@@ -39,35 +39,53 @@ def settings(home: Path) -> dict:
     return result
 
 
+def _accept_lang_everywhere(parser: argparse.ArgumentParser, help_text: str) -> None:
+    """Let `--lang` follow any subcommand too. A subcommand without it would reject the option."""
+    for action in parser._actions:   # argparse exposes subparsers only through this attribute
+        if isinstance(action, argparse._SubParsersAction):
+            for child in dict.fromkeys(action.choices.values()):
+                if "--lang" not in child._option_string_actions:
+                    child.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS, help=help_text)
+                _accept_lang_everywhere(child, help_text)
+
+
 def setup(parser: argparse.ArgumentParser) -> None:
+    from .i18n import resolve, text
+
+    language = resolve()   # help follows the profile language; output follows --lang or the settings
+
+    def _(sentence: str) -> str:
+        return text(sentence, language)
+
+    parser.add_argument("--lang", choices=("en", "pt"), default=None, help=_("Language of lessons, messages and the digest"))
     commands = parser.add_subparsers(dest="evolution_action", required=True)
-    health = commands.add_parser("health", help="Inspect Hermes files and host signals")
-    usage = commands.add_parser("usage", help="Summarize provider and tool measurements")
-    tick = commands.add_parser("tick", help="Run maintenance and record decisions")
+    health = commands.add_parser("health", help=_("Inspect Hermes files and host signals"))
+    usage = commands.add_parser("usage", help=_("Summarize provider and tool measurements"))
+    tick = commands.add_parser("tick", help=_("Run maintenance and record decisions"))
     for command in (health, tick):
-        command.add_argument("--upstream-tag", help="Reference version to compare against offline")
+        command.add_argument("--upstream-tag", help=_("Reference version to compare against offline"))
     for command in (usage, tick):
         command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
-    tick.add_argument("--changes-only", action="store_true", help="Only print when a decision changes")
+    tick.add_argument("--changes-only", action="store_true", help=_("Only print when a decision changes"))
 
-    memory = commands.add_parser("memory", help="Access legacy 0.1 note data")
+    memory = commands.add_parser("memory", help=_("Access legacy 0.1 note data"))
     audience = memory.add_mutually_exclusive_group()
-    audience.add_argument("--shared", action="store_true", help="Explicitly select the profile-wide store")
-    audience.add_argument("--dm", nargs=3, metavar=("PLATFORM", "USER", "CHAT"), help="Select a direct chat store")
-    memory.add_argument("--namespace", default="", help="Optional platform tenant or workspace ID for --dm")
+    audience.add_argument("--shared", action="store_true", help=_("Explicitly select the profile-wide store"))
+    audience.add_argument("--dm", nargs=3, metavar=("PLATFORM", "USER", "CHAT"), help=_("Select a direct chat store"))
+    memory.add_argument("--namespace", default="", help=_("Optional platform tenant or workspace ID for --dm"))
     tasks = memory.add_subparsers(dest="memory_action", required=True)
     add = tasks.add_parser("remember")
     add.add_argument("category", choices=CATEGORIES)
     add.add_argument("text")
     add.add_argument("--confidence", type=float, default=1.0)
     add.add_argument("--tag", action="append", default=[])
-    add.add_argument("--promote", action="store_true", help="Explicitly confirm a personal profile entry")
+    add.add_argument("--promote", action="store_true", help=_("Explicitly confirm a personal profile entry"))
     recall = tasks.add_parser("recall")
     recall.add_argument("query")
     recall.add_argument("--category", action="append", default=[], choices=CATEGORIES)
     recall.add_argument("--include-shared", action="store_true")
     recall.add_argument("--limit", type=int, default=5)
-    evaluate = tasks.add_parser("evaluate", help="Measure retrieval against a labeled JSON file")
+    evaluate = tasks.add_parser("evaluate", help=_("Measure retrieval against a labeled JSON file"))
     evaluate.add_argument("cases", type=Path)
     evaluate.add_argument("--limit", type=int, default=5)
     evaluate.add_argument("--include-shared", action="store_true")
@@ -75,75 +93,77 @@ def setup(parser: argparse.ArgumentParser) -> None:
     remove = tasks.add_parser("forget")
     remove.add_argument("id", type=int)
 
-    feedback = commands.add_parser("feedback", help="Record how an operational finding performed")
+    feedback = commands.add_parser("feedback", help=_("Record how an operational finding performed"))
     feedback.add_argument("code")
     feedback.add_argument("result", choices=("helpful", "dismissed", "reset"))
-    commands.add_parser("history", help="Show learned maintenance priorities and feedback")
+    commands.add_parser("history", help=_("Show learned maintenance priorities and feedback"))
 
-    learn = commands.add_parser("learn", help="Run one evolution pass: derive lessons, measure changes, refresh proposals")
-    learn.add_argument("--notify-only", action="store_true", help="Print only new lessons, regressions and high-risk proposals")
-    playbook = commands.add_parser("lessons", help="Review the playbook learned from recurring tool failures")
+    learn = commands.add_parser("learn", help=_("Run one evolution pass: derive lessons, measure changes, refresh proposals"))
+    learn.add_argument("--notify-only", action="store_true", help=_("Print only new lessons, regressions and high-risk proposals"))
+    playbook = commands.add_parser("lessons", help=_("Review the playbook learned from recurring tool failures"))
     playbook_commands = playbook.add_subparsers(dest="lessons_action")
     listing = playbook_commands.add_parser("list")
     listing.add_argument("--status", choices=("candidate", "active", "quarantined", "retired"))
     listing.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS)
     for name in ("approve", "retire"):
         playbook_commands.add_parser(name).add_argument("id", type=int)
-    custom = playbook_commands.add_parser("add", help="Add an operator lesson")
+    custom = playbook_commands.add_parser("add", help=_("Add an operator lesson"))
     custom.add_argument("text")
     custom.add_argument("--tool", default="general")
-    skills = commands.add_parser("skills", help="Show skill churn, flip-flops and rewrites that were never exercised")
-    queue = commands.add_parser("proposals", help="Review and decide what the evolution loop proposes")
+    skills = commands.add_parser("skills", help=_("Show skill churn, flip-flops and rewrites that were never exercised"))
+    queue = commands.add_parser("proposals", help=_("Review and decide what the evolution loop proposes"))
     queue_commands = queue.add_subparsers(dest="proposals_action")
     queue_list = queue_commands.add_parser("list")
-    queue_list.add_argument("--all", action="store_true", help="Include decided and expired proposals")
+    queue_list.add_argument("--all", action="store_true", help=_("Include decided and expired proposals"))
     for name in ("approve", "reject"):
         decision = queue_commands.add_parser(name)
         decision.add_argument("id", type=int)
         decision.add_argument("--note")
-    commands.add_parser("experiments", help="Show tracked changes with their before-and-after verdicts")
-    digest = commands.add_parser("report", help="Print the evolution digest")
+    commands.add_parser("experiments", help=_("Show tracked changes with their before-and-after verdicts"))
+    digest = commands.add_parser("report", help=_("Print the evolution digest"))
     digest.add_argument("--format", choices=("md", "json"), default="md")
     digest.add_argument("--schedule-spec", action="store_true",
-                        help="Print a no-agent cron recipe that delivers this digest weekly, without creating it")
+                        help=_("Print a no-agent cron recipe that delivers this digest weekly, without creating it"))
     digest.add_argument("--weekday", type=int, choices=range(0, 7), default=1, metavar="0..6")
     digest.add_argument("--hour", type=int, choices=range(0, 24), default=8, metavar="0..23")
-    digest.add_argument("--deliver", default="local", help="Hermes delivery target for the scheduled digest")
+    digest.add_argument("--deliver", default="local", help=_("Hermes delivery target for the scheduled digest"))
     for command in (skills, digest):
         command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
     for command in (playbook, digest, learn):
-        command.add_argument("--lang", choices=("en", "pt"), help="Language of lessons and the digest")
+        command.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS,
+                             help=_("Language of lessons, messages and the digest"))
 
-    ops = commands.add_parser("ops", help="Inspect and supervise Hermes and Linux resource contention")
+    ops = commands.add_parser("ops", help=_("Inspect and supervise Hermes and Linux resource contention"))
     ops_commands = ops.add_subparsers(dest="ops_action", required=True)
     for name in ("inspect", "tick"):
         command = ops_commands.add_parser(name)
         command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
         command.add_argument("--upstream-tag")
-        command.add_argument("--hermes-source", type=Path, help="Include the bundled Hermes source inventory")
+        command.add_argument("--hermes-source", type=Path, help=_("Include the bundled Hermes source inventory"))
         command.add_argument("--sensitivity", choices=("low", "balanced", "high"))
         if name == "tick":
-            command.add_argument("--notify-only", action="store_true", help="Print only new alerts and action transitions")
+            command.add_argument("--notify-only", action="store_true", help=_("Print only new alerts and action transitions"))
     ops_commands.add_parser("history")
     ops_commands.add_parser("rollback")
-    similar = ops_commands.add_parser("similar", help="Find previous diagnostic patterns")
+    similar = ops_commands.add_parser("similar", help=_("Find previous diagnostic patterns"))
     similar.add_argument("query")
     similar.add_argument("--limit", type=int, choices=range(1, 11), default=5, metavar="1..10")
-    review = ops_commands.add_parser("review", help="Review learned baselines, feedback and outcomes")
+    review = ops_commands.add_parser("review", help=_("Review learned baselines, feedback and outcomes"))
     review.add_argument("--days", type=int, default=14)
-    rating = ops_commands.add_parser("feedback", help="Rate an adaptive alert")
+    rating = ops_commands.add_parser("feedback", help=_("Rate an adaptive alert"))
     rating.add_argument("code")
     rating.add_argument("result", choices=("helpful", "dismissed", "reset"))
-    planner = ops_commands.add_parser("plan", help="Create a read-only research, delegation or diagnostic plan")
+    planner = ops_commands.add_parser("plan", help=_("Create a read-only research, delegation or diagnostic plan"))
     planner.add_argument("kind", choices=KINDS)
     planner.add_argument("--effort", choices=EFFORTS, default="standard")
     planner.add_argument("--durable", action="store_true")
-    handoff = ops_commands.add_parser("handoff", help="Create a blocked native Kanban verification card")
+    handoff = ops_commands.add_parser("handoff", help=_("Create a blocked native Kanban verification card"))
     handoff.add_argument("kind", choices=sorted(PLAYBOOKS))
     handoff.add_argument("subject")
-    scheduler = ops_commands.add_parser("schedule-spec", help="Generate a native timer configuration for review")
+    scheduler = ops_commands.add_parser("schedule-spec", help=_("Generate a native timer configuration for review"))
     scheduler.add_argument("--every-minutes", type=int, default=5)
     scheduler.add_argument("--upstream-tag")
+    _accept_lang_everywhere(parser, _("Language of lessons, messages and the digest"))
 
 
 def _memory(conn, args):
@@ -184,7 +204,7 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None):
 
     action = args.evolution_action
     config = settings(home)
-    opts = options(config)
+    opts = options(config, runtime_config)
     lang = getattr(args, "lang", None) or opts["language"]
     if action == "learn":
         result = cycle(home, now=now, runtime_config=runtime_config, config=config, lang=lang)
@@ -358,7 +378,7 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
         return _rollback_trial(home, now)
     config = settings(home)
     if action == "handoff":
-        return create_handoff(home, config, kind=args.kind, subject=args.subject, now=now)
+        return create_handoff(home, config, kind=args.kind, subject=args.subject, now=now, lang=args.lang)
     if action == "similar":
         from .semantic_ops import match_incidents
 
@@ -440,9 +460,28 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
             "maintenance": maintenance["decision"], "learning": adaptive, "evolution": evolution}
 
 
+def _output_language(args, home: Path, runtime_config) -> str:
+    """--lang, then the plugin setting, then the profile language Hermes uses."""
+    from .i18n import normalize, resolve
+
+    chosen = normalize(getattr(args, "lang", None))
+    if chosen:
+        return chosen
+    try:
+        configured = (settings(home).get("evolution") or {}).get("language")
+    except (OSError, ValueError):
+        configured = None
+    return resolve(configured if isinstance(configured, str) else None, runtime_config)
+
+
 def execute(args, home: Path, *, running_version=None, provider=None, runtime_config=None, hermes_source=None,
             kanban_home=None) -> None:
+    from .i18n import localize, text
+
     now = time.time()
+    language = _output_language(args, home, runtime_config)
+    if getattr(args, "lang", None) is None:
+        args.lang = language
     try:
         result = _report(args, home, running_version=running_version, provider=provider, now=now,
                          runtime_config=runtime_config, hermes_source=hermes_source, kanban_home=kanban_home)
@@ -455,11 +494,11 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
                     recovery = f"\nActive trial recovery: {outcome['status']}"
             except (OSError, ValueError, sqlite3.Error):
                 recovery = "\nTrial recovery is unverified. Run ops rollback to recheck."
-        raise SystemExit(f"Evolution: {error}{recovery}") from None
+        raise SystemExit(f"Evolution: {text(str(error), language)}{text(recovery, language)}") from None
     if isinstance(result, str):
         print(result, end="" if result.endswith("\n") else "\n")
     elif result is not None:
-        print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
+        print(json.dumps(localize(result, language), indent=2, ensure_ascii=False, allow_nan=False))
 
 
 def _standalone_config(home: Path) -> dict:
@@ -478,13 +517,18 @@ def _standalone_config(home: Path) -> dict:
 
 
 def main():
+    from .i18n import resolve, text
+
+    def _(sentence: str) -> str:
+        return text(sentence, resolve())
+
     parser = argparse.ArgumentParser(prog="python -m hermes_evolution")
-    parser.add_argument("--home", type=Path, default=os.environ.get("HERMES_HOME"), help="Explicit Hermes profile path")
-    parser.add_argument("--hermes-version", help="Installed version if running outside Hermes")
+    parser.add_argument("--home", type=Path, default=os.environ.get("HERMES_HOME"), help=_("Explicit Hermes profile path"))
+    parser.add_argument("--hermes-version", help=_("Installed version if running outside Hermes"))
     setup(parser)
     args = parser.parse_args()
     if args.home is None:
-        parser.error("Pass --home or set HERMES_HOME")
+        parser.error(_("Pass --home or set HERMES_HOME"))
     home = args.home.expanduser().resolve()
     config = _standalone_config(home)
     memory = config.get("memory")

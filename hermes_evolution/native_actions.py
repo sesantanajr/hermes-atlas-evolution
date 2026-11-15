@@ -24,6 +24,9 @@ _SUBJECT = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.@-]{0,79}\Z")
 _TASK_ID = re.compile(r"t_[0-9a-f]{8}\Z")
 _TAG = re.compile(r"v?[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.-]+)?\Z")
 _TASK_STATUSES = {"blocked", "triage", "todo", "ready", "running", "review", "done", "archived", "scheduled"}
+HANDOFF_RULES = ("Use verification and observation only. Report evidence, uncertainty and a proposed next step. "
+                 "Keep raw logs and secrets out of the handoff. Configuration changes and service operations require "
+                 "separate approval.")
 _RUNNER_FLAGS = ("HERMES_DELEGATED_CHILD_CONTEXT", "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID")
 _JOB_NAME = "atlas-evolution-watchdog"
 _SCRIPT_NAME = _JOB_NAME + ".py"
@@ -38,7 +41,7 @@ def _profile_args(profile: Path) -> list[str]:
 
 
 def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: float | None = None,
-                   runner=None) -> dict:
+                   runner=None, lang: str = "en") -> dict:
     """Request one bounded, blocked card using a fixed verification playbook."""
     policy = config.get("kanban_handoff")
     if policy is None or isinstance(policy, dict) and policy.get("enabled") is not True:
@@ -63,11 +66,13 @@ def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: fl
     stamp = datetime.now(timezone.utc) if now is None else datetime.fromtimestamp(now, timezone.utc)
     identity = json.dumps([os.path.normcase(str(profile)), board, assignee, kind, subject, str(stamp.date())])
     key = "atlas-evolution:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
-    title = f"Atlas Evolution: verify {kind} / {subject}"
+    from .i18n import text
+
+    portuguese = lang == "pt"
+    title = f"Atlas Evolution: {'verificar' if portuguese else 'verify'} {kind} / {subject}"
     body = (
-        f"Subject: {subject}\n\n{PLAYBOOKS[kind]}\n\n"
-        "Use verification and observation only. Report evidence, uncertainty and a proposed next step. "
-        "Keep raw logs and secrets out of the handoff. Configuration changes and service operations require separate approval."
+        f"{'Assunto' if portuguese else 'Subject'}: {subject}\n\n{text(PLAYBOOKS[kind], lang)}\n\n"
+        + text(HANDOFF_RULES, lang)
     )
     command = [
         str(Path(executable).resolve()), *_profile_args(profile), "kanban", "--board", board, "create", title,

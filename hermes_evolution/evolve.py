@@ -12,6 +12,7 @@ import sqlite3
 from pathlib import Path
 
 from . import experiments, lessons, logwatch, proposals, signals
+from .i18n import resolve
 from .experience import day_offset, experience, prune, utc_day
 from .skill_health import read_usage, skill_health
 
@@ -19,17 +20,7 @@ DEFAULTS = {"lessons": "suggest", "tool_hints": True, "feedback_signals": True, 
             "slow_turn_seconds": 60, "owner_sender_ids": ()}
 
 
-def _language(value) -> str:
-    if value in lessons.LANGUAGES:
-        return value
-    for name in ("LC_ALL", "LC_MESSAGES", "LANG"):
-        locale = os.environ.get(name, "")
-        if locale:
-            return "pt" if locale.lower().startswith("pt") else "en"
-    return "en"
-
-
-def options(config) -> dict:
+def options(config, runtime_config=None) -> dict:
     """Validated evolution settings. Unknown or malformed values fall back to the safe default."""
     raw = config.get("evolution") if isinstance(config, dict) and isinstance(config.get("evolution"), dict) else {}
     mode = raw.get("lessons", DEFAULTS["lessons"])
@@ -44,7 +35,7 @@ def options(config) -> dict:
         raise ValueError("evolution.owner_sender_ids must list up to 20 sender ids")
     return {"lessons": mode, "tool_hints": raw.get("tool_hints", True) is not False,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
-            "language": _language(raw.get("language", "auto")), "slow_turn_seconds": slow,
+            "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
             "owner_sender_ids": tuple(owners)}
 
 
@@ -52,7 +43,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     """Run one evolution pass and return what changed. `lang` overrides the configured language of the output."""
     from .operations import database
 
-    opts = options(config or {})
+    opts = options(config or {}, runtime_config)
     if lang in lessons.LANGUAGES:
         opts["language"] = lang
     with experience(home) as conn:
