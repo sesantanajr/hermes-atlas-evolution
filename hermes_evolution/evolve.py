@@ -81,12 +81,19 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             if not step.get("more"):
                 break
         created = lessons.derive(conn, now=now, mode=opts["lessons"])
-        if opts["reflector"] and callable(reflect):
+        if not opts["reflector"]:
+            conn.execute("DELETE FROM failure_sample")   # nothing waits for a reflector that is off
+            reflection = {"status": "off"}
+        elif opts["lessons"] == "off":
+            reflection = {"status": "lessons_off"}   # measure-only mode spends nothing on drafts
+        elif not callable(reflect):
+            # Run outside Hermes (python -m): no model access here. Excerpts wait for a run inside Hermes and
+            # expire after 14 days.
+            reflector.prune_samples(conn, now=now)
+            reflection = {"status": "unavailable_without_hermes_llm"}
+        else:
             reflection = reflector.reflect(conn, reflect, now=now, lang=opts["language"],
                                            daily_limit=opts["reflector_daily_limit"])
-        else:
-            conn.execute("DELETE FROM failure_sample")   # nothing waits for a reflector that is off
-            reflection = {"status": "off" if not opts["reflector"] else "unavailable_without_hermes_llm"}
         effects = lessons.evaluate(conn, now=now, mode=opts["lessons"])
         skills = skill_health(home, now=now, days=7)
         detected = experiments.detect_changes(conn, home, runtime_config, now=now)
