@@ -75,6 +75,8 @@ Every change must keep these. A pull request that breaks one will not be merged.
 
 Every command, option, setting key, hook name and number in the documentation must exist in the code. Check commands with `python -m hermes_evolution --home /tmp/x --hermes-version 0.23.1 <command> --help`, and state plainly what has not been verified. Do not add benchmarks, user counts or results that were not measured.
 
+Hermes scans every file of a plugin before it installs or updates it, and a critical finding blocks both, with no override. Do not quote prompt-injection phrases verbatim in the documentation or the skill; describe what a filter refuses instead. Before a release, `hermes plugins validate .` must report the security scan as passed.
+
 ## Pull requests
 
 - Keep one change per pull request and describe how you tested it.
