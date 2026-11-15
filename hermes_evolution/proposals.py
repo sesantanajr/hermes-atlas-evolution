@@ -14,6 +14,9 @@ from . import lessons as playbook
 
 RISKS = ("low", "medium", "high")
 REOPEN_AFTER_SECONDS = 30 * 86_400
+REGRESSION_DAYS = 30
+# Who wrote a lesson decides the risk of showing it to the agent: fixed templates, a model, or the agent itself.
+LESSON_RISK = {"derived": "low", "operator": "low", "reflector": "medium", "agent": "high"}
 _UNTEMPLATED = ("code_exception", "command_failed", "other", "auth", "network")
 
 
@@ -32,14 +35,18 @@ def _upsert(conn, seen: set, code: str, kind: str, risk: str, subject: str, evid
 
 
 def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None, reviews: dict | None = None,
-            failures: list | None = None, turns: dict | None = None, changes: list | None = None) -> list[dict]:
-    """Rebuild open proposals from current evidence. Proposals whose evidence is gone expire."""
+            failures: list | None = None, turns: dict | None = None, changes: list | None = None,
+            outcomes: dict | None = None, lang: str = "en") -> list[dict]:
+    """Rebuild open proposals from current evidence. Proposals whose evidence is gone expire.
+
+    A lesson proposal carries the exact sentence the agent would read. Regressions come from the stored
+    verdicts of the last 30 days, so a high-risk proposal stays open while its evidence stands."""
     seen: set[str] = set()
     for row in conn.execute("SELECT l.*, COALESCE(f.total,0) AS total, COALESCE(f.sessions,0) AS sessions FROM lesson l "
                             "LEFT JOIN failure f ON f.signature=l.signature WHERE l.status IN ('candidate','quarantined')"):
-        _upsert(conn, seen, f"lesson:{row['id']}", "lesson", "low", row["tool"],
+        _upsert(conn, seen, f"lesson:{row['id']}", "lesson", LESSON_RISK.get(row["origin"], "high"), row["tool"],
                 {"lesson_id": row["id"], "origin": row["origin"], "class": row["klass"], "failures_seen": row["total"],
-                 "sessions": row["sessions"]},
+                 "sessions": row["sessions"], "lesson": playbook.render(row, lang)},
                 f"hermes evolution lessons approve {row['id']}", now)
     for row in conn.execute("SELECT * FROM lesson WHERE status='active' AND verdict='ineffective'"):
         _upsert(conn, seen, f"lesson_retire:{row['id']}", "lesson_retire", "low", row["tool"],
@@ -58,6 +65,11 @@ def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None,
         elif finding["code"] == "skill_never_used":
             _upsert(conn, seen, f"skill_archive:{skill}", "skill_archive", "low", skill,
                     {"age_days": finding["age_days"]}, f"hermes curator archive {skill}", now)
+    for finding in (outcomes or {}).get("findings", ()):
+        skill = finding["skill"]
+        _upsert(conn, seen, f"skill_outcome:{skill}", "skill_outcome", "low", skill,
+                {"turns": finding["turns"], "worse": finding["worse"], "skill_rates": finding["skill_rates"],
+                 "profile_rates": finding["profile_rates"]}, f"hermes curator ledger --skill {skill}", now)
     if reviews and reviews.get("reviews", 0) >= 10 and (reviews.get("empty_pct") or 0) >= 50:
         _upsert(conn, seen, "review_interval", "review_interval", "medium", "skills.creation_nudge_interval",
                 {"reviews": reviews["reviews"], "empty_pct": reviews["empty_pct"], "model_calls": reviews["model_calls"],
@@ -72,20 +84,21 @@ def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None,
         _upsert(conn, seen, "slow_turns", "investigate_latency", "medium", "turns",
                 {"turns": turns["turns"], "slow_pct": turns["slow_pct"], "p50_ms": turns["p50_ms"], "p95_ms": turns["p95_ms"]},
                 "hermes evolution report --days 7", now)
-    for change in changes or ():
-        if change.get("verdict") != "regressed":
+    del changes   # kept for callers; the stored verdicts below are the source of truth
+    for row in conn.execute("""SELECT * FROM change WHERE verdict='regressed' AND kind IN ('skill','config')
+                               AND at >= ?""", (now - REGRESSION_DAYS * 86_400,)).fetchall():
+        try:
+            detail, measured = json.loads(row["detail"]), json.loads(row["metrics"] or "{}")
+        except ValueError:
             continue
-        if change["kind"] == "skill":
-            row = conn.execute("SELECT detail FROM change WHERE id=?", (change["id"],)).fetchone()
-            entry = json.loads(row["detail"]).get("last_entry") if row else None
-            if entry:
-                _upsert(conn, seen, f"skill_rollback:{change['id']}", "skill_rollback", "high", change["subject"],
-                        {"worse": change["worse"], "concurrent_changes": change["concurrent_changes"],
-                         "metrics": change["metrics"]}, f"hermes curator rollback {entry}", now)
-        elif change["kind"] == "config":
-            _upsert(conn, seen, f"config_review:{change['id']}", "config_review", "high", change["subject"],
-                    {"worse": change["worse"], "concurrent_changes": change["concurrent_changes"],
-                     "metrics": change["metrics"]}, f"hermes config get {change['subject']}", now)
+        evidence = {"worse": measured.get("worse"), "concurrent_changes": measured.get("concurrent_changes"),
+                    "metrics": measured.get("metrics"), "final": row["evaluated"] is not None}
+        if row["kind"] == "skill" and isinstance(detail.get("last_entry"), str):
+            _upsert(conn, seen, f"skill_rollback:{row['id']}", "skill_rollback", "high", row["subject"], evidence,
+                    f"hermes curator rollback {detail['last_entry']}", now)
+        elif row["kind"] == "config":
+            _upsert(conn, seen, f"config_review:{row['id']}", "config_review", "high", row["subject"], evidence,
+                    f"hermes config get {row['subject']}", now)
     stale = [row["id"] for row in conn.execute("SELECT id, code FROM proposal WHERE status='open'") if row["code"] not in seen]
     conn.executemany("UPDATE proposal SET status='expired', updated=? WHERE id=?", [(now, item) for item in stale])
     return listing(conn, status="open")

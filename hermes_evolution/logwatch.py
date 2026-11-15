@@ -15,7 +15,8 @@ from pathlib import Path
 
 _READ_LIMIT = 4 * 1024 * 1024
 _REVIEW = re.compile(
-    rb"^(?P<day>\d{4}-\d{2}-\d{2}) [\d:,]{8,12} \w+ .{0,160}?Background review complete: .{0,80}?"
+    rb"^(?P<day>\d{4}-\d{2}-\d{2}) [\d:,]{8,12} INFO(?: \[[^\]\n]{1,200}\])? agent\.background_review: "
+    rb"Background review complete: thread=[\w.-]{1,40} "
     rb"calls=(?P<calls>\d{1,7}) in=(?P<input>\d{1,10}) out=(?P<output>\d{1,10}) cache_read=(?P<cache>\d{1,11}) "
     rb"result=(?P<result>none|skill\+memory|skill|memory|error)\b")
 RESULTS = ("none", "skill", "memory", "skill+memory", "error")
@@ -70,6 +71,16 @@ def ingest_reviews(home: Path, conn) -> dict:
     conn.execute("INSERT OR REPLACE INTO cursor VALUES ('agent_log', ?)",
                  (json.dumps({"inode": info.st_ino, "offset": offset + complete}),))
     return {"status": "ok", "reviews": added, "bytes_read": complete, "more": offset + complete < info.st_size}
+
+
+def local_days(now: float, days: int) -> tuple[str, str]:
+    """First and last local calendar day of a window: agent.log stamps lines in the process's local time."""
+    import time as _time
+
+    def day(moment):
+        return _time.strftime("%Y-%m-%d", _time.localtime(moment))
+
+    return day(now - (days - 1) * 86_400), day(now)
 
 
 def review_summary(conn, *, start_day: str, end_day: str) -> dict:

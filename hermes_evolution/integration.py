@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 
 from .advisory import TOOL, tool_handler
-from .cli import execute, settings, setup
+from .cli import effective_settings, execute, settings, setup
 from .memory import GLOBAL_SCOPE, MemoryStore, make_scope
 from .native_signals import HOOKS, observe_native
 from .operations import database, observe
@@ -123,21 +123,33 @@ def register(ctx):
 
     from . import lessons as playbook
     from .agent_tools import LESSONS_TOOL, LessonsTool
-    from .evolve import DEFAULTS, options
+    from .evolve import options
     from .experience import experience
     from .hints import HintIndex, attach
-    from .signals import FeedbackSensor, TurnTracker, classify, record_skill_event, record_tool
+    from .signals import (FeedbackSensor, TurnTracker, classify, record_skill_correction, record_skill_event,
+                          record_tool)
 
     home = get_hermes_home()
     research = ResearchTracker(home)
     try:
-        config = settings(home)
-    except (OSError, ValueError):
-        config = {}
+        from hermes_cli.config import load_config_readonly
+
+        runtime_config = load_config_readonly() or {}
+    except Exception:   # the plugin still loads with its own settings file
+        runtime_config = {}
+    from logging import getLogger
+
+    problems: list = []
     try:
-        evolution = options(config)
-    except ValueError:
-        evolution = options({"evolution": {"lessons": DEFAULTS["lessons"]}})
+        config = effective_settings(home, runtime_config)
+    except (OSError, ValueError, RecursionError):
+        # Unreadable settings: keep measuring, but show nothing to the agent until the file is fixed.
+        config = {"evolution": {"lessons": "off"}}
+        problems.append("settings.json")
+    evolution = options(config, runtime_config, strict=False, problems=problems)
+    if problems:
+        getLogger(__name__).warning("Atlas Evolution ignored invalid settings (%s); lessons=%s until they are fixed",
+                                    ", ".join(problems), evolution["lessons"])
     legacy_enabled = config.get("legacy_memory_commands") is True
     advice_enabled = config.get("agent_advice") is True
     lessons_on = evolution["lessons"] != "off"
@@ -174,9 +186,9 @@ def register(ctx):
         try:
             failure = classify(payload.get("tool_name"), payload.get("status"), payload.get("error_message"),
                                payload.get("result"), payload.get("args"))
-            record_tool(home, payload, failure=failure)
+            record_tool(home, payload, failure=failure, sample=evolution["reflector"])
             call = payload.get("tool_call_id")
-            if failure and isinstance(call, str) and len(call) <= 400:
+            if failure and isinstance(call, str) and 0 < len(call) <= 400:
                 with recent_lock:
                     recent_failures[call] = failure
                     while len(recent_failures) > 256:
@@ -186,15 +198,17 @@ def register(ctx):
 
     def with_lesson(**payload):
         """Add the matching lesson to a failing tool result. Any doubt leaves the result untouched."""
-        if payload.get("status") not in ("error", "blocked"):
-            return None
         try:
+            if payload.get("status") not in ("error", "blocked"):
+                return None
             call, session = payload.get("tool_call_id"), payload.get("session_id")
+            if not isinstance(session, str) or not session.strip():
+                return None   # without a session there is no "once per session"
             with recent_lock:
-                failure = recent_failures.pop(call, None) if isinstance(call, str) else None
+                failure = recent_failures.pop(call, None) if isinstance(call, str) and call else None
             failure = failure or classify(payload.get("tool_name"), payload.get("status"), payload.get("error_message"),
                                           payload.get("result"), payload.get("args"))
-            if not failure or not isinstance(session, str):
+            if not failure:
                 return None
             entry = hints.lookup(failure["signature"], session)
             if entry is None:
@@ -219,10 +233,11 @@ def register(ctx):
 
     def before_turn(**payload):
         try:
+            if sensor is not None and {"correction", "reask"} & set(sensor.observe(payload)):
+                # The owner is correcting the previous turn: count it against the skills that turn loaded.
+                record_skill_correction(home, turns.recent_skills(payload.get("session_id")))
             research.start(payload)
             turns.start(payload)
-            if sensor is not None:
-                sensor.observe(payload)
             return shared_context(home, payload) if legacy_enabled else None
         except storage_errors:
             return None
@@ -241,19 +256,44 @@ def register(ctx):
 
     def skill_event(**payload):
         try:
+            turns.skill(payload)
             record_skill_event(home, payload)
         except storage_errors:
             _warn_once(failed, "skill")
 
     def playbook_section(_session_info):
+        """Read the playbook, then count the lessons shown through the queued writer: a busy database
+        (a `learn` run, another process) must never leave a new session without its lessons."""
         try:
+            shown: list = []
             with experience(home, observer=True) as conn:
-                return playbook.playbook(conn, lang=evolution["language"], mark_shown=True)
+                text = playbook.playbook(conn, lang=evolution["language"], chosen=shown)
+            if shown:
+                from .experience import record
+
+                record(home, lambda conn: conn.executemany("UPDATE lesson SET shown=shown+1 WHERE id=?",
+                                                           [(item,) for item in shown]))
+            return text
         except storage_errors:
             return ""
 
     def command(raw_args, *, source=None, platform=""):
         return slash(home, raw_args, source=source, platform=platform)
+
+    reflect = None
+    if evolution["reflector"] and callable(getattr(ctx, "register_auxiliary_task", None)):
+        from .reflector import host_caller
+
+        try:
+            ctx.register_auxiliary_task(
+                "evolution_reflector", display_name="Atlas Evolution reflector",
+                description="Drafts lessons from recurring tool failures. Each draft waits for operator approval.",
+                inherit_from="compression")
+            reflect = host_caller(ctx)
+        except Exception:   # an older host without plugin LLM access: the loop runs without drafts
+            from logging import getLogger
+
+            getLogger(__name__).warning("Atlas Evolution reflector is unavailable on this Hermes build")
 
     def operator_cli(args):
         import hermes_cli.config as hermes_config
@@ -266,7 +306,8 @@ def register(ctx):
         # loaded its own package, so the attribute is read from there; None simply skips the update check.
         version = getattr(sys.modules.get("hermes_cli"), "__version__", None)
         execute(args, home, running_version=version if isinstance(version, str) else None, provider=provider,
-                runtime_config=config, hermes_source=source, kanban_home=get_default_hermes_root(home=home))
+                runtime_config=config, hermes_source=source, kanban_home=get_default_hermes_root(home=home),
+                reflect=reflect)
 
     ctx.register_hook("post_tool_call", after_tool)
     ctx.register_hook("pre_llm_call", before_turn)
@@ -280,23 +321,39 @@ def register(ctx):
     if legacy_enabled:
         ctx.register_command("evolution", command, description="Access legacy Evolution notes", args_hint="<command>")
     _register_skills(ctx)
+    register_env = getattr(ctx, "register_session_env", None)
+    if callable(register_env):
+        try:
+            # Every shell an agent session spawns carries this marker, so `hermes evolution` run by the agent
+            # can tell it is not the operator and refuses to approve or activate anything.
+            register_env(["ATLAS_EVOLUTION_AGENT"], lambda session_id: {"ATLAS_EVOLUTION_AGENT": "1"})
+        except Exception:   # the session id marker set by Hermes still guards the commands
+            getLogger(__name__).warning("Atlas Evolution could not mark agent shells; the session id still guards decisions")
     on_unload = getattr(ctx, "on_unload", None)
     if callable(on_unload):
         from .operations import close_observers
 
         on_unload(close_observers)   # write queued counters and release the shared connection
 
+    from .i18n import localize
+
+    def in_language(payload: str) -> str:
+        try:
+            return json.dumps(localize(json.loads(payload), evolution["language"]), ensure_ascii=False)
+        except (TypeError, ValueError):
+            return payload
+
     def advisory_tool(args, **context):
         if not advice_enabled:
-            return json.dumps({"error": "Planning permission has not been enabled for this Hermes profile."})
-        return tool_handler(args, **context)
+            return in_language(json.dumps({"error": "Planning permission has not been enabled for this Hermes profile."}))
+        return in_language(tool_handler(args, **context))
 
     lessons_tool = LessonsTool(home, lang=evolution["language"])
 
     def playbook_tool(args, **context):
         if not advice_enabled:
-            return json.dumps({"error": "Playbook access has not been enabled for this Hermes profile."})
-        return lessons_tool.handle(args, **context)
+            return in_language(json.dumps({"error": "Playbook access has not been enabled for this Hermes profile."}))
+        return in_language(lessons_tool.handle(args, **context))
 
     ctx.register_tool(name=TOOL["name"], toolset="atlas-evolution", schema=TOOL, handler=advisory_tool,
                       check_fn=lambda: advice_enabled)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import experiments, lessons, logwatch, proposals, signals
 from .experience import day_offset, experience, utc_day
-from .skill_health import skill_health
+from .skill_health import skill_health, skill_outcomes
 
 def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dict | None = None) -> dict:
     """Collect the digest for the last `days` days and the same span before it."""
@@ -34,10 +34,11 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
             "owner_feedback": signals.feedback_summary(conn, now=now, days=days),
             "skill_events": signals.skill_event_summary(conn, now=now, days=days),
             "self_improvement": {"background_reviews": logwatch.review_summary(
-                conn, start_day=day_offset(now, days), end_day=utc_day(now + 86_400))},
+                conn, **dict(zip(("start_day", "end_day"), logwatch.local_days(now, days))))},
             "lessons": lessons.listing(conn, lang=lang),
             "changes": experiments.listing(conn, limit=20),
             "proposals": proposals.listing(conn, status="open"),
+            "skill_outcomes": skill_outcomes(conn, start_day=start, end_day=end, limit=10),
         }
         try:
             with database(home) as ops:
@@ -87,10 +88,14 @@ _TEXT = {
         "vs": "Versus the previous {days} days", "verdict": "verdict", "failures": "Failures that repeat",
         "failures_none": "No recurring tool failure in this window.", "times": "times", "days": "days",
         "lesson_state": "lesson", "no_lesson": "no lesson yet", "learning": "Self-improvement loop",
+        "never_lesson": "never a lesson: the user's approval decides",
         "reviews": "background reviews", "empty": "produced nothing", "review_tokens": "review tokens (input / output)",
         "share": "of the uncached input and output tokens went to learning (approximate)",
         "rewrites": "skill rewrites", "by_review": "by the automatic review", "skills": "skills",
         "churn": "Skills rewritten the most", "flipflops": "flip-flops", "uses": "uses",
+        "outcomes": "Skills by outcome", "outcomes_none": "Not enough turns with a loaded skill yet.",
+        "whole_profile": "whole profile", "turns_word": "turns", "failed_short": "failed", "corrected_short": "corrected",
+        "interrupted_short": "interrupted", "tool_errors_short": "with tool errors", "below": "worse than the profile",
         "lessons": "Playbook", "active": "active", "candidate": "awaiting approval", "retired": "retired",
         "effect": "measured effect", "before": "before", "after": "after", "changes": "Changes and their measured effect",
         "changes_none": "No change evaluated yet.", "proposals": "Proposals awaiting a decision",
@@ -107,10 +112,14 @@ _TEXT = {
         "vs": "Comparado aos {days} dias anteriores", "verdict": "veredito", "failures": "Falhas que se repetem",
         "failures_none": "Nenhuma falha de ferramenta recorrente nesta janela.", "times": "vezes", "days": "dias",
         "lesson_state": "lição", "no_lesson": "sem lição ainda", "learning": "Ciclo de auto-melhoria",
+        "never_lesson": "nunca vira lição: quem decide é a aprovação do usuário",
         "reviews": "revisões em segundo plano", "empty": "não produziram nada", "review_tokens": "tokens das revisões (entrada / saída)",
         "share": "dos tokens de entrada sem cache e de saída foram para o aprendizado (aproximado)",
         "rewrites": "reescritas de skills", "by_review": "pela revisão automática", "skills": "skills",
         "churn": "Skills mais reescritas", "flipflops": "vai-e-volta", "uses": "usos",
+        "outcomes": "Skills pelo resultado", "outcomes_none": "Ainda não há turnos suficientes com skill carregada.",
+        "whole_profile": "perfil inteiro", "turns_word": "turnos", "failed_short": "falharam", "corrected_short": "corrigidos",
+        "interrupted_short": "interrompidos", "tool_errors_short": "com erro de ferramenta", "below": "pior que o perfil",
         "lessons": "Playbook", "active": "ativas", "candidate": "aguardando aprovação", "retired": "aposentadas",
         "effect": "efeito medido", "before": "antes", "after": "depois", "changes": "Mudanças e o efeito medido",
         "changes_none": "Nenhuma mudança avaliada ainda.", "proposals": "Propostas aguardando decisão",
@@ -139,14 +148,16 @@ _KIND = {
            "skill_lock": "Lock a skill that keeps being rewritten", "skill_review": "Review rewrites that were never used",
            "skill_archive": "Archive a skill that was never used", "skill_rollback": "Roll back a skill change that made things worse",
            "review_interval": "Space out the automatic review", "investigate_failure": "Recurring failure without a lesson",
-           "investigate_latency": "Many slow turns", "config_review": "Review a setting change that made things worse"},
+           "investigate_latency": "Many slow turns", "config_review": "Review a setting change that made things worse",
+           "skill_outcome": "Review a skill whose turns go worse than the profile"},
     "pt": {"lesson": "Ativar lição", "lesson_retire": "Aposentar lição que não ajudou",
            "skill_lock": "Travar skill reescrita em excesso", "skill_review": "Revisar reescritas nunca usadas",
            "skill_archive": "Arquivar skill nunca usada", "skill_rollback": "Desfazer alteração de skill que piorou",
            "review_interval": "Espaçar a revisão automática", "investigate_failure": "Falha recorrente sem lição",
-           "investigate_latency": "Muitos turnos lentos", "config_review": "Revisar mudança de configuração que piorou"},
+           "investigate_latency": "Muitos turnos lentos", "config_review": "Revisar mudança de configuração que piorou",
+           "skill_outcome": "Revisar skill cujos turnos vão pior que o perfil"},
 }
-_ADVISORY = ("skill_review", "investigate_failure", "investigate_latency", "config_review")
+_ADVISORY = ("skill_review", "investigate_failure", "investigate_latency", "config_review", "skill_outcome")
 
 
 def _number(value, lang: str, digits: int = 0) -> str:
@@ -191,8 +202,10 @@ def markdown(report: dict, lang: str = "en") -> str:
     if report["recurring_failures"]:
         for item in report["recurring_failures"][:8]:
             detail = f" (`{item['hint']}`)" if item["hint"] else ""
+            state = (t["never_lesson"] if item["class"] == "approval_refused"
+                     else f"{t['lesson_state']}: {_STATUS[lang].get(item['lesson'], t['no_lesson'])}")
             lines.append(f"- `{item['tool']}` · {item['class']}{detail}: {item['count']} {t['times']}, {item['days']} {t['days']}"
-                         f" · {t['lesson_state']}: {_STATUS[lang].get(item['lesson'], t['no_lesson'])}")
+                         f" · {state}")
     else:
         lines.append(t["failures_none"])
 
@@ -213,10 +226,29 @@ def markdown(report: dict, lang: str = "en") -> str:
         for item in skills["top"][:5]:
             lines.append(f"- `{item['skill']}`: {item['rewrites']}× · {item['flipflops']} {t['flipflops']} · {item['uses_total']} {t['uses']}")
 
+    outcomes = report["skill_outcomes"]
+    lines += ["", "### " + t["outcomes"], ""]
+    measured_skills = [item for item in outcomes["skills"] if item["turns"] >= outcomes["min_turns"]]
+    if measured_skills and outcomes["profile"]["turns"]:
+        flagged = {item["skill"] for item in outcomes["findings"]}
+        base = outcomes["profile"]
+        lines.append(f"- {t['whole_profile']}: {_number(base['turns'], lang)} {t['turns_word']} · "
+                     f"{_number(base['failed_pct'], lang, 1)}% {t['failed_short']} · "
+                     f"{_number(base['corrected_pct'], lang, 1)}% {t['corrected_short']}")
+        for item in measured_skills[:8]:
+            mark = f" · **{t['below']}**" if item["skill"] in flagged else ""
+            lines.append(f"- `{item['skill']}`: {_number(item['turns'], lang)} {t['turns_word']} · "
+                         f"{_number(item['failed_pct'], lang, 1)}% {t['failed_short']} · "
+                         f"{_number(item['corrected_pct'], lang, 1)}% {t['corrected_short']} · "
+                         f"{_number(item['tool_error_turns_pct'], lang, 1)}% {t['tool_errors_short']}{mark}")
+    else:
+        lines.append(t["outcomes_none"])
+
     playbook = report["lessons"]
     counts = {status: sum(item["status"] == status for item in playbook) for status in ("active", "candidate", "quarantined", "retired")}
     lines += ["", "## " + t["lessons"], "",
-              f"- {counts['active']} {t['active']} · {counts['candidate'] + counts['quarantined']} {t['candidate']} · {counts['retired']} {t['retired']}"]
+              f"- {t['active']}: {counts['active']} · {t['candidate']}: {counts['candidate'] + counts['quarantined']}"
+              f" · {t['retired']}: {counts['retired']}"]
     for item in [entry for entry in playbook if entry["status"] == "active"][:8]:
         effect = verdicts[item["verdict"]]
         numbers = (f" ({t['before']} {_number(item['rate_before'], lang, 3)} → {t['after']} {_number(item['rate_after'], lang, 3)})"

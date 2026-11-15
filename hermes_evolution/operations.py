@@ -17,7 +17,7 @@ from pathlib import Path
 
 BUCKETS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 RETENTION_DAYS = 35
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 7
 RECOVERY_SPACING_SECONDS = 300
 OBSERVER_BUSY_SECONDS = 0.035
 _OBSERVER_LOCK_SECONDS = 0.05
@@ -69,13 +69,24 @@ def _open(path: Path, timeout: float, **options) -> sqlite3.Connection:
     try:
         connection.row_factory = sqlite3.Row
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version in (0, 1, 2, 3):
+        if version in (0, 1, 2, 3, 4, 5, 6):
             if version == 0:
                 connection.execute("PRAGMA journal_mode=WAL")
-            from .experience import SCHEMA as experience_schema   # version 4 adds the evolution loop tables
+            # 4: evolution loop, 5: skill outcomes, 6: reflector, 7: frozen lesson baselines
+            from .experience import SCHEMA as experience_schema, ensure_columns
 
-            connection.executescript("BEGIN IMMEDIATE;" + SCHEMA + experience_schema
-                                     + f"PRAGMA user_version={SCHEMA_VERSION}; COMMIT;")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for statement in (SCHEMA + experience_schema).split(";"):
+                    if statement.strip():
+                        connection.execute(statement)
+                ensure_columns(connection)
+                connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                connection.execute("COMMIT")
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
         elif version != SCHEMA_VERSION:
             raise ValueError(f"Unsupported Evolution database schema {version}")
         connection.execute("PRAGMA foreign_keys=ON")
@@ -234,7 +245,9 @@ class _Observer:
                 _rollback(connection)
                 raise
         except (OSError, ValueError):
-            raise  # The folder or schema is unusable for now. The bounded queue waits for it.
+            if job is not None:
+                self._defer(job)   # kept (bounded) for when the folder or schema is usable again
+            raise
         except Exception as error:
             if isinstance(error, sqlite3.Error) and _busy(error):
                 if job is not None:
