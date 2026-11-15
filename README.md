@@ -218,7 +218,7 @@ The operator. The agent can only propose.
 - **Not stored:** conversation text, prompts, responses, tool arguments or output, memory content, raw log lines.
 - **Lesson text** is normalized (NFKC); control, bidirectional and zero-width characters and secret-shaped values are refused.
 - **Approval refusals** (denied, timed out, no approver, non-interactive) form the class `approval_refused`, which never becomes a lesson. The `blocked_by_policy` lesson says not to look for another way and to tell the user.
-- **Reflector.** While on, it keeps one scrubbed error excerpt of up to 300 characters per untemplated failure. Hermes makes the call under the auxiliary task `evolution_reflector` (model chosen in `auxiliary.evolution_reflector`), with caps per pass and per day. Excerpts are deleted once a draft exists, after 14 days, or at the next pass with the reflector off.
+- **Reflector.** While on, and while `lessons` is not `off`, it keeps one scrubbed error excerpt of up to 300 characters per untemplated failure. Hermes makes the call under the auxiliary task `evolution_reflector` (model chosen in `auxiliary.evolution_reflector`), with caps per pass and per day. Excerpts are deleted once the failure has a lesson, when a draft is declined, after 14 days, or at the next pass with the reflector off.
 - **Hooks fail open** and queue writes (512 entries) while the database is busy; overflow is reported as `dropped_events`.
 
 Details are in [SECURITY.md](SECURITY.md).
@@ -229,7 +229,7 @@ Requires Hermes Agent 0.23.1 or later and Python 3.11 or later.
 
 **Verified on the development machine** (measurements, not guarantees):
 
-- 206 tests, unit and end-to-end against a simulated Hermes, also under Hermes' Python with its native redactor; CI runs Python 3.11 to 3.13.
+- 207 tests, unit and end-to-end against a simulated Hermes, also under Hermes' Python with its native redactor; CI runs Python 3.11 to 3.13.
 - `hermes plugins validate` and `doctor` of Hermes 0.23.1: no warnings (2 tools, 14 hooks), also with the reflector on and under `plugins.isolation: host`.
 - About 0.1 ms per hook event (about 6 ms before, with events lost under concurrency). With a `state.db` of about 170 MB: `learn` about 0.3 s and 25 MB, `report` about 0.35 s, `ops tick` about 0.5 s.
 - The reflector ran against a simulated model; its call was checked against the Hermes 0.23.1 source.

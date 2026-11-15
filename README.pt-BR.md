@@ -219,7 +219,7 @@ O operador. O agente só propõe.
 - **Não gravado:** texto de conversa, prompts, respostas, argumentos ou saída de ferramenta, conteúdo de memória, linhas brutas de log.
 - **O texto de lição** é normalizado (NFKC); caracteres de controle, de direção de texto e de largura zero e valores com cara de segredo são recusados.
 - **Recusas de aprovação** (negada, expirada, sem aprovador, contexto não interativo) formam a classe `approval_refused`, que nunca vira lição. A lição de `blocked_by_policy` diz para não procurar outro caminho e avisar o usuário.
-- **Refletor.** Enquanto ligado, guarda um trecho de erro limpo, de até 300 caracteres, por falha sem modelo. O Hermes faz a chamada pela tarefa auxiliar `evolution_reflector` (modelo escolhido em `auxiliary.evolution_reflector`), com limites por passada e por dia. O trecho é apagado quando o rascunho existe, após 14 dias ou na passada seguinte com o refletor desligado.
+- **Refletor.** Enquanto ligado, e com `lessons` fora de `off`, guarda um trecho de erro limpo, de até 300 caracteres, por falha sem modelo. O Hermes faz a chamada pela tarefa auxiliar `evolution_reflector` (modelo escolhido em `auxiliary.evolution_reflector`), com limites por passada e por dia. O trecho é apagado quando a falha ganha uma lição, quando um rascunho é recusado, após 14 dias ou na passada seguinte com o refletor desligado.
 - **Os hooks falham de forma aberta** e enfileiram as gravações (512 entradas) enquanto o banco está ocupado; o excedente aparece como `dropped_events`.
 
 Detalhes no [SECURITY.md](SECURITY.md) (em inglês).
@@ -230,7 +230,7 @@ Exige Hermes Agent 0.23.1 ou superior e Python 3.11 ou superior.
 
 **Verificado na máquina de desenvolvimento** (medições, não garantias):
 
-- 206 testes, unitários e de ponta a ponta contra um Hermes simulado, também com o Python do Hermes e o redator nativo dele; a integração contínua roda Python 3.11 a 3.13.
+- 207 testes, unitários e de ponta a ponta contra um Hermes simulado, também com o Python do Hermes e o redator nativo dele; a integração contínua roda Python 3.11 a 3.13.
 - `hermes plugins validate` e `doctor` do Hermes 0.23.1: sem avisos (2 ferramentas, 14 hooks), também com o refletor ligado e com `plugins.isolation: host`.
 - Cerca de 0,1 ms por evento de hook (antes, cerca de 6 ms, com perda de eventos sob concorrência). Com um `state.db` de cerca de 170 MB: `learn` cerca de 0,3 s e 25 MB, `report` cerca de 0,35 s, `ops tick` cerca de 0,5 s.
 - O refletor rodou contra um modelo simulado; a chamada foi conferida contra o código do Hermes 0.23.1.

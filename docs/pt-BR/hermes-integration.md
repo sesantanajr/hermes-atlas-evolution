@@ -49,7 +49,7 @@ Na máquina de desenvolvimento, um evento de hook levou cerca de 0,1 ms com esse
 
 ## O refletor e o acesso a modelos do Hermes
 
-O refletor é a única parte do plugin que envolve um modelo, e vem desligado. Quando `reflector` está ligado no carregamento, o plugin registra a tarefa auxiliar `evolution_reflector` com `inherit_from="compression"`: ela parte da configuração efetiva da tarefa de compressão, e você pode dar a ela provedor e modelo próprios em `auxiliary.evolution_reflector`, na configuração do perfil. Uma passada então chama `ctx.llm.complete_structured` com essa tarefa, um esquema JSON, no máximo 300 tokens de saída e prazo de 60 segundos. O Hermes resolve o provedor, envia a requisição e a contabiliza; o plugin não abre conexão. Quando o host não oferece acesso a modelos para plugins, o ciclo roda sem rascunhos. O que é enviado e o que é aceito de volta está descrito em [O ciclo de evolução](evolution-loop.md#o-refletor).
+O refletor é a única parte do plugin que envolve um modelo, e vem desligado. Quando `reflector` está ligado no carregamento, o plugin registra a tarefa auxiliar `evolution_reflector` com `inherit_from="compression"`: ela parte da configuração efetiva da tarefa de compressão, e você pode dar a ela provedor e modelo próprios em `auxiliary.evolution_reflector`, na configuração do perfil. Uma passada então chama `ctx.llm.complete_structured` com essa tarefa, um esquema JSON, no máximo 300 tokens de saída e prazo de 60 segundos. O Hermes resolve o provedor, envia a requisição e a contabiliza; o plugin não abre conexão. Quando o host não oferece acesso a modelos para plugins, ou enquanto `lessons` está em `off`, o ciclo roda sem rascunhos. O que é enviado e o que é aceito de volta está descrito em [O ciclo de evolução](evolution-loop.md#o-refletor).
 
 ## O que o plugin lê
 
@@ -112,7 +112,7 @@ Tudo em modo somente leitura e com limite de tamanho e de tempo.
 
 - **Pelo GitHub.** `hermes plugins install sesantanajr/hermes-atlas-evolution --enable` no perfil escolhido; `hermes -p NOME` seleciona o perfil. Confira com `hermes plugins doctor --ci hermes-evolution`.
 - **Manualmente.** Copie a pasta inteira do plugin, com o `plugin.yaml` na raiz, para `<HERMES_HOME>/plugins/hermes-evolution/` e execute `hermes plugins enable hermes-evolution`. O padrão no Linux é `~/.hermes`. Instalações Windows geralmente usam `%LOCALAPPDATA%\hermes`. Use o procedimento de manutenção do perfil caso o gateway já esteja em execução.
-- **Isolamento em host.** Com `plugins.isolation: host`, o Hermes ignora `register_cli_command`; use `python -m hermes_evolution --home <perfil> ...` a partir da pasta do plugin. O refletor não roda nesse modo. Veja [Operações](operations.md#fora-do-hermes).
+- **Isolamento em host.** Com `plugins.isolation: host`, o Hermes ignora `register_cli_command`; use `python -m hermes_evolution --home <perfil> ...` a partir da pasta do plugin. O refletor não roda nesse modo; os trechos em espera ficam para a próxima passada feita pelo Hermes. Veja [Operações](operations.md#fora-do-hermes).
 
 ## Avançado: deixar a revisão nativa propor lições
 

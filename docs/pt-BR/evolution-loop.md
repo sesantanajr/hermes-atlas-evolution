@@ -197,10 +197,10 @@ Como a seção fica fixa durante toda a sessão e a dica é acrescentada a um re
 
 O refletor (`reflector`) rascunha lições para falhas recorrentes que não têm modelo. Vem desligado e é ligado pela opção `reflector`. Enquanto está desligado, nada do que segue acontece.
 
-**O que é guardado.** Quando o plugin carrega com o refletor ligado, o hook de ferramentas guarda, para cada assinatura de falha das classes `code_exception`, `command_failed`, `network`, `auth` e `other`, o trecho de erro mais recente (`failure_sample`):
+**O que é guardado.** Quando o plugin carrega com o refletor ligado e `lessons` não está em `off`, o hook de ferramentas guarda, para cada assinatura de falha das classes `code_exception`, `command_failed`, `network`, `auth` e `other`, o trecho de erro mais recente (`failure_sample`):
 
 1. as últimas 4 linhas não vazias do texto de erro e da saída, unidas, com no máximo 1.200 caracteres;
-2. passadas pelo redator de segredos do Hermes, quando o plugin roda dentro do Hermes;
+2. passadas pelo redator de segredos do Hermes, quando o plugin roda dentro do Hermes, com `force=True` para valer mesmo quando o perfil desligou a redação;
 3. mascaradas pelo plugin: URLs viram `<url>`, e-mails `<email>`, caminhos de dois ou mais segmentos `<path>`, sequências hexadecimais de 16 ou mais caracteres `<hex>`, valores com prefixo de credencial `<secret>`, sequências de 5 ou mais dígitos `<n>` e textos entre aspas com mais de 40 caracteres `'<text>'`;
 4. cortadas nos últimos 300 caracteres (`EXCERPT_LIMIT`).
 
@@ -212,9 +212,9 @@ O refletor (`reflector`) rascunha lições para falhas recorrentes que não têm
 
 **O que é aceito.** Um rascunho é descartado quando `applies` não é verdadeiro, quando a frase não passa nas [regras do texto](#regras-do-texto), quando contém `<` ou quando casa com o filtro de injeção (frases como "ignore previous instructions", "disregard", "system prompt", "you are now", as formas em português, ou marcas `system` e `assistant`). Um rascunho aceito vira uma lição `quarantined` com origem `reflector`, ligada à assinatura da falha, e ganha uma proposta de risco médio. Depois de aprovado, é mostrado, vira dica e é medido como uma lição derivada.
 
-**Quando o trecho é apagado.** Assim que a falha tem uma lição, quando o modelo recusa ou o rascunho é descartado, 14 dias depois da última atualização (`SAMPLE_DAYS`) e em toda passada que roda com o refletor desligado ou sem o acesso a modelos do Hermes. Um erro do provedor mantém o trecho para uma passada seguinte.
+**Quando o trecho é apagado.** Assim que a falha tem uma lição, quando o modelo recusa ou o rascunho é descartado, 14 dias depois da última atualização (`SAMPLE_DAYS`) e em toda passada que roda com o refletor desligado. Um erro do provedor, ou uma passada sem o acesso a modelos do Hermes, mantém o trecho para uma passada seguinte.
 
-**Onde ele roda.** Só numa passada executada pela CLI do Hermes (`hermes evolution learn`, `ops tick` ou a receita semanal), porque o acesso ao modelo vem do Hermes. O executor independente (`python -m hermes_evolution`) não rascunha nada; o `learn` dele informa `unavailable_without_hermes_llm` e apaga os trechos em espera.
+**Onde ele roda.** Só numa passada executada pela CLI do Hermes (`hermes evolution learn`, `ops tick` ou a receita semanal), porque o acesso ao modelo vem do Hermes, e só enquanto `lessons` não está em `off` (senão o bloco informa `lessons_off`, já que um rascunho aprovado nunca seria mostrado). O executor independente (`python -m hermes_evolution`) não rascunha nada; o `learn` dele informa `unavailable_without_hermes_llm` e mantém os trechos em espera para a próxima passada feita pelo Hermes.
 
 A saída do `learn` tem um bloco `reflector` com os rascunhos, o número de recusados e de falhas, as chamadas feitas no dia e o limite diário.
 
@@ -248,7 +248,7 @@ O Hermes informa cada skill que carrega pelo `on_skill_lifecycle`. O plugin liga
 - o turno teve pelo menos um erro de ferramenta;
 - o dono o corrigiu: a mensagem seguinte do dono na mesma sessão, até 30 minutos depois do fim do turno (`CORRECTION_WINDOW_SECONDS`), foi uma correção ou uma pergunta repetida. Isso exige `feedback_signals`.
 
-Turnos de subagentes não são atribuídos. Turnos das superfícies local, gateway e cron são.
+Só turnos interativos são atribuídos, os das superfícies local e gateway, que são também os turnos do perfil com que a skill é comparada. Turnos de cron e de subagentes não são atribuídos.
 
 **Comparadas com o perfil** (`skill_health.skill_outcomes`). A linha de base do perfil são todos os turnos interativos (local e gateway) da janela: a parcela que falhou, foi interrompida ou foi lenta, e correções mais perguntas repetidas por turno. Uma skill com pelo menos 8 turnos (`MIN_SKILL_TURNS`) é marcada `skill_underperforming` quando, na parcela de turnos que falharam, foram interrompidos ou foram corrigidos, a taxa dela passa a do perfil por pelo menos a margem abaixo e é pelo menos 1,5 vez o maior valor entre a taxa do perfil e 1%.
 

@@ -49,7 +49,7 @@ On the development machine a hook event took about 0.1 ms with this design, agai
 
 ## The reflector and Hermes' model access
 
-The reflector is the only part of the plugin that involves a model, and it is off by default. When `reflector` is on at load time, the plugin registers the auxiliary task `evolution_reflector` with `inherit_from="compression"`: it starts from the effective configuration of the compression task, and you can give it its own provider and model in `auxiliary.evolution_reflector` of the profile configuration. A pass then calls `ctx.llm.complete_structured` with that task, a JSON schema, at most 300 output tokens and a 60-second timeout. Hermes resolves the provider, sends the request and accounts for it; the plugin opens no connection. When the host offers no plugin model access, the loop runs without drafts. What is sent and what is accepted back is described in [The evolution loop](evolution-loop.md#the-reflector).
+The reflector is the only part of the plugin that involves a model, and it is off by default. When `reflector` is on at load time, the plugin registers the auxiliary task `evolution_reflector` with `inherit_from="compression"`: it starts from the effective configuration of the compression task, and you can give it its own provider and model in `auxiliary.evolution_reflector` of the profile configuration. A pass then calls `ctx.llm.complete_structured` with that task, a JSON schema, at most 300 output tokens and a 60-second timeout. Hermes resolves the provider, sends the request and accounts for it; the plugin opens no connection. When the host offers no plugin model access, or while `lessons` is `off`, the loop runs without drafts. What is sent and what is accepted back is described in [The evolution loop](evolution-loop.md#the-reflector).
 
 ## What the plugin reads
 
@@ -112,7 +112,7 @@ All of it is read-only and bounded in size and time.
 
 - **From GitHub.** `hermes plugins install sesantanajr/hermes-atlas-evolution --enable` in the chosen profile; `hermes -p NAME` selects a profile. Check with `hermes plugins doctor --ci hermes-evolution`.
 - **Manually.** Copy the whole plugin folder, with `plugin.yaml` at its root, to `<HERMES_HOME>/plugins/hermes-evolution/` and run `hermes plugins enable hermes-evolution`. The default home on Linux is `~/.hermes`. Windows installations usually use `%LOCALAPPDATA%\hermes`. Follow the profile's maintenance procedure if the gateway is already running.
-- **Host isolation.** Under `plugins.isolation: host` Hermes skips `register_cli_command`, so use `python -m hermes_evolution --home <profile> ...` from the plugin folder. The reflector does not run there. See [Operations](operations.md#running-outside-hermes).
+- **Host isolation.** Under `plugins.isolation: host` Hermes skips `register_cli_command`, so use `python -m hermes_evolution --home <profile> ...` from the plugin folder. The reflector does not run there; waiting excerpts are kept for the next pass run by Hermes. See [Operations](operations.md#running-outside-hermes).
 
 ## Advanced: let the native background review propose lessons
 
