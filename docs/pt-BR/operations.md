@@ -4,7 +4,7 @@
 
 Além do [ciclo de evolução](evolution-loop.md), o Atlas Evolution supervisiona o host e a carga de um perfil do Hermes. Ele examina o que o Hermes grava, mede a carga do agente e do Linux, e cruza evidências para sugerir testes e conduzir remediações reversíveis. Por padrão, só observa. Usa apenas a API pública de plugins do Hermes e preserva o seu provedor de memória, os seus plugins e o seu roteador.
 
-Todos os comandos abaixo são subcomandos de `hermes evolution`. Nomes de campos, códigos e identificadores da saída em JSON estão sempre em inglês. O texto para leitura (hipóteses, alternativas, recomendações, planos, cartões Kanban, ajuda e mensagens de erro) sai em inglês ou português do Brasil: `--lang en|pt` antes ou depois de qualquer subcomando; senão, a configuração `language` do plugin, depois `HERMES_LANGUAGE`, `display.language` e o locale do processo e, por fim, inglês.
+Todos os comandos abaixo são subcomandos de `hermes evolution`. Nomes de campos, códigos e identificadores da saída em JSON estão sempre em inglês. O texto para leitura (hipóteses, alternativas, recomendações, planos, cartões Kanban e mensagens de erro) sai em inglês ou português do Brasil: `--lang en|pt` antes ou depois de qualquer subcomando; senão, a configuração `language` do plugin, depois `HERMES_LANGUAGE`, `display.language` e o locale do processo e, por fim, inglês. A ajuda dos comandos segue o `HERMES_LANGUAGE`, o `display.language` e o locale.
 
 ## Conteúdo
 
