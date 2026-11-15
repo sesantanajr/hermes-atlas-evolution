@@ -6,6 +6,7 @@ discarded. Only the class, an identifier-like hint and counters are stored.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
@@ -73,6 +74,7 @@ _POSITIVE = re.compile(
 _WORD = re.compile(r"[^\W_]{3,}", re.UNICODE)
 
 
+@functools.lru_cache(maxsize=1)
 def _native_redactor():
     """Hermes' own secret redactor when running inside Hermes; None in the standalone runner."""
     try:
