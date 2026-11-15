@@ -60,6 +60,20 @@ class LearningTests(unittest.TestCase):
         record_feedback(self.conn, "provider_errors", "reset", now=NOW + DAY)
         self.assertEqual(len(review(self.conn, metrics={}, findings=findings, now=NOW + 2 * DAY)["alerts"]), 1)
 
+    def test_diagnosis_without_a_proposed_action_is_not_a_notice(self):
+        from hermes_evolution.reasoning import diagnose
+
+        host = {"memory": {"total_bytes": 100, "available_bytes": 48, "page_cache_bytes": 32},
+                "pressure": {"memory": {"some": {"avg60": 0.0}}}}
+        healthy = diagnose({}, {}, host=host)
+        self.assertEqual([(item["code"], item["action_ids"]) for item in healthy], [("page_cache_headroom", [])])
+        findings = [*healthy, {"code": "queue_review", "severity": "info", "action_ids": ["review_queue"]},
+                    {"id": "low_disk", "severity": "warning"}]
+        result = review(self.conn, metrics={}, findings=findings, now=NOW, record=True)
+        self.assertEqual([item["code"] for item in result["alerts"]], ["low_disk", "queue_review"])
+        self.assertEqual(result["suppressed"], [])
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM learning_alert WHERE code='page_cache_headroom'").fetchone())
+
     def test_ineffective_trials_are_replay_safe_and_same_slot_counts_once(self):
         action = "rebalance_cpu"
         self.assertTrue(record_outcome(self.conn, action, 1, "ineffective", now=NOW))
