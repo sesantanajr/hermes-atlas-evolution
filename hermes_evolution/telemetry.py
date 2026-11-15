@@ -10,7 +10,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .operations import TOOL_FAILURES, _day, database
+from .operations import TOOL_FAILURES, _day, record
 
 RESEARCH_TOOLS = frozenset({"web_search", "web_extract", "web_fetch", "web_deep_research", "deep_research"})
 RESEARCH_LIMIT_MS = 120_000
@@ -78,13 +78,13 @@ class ResearchTracker:
             return
         duration = min(14_400_000, int((clock - turn.started) * 1000))
         bucket = next((limit for limit in LATENCY_BUCKETS if duration <= limit), 0)
-        with database(self.home, observer=True) as conn:
-            conn.execute("""INSERT INTO research_latency VALUES (?, ?, 1, ?, ?, ?, ?)
+        now = time.time() if now is None else now
+        row = (_day(now), bucket, int(duration >= RESEARCH_LIMIT_MS), turn.errors, turn.calls, duration)
+        record(self.home, lambda conn: conn.execute(
+            """INSERT INTO research_latency VALUES (?, ?, 1, ?, ?, ?, ?)
               ON CONFLICT DO UPDATE SET turns=turns+1, slow_turns=slow_turns+excluded.slow_turns,
                 tool_errors=tool_errors+excluded.tool_errors, tool_calls=tool_calls+excluded.tool_calls,
-                max_ms=MAX(max_ms,excluded.max_ms)""",
-                         (_day(time.time() if now is None else now), bucket, int(duration >= RESEARCH_LIMIT_MS),
-                          turn.errors, turn.calls, duration))
+                max_ms=MAX(max_ms,excluded.max_ms)""", row), now=now)
 
 
 def research_summary(conn, *, now: float, days: int) -> dict:
