@@ -233,6 +233,21 @@ class CycleAndReportTest(Base):
         with self.assertRaises(ValueError):
             build(self.home, now=NOW, days=0)
 
+    def test_digest_schedule_is_a_recipe_that_changes_nothing(self):
+        from hermes_evolution.evolve import digest_schedule_spec
+
+        before = sorted(path.name for path in self.home.rglob("*"))
+        spec = digest_schedule_spec(self.home, weekday=1, hour=8, lang="pt")
+        self.assertEqual(sorted(path.name for path in self.home.rglob("*")), before)
+        self.assertEqual(spec["create_args"][3:6], ["cron", "create", "0 8 * * 1"])
+        self.assertIn("--no-agent", spec["create_args"])
+        self.assertIn("'report', '--days', '7', '--lang', 'pt'", spec["script_content"])
+        self.assertIn("'learn', '--notify-only'", spec["script_content"])
+        compile(spec["script_content"], "digest", "exec")
+        for bad in ({"weekday": 9}, {"hour": 24}, {"lang": "xx"}, {"days": 0}, {"deliver": "a b; rm -rf"}):
+            with self.assertRaises(ValueError):
+                digest_schedule_spec(self.home, **bad)
+
     def test_an_empty_profile_still_produces_a_digest(self):
         report = build(self.home, now=NOW, days=7)
         text = markdown(report, "en")

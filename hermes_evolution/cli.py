@@ -101,6 +101,11 @@ def setup(parser: argparse.ArgumentParser) -> None:
     commands.add_parser("experiments", help="Show tracked changes with their before-and-after verdicts")
     digest = commands.add_parser("report", help="Print the evolution digest")
     digest.add_argument("--format", choices=("md", "json"), default="md")
+    digest.add_argument("--schedule-spec", action="store_true",
+                        help="Print a no-agent cron recipe that delivers this digest weekly, without creating it")
+    digest.add_argument("--weekday", type=int, choices=range(0, 7), default=1, metavar="0..6")
+    digest.add_argument("--hour", type=int, choices=range(0, 24), default=8, metavar="0..23")
+    digest.add_argument("--deliver", default="local", help="Hermes delivery target for the scheduled digest")
     for command in (skills, digest):
         command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
     for command in (playbook, digest, learn):
@@ -183,6 +188,11 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None):
         return notify_view(result) if args.notify_only else result
     if action == "skills":
         return skill_health(home, now=now, days=args.days)
+    if action == "report" and args.schedule_spec:
+        from .evolve import digest_schedule_spec
+
+        return digest_schedule_spec(home, weekday=args.weekday, hour=args.hour, days=args.days, lang=lang,
+                                    deliver=args.deliver)
     if action == "report":
         report = build(home, now=now, days=args.days, lang=lang, rates=config.get("rates_usd_per_million", {}))
         return markdown(report, lang) if args.format == "md" else report

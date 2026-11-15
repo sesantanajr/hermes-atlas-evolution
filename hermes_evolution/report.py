@@ -60,6 +60,12 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
             "auxiliary_calls": sum(row["requests"] for row in usage["groups"] if row["lane"].startswith("aux:")),
             "basis": "calls_observed_by_this_plugin",
         }
+        reviews = report["self_improvement"]["background_reviews"]
+        paid = report["usage"]["input_tokens"] + report["usage"]["output_tokens"]
+        spent = reviews["input_tokens"] + reviews["output_tokens"]
+        if paid and spent:
+            # Review calls run on the main lane, so they are already inside `paid`.
+            report["self_improvement"]["learning_share_pct"] = round(min(100.0, 100 * spent / paid), 1)
     try:
         native = native_billing(home, days=days, now=now)
         totals = native.get("totals") if isinstance(native, dict) else None
@@ -82,6 +88,7 @@ _TEXT = {
         "failures_none": "No recurring tool failure in this window.", "times": "times", "days": "days",
         "lesson_state": "lesson", "no_lesson": "no lesson yet", "learning": "Self-improvement loop",
         "reviews": "background reviews", "empty": "produced nothing", "review_tokens": "review tokens (input / output)",
+        "share": "of the uncached input and output tokens went to learning (approximate)",
         "rewrites": "skill rewrites", "by_review": "by the automatic review", "skills": "skills",
         "churn": "Skills rewritten the most", "flipflops": "flip-flops", "uses": "uses",
         "lessons": "Playbook", "active": "active", "candidate": "awaiting approval", "retired": "retired",
@@ -101,6 +108,7 @@ _TEXT = {
         "failures_none": "Nenhuma falha de ferramenta recorrente nesta janela.", "times": "vezes", "days": "dias",
         "lesson_state": "lição", "no_lesson": "sem lição ainda", "learning": "Ciclo de auto-melhoria",
         "reviews": "revisões em segundo plano", "empty": "não produziram nada", "review_tokens": "tokens das revisões (entrada / saída)",
+        "share": "dos tokens de entrada sem cache e de saída foram para o aprendizado (aproximado)",
         "rewrites": "reescritas de skills", "by_review": "pela revisão automática", "skills": "skills",
         "churn": "Skills mais reescritas", "flipflops": "vai-e-volta", "uses": "usos",
         "lessons": "Playbook", "active": "ativas", "candidate": "aguardando aprovação", "retired": "aposentadas",
@@ -194,6 +202,9 @@ def markdown(report: dict, lang: str = "en") -> str:
                  + (f" · {_number(reviews['empty_pct'], lang, 1)}% {t['empty']}" if reviews["empty_pct"] is not None else ""))
     if reviews["reviews"]:
         lines.append(f"- {t['review_tokens']}: {_number(reviews['input_tokens'], lang)} / {_number(reviews['output_tokens'], lang)}")
+    share = report["self_improvement"].get("learning_share_pct")
+    if share is not None:
+        lines.append(f"- {_number(share, lang, 1)}% {t['share']}")
     by_review = skills["rewrites_by_actor"].get("curator", 0)
     lines.append(f"- {_number(skills['rewrites'], lang)} {t['rewrites']} ({_number(by_review, lang)} {t['by_review']})"
                  f" · {skills['skills_rewritten']} {t['skills']}")

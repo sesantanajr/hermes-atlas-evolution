@@ -34,7 +34,10 @@ def read_manifest(path: Path) -> dict:
 
 class FakeContext:
     def __init__(self):
-        self.hooks, self.tools, self.sections, self.commands, self.cli = {}, {}, {}, {}, {}
+        self.hooks, self.tools, self.sections, self.commands, self.cli, self.skills = {}, {}, {}, {}, {}, {}
+
+    def register_skill(self, name, path, description="", frontmatter=None):
+        self.skills[name] = Path(path)
 
     def register_hook(self, name, callback, **_options):
         self.hooks.setdefault(name, []).append(callback)
@@ -87,6 +90,10 @@ class PluginLoopTest(unittest.TestCase):
         self.assertEqual(list(context.sections), ["atlas-evolution.playbook"])
         self.assertLessEqual(context.sections["atlas-evolution.playbook"]["max_chars"], 4000)
         self.assertIn("evolution", context.cli)
+        self.assertEqual(list(context.skills), ["evolution-review"])
+        skill = context.skills["evolution-review"].read_text(encoding="utf-8")
+        self.assertTrue(skill.startswith("---\nname: evolution-review\ndescription: "))
+        self.assertLess(len(skill), 15_000)
         self.assertEqual(context.commands, {})   # the legacy chat command stays opt-in
         for name, tool in context.tools.items():
             self.assertFalse(tool["check"](), name)   # agent-facing tools are off until the operator allows them
