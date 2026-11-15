@@ -324,7 +324,7 @@ def _label(value) -> str:
         segments = re.split(r"[/:]", lower)
         credential_prefixes = ("sk-", "ghp_", "gho_", "ghs_", "ghr_", "ghu_", "github_pat_", "xox", "akia", "aiza", "hf_")
         # A local server can report the model as its file path. Keep namespaced names, never a path.
-        path_like = any(part in ("", ".", "..") for part in lower.split("/"))
+        path_like = any(part in ("", ".", "..") for part in lower.split("/")) or re.match(r"[a-z]:/", lower)
         if not path_like and "://" not in lower and not any(segment.startswith(credential_prefixes) for segment in segments):
             return lower
     return "unknown"
