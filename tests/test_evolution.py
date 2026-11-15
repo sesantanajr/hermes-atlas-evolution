@@ -70,6 +70,28 @@ class EvolutionTest(unittest.TestCase):
         finding, = recommendations(report)
         self.assertEqual((finding["code"], finding["errors"], finding["attempts"]), ("tool_errors", 4, 10))
 
+    def test_provider_failures_use_the_hermes_reason_and_auxiliary_error_type(self):
+        attempts = (
+            ("api_error", {"reason": "timeout", "status_code": None}, "timeout"),
+            ("api_error", {"reason": "overloaded", "status_code": 529}, "upstream"),
+            ("api_error", {"reason": "upstream_blocked", "status_code": 403}, "upstream"),
+            ("api_error", {"reason": "rate_limit", "status_code": None}, "rate_limit"),
+            ("api_error", {"reason": "unknown", "status_code": 401}, "auth"),
+            ("api_error", {"reason": "format_error", "status_code": 400}, "error"),
+            ("aux", {"error": "RateLimitError: PRIVATE provider text", "error_type": "RateLimitError"}, "rate_limit"),
+            ("aux", {"error": "APIStatusError: Error code: 503 - PRIVATE", "error_type": "APIStatusError"}, "upstream"),
+            ("aux", {"error": "ReadTimeout: PRIVATE", "error_type": "ReadTimeout"}, "timeout"),
+            ("aux", {"error": "ValueError: PRIVATE 429", "error_type": "ValueError"}, "error"),
+        )
+        for index, (event, fields, expected) in enumerate(attempts):
+            observe(self.home, event, {"turn_id": "t", "api_request_id": str(index), "provider": f"p{index}",
+                                       "model": "m", "aux_task": "compression", **fields}, now=NOW)
+        with database(self.home) as conn:
+            report = summarize(conn, days=1, now=NOW, rates={})
+            self.assertNotIn("PRIVATE", "\n".join(conn.iterdump()))
+        outcomes = {row["provider"]: row["outcome"] for row in report["groups"]}
+        self.assertEqual(outcomes, {f"p{index}": expected for index, (_, _, expected) in enumerate(attempts)})
+
     def test_decisions_learn_across_days_and_recover(self):
         def critical():
             return [{"code": "disk", "severity": "critical"}]

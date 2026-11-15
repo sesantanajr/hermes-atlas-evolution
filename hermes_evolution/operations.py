@@ -89,15 +89,39 @@ def _tokens(value) -> int:
     return min(value, 10**9) if type(value) is int and value > 0 else 0
 
 
+# Hermes classifies each failed attempt (agent.error_classifier.FailoverReason). Prefer that verdict:
+# connection timeouts, Codex quota replies and 529 responses reach the hook with no HTTP status.
+_REASON_OUTCOMES = {
+    "rate_limit": "rate_limit", "upstream_rate_limit": "rate_limit", "auth": "auth", "auth_permanent": "auth",
+    "timeout": "timeout", "overloaded": "upstream", "server_error": "upstream", "upstream_blocked": "upstream",
+}
+_STATUS_OUTCOMES = {401: "auth", 403: "auth", 408: "timeout", 429: "rate_limit", 500: "upstream",
+                    502: "upstream", 503: "upstream", 504: "upstream", 529: "upstream"}
+# post_auxiliary_call reports a failure as ``error_type`` plus "<Type>: <text>" and carries no status_code.
+_ERROR_TYPE_OUTCOMES = {
+    "RateLimitError": "rate_limit", "AuthenticationError": "auth", "PermissionDeniedError": "auth",
+    "APITimeoutError": "timeout", "TimeoutError": "timeout", "ReadTimeout": "timeout", "ConnectTimeout": "timeout",
+    "WriteTimeout": "timeout", "PoolTimeout": "timeout", "TimeoutException": "timeout",
+    "InternalServerError": "upstream", "APIConnectionError": "upstream", "ServiceUnavailableError": "upstream",
+    "OverloadedError": "upstream",
+}
+_ERROR_STATUS = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,80}: Error code: ([0-9]{3})\b")
 TOOL_FAILURES = ("error", "timeout")
 
 
 def _outcome(event: str, info: dict) -> str:
     if event == "api_error" or event == "aux" and info.get("error"):
-        code = info.get("status_code")
-        codes = {401: "auth", 403: "auth", 408: "timeout", 429: "rate_limit", 500: "upstream",
-                 502: "upstream", 503: "upstream", 504: "upstream"}
-        return codes.get(code, "error") if type(code) is int else "error"
+        reason, code = info.get("reason"), info.get("status_code")
+        if isinstance(reason, str) and reason in _REASON_OUTCOMES:
+            return _REASON_OUTCOMES[reason]
+        if type(code) is int:
+            return _STATUS_OUTCOMES.get(code, "error")
+        kind, text = info.get("error_type"), info.get("error")
+        if isinstance(kind, str) and kind in _ERROR_TYPE_OUTCOMES:
+            return _ERROR_TYPE_OUTCOMES[kind]
+        # Only the numeric status leaves the provider message.
+        reported = _ERROR_STATUS.match(text[:160]) if isinstance(text, str) else None
+        return _STATUS_OUTCOMES.get(int(reported[1]), "error") if reported else "error"
     if event == "tool":
         status = info.get("status")
         return status if isinstance(status, str) and status in ("ok", "error", "blocked", "cancelled", "timeout") else "unknown"
