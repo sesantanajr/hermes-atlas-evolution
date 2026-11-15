@@ -92,6 +92,19 @@ class EvolutionTest(unittest.TestCase):
         outcomes = {row["provider"]: row["outcome"] for row in report["groups"]}
         self.assertEqual(outcomes, {f"p{index}": expected for index, (_, _, expected) in enumerate(attempts)})
 
+    def test_each_failed_attempt_of_one_request_is_counted_once(self):
+        # Hermes 0.23.1 reuses "<turn>:api:<n>" for all retries of a request.
+        request = {"turn_id": "turn", "api_request_id": "turn:api:1", "provider": "example", "model": "a",
+                   "status_code": 429}
+        for retry in range(3):
+            attempt = {**request, "retry_count": retry, "ended_at": NOW + retry}
+            for _ in range(2):
+                observe(self.home, "api_error", attempt, now=NOW)
+        with database(self.home) as conn:
+            report = summarize(conn, days=1, now=NOW, rates={})
+        self.assertEqual([(row["outcome"], row["requests"]) for row in report["groups"]], [("rate_limit", 3)])
+        self.assertEqual([item["code"] for item in recommendations(report)], ["llm_rate_limit"])
+
     def test_decisions_learn_across_days_and_recover(self):
         def critical():
             return [{"code": "disk", "severity": "critical"}]
