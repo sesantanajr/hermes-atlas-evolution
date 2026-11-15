@@ -266,7 +266,7 @@ def register(ctx):
         (a `learn` run, another process) must never leave a new session without its lessons."""
         try:
             shown: list = []
-            with experience(home, observer=True) as conn:
+            with experience(home) as conn:   # its own connection: WAL readers never wait for a writer
                 text = playbook.playbook(conn, lang=evolution["language"], chosen=shown)
             if shown:
                 from .experience import record
