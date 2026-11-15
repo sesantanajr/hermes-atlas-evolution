@@ -105,6 +105,13 @@ class EvolutionTest(unittest.TestCase):
         self.assertEqual([(row["outcome"], row["requests"]) for row in report["groups"]], [("rate_limit", 3)])
         self.assertEqual([item["code"] for item in recommendations(report)], ["llm_rate_limit"])
 
+    def test_model_reported_as_a_file_path_is_not_stored(self):
+        for index, model in enumerate(("/home/alice/models/q.gguf", "../models/q.gguf", "models//q.gguf", "vendor/q:free")):
+            observe(self.home, "api", {"provider": f"p{index}", "model": model}, now=NOW)
+        with database(self.home) as conn:
+            stored = dict(conn.execute("SELECT provider, model FROM metric"))
+        self.assertEqual(stored, {"p0": "unknown", "p1": "unknown", "p2": "unknown", "p3": "vendor/q:free"})
+
     def test_decisions_learn_across_days_and_recover(self):
         def critical():
             return [{"code": "disk", "severity": "critical"}]
