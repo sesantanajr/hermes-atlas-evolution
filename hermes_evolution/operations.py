@@ -89,6 +89,9 @@ def _tokens(value) -> int:
     return min(value, 10**9) if type(value) is int and value > 0 else 0
 
 
+TOOL_FAILURES = ("error", "timeout")
+
+
 def _outcome(event: str, info: dict) -> str:
     if event == "api_error" or event == "aux" and info.get("error"):
         code = info.get("status_code")
@@ -97,7 +100,7 @@ def _outcome(event: str, info: dict) -> str:
         return codes.get(code, "error") if type(code) is int else "error"
     if event == "tool":
         status = info.get("status")
-        return status if status in ("ok", "error", "blocked", "cancelled") else "unknown"
+        return status if isinstance(status, str) and status in ("ok", "error", "blocked", "cancelled", "timeout") else "unknown"
     return "ok"
 
 
@@ -207,8 +210,8 @@ def recommendations(usage: dict) -> list[dict]:
                           "cache_share": round(hits / prompt, 3),
                           "action": "Measure tool schemas, injected memory and instruction size; test existing retrieval controls."})
     tools = {row["outcome"]: row["requests"] for row in by_lane if row["lane"] == "tool"}
-    attempts = tools.get("ok", 0) + tools.get("error", 0)
-    errors = tools.get("error", 0)
+    errors = sum(tools.get(outcome, 0) for outcome in TOOL_FAILURES)
+    attempts = tools.get("ok", 0) + errors
     if attempts >= 10 and errors / attempts >= 0.25:
         proposals.append({"code": "tool_errors", "severity": "warning", "errors": errors, "attempts": attempts,
                           "action": "Use existing traces to find the failing tools and compare retries with successful runs."})

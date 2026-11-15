@@ -284,8 +284,8 @@ def _request_diagnoses(usage, research, history, daily):
 
     tool_counts = Counter()
     for row in rows:
-        if row.get("lane") == "tool" and row.get("outcome") in ("ok", "error"):
-            tool_counts[row["outcome"]] += _number(row.get("requests")) or 0
+        if row.get("lane") == "tool" and row.get("outcome") in ("ok", "error", "timeout"):
+            tool_counts["ok" if row["outcome"] == "ok" else "error"] += _number(row.get("requests")) or 0
     tool_attempts = sum(tool_counts.values())
     tool_error_share = _ratio(tool_counts["error"], tool_attempts)
     if tool_attempts >= 10 and (tool_error_share or 0) >= 0.25:
