@@ -152,6 +152,20 @@ class ObserverTests(unittest.TestCase):
         observe(self.home, "tool", tool("recovered"), now=NOW)
         self.assertEqual(self.tools(), 2)
 
+    def test_mistyped_profile_path_fails_without_creating_a_tree(self):
+        from hermes_evolution.supervisor import _journal
+
+        missing = self.home / "no-such-profile"
+        with self.assertRaises(OSError):
+            with database(missing):
+                pass
+        with self.assertRaises(OSError):
+            observe(missing, "tool", tool("lost"), now=NOW)
+        with self.assertRaises(OSError):
+            with _journal(missing):
+                pass
+        self.assertFalse(missing.exists())
+
     def test_shared_connection_serves_readers_and_keeps_their_writes(self):
         with database(self.home, observer=True) as conn:
             conn.execute("INSERT INTO control VALUES ('probe', 'kept')")
