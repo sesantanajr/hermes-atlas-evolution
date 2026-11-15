@@ -86,6 +86,20 @@ class WorkloadsTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         self.assertNotIn(_SECRET, json.dumps(report))
 
+    def test_cron_job_that_cannot_be_scheduled_or_dispatched_is_reported(self):
+        base = {"enabled": True, "last_status": "ok", "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+                "prompt": _SECRET}
+        healthy = {**base, "state": "scheduled", "next_run_at": _iso(3600)}
+        for broken in ({**base, "state": "error", "next_run_at": None, "last_error": _SECRET},
+                       {**healthy, "last_fire_error": {"at": _iso(-120), "detail": _SECRET}}):
+            self._write_cron({"jobs": [healthy, broken]})
+            report = self._inspect()
+            self.assertEqual([item["code"] for item in report["recommendations"]], ["cron_dispatch_or_failures"])
+            self.assertEqual(report["cron"]["counts"]["schedule_errors"] + report["cron"]["counts"]["recent_fire_errors"], 1)
+            self.assertNotIn(_SECRET, json.dumps(report))
+        self._write_cron({"jobs": [healthy, {**healthy, "last_fire_error": {"at": _iso(-90000), "detail": _SECRET}}]})
+        self.assertEqual(self._inspect()["recommendations"], [])
+
     def test_cron_json_and_record_limits_report_incomplete_coverage(self):
         path = self._write_cron({"jobs": [{"enabled": True}, {"enabled": True}]})
         with patch("hermes_evolution.workloads._JOB_LIMIT", 1):
