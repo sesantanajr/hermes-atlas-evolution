@@ -98,3 +98,50 @@ def notify_view(result: dict) -> dict | None:
         return None
     return {"new_lessons": result["new_lessons"], "regressions": regressions, "lessons_retired": retired,
             "high_risk_proposals": urgent}
+
+
+def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: int = 7, lang: str = "en",
+                         deliver: str = "local") -> dict:
+    """A no-agent cron recipe that delivers the digest weekly. Nothing is written and no job is created."""
+    import re
+    import shlex
+
+    from .native_actions import _profile_args
+
+    if type(weekday) is not int or not 0 <= weekday <= 6 or type(hour) is not int or not 0 <= hour <= 23:
+        raise ValueError("Use a weekday from 0 (Sunday) to 6 and an hour from 0 to 23")
+    if type(days) is not int or not 1 <= days <= 35 or lang not in lessons.LANGUAGES:
+        raise ValueError("Use 1 to 35 days and the language en or pt")
+    if not isinstance(deliver, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.:@+-]{0,119}", deliver):
+        raise ValueError("deliver must be a Hermes delivery target such as local or origin")
+    profile = Path(home).expanduser().resolve()
+    arguments = [*_profile_args(profile), "evolution", "report", "--days", str(days), "--lang", lang]
+    script_name = "atlas-evolution-digest.py"
+    script = f'''"""Deliver the Atlas Evolution digest without an agent turn."""
+import os
+import shutil
+import subprocess
+
+launcher = shutil.which("hermes")
+if not launcher:
+    raise SystemExit("Hermes CLI is not on the scheduler PATH.")
+try:
+    learn = subprocess.run([launcher, *{arguments[:-6] + ["evolution", "learn", "--notify-only"]!r}],
+                           capture_output=True, text=True, env=dict(os.environ, HERMES_HOME={str(profile)!r}),
+                           encoding="utf-8", errors="replace", timeout=120, check=False)
+    result = subprocess.run([launcher, *{arguments!r}], capture_output=True, text=True,
+                            env=dict(os.environ, HERMES_HOME={str(profile)!r}),
+                            encoding="utf-8", errors="replace", timeout=120, check=False)
+    if learn.returncode or result.returncode or len(result.stdout) > 65_536:
+        raise SystemExit("Atlas Evolution digest failed. Run `hermes evolution report` in this profile to inspect.")
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit("Atlas Evolution digest could not be produced.") from None
+
+print(result.stdout.rstrip())
+'''
+    create_args = ["hermes", *_profile_args(profile), "cron", "create", f"0 {hour} * * {weekday}", "--name",
+                   "atlas-evolution-digest", "--no-agent", "--script", script_name, "--deliver", deliver]
+    return {"status": "planned", "profile_home": str(profile), "script_name": script_name,
+            "script_path": str(profile / "scripts" / script_name), "script_content": script,
+            "create_args": create_args,
+            "posix_command": f"HERMES_HOME={shlex.quote(str(profile))} {shlex.join(create_args)}"}

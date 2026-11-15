@@ -99,6 +99,23 @@ def _warn_once(seen: set, event: str) -> None:
         getLogger(__name__).warning("Atlas Evolution could not record %s; the turn continues unaffected", event)
 
 
+def _register_skills(ctx) -> None:
+    """Expose the bundled skills as `hermes-evolution:<name>`. Optional: an older or stricter host skips them."""
+    folder = Path(__file__).resolve().parent.parent / "skills"
+    register_skill = getattr(ctx, "register_skill", None)
+    if not callable(register_skill) or not folder.is_dir():
+        return
+    for child in sorted(folder.iterdir()):
+        document = child / "SKILL.md"
+        if document.is_file():
+            try:
+                register_skill(child.name, document)
+            except Exception:   # a skill is a convenience; it must never stop the plugin from loading
+                from logging import getLogger
+
+                getLogger(__name__).warning("Atlas Evolution could not register the bundled skill %s", child.name)
+
+
 def register(ctx):
     import sys
 
@@ -261,6 +278,7 @@ def register(ctx):
         ctx.register_system_prompt_section("atlas-evolution.playbook", playbook_section, max_chars=1400)
     if legacy_enabled:
         ctx.register_command("evolution", command, description="Access legacy Evolution notes", args_hint="<command>")
+    _register_skills(ctx)
 
     def advisory_tool(args, **context):
         if not advice_enabled:
