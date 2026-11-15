@@ -258,9 +258,18 @@ def register(ctx):
             _warn_once(failed, "skill")
 
     def playbook_section(_session_info):
+        """Read the playbook, then count the lessons shown through the queued writer: a busy database
+        (a `learn` run, another process) must never leave a new session without its lessons."""
         try:
+            shown: list = []
             with experience(home, observer=True) as conn:
-                return playbook.playbook(conn, lang=evolution["language"], mark_shown=True)
+                text = playbook.playbook(conn, lang=evolution["language"], chosen=shown)
+            if shown:
+                from .experience import record
+
+                record(home, lambda conn: conn.executemany("UPDATE lesson SET shown=shown+1 WHERE id=?",
+                                                           [(item,) for item in shown]))
+            return text
         except storage_errors:
             return ""
 
