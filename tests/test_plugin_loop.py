@@ -192,10 +192,18 @@ class PluginLoopTest(unittest.TestCase):
         self.assertTrue(tool["check"]())
         self.assertEqual(json.loads(tool["handler"]({"action": "search"})), {"lessons": []})
 
-    def test_invalid_settings_fall_back_to_safe_defaults(self):
+    def test_invalid_settings_never_switch_on_what_the_operator_switched_off(self):
         self.settings(evolution={"lessons": "everything", "slow_turn_seconds": "fast"})
-        context = self.plugin()
-        self.assertIn("atlas-evolution.playbook", context.sections)   # 'suggest': shown only after approval
+        with self.assertLogs("hermes_evolution.integration", level="WARNING"):
+            context = self.plugin()
+        self.assertEqual(context.sections, {})                    # an invalid mode means off
+        self.assertNotIn("transform_tool_result", context.hooks)
+        self.settings(evolution={"lessons": "off", "slow_turn_seconds": 120.5})   # another key is wrong
+        self.assertEqual(self.plugin().sections, {})
+        self.settings(evolution={"lessons": "auto", "slow_turn_seconds": 120.0})  # a form may store whole floats
+        self.assertIn("atlas-evolution.playbook", self.plugin().sections)
+        (self.home / "evolution" / "settings.json").write_text("{not json")
+        self.assertEqual(self.plugin().sections, {})              # unreadable file: measure only
 
 
 if __name__ == "__main__":

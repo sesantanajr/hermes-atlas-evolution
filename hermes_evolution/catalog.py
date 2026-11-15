@@ -367,6 +367,13 @@ PAIRS = (
      "Use um identificador de até 80 caracteres como assunto do encaminhamento"),
     ("Unsupported handoff playbook", "Roteiro de encaminhamento não suportado"),
     ("Pass --home or set HERMES_HOME", "Informe --home ou defina HERMES_HOME"),
+    ("Only the operator can decide on lessons and proposals. Run this command in your own terminal; the agent can "
+     "propose lessons, which wait for your approval.",
+     "Só o operador decide sobre lições e propostas. Rode este comando no seu próprio terminal; o agente pode propor "
+     "lições, que aguardam a sua aprovação."),
+    ("Confirm with --yes after reading the text with 'proposals list' or 'lessons list'",
+     "Confirme com --yes depois de ler o texto em 'proposals list' ou 'lessons list'"),
+    ("Cancelled; nothing changed", "Cancelado; nada mudou"),
     # ── command-line help ────────────────────────────────────────────────────────────────────────
     ("Review Hermes health, learning and operations", "Saúde, aprendizado e operação do Hermes"),
     ("Inspect Hermes files and host signals", "Examina os arquivos do Hermes e os sinais do host"),
@@ -386,6 +393,8 @@ PAIRS = (
     ("Print only new lessons, regressions and high-risk proposals", "Imprime só lições novas, regressões e propostas de risco alto"),
     ("Review the playbook learned from recurring tool failures", "Revisa o playbook aprendido com falhas recorrentes de ferramentas"),
     ("Add an operator lesson", "Adiciona uma lição do operador"),
+    ("Activate it now instead of leaving it for approval", "Ativa agora em vez de deixar para aprovação"),
+    ("Confirm without the interactive question", "Confirma sem a pergunta interativa"),
     ("Show skill churn, flip-flops and rewrites that were never exercised",
      "Mostra reescritas em excesso, vai-e-volta e reescritas nunca usadas das skills"),
     ("Show how the turns that loaded each skill went", "Mostra como foram os turnos que carregaram cada skill"),

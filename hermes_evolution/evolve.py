@@ -20,22 +20,42 @@ DEFAULTS = {"lessons": "suggest", "tool_hints": True, "feedback_signals": True, 
             "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": False, "reflector_daily_limit": 6}
 
 
-def options(config, runtime_config=None) -> dict:
-    """Validated evolution settings. Unknown or malformed values fall back to the safe default."""
+def _whole(value):
+    """An integer, also when a settings form stored it as 60.0."""
+    if type(value) is float and value.is_integer():
+        return int(value)
+    return value
+
+
+def options(config, runtime_config=None, *, strict: bool = True, problems: list | None = None) -> dict:
+    """Validated evolution settings.
+
+    strict (the CLI): an invalid value is an error the operator sees. Lenient (inside the gateway): each
+    invalid value falls back on its own, and an invalid `lessons` value means `off`, so a typo can never
+    switch on what the operator switched off."""
     raw = config.get("evolution") if isinstance(config, dict) and isinstance(config.get("evolution"), dict) else {}
-    mode = raw.get("lessons", DEFAULTS["lessons"])
-    if mode not in lessons.MODES:
-        raise ValueError("evolution.lessons must be off, suggest or auto")
-    slow = raw.get("slow_turn_seconds", DEFAULTS["slow_turn_seconds"])
-    if type(slow) is not int or not 5 <= slow <= 3600:
-        raise ValueError("evolution.slow_turn_seconds must be an integer from 5 to 3600")
-    owners = raw.get("owner_sender_ids", ())
-    if not isinstance(owners, (list, tuple)) or len(owners) > 20 or any(
-            not isinstance(item, str) or not 0 < len(item) <= 200 for item in owners):
-        raise ValueError("evolution.owner_sender_ids must list up to 20 sender ids")
-    daily = raw.get("reflector_daily_limit", DEFAULTS["reflector_daily_limit"])
-    if type(daily) is not int or not 1 <= daily <= 50:
-        raise ValueError("evolution.reflector_daily_limit must be an integer from 1 to 50")
+    problems = [] if problems is None else problems
+
+    def checked(key, value, valid, message, fallback):
+        if valid(value):
+            return value
+        if strict:
+            raise ValueError(message)
+        problems.append(key)
+        return fallback
+
+    mode = checked("lessons", raw.get("lessons", DEFAULTS["lessons"]), lambda value: value in lessons.MODES,
+                   "evolution.lessons must be off, suggest or auto", "off")
+    slow = checked("slow_turn_seconds", _whole(raw.get("slow_turn_seconds", DEFAULTS["slow_turn_seconds"])),
+                   lambda value: type(value) is int and 5 <= value <= 3600,
+                   "evolution.slow_turn_seconds must be an integer from 5 to 3600", DEFAULTS["slow_turn_seconds"])
+    owners = checked("owner_sender_ids", raw.get("owner_sender_ids", ()),
+                     lambda value: isinstance(value, (list, tuple)) and len(value) <= 20 and all(
+                         isinstance(item, str) and 0 < len(item) <= 200 for item in value),
+                     "evolution.owner_sender_ids must list up to 20 sender ids", ())
+    daily = checked("reflector_daily_limit", _whole(raw.get("reflector_daily_limit", DEFAULTS["reflector_daily_limit"])),
+                    lambda value: type(value) is int and 1 <= value <= 50,
+                    "evolution.reflector_daily_limit must be an integer from 1 to 50", DEFAULTS["reflector_daily_limit"])
     return {"lessons": mode, "tool_hints": raw.get("tool_hints", True) is not False,
             "reflector": raw.get("reflector") is True, "reflector_daily_limit": daily,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
@@ -77,7 +97,8 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             verdicts = experiments.evaluate_changes(conn, None, now=now)
         failures = signals.failure_summary(conn, now=now, days=7)
         turns = signals.turn_summary(conn, now=now, days=7, surfaces=("local", "gateway"))
-        reviews = logwatch.review_summary(conn, start_day=day_offset(now, 7), end_day=utc_day(now + 86_400))
+        start_day, end_day = logwatch.local_days(now, 7)
+        reviews = logwatch.review_summary(conn, start_day=start_day, end_day=end_day)
         usage = read_usage(home)
         closed = 0
         for row in conn.execute("SELECT id, subject FROM proposal WHERE status='approved' AND kind='skill_lock'").fetchall():
@@ -87,19 +108,20 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
                 closed += 1
         outcomes = skill_outcomes(conn, start_day=day_offset(now, 13), end_day=utc_day(now))
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
-                                    changes=verdicts, outcomes=outcomes)
+                                    changes=verdicts, outcomes=outcomes, lang=opts["language"])
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in created]
-    return {"lessons_mode": opts["lessons"], "new_lessons": new_lessons, "reflector": reflection,
+    return {"now": now, "lessons_mode": opts["lessons"], "new_lessons": new_lessons, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
             "proposals_closed_as_applied": closed, "open_proposals": pending}
 
 
 def notify_view(result: dict) -> dict | None:
-    """What a quiet scheduled run should print: only new lessons, regressions and high-risk proposals."""
-    regressions = [item for item in result["change_verdicts"] if item["verdict"] == "regressed"]
+    """What a quiet scheduled run should print, once: new lessons and drafts, regressions whose verdict became
+    final in this run, lessons retired in this run, and high-risk proposals opened in this run."""
+    regressions = [item for item in result["change_verdicts"] if item["verdict"] == "regressed" and item["final"]]
     retired = [item for item in result["lesson_effects"] if item["retired"]]
-    urgent = [item for item in result["open_proposals"] if item["risk"] == "high"]
+    urgent = [item for item in result["open_proposals"] if item["risk"] == "high" and item["created"] == result.get("now")]
     drafts = result.get("reflector", {}).get("drafted") or []
     if not (result["new_lessons"] or regressions or retired or urgent or drafts):
         return None

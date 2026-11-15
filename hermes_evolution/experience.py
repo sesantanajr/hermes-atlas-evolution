@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS lesson (
     hint TEXT NOT NULL, origin TEXT NOT NULL, status TEXT NOT NULL, text TEXT,
     created REAL NOT NULL, updated REAL NOT NULL, activated REAL,
     shown INTEGER NOT NULL DEFAULT 0, hints INTEGER NOT NULL DEFAULT 0,
-    verdict TEXT, rate_before REAL, rate_after REAL, evaluated REAL
+    verdict TEXT, rate_before REAL, rate_after REAL, evaluated REAL,
+    baseline_failures INTEGER, baseline_calls INTEGER
 );
 CREATE INDEX IF NOT EXISTS lesson_status ON lesson(status);
 CREATE TABLE IF NOT EXISTS change (
@@ -113,6 +114,18 @@ def record(home: Path, job, *, now: float | None = None) -> None:
     from .operations import record as write
 
     write(Path(home), job, now=now)
+
+
+# Columns added after a table first shipped: (table, column, declaration).
+ADDED_COLUMNS = (("lesson", "baseline_failures", "INTEGER"), ("lesson", "baseline_calls", "INTEGER"))
+
+
+def ensure_columns(conn: sqlite3.Connection) -> None:
+    """Bring tables created by an earlier development schema up to date. Safe to run repeatedly."""
+    for table, column, declaration in ADDED_COLUMNS:
+        present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if present and column not in present:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def prune(conn: sqlite3.Connection, *, now: float) -> None:

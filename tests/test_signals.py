@@ -35,7 +35,7 @@ class ClassifyTest(unittest.TestCase):
             ("terminal", result(output="", exit_code=-1, error="BLOCKED: Command flagged as dangerous (script execution via -e/-c flag)"),
              "terminal", "blocked_by_policy", "inline_script"),
             ("terminal", result(output="", exit_code=-1, error="BLOCKED: Command timed out without user response."),
-             "terminal", "approval_timeout", ""),
+             "terminal", "approval_refused", ""),
             ("terminal", result(output="[Command timed out after 60s]", exit_code=124, error=None), "terminal", "timeout", ""),
             ("terminal", result(output="/bin/bash: line 1: pwsh: command not found", exit_code=127), "terminal",
              "missing_dependency", "pwsh"),
@@ -59,6 +59,50 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual((split["tool"], split["klass"], split["hint"]), ("files_search", "missing_argument", "servico"))
         bare = classify("t", "error", "missing required argument\nnext_line_word", None)
         self.assertEqual((bare["klass"], bare["hint"]), ("missing_argument", ""))
+
+    def test_every_hermes_approval_refusal_is_its_own_class(self):
+        # Literal texts of tools/approval.py in Hermes 0.23.1 (the {placeholders} filled as Hermes does).
+        stop = (" The user has NOT consented to this action. Do NOT retry this command, do NOT rephrase it, and do NOT "
+                "attempt the same outcome via a different command. Stop the current workflow and wait for the user to "
+                "respond before taking any further destructive or irreversible action.")
+        refusals = [
+            "BLOCKED: User denied this command." + stop,
+            "BLOCKED: Command timed out without user response." + stop + " Silence is not consent.",
+            "BLOCKED: User denied this command through the selected approval transport. The user has NOT consented to "
+            "this action. Do NOT retry or attempt the same outcome through another route.",
+            "BLOCKED: Failed to send approval request to user. Do NOT retry.",
+            "BLOCKED: Failed to send execute_code approval request to user. Do NOT retry.",
+            "BLOCKED: User denied execute_code script execution (matched 'x'). Do NOT retry — the user has explicitly rejected it.",
+            "BLOCKED: Command flagged as dangerous (script execution via -e/-c flag) but no user is present in cron jobs. "
+            "Use normal tools instead. To allow commands in cron jobs, set approvals.cron: approve in config.yaml.",
+            "BLOCKED: Command flagged as dangerous (script execution via -e/-c flag)." + stop,
+        ]
+        for message in refusals:
+            with self.subTest(message=message[:60]):
+                found = classify("terminal", "error", None, result(output="", exit_code=-1, error=message))
+                self.assertEqual(found["klass"], "approval_refused")
+
+    def test_hints_from_command_output_must_look_like_a_command_or_module(self):
+        leaks = [
+            (result(output="bash: SenhaDoBancoProducao: command not found", exit_code=127), "missing_dependency"),
+            (result(output="bash: maria.souza: command not found", exit_code=127), "missing_dependency"),
+            (result(output="Error: missing required argument(s): maria.souza", exit_code=2), "missing_argument"),
+            (result(output="tool_call to 'evil_tool_name_from_output' is missing required argument(s): x", exit_code=2),
+             "missing_argument"),
+        ]
+        for body, klass in leaks:
+            with self.subTest(body=body):
+                found = classify("terminal", "error", None, body)
+                self.assertEqual((found["tool"], found["klass"]), ("terminal", klass))
+                self.assertEqual(found["hint"] in ("", "x"), True, found["hint"])
+        module = classify("terminal", "error", None, result(output="ModuleNotFoundError: No module named 'google.cloud'",
+                                                            exit_code=1))
+        self.assertEqual((module["klass"], module["hint"]), ("missing_dependency", "google.cloud"))
+        command = classify("terminal", "error", None, result(output="/bin/sh: 1: php8.2: command not found", exit_code=127))
+        self.assertEqual(command["hint"], "")   # a dotted command name could be anything: dropped
+        named = classify("tool_call", "error", "tool_call to 'mcp__crm__lookup' is missing required argument(s): id", None,
+                         {"calls": [{"name": "a"}, {"name": "b"}]})
+        self.assertEqual((named["tool"], named["hint"]), ("mcp__crm__lookup", "id"))
 
     def test_success_is_not_a_failure_and_blocked_defaults_to_policy(self):
         self.assertIsNone(classify("terminal", "ok", None, "{}"))

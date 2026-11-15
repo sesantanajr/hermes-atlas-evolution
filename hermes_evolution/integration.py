@@ -123,7 +123,7 @@ def register(ctx):
 
     from . import lessons as playbook
     from .agent_tools import LESSONS_TOOL, LessonsTool
-    from .evolve import DEFAULTS, options
+    from .evolve import options
     from .experience import experience
     from .hints import HintIndex, attach
     from .signals import (FeedbackSensor, TurnTracker, classify, record_skill_correction, record_skill_event,
@@ -137,17 +137,19 @@ def register(ctx):
         runtime_config = load_config_readonly() or {}
     except Exception:   # the plugin still loads with its own settings file
         runtime_config = {}
+    from logging import getLogger
+
+    problems: list = []
     try:
         config = effective_settings(home, runtime_config)
-    except (OSError, ValueError):
-        config = {}
-    try:
-        evolution = options(config, runtime_config)
-    except ValueError:
-        from logging import getLogger
-
-        getLogger(__name__).warning("Atlas Evolution settings are invalid; using safe defaults until they are fixed")
-        evolution = options({"evolution": {"lessons": DEFAULTS["lessons"]}}, runtime_config)
+    except (OSError, ValueError, RecursionError):
+        # Unreadable settings: keep measuring, but show nothing to the agent until the file is fixed.
+        config = {"evolution": {"lessons": "off"}}
+        problems.append("settings.json")
+    evolution = options(config, runtime_config, strict=False, problems=problems)
+    if problems:
+        getLogger(__name__).warning("Atlas Evolution ignored invalid settings (%s); lessons=%s until they are fixed",
+                                    ", ".join(problems), evolution["lessons"])
     legacy_enabled = config.get("legacy_memory_commands") is True
     advice_enabled = config.get("agent_advice") is True
     lessons_on = evolution["lessons"] != "off"
@@ -186,7 +188,7 @@ def register(ctx):
                                payload.get("result"), payload.get("args"))
             record_tool(home, payload, failure=failure, sample=evolution["reflector"])
             call = payload.get("tool_call_id")
-            if failure and isinstance(call, str) and len(call) <= 400:
+            if failure and isinstance(call, str) and 0 < len(call) <= 400:
                 with recent_lock:
                     recent_failures[call] = failure
                     while len(recent_failures) > 256:
@@ -196,15 +198,17 @@ def register(ctx):
 
     def with_lesson(**payload):
         """Add the matching lesson to a failing tool result. Any doubt leaves the result untouched."""
-        if payload.get("status") not in ("error", "blocked"):
-            return None
         try:
+            if payload.get("status") not in ("error", "blocked"):
+                return None
             call, session = payload.get("tool_call_id"), payload.get("session_id")
+            if not isinstance(session, str) or not session.strip():
+                return None   # without a session there is no "once per session"
             with recent_lock:
-                failure = recent_failures.pop(call, None) if isinstance(call, str) else None
+                failure = recent_failures.pop(call, None) if isinstance(call, str) and call else None
             failure = failure or classify(payload.get("tool_name"), payload.get("status"), payload.get("error_message"),
                                           payload.get("result"), payload.get("args"))
-            if not failure or not isinstance(session, str):
+            if not failure:
                 return None
             entry = hints.lookup(failure["signature"], session)
             if entry is None:
@@ -317,6 +321,14 @@ def register(ctx):
     if legacy_enabled:
         ctx.register_command("evolution", command, description="Access legacy Evolution notes", args_hint="<command>")
     _register_skills(ctx)
+    register_env = getattr(ctx, "register_session_env", None)
+    if callable(register_env):
+        try:
+            # Every shell an agent session spawns carries this marker, so `hermes evolution` run by the agent
+            # can tell it is not the operator and refuses to approve or activate anything.
+            register_env(["ATLAS_EVOLUTION_AGENT"], lambda session_id: {"ATLAS_EVOLUTION_AGENT": "1"})
+        except Exception:   # the session id marker set by Hermes still guards the commands
+            getLogger(__name__).warning("Atlas Evolution could not mark agent shells; the session id still guards decisions")
     on_unload = getattr(ctx, "on_unload", None)
     if callable(on_unload):
         from .operations import close_observers

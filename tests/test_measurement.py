@@ -94,12 +94,21 @@ class LogwatchTest(Base):
     LINE = ("2026-11-15 10:00:0{n},123 INFO [session-x] agent.background_review: Background review complete: "
             "thread=bg-review calls={calls} in={i} out={o} cache_read={c} result={result}\n")
 
+    def test_only_the_background_review_logger_counts(self):
+        log = self.home / "logs" / "agent.log"
+        log.write_text("2026-11-15 10:00:01,000 INFO [s] tools.web_search: query=Background review complete: thread=x "
+                       "calls=9 in=9 out=9 cache_read=9 result=skill\n"
+                       + self.LINE.format(n=2, calls=1, i=1, o=1, c=1, result="none"))
+        with experience(self.home) as conn:
+            self.assertEqual(ingest_reviews(self.home, conn)["reviews"], 1)
+
     def test_reviews_are_counted_once_across_runs_and_rotation(self):
         log = self.home / "logs" / "agent.log"
         log.write_text("noise line with a secret sk-should-not-matter\n"
                        + self.LINE.format(n=1, calls=4, i=1000, o=100, c=5000, result="skill")
                        + self.LINE.format(n=2, calls=0, i=0, o=0, c=0, result="none")
-                       + "2026-11-15 10:00:03,000 INFO agent.background_review: Background review complete: calls=1 in=5")
+                       + "2026-11-15 10:00:03,000 INFO agent.background_review: Background review complete: "
+                         "thread=bg-review calls=1 in=5")
         with experience(self.home) as conn:
             self.assertEqual(ingest_reviews(self.home, conn)["reviews"], 2)   # the unterminated line waits
             self.assertEqual(ingest_reviews(self.home, conn)["reviews"], 0)
@@ -129,7 +138,12 @@ class ExperimentsTest(Base):
         self.assertEqual(snapshot["compression.threshold_tokens"], "80000")
         self.assertEqual(snapshot["compression.enabled"], "true")
         self.assertEqual(snapshot["model.default"], "deepseek-flash")
-        self.assertEqual(snapshot["auxiliary.background_review.model"], "set")   # not a plain label: value withheld
+        self.assertRegex(snapshot["auxiliary.background_review.model"], r"^set:[0-9a-f]{10}$")   # value withheld
+        other = experiments.config_snapshot({"model": {"default": "openrouter/anthropic/claude"}})
+        changed = experiments.config_snapshot({"model": {"default": "openrouter/openai/gpt"}})
+        self.assertNotEqual(other["model.default"], changed["model.default"])   # provider/model changes are seen
+        self.assertNotIn("openrouter", json.dumps(other))
+        self.assertIn("model.model", other)
         self.assertEqual(snapshot["memory.provider"], "unset")
         self.assertTrue(snapshot["plugins.enabled"].startswith("2:"))
         self.assertNotIn("sk-secret", json.dumps(snapshot))
@@ -277,7 +291,7 @@ class CycleAndReportTest(Base):
         queue = json.loads(run(evolution_action="proposals", proposals_action="list", all=False))
         self.assertEqual([item["kind"] for item in queue], ["lesson"])
         approved = json.loads(run(evolution_action="lessons", lessons_action="approve", id=learned["new_lessons"][0]["id"],
-                                  lang=None))
+                                  lang=None, yes=True))
         self.assertEqual(approved["status"], "active")
         self.assertEqual(json.loads(run(evolution_action="proposals", proposals_action="list", all=False)), [])
         everything = json.loads(run(evolution_action="proposals", proposals_action="list", all=True))
@@ -288,7 +302,7 @@ class CycleAndReportTest(Base):
         self.assertEqual(json.loads(run(evolution_action="skills", days=7))["rewrites"], 0)
         self.assertEqual(json.loads(run(evolution_action="experiments"))[0]["kind"], "lesson")
         with self.assertRaises(SystemExit):
-            run(evolution_action="lessons", lessons_action="approve", id=999, lang=None)
+            run(evolution_action="lessons", lessons_action="approve", id=999, lang=None, yes=True)
 
     def test_an_empty_profile_still_produces_a_digest(self):
         report = build(self.home, now=NOW, days=7)
