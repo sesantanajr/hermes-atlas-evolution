@@ -286,17 +286,25 @@ def register(ctx):
 
         on_unload(close_observers)   # write queued counters and release the shared connection
 
+    from .i18n import localize
+
+    def in_language(payload: str) -> str:
+        try:
+            return json.dumps(localize(json.loads(payload), evolution["language"]), ensure_ascii=False)
+        except (TypeError, ValueError):
+            return payload
+
     def advisory_tool(args, **context):
         if not advice_enabled:
-            return json.dumps({"error": "Planning permission has not been enabled for this Hermes profile."})
-        return tool_handler(args, **context)
+            return in_language(json.dumps({"error": "Planning permission has not been enabled for this Hermes profile."}))
+        return in_language(tool_handler(args, **context))
 
     lessons_tool = LessonsTool(home, lang=evolution["language"])
 
     def playbook_tool(args, **context):
         if not advice_enabled:
-            return json.dumps({"error": "Playbook access has not been enabled for this Hermes profile."})
-        return lessons_tool.handle(args, **context)
+            return in_language(json.dumps({"error": "Playbook access has not been enabled for this Hermes profile."}))
+        return in_language(lessons_tool.handle(args, **context))
 
     ctx.register_tool(name=TOOL["name"], toolset="atlas-evolution", schema=TOOL, handler=advisory_tool,
                       check_fn=lambda: advice_enabled)
