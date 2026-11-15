@@ -197,10 +197,10 @@ Because the section is fixed for the whole session and the hint is appended to a
 
 The reflector (`reflector`) drafts lessons for recurring failures that have no template. It is off by default and is switched on with the `reflector` option. While it is off, nothing below happens.
 
-**What is kept.** When the plugin loads with the reflector on, the tool hook keeps, for each failure signature of the classes `code_exception`, `command_failed`, `network`, `auth` and `other`, the latest error excerpt (`failure_sample`):
+**What is kept.** When the plugin loads with the reflector on and `lessons` is not `off`, the tool hook keeps, for each failure signature of the classes `code_exception`, `command_failed`, `network`, `auth` and `other`, the latest error excerpt (`failure_sample`):
 
 1. the last 4 non-empty lines of the error text and output, joined, at most 1,200 characters;
-2. passed through Hermes' secret redactor when the plugin runs inside Hermes;
+2. passed through Hermes' secret redactor when the plugin runs inside Hermes, with `force=True` so that it applies even when the profile turned redaction off;
 3. masked by the plugin: URLs become `<url>`, e-mail addresses `<email>`, paths of two or more segments `<path>`, hexadecimal strings of 16 or more characters `<hex>`, values with a credential prefix `<secret>`, runs of 5 or more digits `<n>`, and quoted strings over 40 characters `'<text>'`;
 4. cut to the last 300 characters (`EXCERPT_LIMIT`).
 
@@ -212,9 +212,9 @@ The reflector (`reflector`) drafts lessons for recurring failures that have no t
 
 **What is accepted.** A draft is discarded when `applies` is not true, when the sentence fails the [text rules](#text-rules), when it contains `<`, or when it matches the injection filter (phrases such as "ignore previous instructions", "disregard", "system prompt", "you are now", their Portuguese forms, or `system` and `assistant` tags). An accepted draft becomes a `quarantined` lesson with origin `reflector`, bound to its failure signature, and gets a medium-risk proposal. Once approved it is shown, hinted and measured like a derived lesson.
 
-**When the excerpt is deleted.** As soon as the failure has a lesson, when the model declines or the draft is discarded, 14 days after its last update (`SAMPLE_DAYS`), and at every pass that runs with the reflector off or without Hermes' model access. A provider error leaves the excerpt for a later pass.
+**When the excerpt is deleted.** As soon as the failure has a lesson, when the model declines or the draft is discarded, 14 days after its last update (`SAMPLE_DAYS`), and at every pass that runs with the reflector off. A provider error, or a pass without Hermes' model access, leaves the excerpt for a later pass.
 
-**Where it runs.** Only in a pass run by the Hermes CLI (`hermes evolution learn`, `ops tick` or the weekly recipe), because the model access comes from Hermes. The standalone runner (`python -m hermes_evolution`) drafts nothing; its `learn` reports `unavailable_without_hermes_llm` and deletes the waiting excerpts.
+**Where it runs.** Only in a pass run by the Hermes CLI (`hermes evolution learn`, `ops tick` or the weekly recipe), because the model access comes from Hermes, and only while `lessons` is not `off` (otherwise the block reports `lessons_off`, since an approved draft would never be shown). The standalone runner (`python -m hermes_evolution`) drafts nothing; its `learn` reports `unavailable_without_hermes_llm` and keeps the waiting excerpts for the next pass run by Hermes.
 
 The `learn` output has a `reflector` block with the drafts, the number declined and failed, the calls made today and the daily limit.
 
@@ -248,7 +248,7 @@ Hermes reports each skill it loads through `on_skill_lifecycle`. The plugin atta
 - the turn had at least one tool error;
 - the owner corrected it: the owner's next message in the same session, within 30 minutes of the end of the turn (`CORRECTION_WINDOW_SECONDS`), was a correction or a repeated question. This needs `feedback_signals`.
 
-Turns of subagents are not attributed. Turns on the local, gateway and cron surfaces are.
+Only interactive turns are attributed, those on the local and gateway surfaces, which are also the turns of the profile the skill is compared with. Cron and subagent turns are not attributed.
 
 **Compared with the profile** (`skill_health.skill_outcomes`). The profile baseline is every interactive turn (local and gateway) in the window: the share that failed, was interrupted or was slow, and corrections plus repeated questions per turn. A skill with at least 8 turns (`MIN_SKILL_TURNS`) is flagged `skill_underperforming` when, for the failed, interrupted or corrected share, its rate exceeds the profile's by at least the margin below and is at least 1.5 times the larger of the profile rate and 1%.
 
