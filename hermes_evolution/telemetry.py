@@ -10,7 +10,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .operations import _day, database
+from .operations import TOOL_FAILURES, _day, database
 
 RESEARCH_TOOLS = frozenset({"web_search", "web_extract", "web_fetch", "web_deep_research", "deep_research"})
 RESEARCH_LIMIT_MS = 120_000
@@ -53,7 +53,8 @@ class ResearchTracker:
         tool = payload.get("tool_name")
         if not isinstance(tool, str) or tool not in RESEARCH_TOOLS:
             return
-        if payload.get("status") not in ("ok", "error"):
+        status = payload.get("status")
+        if not isinstance(status, str) or status not in ("ok", *TOOL_FAILURES):
             return
         key = _key(payload.get("turn_id"))
         call = _key(payload.get("tool_call_id"))
@@ -64,7 +65,7 @@ class ResearchTracker:
             if call:
                 turn.completed_calls.add(call)
             turn.calls += 1
-            turn.errors += int(payload.get("status") == "error")
+            turn.errors += int(status in TOOL_FAILURES)
 
     def finish(self, payload: dict, *, clock: float | None = None, now: float | None = None) -> None:
         key = _key(payload.get("turn_id"))

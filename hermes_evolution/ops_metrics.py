@@ -13,7 +13,8 @@ def current_metrics(host: dict, usage: dict, workloads: dict, baseline: dict) ->
         if average is not None:
             metrics[f"{kind}_psi_pct"] = average
     for lane, metric in (("main", "api_error_pct"), ("tool", "tool_error_pct")):
-        considered = {"ok", "error", "auth", "timeout", "rate_limit", "upstream"} if lane == "main" else {"ok", "error"}
+        # A tool that exceeds its deadline reaches the hook as "timeout", not "error".
+        considered = {"ok", "error", "timeout"} | ({"auth", "rate_limit", "upstream"} if lane == "main" else set())
         rows = [row for row in usage["groups"] if row["lane"] == lane and row["outcome"] in considered]
         count = sum(row["requests"] for row in rows)
         if count >= 5:

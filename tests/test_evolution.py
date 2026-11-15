@@ -60,6 +60,16 @@ class EvolutionTest(unittest.TestCase):
             report = summarize(conn, days=1, now=NOW, rates={})
         self.assertEqual({item["code"] for item in recommendations(report)}, {"large_main_prompt", "llm_rate_limit"})
 
+    def test_tool_timeouts_count_as_failed_attempts(self):
+        for n in range(10):
+            observe(self.home, "tool", {"turn_id": "t", "tool_call_id": str(n),
+                                        "status": "timeout" if n < 4 else "ok"}, now=NOW)
+        with database(self.home) as conn:
+            report = summarize(conn, days=1, now=NOW, rates={})
+        self.assertEqual({row["outcome"]: row["requests"] for row in report["groups"]}, {"ok": 6, "timeout": 4})
+        finding, = recommendations(report)
+        self.assertEqual((finding["code"], finding["errors"], finding["attempts"]), ("tool_errors", 4, 10))
+
     def test_decisions_learn_across_days_and_recover(self):
         def critical():
             return [{"code": "disk", "severity": "critical"}]
