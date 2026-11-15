@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import math
+import os
 import re
 import sqlite3
+import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict, deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +18,10 @@ from pathlib import Path
 BUCKETS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 RETENTION_DAYS = 35
 RECOVERY_SPACING_SECONDS = 300
+OBSERVER_BUSY_SECONDS = 0.035
+_OBSERVER_LOCK_SECONDS = 0.05
+_OBSERVER_QUEUE = 512
+_OBSERVER_LIMIT = 8
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, day TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS seen_day ON seen(day);
@@ -43,8 +50,7 @@ CREATE TABLE IF NOT EXISTS native_activity (
 """
 
 
-@contextmanager
-def database(home: Path, *, observer: bool = False):
+def _database_path(home: Path) -> Path:
     folder = home / "evolution"
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = folder / "evolution.sqlite3"
@@ -54,9 +60,13 @@ def database(home: Path, *, observer: bool = False):
             path.touch(mode=0o600, exist_ok=False)
         except FileExistsError:
             pass
-    connection = sqlite3.connect(path, timeout=0.035 if observer else 2)
-    connection.row_factory = sqlite3.Row
+    return path
+
+
+def _open(path: Path, timeout: float, **options) -> sqlite3.Connection:
+    connection = sqlite3.connect(path, timeout=timeout, **options)
     try:
+        connection.row_factory = sqlite3.Row
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         if version in (0, 1, 2):
             if version == 0:
@@ -65,10 +75,238 @@ def database(home: Path, *, observer: bool = False):
         elif version != 3:
             raise ValueError(f"Unsupported Evolution database schema {version}")
         connection.execute("PRAGMA foreign_keys=ON")
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+@contextmanager
+def database(home: Path, *, observer: bool = False):
+    """Open the profile database. Hook callers share one connection per process."""
+    if observer:
+        with _observer(home).session() as connection:
+            yield connection
+        return
+    connection = _open(_database_path(home), 2)
+    try:
         with connection:
             yield connection
     finally:
         connection.close()
+
+
+def _busy(error: sqlite3.Error) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    if type(code) is int:
+        return code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    return "locked" in str(error)
+
+
+def _rollback(connection: sqlite3.Connection) -> None:
+    try:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+    except sqlite3.Error:
+        pass
+
+
+class _Observer:
+    """One connection per process and profile for hook callbacks, with a bounded retry queue.
+
+    Hermes runs each hook callback on its own thread. A connection per event made the threads of a
+    single process compete for the write lock, and an event that outlived the busy wait was lost.
+    """
+
+    def __init__(self, home: Path):
+        self.home = Path(home)
+        self.lock = threading.RLock()  # Serializes every use of the shared connection.
+        self.guard = threading.Lock()  # Protects the queue for threads that could not wait.
+        self.pending: deque = deque()
+        self.dropped = 0
+        self.connection: sqlite3.Connection | None = None
+        self.identity = None
+
+    def _file(self):
+        try:
+            info = os.stat(self.home / "evolution" / "evolution.sqlite3")
+        except OSError:
+            return None
+        return os.getpid(), info.st_dev, info.st_ino
+
+    def _connect(self) -> sqlite3.Connection:
+        # A removed or replaced file, or a forked process, needs a handle of its own.
+        current = self._file()
+        if self.connection is not None and current is not None and current == self.identity:
+            return self.connection
+        self._release()
+        connection = _open(_database_path(self.home), OBSERVER_BUSY_SECONDS, check_same_thread=False)
+        try:
+            if connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+                # Counters can lose the last moments before a power failure. WAL keeps the file consistent.
+                connection.execute("PRAGMA synchronous=NORMAL")
+        except BaseException:
+            connection.close()
+            raise
+        self.connection, self.identity = connection, self._file()
+        return connection
+
+    def _release(self) -> None:
+        connection, identity = self.connection, self.identity
+        self.connection = self.identity = None
+        if connection is None:
+            return
+        if identity is not None and identity[0] != os.getpid():
+            _INHERITED.append(connection)  # The handle belongs to the parent process.
+            return
+        try:
+            connection.close()
+        except sqlite3.Error:
+            pass
+
+    @contextmanager
+    def session(self):
+        """Lend the shared connection. A caller that cannot get it in time sees a busy database."""
+        if not self.lock.acquire(timeout=_OBSERVER_LOCK_SECONDS):
+            raise sqlite3.OperationalError("database is locked")
+        try:
+            connection = self._connect()
+            try:
+                yield connection
+                if connection.in_transaction:
+                    connection.execute("COMMIT")
+            except BaseException as error:
+                _rollback(connection)
+                if isinstance(error, sqlite3.Error) and not _busy(error):
+                    self._release()
+                raise
+            try:
+                self._write(None, time.time())  # Events that arrived during the caller's transaction.
+            except (OSError, ValueError, sqlite3.Error):
+                pass
+        finally:
+            self.lock.release()
+
+    def record(self, job, now: float) -> None:
+        """Apply one counter update, or keep it for the next write while the database is busy."""
+        if not self.lock.acquire(timeout=_OBSERVER_LOCK_SECONDS):
+            self._defer(job)
+            return
+        try:
+            self._write(job, now)
+        finally:
+            self.lock.release()
+
+    def _defer(self, job) -> None:
+        with self.guard:
+            if len(self.pending) < _OBSERVER_QUEUE:
+                self.pending.append(job)
+            else:
+                self.dropped += 1
+
+    def _write(self, job, now: float) -> None:
+        with self.guard:
+            waiting, dropped = list(self.pending), self.dropped
+        jobs = waiting + ([job] if job is not None else [])
+        if not jobs and not dropped:
+            return
+        day = _day(now)
+        try:
+            connection = self._connect()
+            if connection.in_transaction:  # A caller of session() on this thread is mid-transaction.
+                raise sqlite3.OperationalError("database is locked")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for item in jobs:
+                    item(connection)
+                if dropped:
+                    connection.execute("""INSERT INTO metric VALUES (?, 'observer', '', '', 'dropped', ?, 0, 0, 0, 0, 0, 0, 0)
+                        ON CONFLICT DO UPDATE SET requests=requests+excluded.requests""", (day, dropped))
+                connection.execute("COMMIT")
+            except BaseException:
+                _rollback(connection)
+                raise
+        except (OSError, ValueError):
+            raise  # The folder or schema is unusable for now. The bounded queue waits for it.
+        except Exception as error:
+            if isinstance(error, sqlite3.Error) and _busy(error):
+                if job is not None:
+                    self._defer(job)
+                return
+            # An update that cannot be applied must not fail every later write of the queue.
+            self._release()
+            self._settle(waiting, lost=len(waiting))
+            raise
+        self._settle(waiting, lost=-dropped)
+
+    def _settle(self, written: list, *, lost: int) -> None:
+        with self.guard:
+            for _ in written:
+                self.pending.popleft()
+            self.dropped += lost
+
+    def close(self, wait: float = 0.5) -> None:
+        """Write what is waiting, with a longer wait than a hook can afford, and release the handle."""
+        if not self.lock.acquire(timeout=wait):
+            return
+        try:
+            try:
+                if self.pending or self.dropped:
+                    self._connect().execute(f"PRAGMA busy_timeout={int(wait * 1000)}")
+                    self._write(None, time.time())
+            except (OSError, ValueError, sqlite3.Error):
+                pass
+            self._release()
+        finally:
+            self.lock.release()
+
+
+_OBSERVERS: OrderedDict[str, _Observer] = OrderedDict()
+_OBSERVERS_GUARD = threading.Lock()
+_INHERITED: list[sqlite3.Connection] = []
+
+
+def _observer(home: Path) -> _Observer:
+    key = os.fspath(home)
+    with _OBSERVERS_GUARD:
+        observer = _OBSERVERS.get(key)
+        if observer is None:
+            observer = _OBSERVERS[key] = _Observer(home)
+        _OBSERVERS.move_to_end(key)
+        retired = [_OBSERVERS.popitem(last=False)[1] for _ in range(len(_OBSERVERS) - _OBSERVER_LIMIT)]
+    for other in retired:
+        other.close()
+    return observer
+
+
+def record(home: Path, job, *, now: float | None = None) -> None:
+    """Run ``job(connection)`` in one write transaction of the shared observer connection.
+
+    The job may run later, on another thread. It must hold only values that are safe to store.
+    """
+    _observer(home).record(job, time.time() if now is None else now)
+
+
+def close_observers() -> None:
+    """Write waiting events and close this process's shared observer connections."""
+    with _OBSERVERS_GUARD:
+        observers = list(_OBSERVERS.values())
+        _OBSERVERS.clear()
+    for observer in observers:
+        observer.close()
+
+
+def _forget_inherited_observers() -> None:
+    # A forked child must neither use the parent's SQLite handles nor wait on a lock held at fork time.
+    global _OBSERVERS_GUARD
+    _INHERITED.extend(item.connection for item in _OBSERVERS.values() if item.connection is not None)
+    _OBSERVERS.clear()
+    _OBSERVERS_GUARD = threading.Lock()
+
+
+atexit.register(close_observers)
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_inherited_observers)
 
 
 def _day(now: float) -> str:
@@ -161,11 +399,15 @@ def observe(home: Path, event: str, info: dict, *, now: float | None = None) -> 
         attempt = (retry if type(retry) is int else None,
                    ended if type(ended) in (int, float) and math.isfinite(ended) else None)
         identity += attempt if attempt != (None, None) else ()
-    with database(home, observer=True) as conn:
-        if event != "aux" and all(isinstance(part, str) and 0 < len(part) <= 400 for part in (turn, correlation)):
-            key = hashlib.sha256(repr(identity).encode()).hexdigest()
-            if not conn.execute("INSERT OR IGNORE INTO seen VALUES (?, ?)", (key, _day(now))).rowcount:
-                return
+    delivery = None
+    if event != "aux" and all(isinstance(part, str) and 0 < len(part) <= 400 for part in (turn, correlation)):
+        delivery = hashlib.sha256(repr(identity).encode()).hexdigest()
+    day = _day(now)
+    row = (day, lane, provider, model, outcome, measured, *(_tokens(usage.get(key)) for key in BUCKETS), duration)
+
+    def write(conn):
+        if delivery and not conn.execute("INSERT OR IGNORE INTO seen VALUES (?, ?)", (delivery, day)).rowcount:
+            return
         conn.execute("""
             INSERT INTO metric VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT DO UPDATE SET requests=requests+1, usage_samples=usage_samples+excluded.usage_samples,
@@ -173,8 +415,9 @@ def observe(home: Path, event: str, info: dict, *, now: float | None = None) -> 
               cache_read_tokens=cache_read_tokens+excluded.cache_read_tokens,
               cache_write_tokens=cache_write_tokens+excluded.cache_write_tokens,
               reasoning_tokens=reasoning_tokens+excluded.reasoning_tokens, duration_ms=duration_ms+excluded.duration_ms
-            """, (_day(now), lane, provider, model, outcome, measured,
-                    *(_tokens(usage.get(key)) for key in BUCKETS), duration))
+            """, row)
+
+    record(home, write, now=now)
 
 
 def summarize(conn: sqlite3.Connection, *, days: int, now: float, rates: dict) -> dict:
@@ -186,9 +429,11 @@ def summarize(conn: sqlite3.Connection, *, days: int, now: float, rates: dict) -
           SUM(usage_samples) AS usage_samples, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
           SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens,
           SUM(reasoning_tokens) AS reasoning_tokens, SUM(duration_ms) AS duration_ms
-        FROM metric WHERE day BETWEEN ? AND ? GROUP BY lane, provider, model, outcome
+        FROM metric WHERE day BETWEEN ? AND ? AND lane != 'observer' GROUP BY lane, provider, model, outcome
         ORDER BY requests DESC, lane, provider, model, outcome
         """, (start, _day(now)))]
+    dropped = conn.execute("SELECT COALESCE(SUM(requests), 0) FROM metric WHERE day BETWEEN ? AND ? AND lane='observer'",
+                           (start, _day(now))).fetchone()[0]
     estimate = 0.0
     priced_calls = 0
     for row in rows:
@@ -209,7 +454,7 @@ def summarize(conn: sqlite3.Connection, *, days: int, now: float, rates: dict) -
     measured = sum(row["usage_samples"] for row in llm)
     return {"window_start_utc": start, "window_end_utc": _day(now), "groups": rows,
             "successful_llm_calls": successful, "usage_samples": measured, "priced_calls": priced_calls,
-            "estimated_usd": round(estimate, 8) if priced_calls else None}
+            "estimated_usd": round(estimate, 8) if priced_calls else None, "dropped_events": dropped}
 
 
 def recommendations(usage: dict) -> list[dict]:
@@ -249,6 +494,10 @@ def recommendations(usage: dict) -> list[dict]:
     if attempts >= 10 and errors / attempts >= 0.25:
         proposals.append({"code": "tool_errors", "severity": "warning", "errors": errors, "attempts": attempts,
                           "action": "Use existing traces to find the failing tools and compare retries with successful runs."})
+    dropped = usage.get("dropped_events", 0)
+    if dropped >= 10:
+        proposals.append({"code": "observer_dropped_events", "severity": "info", "count": dropped,
+                          "action": "Treat these totals as a lower bound and look for a long writer on the Evolution database."})
     return proposals
 
 
