@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS research_latency (
     slow_turns INTEGER NOT NULL, tool_errors INTEGER NOT NULL, tool_calls INTEGER NOT NULL,
     max_ms INTEGER NOT NULL, PRIMARY KEY (day,bucket)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_activity (
+    day TEXT NOT NULL, hook TEXT NOT NULL, outcome TEXT NOT NULL, events INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL, tokens_before INTEGER NOT NULL, tokens_after INTEGER NOT NULL,
+    measured INTEGER NOT NULL, PRIMARY KEY (day,hook,outcome)
+) WITHOUT ROWID;
 """
 
 
@@ -53,11 +58,11 @@ def database(home: Path, *, observer: bool = False):
     connection.row_factory = sqlite3.Row
     try:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version in (0, 1):
+        if version in (0, 1, 2):
             if version == 0:
                 connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript("BEGIN IMMEDIATE;" + SCHEMA + "PRAGMA user_version=2; COMMIT;")
-        elif version != 2:
+            connection.executescript("BEGIN IMMEDIATE;" + SCHEMA + "PRAGMA user_version=3; COMMIT;")
+        elif version != 3:
             raise ValueError(f"Unsupported Evolution database schema {version}")
         connection.execute("PRAGMA foreign_keys=ON")
         with connection:
@@ -217,6 +222,7 @@ def run_policy(conn: sqlite3.Connection, findings: list[dict], *, now: float, re
     conn.execute("DELETE FROM seen WHERE day < ?", (cutoff,))
     conn.execute("DELETE FROM metric WHERE day < ?", (cutoff,))
     conn.execute("DELETE FROM research_latency WHERE day < ?", (cutoff,))
+    conn.execute("DELETE FROM native_activity WHERE day < ?", (cutoff,))
     conn.execute("DELETE FROM maintenance WHERE active=0 AND feedback IS NULL AND last_seen < ?",
                  (now - 90 * 86400,))
     current = {item["code"]: item for item in findings}

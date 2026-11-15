@@ -162,6 +162,23 @@ def _host_diagnoses(health, host, contention):
             if attributed else "Identifique o processo ou volume responsável antes de alterar prioridades.",
         )
 
+    memory_candidate = contention.get("memory", {})
+    bounded_high = _number(memory_candidate.get("memory_high_bytes"))
+    working_set = _number(memory_candidate.get("background_memory_current_bytes"))
+    cache_headroom = _number(memory_candidate.get("background_inactive_clean_file_bytes"))
+    if (memory_candidate.get("attributed") is True and (_number(memory_candidate.get("pressure_avg10")) or 0) >= 5
+            and bounded_high and working_set and cache_headroom and 0 < working_set - bounded_high <= cache_headroom):
+        yield _finding(
+            "background_memory_reclaim_trial", "warning", "medium",
+            "A pressão de memória coincidiu com cache recuperável na unidade auxiliar nas duas amostras.",
+            {"sample.psi_memory_some_avg10_pct": memory_candidate["pressure_avg10"],
+             "sample.background_current_bytes": working_set, "sample.background_clean_file_bytes": cache_headroom,
+             "operator.memory_high_bytes": bounded_high},
+            ("Falhas de página e outras unidades podem contribuir para a espera no Hermes.",),
+            ("rebalance_background_memory",),
+            "Verifique se o limite temporário reduz pressão sem aumentar swap, OOM ou latência na unidade auxiliar.",
+        )
+
     if locks >= 2 and (pressure_io or 0) < 5:
         yield _finding(
             "sqlite_writer_contention", "warning", "medium", "Gravações concorrentes são uma hipótese para os bloqueios de SQLite.",
@@ -380,7 +397,7 @@ def diagnose(health: dict, usage: dict, *, host: dict | None = None, inventory: 
     telemetry = telemetry or {}
     possible_contention = [telemetry.get("contention"), *(telemetry.get("contention_candidates") or ())]
     contention = {candidate["kind"]: candidate for candidate in possible_contention
-                  if isinstance(candidate, dict) and candidate.get("kind") in ("cpu", "io")
+                  if isinstance(candidate, dict) and candidate.get("kind") in ("cpu", "io", "memory")
                   and candidate.get("attributed") is True}
     findings = list(_host_diagnoses(health, host or {}, contention))
     findings += _request_diagnoses(usage, telemetry.get("research") or {}, history or {},

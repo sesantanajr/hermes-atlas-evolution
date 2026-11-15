@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Added creator attribution, adaptive operational feedback, sensitivity levels and outcome review.
+- Added Cron and Kanban workload diagnostics plus Hermes-native delegation, compaction, Curator and worker telemetry.
+- Added bounded research and delegation plans, an opt-in advisory tool, blocked Kanban verification handoffs and a script-only Cron recipe.
+- Added opt-in, reversible Linux memory-pressure trials alongside CPU and I/O trials.
+
 ## 0.2.0
 
 - Adds Linux PSI, cgroup, memory, filesystem and gateway diagnostics with bounded local reads.

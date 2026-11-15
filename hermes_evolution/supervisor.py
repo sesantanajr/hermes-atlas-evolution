@@ -7,7 +7,8 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from .linux_actions import KINDS, SystemPolicy, Systemd, attribute, pair_sample
+from .learning import action_cooldowns, record_outcome
+from .linux_actions import KINDS, SystemPolicy, Systemd, attribute, memory_application_ready, memory_trial_safe, pair_sample
 from .operations import _day
 
 LEASE_SECONDS = 900
@@ -58,9 +59,22 @@ def _active(conn):
 def _transition(conn, record, status, reason, now, pressure=None):
     conn.execute("UPDATE weight_trial SET status=?,reason=?,updated=?,observed_psi=? WHERE id=?",
                  (status, reason, now, pressure, record["id"]))
+    if status in {"rolled_back", "released", "not_applied"}:
+        outcome = "inconclusive"
+        if status == "rolled_back" and reason == "insufficient_improvement":
+            outcome = "ineffective"
+        elif (status == "rolled_back" and reason == "lease_expired" and record["status"] == "improved"
+              and 60 <= record["updated"] - record["started"] < LEASE_SECONDS
+              and pressure is not None and pressure <= 0.8 * record["baseline_psi"]):
+            outcome = "improved"
+        record_outcome(conn, "rebalance_" + record["kind"], record["id"], outcome, now=now)
     conn.commit()
-    return {"id": record["id"], "resource": record["kind"], "status": status, "reason": reason,
-            "observed_pressure": pressure}
+    result = {"id": record["id"], "resource": record["kind"], "status": status, "reason": reason,
+              "observed_pressure": pressure}
+    if record["kind"] == "memory":
+        result.update(property="MemoryHigh", trial_memory_high_bytes=record["applied_weight"],
+                      prior_limit="unlimited")
+    return result
 
 
 def _undo(conn, backend, record, unit, now, reason, pressure=None):
@@ -92,7 +106,8 @@ def _check_trial(conn, backend, record, policy, safe, now, *, manual=False):
     pressure = hermes.psi[kind] if hermes and hermes.active else None
     enabled = (policy and policy.mode == "apply" and policy.scope == record["scope"]
                and policy.background_unit == record["unit"] and policy.hermes_unit == record["hermes"]
-               and kind in policy.resources)
+               and kind in policy.resources
+               and (kind != "memory" or policy.memory_high_bytes == record["applied_weight"]))
     elapsed = now - record["started"]
     reason = None
     if manual or not enabled:
@@ -101,6 +116,8 @@ def _check_trial(conn, backend, record, policy, safe, now, *, manual=False):
         reason = "health_or_effect_unverified"
     elif hermes.invocation != record["hermes_invocation"] or unit.invocation != record["unit_invocation"]:
         reason = "service_replaced"
+    elif kind == "memory" and not memory_trial_safe(hermes, unit, record["applied_weight"]):
+        reason = "memory_trial_guard_changed"
     elif elapsed < 0 or elapsed >= LEASE_SECONDS:
         reason = "lease_expired"
     elif elapsed >= 60 and (pressure is None or pressure > 0.8 * record["baseline_psi"]):
@@ -115,13 +132,20 @@ def _begin(conn, backend, policy, candidate, pair, now):
     kind = candidate["kind"]
     hermes, other = pair
     current = backend.unit(policy.scope, policy.background_unit)
-    if (not current or not current.active or current.invocation != other.invocation or current.group != other.group
-            or current.weight[kind] not in (0, 100) or current.effective[kind] != 100):
+    if not current or not current.active or current.invocation != other.invocation or current.group != other.group:
         return {"status": "skipped", "reason": "background_weight_or_identity_not_standard"}
     gateway = backend.unit(policy.scope, policy.hermes_unit)
     if (not gateway or not gateway.active or gateway.invocation != hermes.invocation or gateway.group != hermes.group
             or gateway.slice != current.slice):
         return {"status": "skipped", "reason": "hermes_identity_changed"}
+    if kind == "memory":
+        trial_value = policy.memory_high_bytes
+        if not memory_application_ready(gateway, current, trial_value):
+            return {"status": "skipped", "reason": "memory_application_guard_unverified"}
+    else:
+        trial_value = TRIAL_WEIGHT
+        if current.weight[kind] not in (0, 100) or current.effective[kind] != 100:
+            return {"status": "skipped", "reason": "background_weight_or_identity_not_standard"}
     boot = backend.boot
     if not boot:
         return {"status": "skipped", "reason": "unverified_boot"}
@@ -131,15 +155,20 @@ def _begin(conn, backend, policy, candidate, pair, now):
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'prepared',?)""",
                          (policy.scope, current.name, policy.hermes_unit, kind, boot, current.invocation,
                           gateway.invocation, current.weight[kind],
-                          current.effective[kind], TRIAL_WEIGHT, candidate["pressure_avg10"], now, now)).lastrowid
+                          current.effective[kind], trial_value, candidate["pressure_avg10"], now, now)).lastrowid
     conn.commit()
-    backend.set_weight(policy.scope, current.name, kind, TRIAL_WEIGHT)
+    backend.set_weight(policy.scope, current.name, kind, trial_value)
     verified = backend.unit(policy.scope, current.name)
-    if not verified or verified.weight[kind] != TRIAL_WEIGHT:
+    if not verified or verified.weight[kind] != trial_value:
         return {"id": ident, "resource": kind, "status": "pending", "reason": "weight_apply_unverified"}
     record = conn.execute("SELECT * FROM weight_trial WHERE id=?", (ident,)).fetchone()
-    if not verified.active or verified.effective[kind] != TRIAL_WEIGHT:
+    if not verified.active or verified.effective[kind] != trial_value:
         return _undo(conn, backend, record, verified, now, "effective_weight_unverified")
+    if kind == "memory":
+        measured_gateway = backend.unit(policy.scope, policy.hermes_unit)
+        if (not measured_gateway or not measured_gateway.active or measured_gateway.invocation != gateway.invocation
+                or not memory_trial_safe(measured_gateway, verified, trial_value)):
+            return _undo(conn, backend, record, verified, now, "memory_trial_guard_changed")
     return _transition(conn, record, "active", "weight_verified", now)
 
 
@@ -156,7 +185,7 @@ def _sample(conn, backend, policy, now):
             or now < previous["now"] or now - previous["now"] >= 60):
         conn.execute("INSERT OR REPLACE INTO pair_sample VALUES(1,?,?)", (identity, json.dumps(current)))
         conn.commit()
-    return attribute(previous, current, policy.resources), pair
+    return attribute(previous, current, policy.resources, memory_high_bytes=policy.memory_high_bytes), pair
 
 
 def supervise(conn, backend, policy: SystemPolicy | None, *, now: float, safe: bool, rollback=False,
@@ -182,15 +211,24 @@ def supervise(conn, backend, policy: SystemPolicy | None, *, now: float, safe: b
         recent = conn.execute("SELECT 1 FROM weight_trial WHERE started >= ? LIMIT 1", (now - COOLDOWN_SECONDS,)).fetchone()
         if recent:
             return candidates, {"status": "skipped", "reason": "cooldown"}
+        learned = action_cooldowns(conn, now=now)
+        deferred = None
         for candidate in candidates:
             if allow_kind and not allow_kind(candidate):
                 continue
+            hold = learned.get("rebalance_" + candidate["kind"])
+            if hold:
+                deferred = {"status": "skipped", "resource": candidate["kind"], "reason": "learned_action_cooldown",
+                            "retry_after": hold["until"], "ineffective_intervals": hold["ineffective_intervals"]}
+                continue
+            # An uncertain rollback remains active and is retried before new trials.
             ineffective = conn.execute("""SELECT 1 FROM weight_trial WHERE scope=? AND unit=? AND kind=? AND started>=?
-                AND reason IN ('insufficient_improvement','effective_weight_unverified','health_or_effect_unverified') LIMIT 1""",
+                AND reason IN ('insufficient_improvement','effective_weight_unverified','health_or_effect_unverified',
+                               'memory_trial_guard_changed') LIMIT 1""",
                                        (policy.scope, policy.background_unit, candidate["kind"], now - 86400)).fetchone()
             if not ineffective:
                 return candidates, _begin(conn, backend, policy, candidate, pair, now)
-        return candidates, {"status": "skipped", "reason": "diagnosis_gate_or_ineffective_previous_trial"}
+        return candidates, deferred or {"status": "skipped", "reason": "diagnosis_gate_or_ineffective_previous_trial"}
 
 
 def journal_history(home: Path) -> dict:

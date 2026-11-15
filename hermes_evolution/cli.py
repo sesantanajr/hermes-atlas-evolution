@@ -11,8 +11,10 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+from .advisory import EFFORTS, KINDS
 from .diagnostics import snapshot
 from .memory import CATEGORIES, GLOBAL_SCOPE, MemoryStore
+from .native_actions import PLAYBOOKS
 from .operations import RETENTION_DAYS, database, recommendations, run_policy, summarize
 
 RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
@@ -80,11 +82,29 @@ def setup(parser: argparse.ArgumentParser) -> None:
         command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
         command.add_argument("--upstream-tag")
         command.add_argument("--hermes-source", type=Path, help="Include the bundled Hermes source inventory")
+        command.add_argument("--sensitivity", choices=("low", "balanced", "high"))
+        if name == "tick":
+            command.add_argument("--notify-only", action="store_true", help="Print only new alerts and action transitions")
     ops_commands.add_parser("history")
     ops_commands.add_parser("rollback")
     similar = ops_commands.add_parser("similar", help="Find previous diagnostic patterns")
     similar.add_argument("query")
     similar.add_argument("--limit", type=int, choices=range(1, 11), default=5, metavar="1..10")
+    review = ops_commands.add_parser("review", help="Review learned baselines, feedback and outcomes")
+    review.add_argument("--days", type=int, default=14)
+    rating = ops_commands.add_parser("feedback", help="Rate an adaptive alert")
+    rating.add_argument("code")
+    rating.add_argument("result", choices=("helpful", "dismissed", "reset"))
+    planner = ops_commands.add_parser("plan", help="Create a read-only research, delegation or diagnostic plan")
+    planner.add_argument("kind", choices=KINDS)
+    planner.add_argument("--effort", choices=EFFORTS, default="standard")
+    planner.add_argument("--durable", action="store_true")
+    handoff = ops_commands.add_parser("handoff", help="Create a blocked native Kanban verification card")
+    handoff.add_argument("kind", choices=sorted(PLAYBOOKS))
+    handoff.add_argument("subject")
+    scheduler = ops_commands.add_parser("schedule-spec", help="Generate a native timer configuration for review")
+    scheduler.add_argument("--every-minutes", type=int, default=5)
+    scheduler.add_argument("--upstream-tag")
 
 
 def _memory(conn, args):
@@ -116,11 +136,11 @@ def _memory(conn, args):
 
 
 def _report(args, home: Path, *, running_version=None, provider=None, now: float, runtime_config=None,
-            hermes_source=None, supplemental=(), health_override=None):
+            hermes_source=None, kanban_home=None, supplemental=(), health_override=None):
     action = args.evolution_action
     if action == "ops":
         return _ops(args, home, now=now, running_version=running_version, provider=provider,
-                    runtime_config=runtime_config, source=hermes_source)
+                    runtime_config=runtime_config, source=hermes_source, kanban_home=kanban_home)
     health = None
     if action in {"health", "tick"}:
         health = health_override or snapshot(home, upstream_tag=args.upstream_tag, provider=provider,
@@ -190,22 +210,47 @@ def _report(args, home: Path, *, running_version=None, provider=None, now: float
     return {"observer_usage": measured, "hermes_native_billing": native_billing(home, days=args.days, now=now)}
 
 
-def _ops(args, home: Path, *, now, running_version, provider, runtime_config, source):
+def _rollback_trial(home: Path, now: float) -> dict:
+    from .linux_actions import Systemd
+    from .supervisor import _journal, supervise
+
+    if not (home / "evolution" / "supervisor.sqlite3").is_file():
+        return {"status": "idle", "reason": "no_active_trial"}
+    with _journal(home) as journal:
+        _, result = supervise(journal, Systemd(), None, now=now, safe=False, rollback=True)
+    return result
+
+
+def _ops(args, home: Path, *, now, running_version, provider, runtime_config, source, kanban_home):
+    from .advisory import plan
     from .inventory import scan_inventory
+    from .learning import record_feedback, retrospective, review as adaptive_review
     from .linux_actions import SystemPolicy, Systemd
     from .linux_host import scan_host
+    from .native_actions import create_handoff, schedule_spec
+    from .native_signals import native_findings, native_summary
+    from .ops_metrics import current_metrics, workload_correlations
     from .reasoning import diagnose
     from .supervisor import _journal, baseline_metrics, journal_history, learned_baseline, record_observations, supervise
     from .telemetry import research_summary
+    from .workloads import inspect_workloads
 
     action = args.ops_action
     if action == "history":
         return journal_history(home)
-    if action == "rollback":
+    if action in ("review", "feedback"):
         with _journal(home) as journal:
-            _, result = supervise(journal, Systemd(), None, now=now, safe=False, rollback=True)
-        return result
+            return (retrospective(journal, now=now, days=args.days) if action == "review"
+                    else record_feedback(journal, args.code, args.result, now=now))
+    if action == "plan":
+        return plan(args.kind, args.effort, args.durable)
+    if action == "schedule-spec":
+        return schedule_spec(home, every_minutes=args.every_minutes, upstream_tag=args.upstream_tag)
+    if action == "rollback":
+        return _rollback_trial(home, now)
     config = settings(home)
+    if action == "handoff":
+        return create_handoff(home, config, kind=args.kind, subject=args.subject, now=now)
     if action == "similar":
         from .semantic_ops import match_incidents
 
@@ -215,20 +260,39 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
         return match_incidents(args.query, journal_history(home)["incidents"], model_path=Path(model) if model else None,
                                limit=args.limit)
     health = snapshot(home, upstream_tag=args.upstream_tag, provider=provider, running_version=running_version)
+    sensitivity = args.sensitivity or config.get("sensitivity", "balanced")
+    if sensitivity not in ("low", "balanced", "high"):
+        raise ValueError("sensitivity must be low, balanced, or high")
     host = scan_host(home)
-    cfg = (runtime_config or {}).get("plugins", {})
+    runtime = runtime_config or {}
+    cfg = runtime.get("plugins", {})
     cfg = cfg if isinstance(cfg, dict) else {}
     inventory = scan_inventory(home, source=args.hermes_source or source, enabled_plugins=cfg.get("enabled"),
                                disabled_plugins=cfg.get("disabled"), now=now)
+    workload_options = {key: runtime.get(key) for key in ("cron", "kanban", "delegation")}
+    if config.get("inspect_shared_kanban") is True:
+        workload_options["kanban_home"] = kanban_home
+    workloads = inspect_workloads(home, provider_options=workload_options, now=now)
     rates = config.get("rates_usd_per_million", {})
     with database(home) as conn:
         usage = summarize(conn, days=args.days, now=now, rates=rates)
         research = research_summary(conn, days=args.days, now=now)
-        daily_usage = summarize(conn, days=1, now=now, rates={}) if action == "tick" else None
-        daily_research = research_summary(conn, days=1, now=now) if action == "tick" else None
-    result = {"health": health, "linux_host": host, "inventory": inventory, "usage": usage, "research": research}
+        native = native_summary(conn, days=args.days, now=now)
+        daily_usage = usage if args.days == 1 else summarize(conn, days=1, now=now, rates={})
+        daily_research = research if args.days == 1 else research_summary(conn, days=1, now=now)
+    observer_issues = native_findings(native)
+    related = workloads["recommendations"] + observer_issues + workload_correlations(workloads, observer_issues)
+    result = {"health": health, "linux_host": host, "inventory": inventory, "usage": usage, "research": research,
+              "workloads": workloads, "native_activity": native}
+    current_baseline = baseline_metrics(daily_usage, daily_research)
+    metrics = current_metrics(host, daily_usage, workloads, current_baseline)
     if action == "inspect":
-        result["diagnoses"] = diagnose(health, usage, host=host, inventory=inventory, telemetry={"research": research})
+        issues = diagnose(health, usage, host=host, inventory=inventory, telemetry={"research": research}) + related
+        result["diagnoses"] = issues
+        if (home / "evolution" / "supervisor.sqlite3").is_file():
+            with _journal(home) as journal:
+                result["learning"] = adaptive_review(journal, metrics=metrics, findings=issues, now=now,
+                                                      sensitivity=sensitivity)
         return result
     policy = SystemPolicy.read(config)
     safe = (health["profile_present"] and health["database"]["status"] in ("ok", "integrity_skipped_large")
@@ -236,35 +300,49 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
                         for item in health["findings"]))
     with _journal(home) as journal:
         history = learned_baseline(journal, now=now)
-        current_baseline = baseline_metrics(daily_usage, daily_research)
-
         def diagnose_with(candidates):
             return diagnose(health, usage, host=host, inventory=inventory,
                             telemetry={"research": research, "contention_candidates": candidates,
                                        "current_daily_baseline": current_baseline}, history=history)
 
         def approved_by_evidence(candidate):
-            return any(f"rebalance_background_{candidate['kind']}" in issue["action_ids"]
-                       for issue in diagnose_with([candidate]))
+            return any(f"rebalance_background_{candidate['kind']}" in issue["action_ids"] for issue in diagnose_with([candidate]))
 
         candidates, outcome = supervise(journal, Systemd(), policy, now=now, safe=safe, allow_kind=approved_by_evidence)
-        issues = diagnose_with(candidates)
+        issues = diagnose_with(candidates) + related
         record_observations(journal, issues, daily_usage, daily_research, now=now)
+        adaptive = adaptive_review(journal, metrics=metrics, findings=issues, now=now, sensitivity=sensitivity, record=True)
     context_actions = [{"code": issue["code"], "action": issue["recommendation"], "severity": issue["severity"],
                         "reduce_context": True} for issue in issues if "pause_optional_context" in issue["action_ids"]]
     args_for_tick = SimpleNamespace(evolution_action="tick", upstream_tag=args.upstream_tag,
                                     days=args.days, changes_only=False)
     maintenance = _report(args_for_tick, home, now=now, health_override=health, supplemental=context_actions)
+    if args.notify_only:
+        changes = maintenance["decision"]["changes"]
+        event = outcome if outcome["status"] in ("active", "rolled_back", "released", "not_applied") else None
+        if not adaptive["alerts"] and not event and not changes:
+            return None
+        return {"alerts": adaptive["alerts"], "host_action": event, "maintenance_changes": changes}
     return {**result, "diagnoses": issues, "paired_contention": candidates, "host_action": outcome,
-            "maintenance": maintenance["decision"]}
+            "maintenance": maintenance["decision"], "learning": adaptive}
 
 
-def execute(args, home: Path, *, running_version=None, provider=None, runtime_config=None, hermes_source=None) -> None:
+def execute(args, home: Path, *, running_version=None, provider=None, runtime_config=None, hermes_source=None,
+            kanban_home=None) -> None:
+    now = time.time()
     try:
-        result = _report(args, home, running_version=running_version, provider=provider, now=time.time(),
-                         runtime_config=runtime_config, hermes_source=hermes_source)
+        result = _report(args, home, running_version=running_version, provider=provider, now=now,
+                         runtime_config=runtime_config, hermes_source=hermes_source, kanban_home=kanban_home)
     except (OSError, ValueError, sqlite3.Error) as error:
-        raise SystemExit(f"Evolution: {error}") from None
+        recovery = ""
+        if args.evolution_action == "ops" and args.ops_action == "tick":
+            try:
+                outcome = _rollback_trial(home, now)
+                if outcome["status"] != "idle":
+                    recovery = f"\nActive trial recovery: {outcome['status']}"
+            except (OSError, ValueError, sqlite3.Error):
+                recovery = "\nTrial recovery is unverified. Run ops rollback to recheck."
+        raise SystemExit(f"Evolution: {error}{recovery}") from None
     if result is not None:
         print(json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False))
 

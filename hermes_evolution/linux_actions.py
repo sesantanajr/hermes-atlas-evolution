@@ -7,15 +7,19 @@ import re
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from contextlib import contextmanager
 from pathlib import Path
 
-KINDS = {"cpu": "CPUWeight", "io": "IOWeight"}
-THRESHOLDS = {"cpu": 10.0, "io": 5.0}
+KINDS = {"cpu": "CPUWeight", "io": "IOWeight", "memory": "MemoryHigh"}
+THRESHOLDS = {"cpu": 10.0, "io": 5.0, "memory": 5.0}
+_MIB = 1 << 20
+_MIN_MEMORY_HIGH = 128 * _MIB
+_MAX_MEMORY_HIGH = (1 << 63) - 1
+_PEER_MEMORY_PRESSURE_LIMIT = 10.0
 _UNIT_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.@-]{0,100}\.service\Z")
 _FIELDS = ("Id", "LoadState", "ActiveState", "SubState", "Slice", "ControlGroup", "InvocationID", "CPUUsageNSec",
-           "CPUWeight", "IOWeight")
+           "CPUWeight", "IOWeight", "MemoryHigh")
 
 
 @dataclass(frozen=True)
@@ -25,6 +29,7 @@ class SystemPolicy:
     hermes_unit: str
     background_unit: str
     resources: tuple[str, ...]
+    memory_high_bytes: int | None = None
 
     @classmethod
     def read(cls, settings: dict):
@@ -39,9 +44,12 @@ class SystemPolicy:
         if (mode not in ("observe", "apply") or scope not in ("user", "system") or hermes == background
                 or not all(isinstance(unit, str) and _UNIT_NAME.fullmatch(unit) for unit in (hermes, background))
                 or not isinstance(resources, list) or not resources
-                or any(resource not in ("cpu", "io") for resource in resources)):
+                or any(not isinstance(resource, str) or resource not in KINDS for resource in resources)):
             raise ValueError("linux_supervisor needs two distinct .service units, a valid scope, mode and resources")
-        return cls(mode, scope, hermes, background, tuple(dict.fromkeys(resources)))
+        memory_high = value.get("memory_high_bytes") if "memory" in resources else None
+        if "memory" in resources and not _valid_memory_high(memory_high):
+            raise ValueError("linux_supervisor.memory_high_bytes must be a whole MiB at least 128 MiB")
+        return cls(mode, scope, hermes, background, tuple(dict.fromkeys(resources)), memory_high)
 
 
 @dataclass
@@ -56,6 +64,11 @@ class Unit:
     psi: dict[str, float | None]
     weight: dict[str, int | None]
     effective: dict[str, int | None]
+    memory: dict[str, int | None] = field(default_factory=dict)
+
+
+def _valid_memory_high(value) -> bool:
+    return type(value) is int and _MIN_MEMORY_HIGH <= value <= _MAX_MEMORY_HIGH and value % _MIB == 0
 
 
 def _number(value, *, maximum=2**63 - 1) -> int | None:
@@ -91,6 +104,77 @@ def _io(text: str) -> dict[str, int]:
         if read is not None and write is not None:
             counters[device] = read + write
     return counters
+
+
+def _memory_limit(value: str | None) -> int | None:
+    if value in ("infinity", "max", "[not set]", "18446744073709551615"):
+        return 0  # Only an explicit unlimited sentinel. A numeric 0 is not unlimited.
+    return _number(value, maximum=_MAX_MEMORY_HIGH) or None
+
+
+def _memory_values(path: Path) -> dict[str, int | None]:
+    def fields(filename):
+        pairs = [line.split() for line in _read(path / filename).splitlines()]
+        return {parts[0]: _number(parts[1]) for parts in pairs if len(parts) == 2}
+
+    stat = fields("memory.stat")
+    events = fields("memory.events")
+    clean_components = [stat.get(key) for key in (
+        "inactive_file", "file", "shmem", "file_mapped", "file_dirty", "file_writeback",
+    )]
+    clean = None
+    if all(value is not None for value in clean_components):
+        inactive, files, shmem, mapped, dirty, writeback = clean_components
+        clean = max(0, min(inactive, files - shmem) - mapped - dirty - writeback)
+    return {
+        "current": _number(_read(path / "memory.current").strip()),
+        "max": _memory_limit(_read(path / "memory.max").strip()),
+        "swap": _number(_read(path / "memory.swap.current").strip()),
+        "oom": events.get("oom"), "oom_kill": events.get("oom_kill"),
+        "anon": stat.get("anon"), "shmem": stat.get("shmem"), "inactive_clean_file": clean,
+    }
+
+
+def _no_memory_faults(memory: dict) -> bool:
+    return all(memory.get(key) == 0 for key in ("swap", "oom", "oom_kill"))
+
+
+def _protected_working_set(peer: dict) -> int | None:
+    current, anon, shmem, clean = (peer.get("current"), peer.get("anon"), peer.get("shmem"),
+                                  peer.get("inactive_clean_file"))
+    if any(value is None for value in (current, anon, shmem, clean)) or current <= 0:
+        return None
+    return max(anon + shmem, current - clean) + max(64 * _MIB, current // 10)
+
+
+def _memory_headroom(hermes: dict, peer: dict, pressure: float | None, target: int) -> float | None:
+    if not (_no_memory_faults(hermes) and _no_memory_faults(peer)) or pressure is None or pressure >= _PEER_MEMORY_PRESSURE_LIMIT:
+        return None
+    metered, current, hard, clean = (hermes.get("current"), peer.get("current"), peer.get("max"),
+                                     peer.get("inactive_clean_file"))
+    protected = _protected_working_set(peer)
+    if any(value is None for value in (metered, current, hard, clean, protected)) or metered <= 0:
+        return None
+    spare = current - target
+    if ((hard and hard <= current) or target < protected
+            or not 64 * _MIB <= spare <= min(clean // 2, current // 5)):
+        return None
+    share = current / (metered + current)
+    return share if share >= 0.65 else None
+
+
+def memory_application_ready(hermes: Unit, peer: Unit, target: int | None) -> bool:
+    return (_valid_memory_high(target) and peer.weight.get("memory") == peer.effective.get("memory") == 0
+            and (hermes.psi.get("memory") or 0) >= THRESHOLDS["memory"]
+            and _memory_headroom(hermes.memory, peer.memory, peer.psi.get("memory"), target) is not None)
+
+
+def memory_trial_safe(hermes: Unit, peer: Unit, target: int) -> bool:
+    stall = peer.psi.get("memory")
+    protected = _protected_working_set(peer.memory)
+    return (_no_memory_faults(hermes.memory) and _no_memory_faults(peer.memory)
+            and stall is not None and stall < _PEER_MEMORY_PRESSURE_LIMIT
+            and protected is not None and protected <= target)
 
 
 class Systemd:
@@ -138,16 +222,25 @@ class Systemd:
         for kind, key in KINDS.items():
             raw = fields.get(key)
             # Zero denotes a recognized unset runtime property, None denotes unavailable.
-            weight[kind] = 0 if raw in ("[not set]", "18446744073709551615") else _number(raw, maximum=10_000)
+            if kind == "memory":
+                weight[kind] = _memory_limit(raw)
+            else:
+                weight[kind] = 0 if raw in ("[not set]", "18446744073709551615") else _number(raw, maximum=10_000)
         return Unit(name, fields.get("ActiveState") == "active" and fields.get("SubState") == "running",
                     fields.get("Slice", ""), group if controls else "", fields.get("InvocationID", ""),
                     _number(fields.get("CPUUsageNSec")), io, pressure, weight,
-                    {"cpu": cpu_weight, "io": _number(io_weight[1], maximum=10_000) if io_weight else None})
+                    {"cpu": cpu_weight, "io": _number(io_weight[1], maximum=10_000) if io_weight else None,
+                     "memory": _memory_limit(_read(controls / "memory.high").strip()) if controls else None},
+                    _memory_values(controls) if controls else {})
 
     def set_weight(self, scope: str, unit: str, kind: str, value: int) -> bool:
-        if not _UNIT_NAME.fullmatch(unit) or kind not in KINDS or type(value) is not int or not 0 <= value <= 10_000:
-            raise ValueError("Invalid systemd weight target")
-        assignment = f"{KINDS[kind]}={value if value else ''}"
+        valid_value = type(value) is int and 0 <= value <= 10_000
+        if kind == "memory":
+            valid_value = type(value) is int and (value == 0 or _valid_memory_high(value))
+        if not _UNIT_NAME.fullmatch(unit) or kind not in KINDS or not valid_value:
+            raise ValueError("Invalid systemd runtime resource target")
+        argument = value if value else ("infinity" if kind == "memory" else "")
+        assignment = f"{KINDS[kind]}={argument}"
         return self._call(scope, ["--runtime", "set-property", "--", unit, assignment]) is not None
 
     @contextmanager
@@ -183,10 +276,13 @@ def pair_sample(hermes: Unit | None, other: Unit | None, boot: str, now: float) 
         return None
     return {"boot": boot, "now": now, "invocations": [hermes.invocation, other.invocation],
             "groups": [hermes.group, other.group], "cpu": [hermes.cpu, other.cpu], "io": [hermes.io, other.io],
-            "psi": hermes.psi}
+            "psi": hermes.psi, "memory": [hermes.memory, other.memory],
+            "peer_memory_pressure": other.psi.get("memory"),
+            "peer_memory_unlimited": other.weight.get("memory") == other.effective.get("memory") == 0}
 
 
-def attribute(previous: dict | None, current: dict | None, kinds: tuple[str, ...]) -> list[dict]:
+def attribute(previous: dict | None, current: dict | None, kinds: tuple[str, ...], *,
+              memory_high_bytes: int | None = None) -> list[dict]:
     if not previous or not current or any(previous[key] != current[key] for key in ("boot", "invocations", "groups")):
         return []
     elapsed = current["now"] - previous["now"]
@@ -197,6 +293,17 @@ def attribute(previous: dict | None, current: dict | None, kinds: tuple[str, ...
         threshold = THRESHOLDS[kind]
         pressures = [sample["psi"].get(kind) for sample in (previous, current)]
         if any(value is None or value < threshold for value in pressures):
+            continue
+        if kind == "memory":
+            if _valid_memory_high(memory_high_bytes) and all(sample.get("peer_memory_unlimited") for sample in (previous, current)):
+                shares = [_memory_headroom(*sample["memory"], sample["peer_memory_pressure"], memory_high_bytes)
+                          for sample in (previous, current)]
+                if all(share is not None for share in shares):
+                    candidates.append({"kind": kind, "attributed": True, "pressure_avg10": pressures[1],
+                                       "previous_pressure_avg10": pressures[0], "share": round(shares[-1], 3),
+                                       "memory_high_bytes": memory_high_bytes,
+                                       "background_memory_current_bytes": current["memory"][1]["current"],
+                                       "background_inactive_clean_file_bytes": current["memory"][1]["inactive_clean_file"]})
             continue
         first, last = previous[kind], current[kind]
         if kind == "cpu":

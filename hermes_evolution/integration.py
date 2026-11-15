@@ -6,8 +6,10 @@ import json
 import sqlite3
 from pathlib import Path
 
+from .advisory import TOOL, tool_handler
 from .cli import execute, settings, setup
 from .memory import GLOBAL_SCOPE, MemoryStore, make_scope
+from .native_signals import HOOKS, observe_native
 from .operations import database, observe
 from .telemetry import ResearchTracker
 
@@ -85,11 +87,16 @@ def shared_context(home, payload: dict):
 
 
 def register(ctx):
-    import hermes_cli
-    from hermes_constants import get_hermes_home
+    from hermes_constants import get_default_hermes_root, get_hermes_home
 
     home = get_hermes_home()
     research = ResearchTracker(home)
+    try:
+        config = settings(home)
+    except (OSError, ValueError):
+        config = {}
+    legacy_enabled = config.get("legacy_memory_commands") is True
+    advice_enabled = config.get("agent_advice") is True
 
     def register_observer(hook, event):
         def callback(**payload):
@@ -110,10 +117,21 @@ def register(ctx):
     register_observer("post_auxiliary_call", "aux")
     register_observer("post_tool_call", "tool")
 
+    def native_observer(hook):
+        def callback(**payload):
+            try:
+                observe_native(home, hook, payload)
+            except (OSError, sqlite3.Error, ValueError):
+                return None
+        return callback
+
+    for hook in HOOKS:
+        ctx.register_hook(hook, native_observer(hook))
+
     def before_turn(**payload):
         try:
             research.start(payload)
-            return shared_context(home, payload)
+            return shared_context(home, payload) if legacy_enabled else None
         except (OSError, sqlite3.Error, ValueError):
             return None
 
@@ -127,21 +145,26 @@ def register(ctx):
         return slash(home, raw_args, source=source, platform=platform)
 
     def operator_cli(args):
-        from hermes_cli.config import load_config_readonly
+        import hermes_cli.config as hermes_config
+        from hermes_cli.version_info import get_version_info
 
-        config = load_config_readonly() or {}
+        config = hermes_config.load_config_readonly() or {}
         memory_config = config.get("memory", {})
         provider = memory_config.get("provider") if isinstance(memory_config, dict) else None
-        source = Path(hermes_cli.__file__).resolve().parent.parent
-        execute(args, home, running_version=hermes_cli.__version__, provider=provider,
-                runtime_config=config, hermes_source=source)
+        source = Path(hermes_config.__file__).resolve().parent.parent
+        execute(args, home, running_version=get_version_info().base_version, provider=provider, runtime_config=config,
+                hermes_source=source, kanban_home=get_default_hermes_root(home=home))
 
     ctx.register_hook("pre_llm_call", before_turn)
     ctx.register_hook("post_llm_call", after_turn)
-    try:
-        legacy_enabled = settings(home).get("legacy_memory_commands") is True
-    except (OSError, ValueError):
-        legacy_enabled = False
     if legacy_enabled:
         ctx.register_command("evolution", command, description="Access legacy Evolution notes", args_hint="<command>")
-    ctx.register_cli_command("evolution", "Review memory, usage and Hermes health", setup, operator_cli)
+
+    def advisory_tool(args, **context):
+        if not advice_enabled:
+            return json.dumps({"error": "Planning permission has not been enabled for this Hermes profile."})
+        return tool_handler(args, **context)
+
+    ctx.register_tool(name=TOOL["name"], toolset="atlas-evolution", schema=TOOL, handler=advisory_tool,
+                      check_fn=lambda: advice_enabled)
+    ctx.register_cli_command("evolution", "Review Hermes health and coordinate operations", setup, operator_cli)

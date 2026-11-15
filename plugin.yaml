@@ -1,9 +1,12 @@
 name: hermes-evolution
-version: "0.2.0"
+version: "0.3.0"
 requires_hermes: ">=0.23.1"
 description: Linux resource diagnosis and reversible operational remediation for Hermes Agent.
 license: MIT
 homepage: https://github.com/sesantanajr/hermes-atlas-evolution
+author: "Sérgio Sant'Ana Júnior"
+provides_tools:
+  - atlas_evolution_plan
 provides_hooks:
   - post_api_request
   - api_request_error
@@ -11,3 +14,8 @@ provides_hooks:
   - post_tool_call
   - pre_llm_call
   - post_llm_call
+  - subagent_start
+  - subagent_stop
+  - post_compaction
+  - post_curator_run
+  - on_kanban_worker_exited

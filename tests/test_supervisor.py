@@ -6,10 +6,13 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from hermes_evolution.learning import record_outcome, retrospective
 from hermes_evolution.linux_actions import SystemPolicy, Systemd, Unit, attribute, pair_sample
 from hermes_evolution.operations import database
 from hermes_evolution.supervisor import _journal, journal_history, supervise
 from hermes_evolution.telemetry import ResearchTracker, research_summary
+
+MIB = 1 << 20
 
 
 def unit(name: str):
@@ -39,7 +42,7 @@ class FakeSystemd:
             self.observed_prepared = self.conn.execute("SELECT status FROM weight_trial").fetchone()[0] == "prepared"
         self.units[name].weight[kind] = value
         if self.effectual:
-            self.units[name].effective[kind] = value or 100
+            self.units[name].effective[kind] = value if kind == "memory" else value or 100
         return True
 
     def advance_pair(self, *, pressure=22.0):
@@ -84,6 +87,16 @@ class SupervisorTest(unittest.TestCase):
         self.backend.advance_pair()
         self.assertEqual(self._tick(6520)[1]["reason"], "diagnosis_gate_or_ineffective_previous_trial")
         self.assertEqual(len(self.backend.writes), 2)
+
+    def test_quieter_host_after_missed_checks_does_not_credit_the_action(self):
+        self._tick(1000)
+        self.backend.advance_pair()
+        self._tick(1120)
+        self.backend.advance_pair(pressure=8.0)
+        self.assertEqual(self._tick(2100)[1]["reason"], "lease_expired")
+        with _journal(self.home) as conn:
+            learned = retrospective(conn, now=2100)
+        self.assertEqual(learned["action_outcomes"], {"rebalance_cpu": {"inconclusive": 1}})
 
     def test_external_change_is_preserved_and_unverifiable_effect_is_reverted(self):
         self._tick(1000)
@@ -132,9 +145,83 @@ class SupervisorTest(unittest.TestCase):
         with patch.object(adapter, "_call", return_value=fields) as called:
             service = adapter.unit("user", "index.service")
             self.assertIn("--all", called.call_args.args[1])
-        self.assertEqual(service.weight, {"cpu": 0, "io": None})
-        self.assertEqual(service.effective, {"cpu": 100, "io": None})
+        self.assertEqual(service.weight, {"cpu": 0, "io": None, "memory": None})
+        self.assertEqual(service.effective, {"cpu": 100, "io": None, "memory": None})
         self.assertEqual(service.psi["cpu"], 25.0)
+
+    def test_memory_runtime_writes_only_aligned_absolute_soft_limit_or_restore(self):
+        adapter = Systemd()
+        with patch.object(adapter, "_call", return_value="") as command:
+            self.assertTrue(adapter.set_weight("user", "index.service", "memory", 896 * MIB))
+            self.assertEqual(command.call_args.args, ("user", ["--runtime", "set-property", "--", "index.service",
+                                                                "MemoryHigh=939524096"]))
+            self.assertTrue(adapter.set_weight("user", "index.service", "memory", 0))
+            self.assertEqual(command.call_args.args[1][-1], "MemoryHigh=infinity")
+            with self.assertRaises(ValueError):
+                adapter.set_weight("user", "index.service", "memory", 896 * MIB + 1)
+        self.assertEqual(command.call_count, 2)
+
+    def _memory_scenario(self, *, target=896 * MIB):
+        self.policy = replace(self.policy, resources=("memory",), memory_high_bytes=target)
+        gateway, peer = self.backend.units.values()
+        gateway.psi["memory"], peer.psi["memory"] = 8.0, 2.0
+        for service in (gateway, peer):
+            service.weight["memory"] = service.effective["memory"] = 0
+            service.memory.update(swap=0, oom=0, oom_kill=0, max=0, shmem=16 * MIB)
+        gateway.memory.update(current=256 * MIB, anon=128 * MIB, inactive_clean_file=80 * MIB)
+        peer.memory.update(current=1024 * MIB, anon=384 * MIB, inactive_clean_file=512 * MIB)
+        return gateway, peer
+
+    def test_memory_trial_uses_paired_pressure_and_restores_verified_soft_limit(self):
+        gateway, peer = self._memory_scenario()
+        self.assertEqual(self._tick(1000)[1]["status"], "observing")
+        self.assertEqual(self.backend.writes, [])
+        evidence, started = self._tick(1120)
+        self.assertEqual(evidence[0]["background_inactive_clean_file_bytes"], 512 * MIB)
+        self.assertEqual((started["status"], started["property"], started["prior_limit"]),
+                         ("active", "MemoryHigh", "unlimited"))
+        self.assertEqual(self.backend.writes[-1], ("user", "index.service", "memory", 896 * MIB))
+        gateway.psi["memory"] = 2.0
+        self.assertEqual(self._tick(1240)[1]["status"], "improved")
+        self.assertEqual(self._tick(2100)[1]["reason"], "lease_expired")
+        self.assertEqual(self.backend.writes[-1], ("user", "index.service", "memory", 0))
+        self.assertEqual(peer.weight["memory"], 0)
+        with _journal(self.home) as conn:
+            learned = retrospective(conn, now=2100)
+        self.assertEqual(learned["action_outcomes"], {"rebalance_memory": {"improved": 1}})
+
+    def test_memory_trial_refuses_existing_limit_swapping_or_missing_file_headroom(self):
+        gateway, peer = self._memory_scenario()
+        self._tick(1000)
+        peer.weight["memory"] = 900 * MIB
+        self.assertEqual(self._tick(1120)[0], [])
+        peer.weight["memory"] = 0
+        gateway.memory["swap"] = 3 * MIB
+        self.assertEqual(self._tick(1240)[0], [])
+        gateway.memory["swap"] = 0
+        peer.memory["inactive_clean_file"] = 64 * MIB
+        self.assertEqual(self._tick(1360)[0], [])
+        self.assertEqual(self.backend.writes, [])
+
+    def test_memory_trial_unwinds_when_peer_starts_swapping(self):
+        _, peer = self._memory_scenario()
+        self._tick(1000)
+        self._tick(1120)
+        peer.memory["swap"] = MIB
+        outcome = self._tick(1240)[1]
+        self.assertEqual((outcome["status"], outcome["reason"]), ("rolled_back", "memory_trial_guard_changed"))
+        self.assertEqual(self.backend.writes[-1], ("user", "index.service", "memory", 0))
+
+    def test_repeated_failed_trials_only_defer_later_independently_approved_candidates(self):
+        now = 130_000
+        with _journal(self.home) as conn:
+            record_outcome(conn, "rebalance_cpu", 101, "ineffective", now=now - 48_000)
+            record_outcome(conn, "rebalance_cpu", 102, "ineffective", now=now - 1_000)
+        self._tick(now)
+        self.backend.advance_pair()
+        deferred = self._tick(now + 120)[1]
+        self.assertEqual((deferred["reason"], deferred["ineffective_intervals"]), ("learned_action_cooldown", 2))
+        self.assertEqual(self.backend.writes, [])
 
     def test_io_requires_common_device_and_pair_identity(self):
         hermes, other = self.backend.units.values()
@@ -156,6 +243,14 @@ class SupervisorTest(unittest.TestCase):
                 SystemPolicy.read({"linux_supervisor": {"mode": "apply", "hermes_unit": "hermes.service",
                                                        "background_unit": unit_name}})
 
+    def test_memory_requires_an_explicit_streamlined_limit(self):
+        base = {"resources": ["memory"], "hermes_unit": "hermes.service", "background_unit": "index.service"}
+        for invalid in (None, "512MiB", 127 * MIB, 512 * MIB + 1, False, 2 ** 63):
+            with self.assertRaises(ValueError):
+                SystemPolicy.read({"linux_supervisor": {**base, "memory_high_bytes": invalid}})
+        config = SystemPolicy.read({"linux_supervisor": {**base, "memory_high_bytes": 512 * MIB}})
+        self.assertEqual(config.memory_high_bytes, 512 * MIB)
+
     def test_research_turn_metrics_and_schema_upgrade_keep_legacy_state(self):
         with database(self.home) as conn:
             conn.execute("INSERT INTO control VALUES ('legacy','true')")
@@ -170,7 +265,7 @@ class SupervisorTest(unittest.TestCase):
         tracker.finish(turn, clock=134, now=2000)
         tracker.finish(turn, clock=135, now=2000)
         with database(self.home) as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(conn.execute("SELECT value FROM control WHERE key='legacy'").fetchone()[0], "true")
             measured = research_summary(conn, now=2000, days=1)
             self.assertEqual((measured["turns"], measured["slow_turns"], measured["tool_errors"]), (1, 1, 1))

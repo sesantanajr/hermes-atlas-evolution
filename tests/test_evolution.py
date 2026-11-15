@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hermes_evolution.cli import _report
+from hermes_evolution.cli import _report, execute
 from hermes_evolution.integration import shared_context, slash
 from hermes_evolution.memory import GLOBAL_SCOPE, MemoryStore
 from hermes_evolution.operations import database, observe, recommendations, run_policy, summarize
@@ -41,6 +41,15 @@ class EvolutionTest(unittest.TestCase):
         self.assertAlmostEqual(report["estimated_usd"], 0.00134)
         for secret in ("canary-turn", "canary-attempt", "canary prompt", "api-key-canary"):
             self.assertNotIn(secret, backing_store)
+
+    def test_failed_operator_tick_attempts_rollback_even_with_invalid_settings(self):
+        tick = SimpleNamespace(evolution_action="ops", ops_action="tick")
+        with patch("hermes_evolution.cli._report", side_effect=ValueError("broken settings")), patch(
+            "hermes_evolution.cli._rollback_trial", return_value={"status": "rolled_back"}
+        ) as recover:
+            with self.assertRaisesRegex(SystemExit, "broken settings\\nActive trial recovery: rolled_back"):
+                execute(tick, self.home)
+            recover.assert_called_once()
 
     def test_identifies_repeated_rate_limits_and_high_prompt_budget(self):
         for n in range(5):

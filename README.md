@@ -2,7 +2,7 @@
 
 # Atlas Evolution
 
-An independent community plugin for Hermes Agent. It correlates agent diagnostics with Linux resource pressure, inventories plugins and skills, and can temporarily rebalance explicitly configured background services with verification and rollback. Tested with **Hermes Agent 0.23.1**.
+An independent community plugin for Hermes Agent. Atlas Evolution correlates Linux resource pressure with agent activity, detects Cron and Kanban congestion, learns from comparable observations, and coordinates bounded research and operational handoffs. Tested with **Hermes Agent 0.23.1**.
 
 ```sh
 hermes plugins install sesantanajr/hermes-atlas-evolution --enable
@@ -10,7 +10,7 @@ hermes plugins doctor --ci hermes-evolution
 hermes evolution ops inspect --upstream-tag v0.23.1
 ```
 
-The installed plugin ID is `hermes-evolution`. Observation is the default. See [Linux remediation](#remediação-no-linux) for the systemd policy and its validation requirements.
+The installed plugin ID is `hermes-evolution`. Observation is the default. See [integration and permissions](docs/hermes-integration.md) for the Hermes surfaces, evidence and action boundaries.
 
 ## Autor
 
@@ -31,10 +31,13 @@ hermes evolution ops inspect --upstream-tag v0.23.1
 hermes evolution usage --days 7
 hermes evolution ops tick --upstream-tag v0.23.1
 hermes evolution ops history
+hermes evolution ops review --days 14
+hermes evolution ops plan research --effort deep
+hermes evolution ops plan delegation --durable
 hermes evolution ops similar "disco lento e pesquisas demoradas"
 ```
 
-`inspect` coleta e explica sinais no momento. `tick` coleta, compara com o histórico, registra hipóteses e executa somente ações habilitadas pela configuração. `history` mostra incidentes e o estado de cada tentativa. `usage` apresenta as medições dos hooks e a contabilidade nativa em campos distintos, com cobertura de dados e distinção entre custos efetivos e estimados. `--upstream-tag` é uma referência informada pelo operador para comparação offline.
+`inspect` coleta e explica sinais no momento. `tick` coleta, compara com o histórico, registra hipóteses e executa somente ações habilitadas pela configuração. `history` mostra incidentes e o estado de cada tentativa. `review` cruza as medições adaptativas, o feedback e os resultados de ensaios. `usage` apresenta as medições dos hooks e a contabilidade nativa em campos distintos, com cobertura de dados e distinção entre custos efetivos e estimados. `--upstream-tag` é uma referência informada pelo operador para comparação offline.
 
 Para rodar sem ativar o plugin, ou quando a instalação usa `plugins.isolation: host`, execute da raiz extraída do projeto. Nesse modo, `--hermes-source` também permite incluir a árvore de plugins e skills distribuídos pelo Hermes.
 
@@ -51,10 +54,33 @@ python -m hermes_evolution --home /caminho/do/perfil --hermes-version 0.23.1 \
 | Hermes | Gateway, legibilidade e estrutura da memória nativa, integridade SQLite e categorias de erros em logs | Cruza falhas de gravação com espaço, inodes e bloqueios. Indica quando uma falha pede reprodução no Hermes, no provedor ou no plugin. A checagem de integridade tem limite de 64 MiB e prazo cooperativo de 300 ms. |
 | Plugins e skills | Tamanho, estado configurado, evidência recente de uso quando atribuível, duplicatas e variantes de skills | Uma amostra sem uso gera uma hipótese de revisão. Hooks, comandos e provedores podem atuar sem deixar uma chamada de ferramenta atribuível. |
 | Pesquisa e tokens | Duração de turnos concluídos com ferramentas web conhecidas, erro de ferramenta, tentativas, tokens por classe e cache | Distingue pesquisa longa, falha de ferramenta, limite de provedor e pouco reaproveitamento de contexto. O p95 de pesquisa é aproximado por intervalos. |
+| Delegação e manutenção | Eventos de subagentes, compactação, Curator e saídas de workers Kanban | Mostra falhas recorrentes e cobertura de tokens antes e depois da compactação quando informada pelo Hermes. |
+| Fila e agendamento | Picos de disparos do Cron, falhas de execução e entrega, itens prontos, bloqueios e sinais de lease vencida no Kanban | Ajuda a identificar congestionamento e a escolher entre tarefas curtas, trabalho durável e scripts sem modelo. |
 
-Cada diagnóstico apresenta uma hipótese, evidências, alternativas, grau de confiança e ação proposta. O aprendizado compara a média diária de entrada e o p95 diário de pesquisa com dias anteriores, após amostragem suficiente. O histórico registra reincidência e resultados de remediação. O coletor guarda agregados, sem registrar texto de conversas, conteúdo da memória nativa, resultados de busca ou linhas brutas de log.
+Cada diagnóstico apresenta hipótese, evidências, alternativas, confiança e ação proposta. O aprendizado agrupa observações em faixas de seis horas UTC e compara horários equivalentes com estatística robusta após amostragem suficiente. Considera RAM disponível, pressão de CPU, memória e I/O, tokens, pesquisa, falhas e profundidade da fila, conforme a cobertura. Use `--sensitivity low|balanced|high` ou a chave `sensitivity` para ajustar o limiar. `ops feedback CODIGO helpful|dismissed|reset` ajusta a recorrência de alertas, preservando a sinalização crítica. O coletor guarda agregados, sem registrar texto de conversas, conteúdo da memória nativa, resultados de busca ou linhas brutas de log.
 
 `ops similar` compara incidentes com termos e trigramas bilíngues. A opção `semantic_incident_model` pode indicar um modelo multilíngue local do SentenceTransformers já instalado e provisionado em formato `safetensors`. O comando usa CPU e arquivos locais, com código remoto e downloads desativados. A similaridade ajuda a consultar incidentes. A decisão de remediação usa medições checáveis e regras independentes.
+
+## Pesquisa, delegação e agendamento
+
+`ops plan` propõe um orçamento de consultas, páginas e tarefas paralelas. Planos de pesquisa incluem descoberta de fontes, verificação de evidência e registro de incertezas. Planos de delegação indicam `delegate_task` para respostas que o agente atual precisa aguardar e Kanban para trabalhos que precisam sobreviver a reinícios. Ative `"agent_advice": true` em `<HERMES_HOME>/evolution/settings.json` e recarregue o plugin para liberar `atlas_evolution_plan` ao perfil. Inclua `atlas-evolution` quando o perfil usa uma lista explícita de toolsets. A ferramenta retorna apenas o plano.
+
+A leitura compartilhada dos quadros Kanban exige `"inspect_shared_kanban": true`. A criação de cartão exige também configurar a sua própria autorização de encaminhamento. O exemplo associa as verificações ao perfil `reviewer` no quadro existente `ops`.
+
+```json
+{
+  "agent_advice": true,
+  "inspect_shared_kanban": true,
+  "kanban_handoff": {"enabled": true, "board": "ops", "assignee": "reviewer"}
+}
+```
+
+```sh
+hermes evolution ops handoff resources "cpu-spikes"
+hermes evolution ops schedule-spec --every-minutes 5 --upstream-tag v0.23.1
+```
+
+`handoff` cria um cartão bloqueado, destinado à verificação, com chave de idempotência no Kanban nativo. O operador libera o cartão após revisar o escopo. `schedule-spec` entrega o script e os argumentos do Cron nativo para agendar `ops tick --notify-only` em modo `no_agent`, com saída local e sem abrir uma sessão de modelo. Revise o script e aplique a receita no perfil escolhido. O ciclo usa a política Linux desse perfil. Use o intervalo de cinco minutos em modo `apply` para verificar e encerrar os ensaios.
 
 ## Remediação no Linux
 
@@ -69,14 +95,15 @@ Salve a configuração em `<HERMES_HOME>/evolution/settings.json`.
     "scope": "user",
     "hermes_unit": "hermes-gateway.service",
     "background_unit": "my-background-indexer.service",
-    "resources": ["cpu", "io"]
+    "resources": ["cpu", "io", "memory"],
+    "memory_high_bytes": 536870912
   }
 }
 ```
 
 O supervisor confirma duas amostras separadas por pelo menos 60 segundos, identidade dos serviços, pressão PSI no cgroup do Hermes e participação de pelo menos 65% da unidade auxiliar na atividade do par medido. Para I/O, exige atividade no mesmo dispositivo. Usa os controladores disponíveis, peso inicial efetivo 100 e identificação inequívoca das unidades.
 
-O ajuste reduz temporariamente `CPUWeight` ou `IOWeight` da unidade auxiliar para 50 via `systemctl --runtime`. O supervisor registra a intenção antes de aplicar, confere o peso efetivo, mede a resposta e restaura a configuração anterior se o efeito ficar incerto ou a pressão não cair pelo menos 20%. O próximo ciclo depois de 15 minutos encerra a tentativa e restaura o peso. Há cooldown de uma hora e bloqueio de nova tentativa equivalente por 24 horas após falta de efeito verificável. O comando só usa as permissões do processo. Ajustes externos observados têm precedência.
+Em CPU e I/O, o ajuste define temporariamente `CPUWeight` ou `IOWeight` da unidade auxiliar como 50. Em memória, o limite `MemoryHigh` precisa ser explícito e o supervisor exige cache limpo recuperável, margem sobre a memória de trabalho e ausência de sinais de swap e OOM. Escolha `memory_high_bytes` com base na unidade real. O exemplo só demonstra o formato. Cada ajuste usa `systemctl --runtime`. O supervisor registra a intenção antes de aplicar, confere o valor efetivo, mede a resposta e restaura a configuração anterior se o efeito ficar incerto ou a pressão não cair pelo menos 20%. O próximo ciclo depois de 15 minutos encerra a tentativa. Há cooldown após ensaios ineficazes e o comando só usa as permissões do processo. Ajustes externos observados têm precedência.
 
 Programe `hermes evolution ops tick` **a cada cinco minutos** no agendador existente, com o usuário que administra essas unidades. A aplicação exige que os ciclos de verificação também estejam operacionais. Para encerrar uma tentativa antecipadamente, rode `hermes evolution ops rollback`. Use `ops history` para confirmar que o peso foi restaurado. O ajuste é temporário no systemd e sai com o reboot do host. A limpeza de dados, desligamento de plugins, mudanças de memória e correções de código são recomendações de revisão nesta versão.
 
