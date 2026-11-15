@@ -227,7 +227,7 @@ class CycleAndReportTest(Base):
         portuguese, english = markdown(report, "pt"), markdown(build(self.home, now=NOW, days=7, lang="en"), "en")
         self.assertIn("# Atlas Evolution · resumo de 7 dias", portuguese)
         self.assertIn("Falhas que se repetem", portuguese)
-        self.assertIn("aguardando aprovação", portuguese)
+        self.assertIn("ativas: 0 · aguardando aprovação: 1 · aposentadas: 0", portuguese)
         self.assertIn("Travar skill reescrita em excesso · `deploy` · aplique com: `hermes curator lock deploy`", portuguese)
         self.assertIn("# Atlas Evolution · 7-day digest", english)
         self.assertIn("Lock a skill that keeps being rewritten", english)
@@ -250,6 +250,45 @@ class CycleAndReportTest(Base):
         for bad in ({"weekday": 9}, {"hour": 24}, {"lang": "xx"}, {"days": 0}, {"deliver": "a b; rm -rf"}):
             with self.assertRaises(ValueError):
                 digest_schedule_spec(self.home, **bad)
+
+    def test_cli_runs_the_loop_and_a_direct_lesson_decision_settles_its_proposal(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+
+        from hermes_evolution.cli import execute
+
+        body = json.dumps({"error": "tool_call to 'files_search' is missing required argument(s): servico."})
+        for offset in range(2):
+            for _ in range(2):
+                record_tool(self.home, {"tool_name": "tool_call", "status": "error", "result": body,
+                                        "session_id": f"s{offset}", "args": {"calls": [{"name": "files_search"}]}},
+                            now=NOW - offset * DAY)
+
+        def run(**arguments):
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                execute(SimpleNamespace(**arguments), self.home, runtime_config={})
+            return stream.getvalue()
+
+        learned = json.loads(run(evolution_action="learn", notify_only=False, lang="pt"))
+        self.assertEqual(learned["new_lessons"][0]["lesson"],
+                         "Ao chamar `files_search`, informe sempre o argumento obrigatório `servico`.")   # accents kept
+        queue = json.loads(run(evolution_action="proposals", proposals_action="list", all=False))
+        self.assertEqual([item["kind"] for item in queue], ["lesson"])
+        approved = json.loads(run(evolution_action="lessons", lessons_action="approve", id=learned["new_lessons"][0]["id"],
+                                  lang=None))
+        self.assertEqual(approved["status"], "active")
+        self.assertEqual(json.loads(run(evolution_action="proposals", proposals_action="list", all=False)), [])
+        everything = json.loads(run(evolution_action="proposals", proposals_action="list", all=True))
+        self.assertEqual(everything[0]["status"], "applied")
+        digest = run(evolution_action="report", format="md", days=7, lang="en", schedule_spec=False)
+        self.assertTrue(digest.startswith("# Atlas Evolution · 7-day digest"))
+        self.assertIn("active: 1", digest)
+        self.assertEqual(json.loads(run(evolution_action="skills", days=7))["rewrites"], 0)
+        self.assertEqual(json.loads(run(evolution_action="experiments"))[0]["kind"], "lesson")
+        with self.assertRaises(SystemExit):
+            run(evolution_action="lessons", lessons_action="approve", id=999, lang=None)
 
     def test_an_empty_profile_still_produces_a_digest(self):
         report = build(self.home, now=NOW, days=7)

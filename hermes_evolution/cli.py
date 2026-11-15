@@ -187,7 +187,7 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None):
     opts = options(config)
     lang = getattr(args, "lang", None) or opts["language"]
     if action == "learn":
-        result = cycle(home, now=now, runtime_config=runtime_config, config=config)
+        result = cycle(home, now=now, runtime_config=runtime_config, config=config, lang=lang)
         return notify_view(result) if args.notify_only else result
     if action == "skills":
         return skill_health(home, now=now, days=args.days)
@@ -210,7 +210,14 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None):
             if task == "add":
                 lesson_id = lessons.add_custom(conn, args.text, tool=args.tool, origin="operator", now=now, active=True)
                 return {"id": lesson_id, "status": "active"}
-            return lessons.set_status(conn, args.id, "active" if task == "approve" else "retired", now=now)
+            outcome = lessons.set_status(conn, args.id, "active" if task == "approve" else "retired", now=now)
+            # A direct decision also settles the matching proposal, so it does not linger in the queue.
+            conn.execute("UPDATE proposal SET status=?, updated=? WHERE code=? AND status IN ('open','approved')",
+                         ("applied" if task == "approve" else "rejected", now, f"lesson:{args.id}"))
+            if task == "retire":
+                conn.execute("UPDATE proposal SET status='applied', updated=? WHERE code=? AND status IN ('open','approved')",
+                             (now, f"lesson_retire:{args.id}"))
+            return outcome
         task = args.proposals_action or "list"
         if task == "list":
             return proposals.listing(conn, status=None if getattr(args, "all", False) else "open")

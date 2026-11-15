@@ -216,7 +216,8 @@ def markdown(report: dict, lang: str = "en") -> str:
     playbook = report["lessons"]
     counts = {status: sum(item["status"] == status for item in playbook) for status in ("active", "candidate", "quarantined", "retired")}
     lines += ["", "## " + t["lessons"], "",
-              f"- {counts['active']} {t['active']} · {counts['candidate'] + counts['quarantined']} {t['candidate']} · {counts['retired']} {t['retired']}"]
+              f"- {t['active']}: {counts['active']} · {t['candidate']}: {counts['candidate'] + counts['quarantined']}"
+              f" · {t['retired']}: {counts['retired']}"]
     for item in [entry for entry in playbook if entry["status"] == "active"][:8]:
         effect = verdicts[item["verdict"]]
         numbers = (f" ({t['before']} {_number(item['rate_before'], lang, 3)} → {t['after']} {_number(item['rate_after'], lang, 3)})"

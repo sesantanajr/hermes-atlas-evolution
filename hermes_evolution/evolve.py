@@ -48,11 +48,13 @@ def options(config) -> dict:
             "owner_sender_ids": tuple(owners)}
 
 
-def cycle(home: Path, *, now: float, runtime_config=None, config=None) -> dict:
-    """Run one evolution pass and return what changed."""
+def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None) -> dict:
+    """Run one evolution pass and return what changed. `lang` overrides the configured language of the output."""
     from .operations import database
 
     opts = options(config or {})
+    if lang in lessons.LANGUAGES:
+        opts["language"] = lang
     with experience(home) as conn:
         prune(conn, now=now)
         ingested = 0
