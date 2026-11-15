@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 
 from .advisory import TOOL, tool_handler
-from .cli import execute, settings, setup
+from .cli import effective_settings, execute, settings, setup
 from .memory import GLOBAL_SCOPE, MemoryStore, make_scope
 from .native_signals import HOOKS, observe_native
 from .operations import database, observe
@@ -132,13 +132,22 @@ def register(ctx):
     home = get_hermes_home()
     research = ResearchTracker(home)
     try:
-        config = settings(home)
+        from hermes_cli.config import load_config_readonly
+
+        runtime_config = load_config_readonly() or {}
+    except Exception:   # the plugin still loads with its own settings file
+        runtime_config = {}
+    try:
+        config = effective_settings(home, runtime_config)
     except (OSError, ValueError):
         config = {}
     try:
-        evolution = options(config)
+        evolution = options(config, runtime_config)
     except ValueError:
-        evolution = options({"evolution": {"lessons": DEFAULTS["lessons"]}})
+        from logging import getLogger
+
+        getLogger(__name__).warning("Atlas Evolution settings are invalid; using safe defaults until they are fixed")
+        evolution = options({"evolution": {"lessons": DEFAULTS["lessons"]}}, runtime_config)
     legacy_enabled = config.get("legacy_memory_commands") is True
     advice_enabled = config.get("agent_advice") is True
     lessons_on = evolution["lessons"] != "off"
