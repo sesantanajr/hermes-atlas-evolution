@@ -180,9 +180,13 @@ def active_lessons(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def playbook(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 8, max_chars: int = 1200,
-             mark_shown: bool = False) -> str:
-    """Bounded text for the session prompt section. Empty when there is nothing active."""
-    lines, used, chosen = [], len(HEADERS.get(lang, HEADERS["en"])), []
+             mark_shown: bool = False, chosen: list | None = None) -> str:
+    """Bounded text for the session prompt section. Empty when there is nothing active.
+
+    `chosen`, when given, receives the ids of the lessons in the text (so a caller can count them later
+    without writing during the read)."""
+    lines, used = [], len(HEADERS.get(lang, HEADERS["en"]))
+    chosen = [] if chosen is None else chosen
     for row in active_lessons(conn):
         sentence = render(row, lang)
         if not sentence or used + len(sentence) + 3 > max_chars:

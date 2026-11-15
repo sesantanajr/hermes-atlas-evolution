@@ -65,7 +65,8 @@ _TARGET_TOOL = re.compile(r"tool_call to '(?P<tool>[A-Za-z0-9_][\w.:-]{0,95})'")
 CLASSES = tuple(dict.fromkeys(name for name, _ in _RULES)) + ("command_failed", "other")
 
 _CORRECTION = re.compile(
-    r"^\W{0,3}(?:n[ãa]o[,.! ]|n[ãa]o era|n[ãa]o foi isso|n[ãa]o [ée] isso|errado|incorreto|est[áa] errado|de novo\b|"
+    r"^\W{0,3}(?:n[ãa]o[,.!]|n[ãa]o era isso|n[ãa]o foi isso|n[ãa]o [ée] isso|n[ãa]o funcionou|errado|incorreto|"
+    r"est[áa] errado|ainda (?:est[áa] )?errado|de novo[,.!]|"
     r"novamente\b|refa[çc]a|corrija|voc[êe] (?:errou|n[ãa]o entendeu)|no[,.!] |nope\b|wrong\b|that'?s (?:not|wrong)|"
     r"not what i|incorrect\b|try again|redo\b|you (?:missed|misunderstood)|still (?:wrong|not|broken))", re.I)
 _POSITIVE = re.compile(

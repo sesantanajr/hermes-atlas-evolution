@@ -140,6 +140,26 @@ class PluginLoopTest(unittest.TestCase):
             item = lessons.listing(conn)[0]
             self.assertEqual((item["shown_in_sessions"], item["hints_given"]), (1, 1))
 
+    def test_a_new_session_gets_the_playbook_while_another_process_holds_the_write_lock(self):
+        import sqlite3
+
+        self.settings(evolution={"lessons": "auto", "language": "en"})
+        with experience(self.home) as conn:
+            lessons.add_custom(conn, "Validate PowerShell with PSScriptAnalyzer before delivering it.", tool="terminal",
+                               origin="operator", now=1.0, active=True)
+        context = self.plugin()
+        writer = sqlite3.connect(self.home / "evolution" / "evolution.sqlite3", timeout=0)
+        writer.execute("BEGIN IMMEDIATE")   # e.g. `hermes evolution learn` running in another process
+        try:
+            text = context.sections["atlas-evolution.playbook"]["content"]({"session_id": "busy"})
+        finally:
+            writer.execute("ROLLBACK")
+            writer.close()
+        self.assertIn("PSScriptAnalyzer", text)
+        close_observers()   # the queued "shown" counter is written once the database is free
+        with experience(self.home) as conn:
+            self.assertEqual(lessons.listing(conn)[0]["shown_in_sessions"], 1)
+
     def test_lessons_off_registers_no_injection_surface(self):
         self.settings(evolution={"lessons": "off"})
         context = self.plugin()

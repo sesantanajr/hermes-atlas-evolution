@@ -175,10 +175,17 @@ class StoreTest(unittest.TestCase):
                                          "user_message": "não, errado"}, clock=0.0, now=NOW), [])
         self.assertEqual(sensor.observe({"session_id": "f", "platform": "cli", "user_message": ["multimodal"]},
                                         clock=0.0, now=NOW), [])
+        for ordinary in ("Não precisa de tabela, só me diga o total", "Não sei se o relatório saiu", "No worries, go ahead",
+                         "De novo o relatório de ontem, por favor"):
+            self.assertEqual(sensor.observe({"session_id": "z", "platform": "cli", "user_message": ordinary},
+                                            clock=5000.0, now=NOW), [], ordinary)
+        for correction in ("Não, não era isso", "Ainda está errado", "Não funcionou", "não é isso que pedi"):
+            self.assertEqual(sensor.observe({"session_id": "y" + correction, "platform": "cli", "user_message": correction},
+                                            clock=6000.0, now=NOW), ["correction"], correction)
         with experience(self.home) as conn:
             summary = feedback_summary(conn, now=NOW, days=1)
             dump = "\n".join(conn.iterdump())
-        self.assertEqual((summary["correction"], summary["reask"], summary["positive"]), (2, 1, 1))
+        self.assertEqual((summary["correction"], summary["reask"], summary["positive"]), (6, 1, 1))
         self.assertNotIn("confidencial", dump)
 
     def test_skill_events_and_retention(self):
