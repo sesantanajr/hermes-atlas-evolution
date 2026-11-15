@@ -24,7 +24,7 @@ MIN_API_CALLS = 30
 _INTERACTIVE = ("local", "gateway")
 CONFIG_KEYS = (
     ("compression", "enabled"), ("compression", "threshold_tokens"), ("compression", "proactive_prune_tokens"),
-    ("model", "default"), ("model", "provider"), ("memory", "provider"), ("memory", "nudge_interval"),
+    ("model", "default"), ("model", "model"), ("model", "provider"), ("memory", "provider"), ("memory", "nudge_interval"),
     ("skills", "creation_nudge_interval"), ("auxiliary", "background_review", "enabled"),
     ("auxiliary", "background_review", "model"), ("auxiliary", "compression", "model"),
     ("tool_budget", "mcp_result_size_chars"), ("curator", "enabled"), ("curator", "consolidate"),
@@ -52,10 +52,12 @@ def config_snapshot(runtime_config) -> dict[str, str]:
             text = "true" if value else "false"
         elif type(value) in (int, float) and -10**12 < value < 10**12:
             text = str(value)
-        elif isinstance(value, str):
-            text = label(value, fallback="set")
+        elif isinstance(value, str) and label(value, fallback="") == value:
+            text = value
         else:
-            text = "set"
+            # Not a plain label (provider/model, a URL, a mapping): keep a short fingerprint, never the value,
+            # so two different settings still read as different.
+            text = "set:" + hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:10]
         result[".".join(path)] = text
     plugins = config.get("plugins") if isinstance(config.get("plugins"), dict) else {}
     enabled = sorted(item for item in plugins.get("enabled") or () if isinstance(item, str))

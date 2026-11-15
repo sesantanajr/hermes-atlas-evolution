@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import unicodedata
 
 from .experience import day_offset, utc_day
 
@@ -46,11 +47,10 @@ TEMPLATES = {
         "`{tool}`: re-read the current text and use an exact, unique `old_string` (add surrounding lines) before patching again.",
         "`{tool}`: releia o trecho atual e use um `old_string` exato e único (inclua linhas vizinhas) antes de tentar de novo."),
     "blocked_by_policy": (False,
-        "`{tool}`: this kind of command is blocked by the safety policy. Do not retry it; write a script file or use the dedicated tool instead.",
-        "`{tool}`: esse tipo de comando é bloqueado pela política de segurança. Não repita; grave um arquivo de script ou use a ferramenta dedicada."),
-    "approval_timeout": (False,
-        "`{tool}`: commands that need approval time out when nobody answers. Ask the user first, or choose a path that needs no approval.",
-        "`{tool}`: comandos que pedem aprovação expiram sem resposta. Pergunte antes ao usuário ou escolha um caminho que não exija aprovação."),
+        "`{tool}`: this kind of command is blocked by the safety policy. Do not retry it or look for another way to the "
+        "same result; tell the user what you needed and let them decide.",
+        "`{tool}`: esse tipo de comando é bloqueado pela política de segurança. Não repita nem procure outro caminho para o "
+        "mesmo resultado; diga ao usuário do que precisava e deixe que ele decida."),
     "timeout": (False,
         "`{tool}` timed out before. Split the work, run long jobs in the background, or set an explicit longer limit.",
         "`{tool}` já estourou o tempo. Divida o trabalho, rode tarefas longas em segundo plano ou defina um limite maior explícito."),
@@ -93,8 +93,21 @@ def render(row, lang: str = "en") -> str:
     return template[2 if lang == "pt" else 1].format(tool=row["tool"], hint=row["hint"])
 
 
+def clean_text(text) -> str | None:
+    """A lesson sentence in canonical form, or None. Control, format (bidi, zero-width) and private-use
+    characters are refused rather than stripped, so what the operator reads is exactly what the agent gets."""
+    if not isinstance(text, str):
+        return None
+    text = " ".join(unicodedata.normalize("NFKC", text).split())
+    if any(unicodedata.category(char) in ("Cc", "Cf", "Co", "Cs", "Zl", "Zp") for char in text):
+        return None
+    if not _TEXT.fullmatch(text) or _SECRET.search(text):
+        return None
+    return text
+
+
 def valid_text(text) -> bool:
-    return isinstance(text, str) and _TEXT.fullmatch(text.strip()) is not None and not _SECRET.search(text)
+    return clean_text(text) is not None
 
 
 def _record_change(conn, lesson_id: int, now: float, subject: str) -> None:
@@ -132,7 +145,8 @@ def add_custom(conn: sqlite3.Connection, text: str, *, tool: str, origin: str, n
     """Store an operator, agent or reflector lesson. Agent and reflector lessons start quarantined."""
     if origin not in ORIGINS[1:]:
         raise ValueError("Unsupported lesson origin")
-    if not valid_text(text):
+    text = clean_text(text)
+    if text is None:
         raise ValueError(f"A lesson is one sentence of 12 to {TEXT_LIMIT} characters without secrets")
     if not isinstance(tool, str) or not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.:+-]{0,95}", tool):
         raise ValueError("Name the tool this lesson applies to, or use 'general'")
@@ -142,7 +156,7 @@ def add_custom(conn: sqlite3.Connection, text: str, *, tool: str, origin: str, n
     status = "active" if active and origin == "operator" else "quarantined"
     cursor = conn.execute("""INSERT INTO lesson(tool, klass, hint, origin, status, text, created, updated, activated)
         VALUES (?, 'custom', '', ?, ?, ?, ?, ?, ?)""",
-                          (tool, origin, status, " ".join(text.split()), now, now, now if status == "active" else None))
+                          (tool, origin, status, text, now, now, now if status == "active" else None))
     if status == "active":
         _record_change(conn, cursor.lastrowid, now, tool)
     return cursor.lastrowid
@@ -151,7 +165,8 @@ def add_custom(conn: sqlite3.Connection, text: str, *, tool: str, origin: str, n
 def add_reflected(conn: sqlite3.Connection, *, signature: str, tool: str, klass: str, hint: str, text: str,
                   now: float) -> int:
     """Store a reflector draft bound to its failure. It stays quarantined until an operator approves it."""
-    if not valid_text(text):
+    text = clean_text(text)
+    if text is None:
         raise ValueError(f"A lesson is one sentence of 12 to {TEXT_LIMIT} characters without secrets")
     cursor = conn.execute("""INSERT INTO lesson(signature, tool, klass, hint, origin, status, text, created, updated)
         VALUES (?, ?, ?, ?, 'reflector', 'quarantined', ?, ?, ?)""", (signature, tool, klass, hint, text, now, now))
@@ -166,8 +181,10 @@ def set_status(conn: sqlite3.Connection, lesson_id: int, status: str, *, now: fl
         raise ValueError(f"Unknown lesson id {lesson_id}")
     if row["status"] != status:
         conn.execute("UPDATE lesson SET status=?, updated=?, activated=CASE WHEN ?='active' THEN ? ELSE activated END,"
-                     " verdict=CASE WHEN ?='active' THEN NULL ELSE verdict END WHERE id=?",
-                     (status, now, status, now, status, lesson_id))
+                     " verdict=CASE WHEN ?='active' THEN NULL ELSE verdict END,"
+                     " baseline_failures=CASE WHEN ?='active' THEN NULL ELSE baseline_failures END,"
+                     " baseline_calls=CASE WHEN ?='active' THEN NULL ELSE baseline_calls END WHERE id=?",
+                     (status, now, status, now, status, status, status, lesson_id))
         if status == "active":
             _record_change(conn, lesson_id, now, row["tool"])
     return {"id": lesson_id, "status": status, "previous": row["status"]}
@@ -212,37 +229,52 @@ def count_hint(conn: sqlite3.Connection, lesson_id: int) -> None:
     conn.execute("UPDATE lesson SET hints=hints+1 WHERE id=?", (lesson_id,))
 
 
-def _rate(conn, signature: str, tool: str, start: str, end: str, days: int) -> tuple[float | None, int, int]:
+AFTER_WINDOW_DAYS = 14
+
+
+def _counts(conn, signature: str, tool: str, start: str, end: str) -> tuple[int, int]:
     failures = conn.execute("SELECT COALESCE(SUM(count),0) FROM failure_daily WHERE signature=? AND day BETWEEN ? AND ?",
                             (signature, start, end)).fetchone()[0]
     calls = conn.execute("SELECT COALESCE(SUM(calls),0) FROM tool_daily WHERE tool=? AND day BETWEEN ? AND ?",
                          (tool, start, end)).fetchone()[0]
-    if calls >= 5:
-        return failures / calls, failures, calls
-    return (failures / days if days else None), failures, calls
+    return failures, calls
+
+
+def _calendar_days(start: str, end: str) -> int:
+    from datetime import date
+
+    return max(0, (date.fromisoformat(end) - date.fromisoformat(start)).days + 1)
 
 
 def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> list[dict]:
-    """Measure each active derived lesson against its failure before and after activation."""
+    """Measure each active lesson bound to a failure against that failure before and after activation.
+
+    The baseline is the 14 days before activation, counted once and frozen, so retention never erases it.
+    The after window is the latest 14 days since activation (the mixed activation day is left out of both).
+    Rates are per call when both sides have call volume, otherwise per calendar day of each window."""
     results = []
     today = utc_day(now)
-    for row in conn.execute("SELECT * FROM lesson WHERE status='active' AND signature IS NOT NULL AND activated IS NOT NULL"):
+    for row in conn.execute("SELECT * FROM lesson WHERE status='active' AND signature IS NOT NULL AND activated IS NOT NULL").fetchall():
         activated_day = utc_day(row["activated"])
-        days_after = int((now - row["activated"]) // 86_400)
-        before, failures_before, calls_before = _rate(
-            conn, row["signature"], row["tool"], day_offset(row["activated"], BASELINE_DAYS), day_offset(row["activated"], 1),
-            BASELINE_DAYS)
-        # The activation day is mixed (partly before the lesson); it is left out of both windows.
-        after_start = day_offset(row["activated"], -1)
-        after, failures_after, calls_after = _rate(conn, row["signature"], row["tool"], after_start, today, max(days_after, 1))
-        per_call = calls_before >= 5 and calls_after >= 5
-        if not per_call:   # compare per day on both sides when one side lacks call volume
-            before = failures_before / BASELINE_DAYS
-            after = failures_after / max(days_after, 1)
-        ready = days_after >= EVALUATE_AFTER_DAYS or calls_after >= EVALUATE_AFTER_CALLS
+        base_failures, base_calls = row["baseline_failures"], row["baseline_calls"]
+        if base_failures is None or base_calls is None:
+            base_failures, base_calls = _counts(conn, row["signature"], row["tool"], day_offset(row["activated"], BASELINE_DAYS),
+                                                day_offset(row["activated"], 1))
+            conn.execute("UPDATE lesson SET baseline_failures=?, baseline_calls=? WHERE id=?",
+                         (base_failures, base_calls, row["id"]))
+        after_start = max(day_offset(row["activated"], -1), day_offset(now, AFTER_WINDOW_DAYS - 1))
+        days_after = _calendar_days(after_start, today) if after_start <= today else 0
+        failures_after, calls_after = _counts(conn, row["signature"], row["tool"], after_start, today) if days_after else (0, 0)
+        per_call = base_calls >= 5 and calls_after >= 5
+        if per_call:
+            before, after = base_failures / base_calls, failures_after / calls_after
+        else:
+            before, after = base_failures / BASELINE_DAYS, failures_after / days_after if days_after else 0.0
+        days_active = _calendar_days(day_offset(row["activated"], -1), today) if activated_day < today else 0
+        ready = days_active >= EVALUATE_AFTER_DAYS or calls_after >= EVALUATE_AFTER_CALLS
         verdict = None
-        if ready and activated_day < today:
-            if failures_before == 0 and failures_after == 0:
+        if ready and days_after:
+            if base_failures == 0 and failures_after == 0:
                 verdict = "inconclusive"
             elif after <= 0.5 * before:
                 verdict = "effective"
@@ -250,15 +282,15 @@ def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> 
                 verdict = "ineffective"
             else:
                 verdict = "inconclusive"
-        retire = verdict == "ineffective" and days_after >= RETIRE_AFTER_DAYS and mode == "auto"
+        retire = verdict == "ineffective" and days_active >= RETIRE_AFTER_DAYS and mode == "auto"
         if verdict:
             conn.execute("UPDATE lesson SET verdict=?, rate_before=?, rate_after=?, evaluated=?, status=?, updated=? WHERE id=?",
                          (verdict, before, after, now, "retired" if retire else "active",
                           now if retire or verdict != row["verdict"] else row["updated"], row["id"]))
         results.append({"id": row["id"], "tool": row["tool"], "class": row["klass"], "verdict": verdict,
                         "basis": "failures_per_call" if per_call else "failures_per_day",
-                        "before": round(before, 4), "after": round(after, 4), "failures_before": failures_before,
-                        "failures_after": failures_after, "days_active": days_after, "retired": retire})
+                        "before": round(before, 4), "after": round(after, 4), "failures_before": base_failures,
+                        "failures_after": failures_after, "days_active": days_active, "retired": retire})
     return results
 
 

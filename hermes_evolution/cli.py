@@ -140,10 +140,14 @@ def setup(parser: argparse.ArgumentParser) -> None:
     listing.add_argument("--status", choices=("candidate", "active", "quarantined", "retired"))
     listing.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS)
     for name in ("approve", "retire"):
-        playbook_commands.add_parser(name).add_argument("id", type=int)
+        decided = playbook_commands.add_parser(name)
+        decided.add_argument("id", type=int)
+        decided.add_argument("--yes", action="store_true", help=_("Confirm without the interactive question"))
     custom = playbook_commands.add_parser("add", help=_("Add an operator lesson"))
     custom.add_argument("text")
     custom.add_argument("--tool", default="general")
+    custom.add_argument("--activate", action="store_true", help=_("Activate it now instead of leaving it for approval"))
+    custom.add_argument("--yes", action="store_true", help=_("Confirm without the interactive question"))
     skills = commands.add_parser("skills", help=_("Show skill churn, flip-flops and rewrites that were never exercised"))
     queue = commands.add_parser("proposals", help=_("Review and decide what the evolution loop proposes"))
     queue_commands = queue.add_subparsers(dest="proposals_action")
@@ -153,6 +157,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
         decision = queue_commands.add_parser(name)
         decision.add_argument("id", type=int)
         decision.add_argument("--note")
+        decision.add_argument("--yes", action="store_true", help=_("Confirm without the interactive question"))
     commands.add_parser("experiments", help=_("Show tracked changes with their before-and-after verdicts"))
     digest = commands.add_parser("report", help=_("Print the evolution digest"))
     digest.add_argument("--format", choices=("md", "json"), default="md")
@@ -267,9 +272,19 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
             if task == "list":
                 return {"mode": opts["lessons"],
                         "lessons": lessons.listing(conn, lang=lang, status=getattr(args, "status", None))}
+            _operator_only()
             if task == "add":
-                lesson_id = lessons.add_custom(conn, args.text, tool=args.tool, origin="operator", now=now, active=True)
-                return {"id": lesson_id, "status": "active"}
+                activate = bool(getattr(args, "activate", False))
+                if activate:
+                    text = lessons.clean_text(args.text)
+                    _confirm(text or "", lang, yes=getattr(args, "yes", False))
+                lesson_id = lessons.add_custom(conn, args.text, tool=args.tool, origin="operator", now=now, active=activate)
+                return {"id": lesson_id, "status": "active" if activate else "quarantined"}
+            if task == "approve":
+                row = conn.execute("SELECT * FROM lesson WHERE id=?", (args.id,)).fetchone()
+                if row is None:
+                    raise ValueError(f"Unknown lesson id {args.id}")
+                _confirm(lessons.render(row, lang), lang, yes=getattr(args, "yes", False))
             outcome = lessons.set_status(conn, args.id, "active" if task == "approve" else "retired", now=now)
             # A direct decision also settles the matching proposal, so it does not linger in the queue.
             conn.execute("UPDATE proposal SET status=?, updated=? WHERE code=? AND status IN ('open','approved')",
@@ -281,7 +296,41 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
         task = args.proposals_action or "list"
         if task == "list":
             return proposals.listing(conn, status=None if getattr(args, "all", False) else "open")
+        _operator_only()
+        if task == "approve":
+            row = conn.execute("SELECT kind, evidence, command FROM proposal WHERE id=?", (args.id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown proposal id {args.id}")
+            evidence = json.loads(row["evidence"])
+            _confirm(evidence.get("lesson") or row["command"], lang, yes=getattr(args, "yes", False))
         return proposals.decide(conn, args.id, task, now=now, note=args.note)
+
+
+AGENT_MARKERS = ("ATLAS_EVOLUTION_AGENT", "HERMES_SESSION_ID", "HERMES_KANBAN_TASK", "HERMES_DELEGATED_CHILD_CONTEXT")
+
+
+def _operator_only() -> None:
+    """Refuse playbook decisions from a shell the agent runs. Hermes marks those shells with the session id,
+    and the plugin adds ATLAS_EVOLUTION_AGENT to every subprocess of an agent session."""
+    if any(os.environ.get(name, "").strip() for name in AGENT_MARKERS):
+        raise ValueError("Only the operator can decide on lessons and proposals. Run this command in your own "
+                         "terminal; the agent can propose lessons, which wait for your approval.")
+
+
+def _confirm(text: str, lang: str, *, yes: bool) -> None:
+    """Show exactly what the agent would read and ask before it takes effect."""
+    import sys
+
+    if yes:
+        return
+    if not sys.stdin.isatty():
+        raise ValueError("Confirm with --yes after reading the text with 'proposals list' or 'lessons list'")
+    question = "Ativar este texto para o agente? [s/N] " if lang == "pt" else "Activate this text for the agent? [y/N] "
+    sys.stderr.write(f"\n  {text}\n\n{question}")   # stdout stays machine-readable
+    sys.stderr.flush()
+    answer = sys.stdin.readline().strip().lower()
+    if answer not in ("y", "yes", "s", "sim"):
+        raise ValueError("Cancelled; nothing changed")
 
 
 def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=None, reflect=None):

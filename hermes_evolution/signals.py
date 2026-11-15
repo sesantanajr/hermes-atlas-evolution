@@ -33,13 +33,17 @@ _RULES = (
         r"|requires an? '(?P<hint2>[A-Za-z_][\w.-]{0,47})'"
         r"|the following arguments are required:[ \t]*-{0,2}(?P<hint3>[A-Za-z_][\w-]{0,47})", re.I)),
     ("missing_argument", re.compile(r"missing required argument", re.I)),   # the argument was not named
+    # Hermes' approval gate: the user denied, nobody answered, no approver can be reached, or the context
+    # cannot approve. Hermes tells the agent not to reach the same outcome another way; no lesson may differ.
+    ("approval_refused", re.compile(
+        r"User denied|has NOT consented|Silence is not consent|timed out without user response|"
+        r"Failed to send (?:\w+ )?approval request|set approvals\.\w+: approve|nobody (?:can|could) approve", re.I)),
     ("locked_resource", re.compile(r"is locked by the user|locked by (?:the )?operator", re.I)),
     ("review_precondition", re.compile(r"Refusing background curator patch|has not been loaded in this review", re.I)),
     ("edit_precondition", re.compile(
         r"Refusing to overwrite|has not seen its|must (?:be )?(?:read|view(?:ed)?)\b.{0,40}\bbefore", re.I)),
     ("edit_mismatch", re.compile(
         r"Could not find a match for old_string|Found \d+ matches for old_string|No edit was applied", re.I)),
-    ("approval_timeout", re.compile(r"timed out without user response|approval (?:request )?timed out", re.I)),
     ("blocked_by_policy", re.compile(r"\bBLOCKED:|flagged as dangerous|blocked by (?:policy|security)|not permitted by policy", re.I)),
     ("rate_limited", re.compile(r"rate.?limit|too many requests|\b429\b|quota exceeded", re.I)),
     ("timeout", re.compile(r"timed out|\btimeout\b|deadline exceeded", re.I)),
@@ -104,18 +108,18 @@ def _clean_hint(value) -> str:
     redact = _native_redactor()
     if redact is not None:
         try:
-            if redact(value) != value:
+            if redact(value, force=True) != value:   # force: redact even when the profile turned redaction off
                 return ""
         except Exception:   # a redactor failure must not let the value through
             return ""
     return value
 
 
-def _error_text(error_message, result) -> tuple[str, int | None]:
-    parts = []
-    exit_code = None
+def _error_parts(error_message, result) -> tuple[str, str, int | None]:
+    """(text Hermes or the tool wrote about the error, command output, exit code)."""
+    errors, output, exit_code = [], "", None
     if isinstance(error_message, str):
-        parts.append(error_message[:2000])
+        errors.append(error_message[:2000])
     if isinstance(result, str) and len(result) <= _RESULT_LIMIT and result.lstrip()[:1] == "{":
         try:
             data = json.loads(result)
@@ -125,16 +129,31 @@ def _error_text(error_message, result) -> tuple[str, int | None]:
             for key in ("error", "hint", "approval", "message"):
                 value = data.get(key)
                 if isinstance(value, str):
-                    parts.append(value[:2000])
-            output = data.get("output")
-            if isinstance(output, str):
-                parts.append(output[-1500:])
+                    errors.append(value[:2000])
+            value = data.get("output")
+            if isinstance(value, str):
+                output = value[-1500:]
             code = data.get("exit_code")
             if type(code) is int and -255 <= code <= 255:
                 exit_code = code
     elif isinstance(result, str):
-        parts.append(result[:1500])
-    return "\n".join(parts), exit_code
+        output = result[:1500]
+    return "\n".join(errors), output, exit_code
+
+
+def _error_text(error_message, result) -> tuple[str, int | None]:
+    errors, output, exit_code = _error_parts(error_message, result)
+    return "\n".join(part for part in (errors, output) if part), exit_code
+
+
+_OUTPUT_HINT = re.compile(r"[a-z_][a-z0-9_+-]{0,31}\Z")
+_MODULE_HINT = re.compile(r"[a-z_][a-z0-9_]{0,31}(?:\.[a-z_][a-z0-9_]{0,31}){0,3}\Z")
+
+
+def _output_hint(value, *, module: bool = False) -> str:
+    """A hint read from command output is anyone's text: keep only lower-case command or module names."""
+    value = _clean_hint(value)
+    return value if (_MODULE_HINT if module else _OUTPUT_HINT).fullmatch(value) else ""
 
 
 def effective_tool(tool_name, args=None) -> str:
@@ -159,17 +178,27 @@ def classify(tool_name, status, error_message=None, result=None, args=None) -> d
     if status not in ("error", "blocked"):
         return None
     tool = effective_tool(tool_name, args)
-    text, exit_code = _error_text(error_message, result)
-    target = _TARGET_TOOL.search(text)
-    if target:
-        tool = label(target.group("tool"), fallback=tool)
+    errors, output, exit_code = _error_parts(error_message, result)
+    text = "\n".join(part for part in (errors, output) if part)
+    if tool == "tool_call":   # the wrapper did not say which tool; Hermes names it in its own error text
+        target = _TARGET_TOOL.search(errors)
+        if target and len(target.group("tool")) <= 96:
+            named = _clean_hint(target.group("tool")) if len(target.group("tool")) <= 32 else label(target.group("tool"))
+            tool = named or tool
     klass, hint = "", ""
-    for name, pattern in _RULES:
-        match = pattern.search(text)
-        if match:
-            klass = name
-            groups = match.groupdict()
-            hint = next((_clean_hint(groups[key]) for key in ("hint", "hint2", "hint3") if groups.get(key)), "")
+    for source, from_output in ((errors, False), (output, True)):
+        for name, pattern in _RULES:
+            match = pattern.search(source) if source else None
+            if match:
+                klass = name
+                groups = match.groupdict()
+                key = next((key for key in ("hint", "hint2", "hint3") if groups.get(key)), None)
+                if key and from_output:
+                    hint = _output_hint(groups[key], module=name == "missing_dependency" and key == "hint2")
+                elif key:
+                    hint = _clean_hint(groups[key])
+                break
+        if klass:
             break
     if klass == "code_exception":
         found = _EXCEPTION.findall(text)

@@ -34,7 +34,7 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
             "owner_feedback": signals.feedback_summary(conn, now=now, days=days),
             "skill_events": signals.skill_event_summary(conn, now=now, days=days),
             "self_improvement": {"background_reviews": logwatch.review_summary(
-                conn, start_day=day_offset(now, days), end_day=utc_day(now + 86_400))},
+                conn, **dict(zip(("start_day", "end_day"), logwatch.local_days(now, days))))},
             "lessons": lessons.listing(conn, lang=lang),
             "changes": experiments.listing(conn, limit=20),
             "proposals": proposals.listing(conn, status="open"),
