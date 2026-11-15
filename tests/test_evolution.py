@@ -105,6 +105,19 @@ class EvolutionTest(unittest.TestCase):
         self.assertEqual([(row["outcome"], row["requests"]) for row in report["groups"]], [("rate_limit", 3)])
         self.assertEqual([item["code"] for item in recommendations(report)], ["llm_rate_limit"])
 
+    def test_reused_request_and_tool_call_ids_do_not_hide_real_events(self):
+        usage = {"usage": {"input_tokens": 10}, "provider": "example", "model": "a"}
+        refunded = {"turn_id": "turn", "api_request_id": "turn:api:2", **usage}
+        for ended in (NOW + 1, NOW + 1, NOW + 9):
+            observe(self.home, "api", {**refunded, "ended_at": ended}, now=NOW)
+        for request in ("turn:api:1", "turn:api:1", "turn:api:2"):
+            observe(self.home, "tool", {"turn_id": "turn", "tool_call_id": "call_0", "api_request_id": request,
+                                        "status": "ok"}, now=NOW)
+        with database(self.home) as conn:
+            report = summarize(conn, days=1, now=NOW, rates={})
+        self.assertEqual({row["lane"]: row["requests"] for row in report["groups"]}, {"main": 2, "tool": 2})
+        self.assertEqual(report["groups"][0]["input_tokens"], 20)
+
     def test_model_reported_as_a_file_path_is_not_stored(self):
         for index, model in enumerate(("/home/alice/models/q.gguf", "../models/q.gguf", "models//q.gguf", "vendor/q:free")):
             observe(self.home, "api", {"provider": f"p{index}", "model": model}, now=NOW)
