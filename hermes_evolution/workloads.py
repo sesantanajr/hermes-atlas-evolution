@@ -151,6 +151,11 @@ def _cron(home: Path, config: Mapping, now: float) -> dict:
             counts["inactive_jobs"] += 1
             continue
         counts["enabled_jobs"] += 1
+        # Hermes parks a recurring job in "error" when it cannot compute the next run, and stamps
+        # last_fire_error when a due fire never reached the runner. Neither leaves a failed run behind.
+        counts["schedule_errors"] += int(job.get("state") == "error")
+        fire_error = _timestamp(_mapping(job.get("last_fire_error")).get("at"))
+        counts["recent_fire_errors"] += int(fire_error is not None and now - _RUN_WINDOW <= fire_error <= now)
         no_agent = job.get("no_agent") is True
         counts["script_only_jobs" if no_agent else "agent_jobs"] += 1
         if (_positive_int(job.get("failure_streak")) or 0) >= 2:
@@ -171,7 +176,7 @@ def _cron(home: Path, config: Mapping, now: float) -> dict:
                 agent_starts.append(next_run)
     keys = ("jobs", "enabled_jobs", "inactive_jobs", "invalid_records", "script_only_jobs", "agent_jobs",
             "recent_job_failures", "recent_delivery_failures", "repeated_failures", "frequent_agent_jobs",
-            "unverified_next_run", "past_due_timestamps", "recent_fire_claims")
+            "unverified_next_run", "past_due_timestamps", "recent_fire_claims", "schedule_errors", "recent_fire_errors")
     partial = len(jobs) > _JOB_LIMIT or counts["invalid_records"] > 0
     return {**result, "status": "partial" if partial else "ok", "counts": {key: counts[key] for key in keys},
             "row_limit_reached": len(jobs) > _JOB_LIMIT,
@@ -315,10 +320,13 @@ def _recommendations(cron: dict, kanban: dict) -> list[dict]:
                        {"cron.frequent_agent_jobs": counts["frequent_agent_jobs"]},
                        ("A frequência pode ser intencional se a rotina depende de análise ou redação.",),
                        ("review_cron_script_only",), "Considere o modo nativo no_agent com script para verificações de resultado determinístico.")
-    if counts.get("past_due_timestamps", 0) or counts.get("repeated_failures", 0) or counts.get("recent_job_failures", 0):
+    if any(counts.get(key, 0) for key in ("past_due_timestamps", "repeated_failures", "recent_job_failures",
+                                          "schedule_errors", "recent_fire_errors")):
         yield _finding("cron_dispatch_or_failures", "warning", "medium", "Há sinais de atraso ou falha nos disparos do cron.",
                        {"cron.past_due_timestamps": counts["past_due_timestamps"], "cron.repeated_failures": counts["repeated_failures"],
-                        "cron.recent_job_failures": counts["recent_job_failures"]},
+                        "cron.recent_job_failures": counts["recent_job_failures"],
+                        "cron.schedule_errors": counts["schedule_errors"],
+                        "cron.recent_fire_errors": counts["recent_fire_errors"]},
                        ("Uma retomada do gateway, política de recuperação ou execução ativa pode explicar horários vencidos.",),
                        ("inspect_native_cron_status",), "Confira hermes cron list e o estado do agendador antes de reenfileirar uma rotina.")
     if counts.get("recent_delivery_failures", 0):
