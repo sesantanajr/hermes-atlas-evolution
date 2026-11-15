@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from hermes_evolution.native_signals import native_findings, native_summary, observe_native
-from hermes_evolution.operations import database
+from hermes_evolution.operations import close_observers, database
 
 
 class NativeSignalTests(unittest.TestCase):
@@ -24,6 +24,7 @@ class NativeSignalTests(unittest.TestCase):
                 report = native_summary(conn, days=1, now=1000)
                 self.assertNotIn("private-", "\n".join(conn.iterdump()))
                 self.assertNotIn("secret-state", "\n".join(conn.iterdump()))
+            close_observers()  # Windows cannot remove a database that is still open.
         findings = {item["code"]: item for item in native_findings(report)}
         self.assertEqual(findings["delegation_failure_rate"]["evidence"][0]["value"], 5)
         self.assertIn("kanban_worker_rate_limits", findings)

@@ -37,6 +37,16 @@ class NativeBillingTests(unittest.TestCase):
     def _report(self):
         return native_billing(self.home, days=1, now=_NOW)
 
+    def test_summed_costs_carry_no_binary_float_residue(self):
+        self._insert(*(
+            (f"session-{index}", "", "openai", "gpt-5", "", 1, 10, 1, 0, 0, 0, cost, 0, "estimated", _CUTOFF, _NOW)
+            for index, cost in enumerate((0.1, 0.2, 0.000_000_014))
+        ))
+        report = self._report()
+        self.assertEqual(report["totals"]["estimated_cost_usd"], 0.30000001)
+        self.assertEqual(report["by_model"][0]["estimated_cost_usd"], 0.30000001)
+        self.assertIsNone(report["totals"]["actual_cost_usd"])
+
     def test_cumulative_window_separates_fully_contained_rows(self):
         self._insert(
             ("session-secret-1", "", "openai", "openai/gpt-5", "https://endpoint.invalid", 2, 80, 20, 20, 0, 15, 0.1, 0, "estimated", _CUTOFF, _NOW),

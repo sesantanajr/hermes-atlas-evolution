@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from hermes_evolution.learning import record_outcome, retrospective
 from hermes_evolution.linux_actions import SystemPolicy, Systemd, Unit, attribute, pair_sample
-from hermes_evolution.operations import database
+from hermes_evolution.operations import close_observers, database
 from hermes_evolution.supervisor import _journal, journal_history, supervise
 from hermes_evolution.telemetry import ResearchTracker, research_summary
 
@@ -55,6 +55,7 @@ class SupervisorTest(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
+        self.addCleanup(close_observers)
         self.home = Path(folder.name)
         self.backend = FakeSystemd()
         self.policy = SystemPolicy("apply", "user", "hermes.service", "index.service", ("cpu",))
@@ -265,7 +266,10 @@ class SupervisorTest(unittest.TestCase):
         tracker.finish(turn, clock=134, now=2000)
         tracker.finish(turn, clock=135, now=2000)
         with database(self.home) as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+            from hermes_evolution.operations import SCHEMA_VERSION
+
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM lesson").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT value FROM control WHERE key='legacy'").fetchone()[0], "true")
             measured = research_summary(conn, now=2000, days=1)
             self.assertEqual((measured["turns"], measured["slow_turns"], measured["tool_errors"]), (1, 1, 1))

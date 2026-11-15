@@ -71,6 +71,41 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertEqual(result["logs"]["events"]["plugin_contract_error"], 1)
         self.assertNotIn("PRIVATE_PLUGIN_NAME", json.dumps(result))
 
+    def write_log(self, messages):
+        (self.home / "logs").mkdir(exist_ok=True)
+        now = datetime.now() - timedelta(seconds=1)
+        rows = [f"{now:%Y-%m-%d %H:%M:%S},{index:03d} {message}" for index, message in enumerate(messages)]
+        (self.home / "logs" / "errors.log").write_text("\n".join(rows), encoding="utf-8")
+
+    def test_tool_output_and_file_names_are_not_component_failures(self):
+        echo = "WARNING [local-1f] agent.tool_executor: Tool {} returned error (0.12s): "
+        self.write_log([
+            echo.format("memory") + '{"error": "PRIVATE proposal queued, memory write failed"}',
+            echo.format("memory") + '{"error": "PRIVATE proposal queued, memory write failed again"}',
+            echo.format("terminal") + '{"output": "PRIVATE permission denied, 429 rate limit, timeout, plugin failed"}',
+            echo.format("terminal") + '{"output": "PRIVATE no space left on device, database is locked, 401"}',
+            "WARNING gateway.platforms.base: [Local] native file send unavailable for /PRIVATE/Project-Memory-1.zip",
+            "WARNING gateway.platforms.base: [Local] native file send unavailable for /PRIVATE/Project-Memory-2.zip",
+            "WARNING hermes_cli.local_runtime.bootstrap: free GPU memory probe failed (PRIVATE)",
+        ])
+        result = snapshot(self.home)
+        self.assertEqual(result["logs"]["events"], {"warning": 7, "tool_result_error": 4})
+        self.assertEqual(result["findings"], [])
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_memory_component_failures_are_recognized_by_their_logger(self):
+        self.write_log([
+            "WARNING agent.memory_manager: Memory provider 'PRIVATE' prefetch timed out after 5.0s; it keeps running",
+            "WARNING [local-1f] agent.memory_manager: Memory provider 'PRIVATE' has 3 background calls stuck for over 60s",
+            "ERROR plugins.memory.PRIVATE: writer error: PRIVATE",
+            "WARNING run_agent: Memory provider on_session_end failed during shutdown: PRIVATE",
+            "WARNING agent.memory_manager: Memory manager is shutting down; rejecting late sync task",
+        ])
+        result = snapshot(self.home)
+        self.assertEqual(result["logs"]["events"], {"warning": 4, "error": 1, "memory_failure": 4, "timeout": 1})
+        self.assertEqual([item["id"] for item in result["findings"]], ["log_memory"])
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
     def test_checks_live_wal_and_preserves_contents(self):
         with closing(sqlite3.connect(self.home / "state.db")) as db:
             db.execute("PRAGMA journal_mode=WAL").fetchone()
@@ -122,6 +157,32 @@ class DiagnosticsTest(unittest.TestCase):
             marker["code_version"] = "0.21.1"
             state.write_text(json.dumps(marker), encoding="utf-8")
             self.assertEqual(snapshot(self.home)["gateway"]["heartbeat"], "unverified")
+
+    def test_named_profile_served_by_the_root_gateway_uses_the_host_record(self):
+        profiles = self.home / "profiles"
+        for name in ("work", "idle"):
+            (profiles / name).mkdir(parents=True)
+        record = {
+            "pid": 123, "kind": "hermes-gateway", "start_time": 321, "gateway_state": "degraded",
+            "code_version": "0.23.1", "updated_at": datetime.now(timezone.utc).isoformat(),
+            "served_profiles": ["default", "work"], "hermes_home": "PRIVATE_HOME",
+            "platforms": {"work:telegram": {"needs_attention": True, "error_message": "PRIVATE_ERROR"},
+                          "other:slack": {"needs_attention": True}, "api_server": {"needs_attention": True}},
+        }
+        (self.home / "gateway_state.json").write_text(json.dumps(record), encoding="utf-8")
+        with patch("hermes_evolution.diagnostics._process_liveness", return_value="confirmed"):
+            served = snapshot(profiles / "work")
+            unserved = snapshot(profiles / "idle")
+            root = snapshot(self.home)
+        self.assertEqual((served["gateway"]["reported_state"], served["gateway"]["platforms_needing_attention"],
+                          served["gateway"]["served_by_host_gateway"]), ("degraded", 1, True))
+        self.assertLessEqual({"gateway_degraded", "gateway_platform_attention"},
+                             {item["id"] for item in served["findings"]})
+        self.assertEqual((unserved["gateway"]["reported_state"], unserved["gateway"]["served_by_host_gateway"]),
+                         (None, False))
+        self.assertEqual((root["gateway"]["platforms_needing_attention"], root["gateway"]["served_by_host_gateway"]),
+                         (1, False))
+        self.assertNotIn("PRIVATE_", json.dumps([served, unserved, root]))
 
 
 if __name__ == "__main__":

@@ -1,13 +1,18 @@
-"""Hermes Agent v0.23.1 adapters. Core operations are usable without Hermes."""
+"""Hermes Agent v0.23.1 adapters: hooks, tools, the playbook prompt section and the operator CLI.
+
+Core operations are usable without Hermes. Every hook callback fails open: a storage problem is logged
+once and the turn continues.
+"""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 from .advisory import TOOL, tool_handler
-from .cli import execute, settings, setup
+from .cli import effective_settings, execute, settings, setup
 from .memory import GLOBAL_SCOPE, MemoryStore, make_scope
 from .native_signals import HOOKS, observe_native
 from .operations import database, observe
@@ -86,43 +91,143 @@ def shared_context(home, payload: dict):
     return None
 
 
+def _warn_once(seen: set, event: str) -> None:
+    if event not in seen:
+        seen.add(event)
+        from logging import getLogger
+
+        getLogger(__name__).warning("Atlas Evolution could not record %s; the turn continues unaffected", event)
+
+
+def _register_skills(ctx) -> None:
+    """Expose the bundled skills as `hermes-evolution:<name>`. Optional: an older or stricter host skips them."""
+    folder = Path(__file__).resolve().parent.parent / "skills"
+    register_skill = getattr(ctx, "register_skill", None)
+    if not callable(register_skill) or not folder.is_dir():
+        return
+    for child in sorted(folder.iterdir()):
+        document = child / "SKILL.md"
+        if document.is_file():
+            try:
+                register_skill(child.name, document)
+            except Exception:   # a skill is a convenience; it must never stop the plugin from loading
+                from logging import getLogger
+
+                getLogger(__name__).warning("Atlas Evolution could not register the bundled skill %s", child.name)
+
+
 def register(ctx):
+    import sys
+
     from hermes_constants import get_default_hermes_root, get_hermes_home
+
+    from . import lessons as playbook
+    from .agent_tools import LESSONS_TOOL, LessonsTool
+    from .evolve import options
+    from .experience import experience
+    from .hints import HintIndex, attach
+    from .signals import (FeedbackSensor, TurnTracker, classify, record_skill_correction, record_skill_event,
+                          record_tool)
 
     home = get_hermes_home()
     research = ResearchTracker(home)
     try:
-        config = settings(home)
-    except (OSError, ValueError):
-        config = {}
+        from hermes_cli.config import load_config_readonly
+
+        runtime_config = load_config_readonly() or {}
+    except Exception:   # the plugin still loads with its own settings file
+        runtime_config = {}
+    from logging import getLogger
+
+    problems: list = []
+    try:
+        config = effective_settings(home, runtime_config)
+    except (OSError, ValueError, RecursionError):
+        # Unreadable settings: keep measuring, but show nothing to the agent until the file is fixed.
+        config = {"evolution": {"lessons": "off"}}
+        problems.append("settings.json")
+    evolution = options(config, runtime_config, strict=False, problems=problems)
+    if problems:
+        getLogger(__name__).warning("Atlas Evolution ignored invalid settings (%s); lessons=%s until they are fixed",
+                                    ", ".join(problems), evolution["lessons"])
     legacy_enabled = config.get("legacy_memory_commands") is True
     advice_enabled = config.get("agent_advice") is True
+    lessons_on = evolution["lessons"] != "off"
+    turns = TurnTracker(home, slow_ms=evolution["slow_turn_seconds"] * 1000)
+    sensor = (FeedbackSensor(home, owner_sender_ids=evolution["owner_sender_ids"])
+              if evolution["feedback_signals"] else None)
+    hints = HintIndex(home, lang=evolution["language"])
+    recent_failures: dict[str, dict] = {}
+    recent_lock = threading.Lock()
+    failed: set[str] = set()
+    # A hook must never raise into a turn: storage problems and anything unexpected are reported once.
+    storage_errors = (Exception,)
 
     def register_observer(hook, event):
         def callback(**payload):
             try:
-                if event == "tool":
-                    research.tool(payload)
                 observe(home, event, payload)
-            except (OSError, sqlite3.Error, ValueError):
-                # Allow Hermes to continue even if the Evolution database is unavailable.
-                from logging import getLogger
-
-                getLogger(__name__).debug("Evolution could not record %s", event)
+            except storage_errors:
+                _warn_once(failed, event)
 
         ctx.register_hook(hook, callback)
 
     register_observer("post_api_request", "api")
     register_observer("api_request_error", "api_error")
     register_observer("post_auxiliary_call", "aux")
-    register_observer("post_tool_call", "tool")
+
+    def after_tool(**payload):
+        try:
+            research.tool(payload)
+            turns.tool(payload)
+            observe(home, "tool", payload)
+        except storage_errors:
+            _warn_once(failed, "tool")
+        try:
+            failure = classify(payload.get("tool_name"), payload.get("status"), payload.get("error_message"),
+                               payload.get("result"), payload.get("args"))
+            # An excerpt is kept only when the reflector could use it: on, and lessons not off.
+            record_tool(home, payload, failure=failure,
+                        sample=evolution["reflector"] and evolution["lessons"] != "off")
+            call = payload.get("tool_call_id")
+            if failure and isinstance(call, str) and 0 < len(call) <= 400:
+                with recent_lock:
+                    recent_failures[call] = failure
+                    while len(recent_failures) > 256:
+                        recent_failures.pop(next(iter(recent_failures)))
+        except storage_errors:
+            _warn_once(failed, "tool_outcome")
+
+    def with_lesson(**payload):
+        """Add the matching lesson to a failing tool result. Any doubt leaves the result untouched."""
+        try:
+            if payload.get("status") not in ("error", "blocked"):
+                return None
+            call, session = payload.get("tool_call_id"), payload.get("session_id")
+            if not isinstance(session, str) or not session.strip():
+                return None   # without a session there is no "once per session"
+            with recent_lock:
+                failure = recent_failures.pop(call, None) if isinstance(call, str) and call else None
+            failure = failure or classify(payload.get("tool_name"), payload.get("status"), payload.get("error_message"),
+                                          payload.get("result"), payload.get("args"))
+            if not failure:
+                return None
+            entry = hints.lookup(failure["signature"], session)
+            if entry is None:
+                return None
+            changed = attach(payload.get("result"), entry[1], evolution["language"])
+            if changed is not None:
+                hints.count(entry[0])
+            return changed
+        except Exception:   # a transform hook must never break a tool result
+            return None
 
     def native_observer(hook):
         def callback(**payload):
             try:
                 observe_native(home, hook, payload)
-            except (OSError, sqlite3.Error, ValueError):
-                return None
+            except storage_errors:
+                _warn_once(failed, hook)
         return callback
 
     for hook in HOOKS:
@@ -130,41 +235,130 @@ def register(ctx):
 
     def before_turn(**payload):
         try:
+            if sensor is not None and {"correction", "reask"} & set(sensor.observe(payload)):
+                # The owner is correcting the previous turn: count it against the skills that turn loaded.
+                record_skill_correction(home, turns.recent_skills(payload.get("session_id")))
             research.start(payload)
+            turns.start(payload)
             return shared_context(home, payload) if legacy_enabled else None
-        except (OSError, sqlite3.Error, ValueError):
+        except storage_errors:
             return None
 
     def after_turn(**payload):
         try:
             research.finish(payload)
-        except (OSError, sqlite3.Error, ValueError):
+        except storage_errors:
             return None
+
+    def turn_ended(**payload):
+        try:
+            turns.finish(payload)
+        except storage_errors:
+            _warn_once(failed, "turn")
+
+    def skill_event(**payload):
+        try:
+            turns.skill(payload)
+            record_skill_event(home, payload)
+        except storage_errors:
+            _warn_once(failed, "skill")
+
+    def playbook_section(_session_info):
+        """Read the playbook, then count the lessons shown through the queued writer: a busy database
+        (a `learn` run, another process) must never leave a new session without its lessons."""
+        try:
+            shown: list = []
+            with experience(home) as conn:   # its own connection: WAL readers never wait for a writer
+                text = playbook.playbook(conn, lang=evolution["language"], chosen=shown)
+            if shown:
+                from .experience import record
+
+                record(home, lambda conn: conn.executemany("UPDATE lesson SET shown=shown+1 WHERE id=?",
+                                                           [(item,) for item in shown]))
+            return text
+        except storage_errors:
+            return ""
 
     def command(raw_args, *, source=None, platform=""):
         return slash(home, raw_args, source=source, platform=platform)
 
+    reflect = None
+    if evolution["reflector"] and callable(getattr(ctx, "register_auxiliary_task", None)):
+        from .reflector import host_caller
+
+        try:
+            ctx.register_auxiliary_task(
+                "evolution_reflector", display_name="Atlas Evolution reflector",
+                description="Drafts lessons from recurring tool failures. Each draft waits for operator approval.",
+                inherit_from="compression")
+            reflect = host_caller(ctx)
+        except Exception:   # an older host without plugin LLM access: the loop runs without drafts
+            from logging import getLogger
+
+            getLogger(__name__).warning("Atlas Evolution reflector is unavailable on this Hermes build")
+
     def operator_cli(args):
         import hermes_cli.config as hermes_config
-        from hermes_cli.version_info import get_version_info
 
         config = hermes_config.load_config_readonly() or {}
         memory_config = config.get("memory", {})
         provider = memory_config.get("provider") if isinstance(memory_config, dict) else None
         source = Path(hermes_config.__file__).resolve().parent.parent
-        execute(args, home, running_version=get_version_info().base_version, provider=provider, runtime_config=config,
-                hermes_source=source, kanban_home=get_default_hermes_root(home=home))
+        # Hermes publishes no version accessor for plugins. The CLI that runs this handler has already
+        # loaded its own package, so the attribute is read from there; None simply skips the update check.
+        version = getattr(sys.modules.get("hermes_cli"), "__version__", None)
+        execute(args, home, running_version=version if isinstance(version, str) else None, provider=provider,
+                runtime_config=config, hermes_source=source, kanban_home=get_default_hermes_root(home=home),
+                reflect=reflect)
 
+    ctx.register_hook("post_tool_call", after_tool)
     ctx.register_hook("pre_llm_call", before_turn)
     ctx.register_hook("post_llm_call", after_turn)
+    ctx.register_hook("on_session_end", turn_ended)
+    ctx.register_hook("on_skill_lifecycle", skill_event)
+    if lessons_on and evolution["tool_hints"]:
+        ctx.register_hook("transform_tool_result", with_lesson)
+    if lessons_on:
+        ctx.register_system_prompt_section("atlas-evolution.playbook", playbook_section, max_chars=1400)
     if legacy_enabled:
         ctx.register_command("evolution", command, description="Access legacy Evolution notes", args_hint="<command>")
+    _register_skills(ctx)
+    register_env = getattr(ctx, "register_session_env", None)
+    if callable(register_env):
+        try:
+            # Every shell an agent session spawns carries this marker, so `hermes evolution` run by the agent
+            # can tell it is not the operator and refuses to approve or activate anything.
+            register_env(["ATLAS_EVOLUTION_AGENT"], lambda session_id: {"ATLAS_EVOLUTION_AGENT": "1"})
+        except Exception:   # the session id marker set by Hermes still guards the commands
+            getLogger(__name__).warning("Atlas Evolution could not mark agent shells; the session id still guards decisions")
+    on_unload = getattr(ctx, "on_unload", None)
+    if callable(on_unload):
+        from .operations import close_observers
+
+        on_unload(close_observers)   # write queued counters and release the shared connection
+
+    from .i18n import localize
+
+    def in_language(payload: str) -> str:
+        try:
+            return json.dumps(localize(json.loads(payload), evolution["language"]), ensure_ascii=False)
+        except (TypeError, ValueError):
+            return payload
 
     def advisory_tool(args, **context):
         if not advice_enabled:
-            return json.dumps({"error": "Planning permission has not been enabled for this Hermes profile."})
-        return tool_handler(args, **context)
+            return in_language(json.dumps({"error": "Planning permission has not been enabled for this Hermes profile."}))
+        return in_language(tool_handler(args, **context))
+
+    lessons_tool = LessonsTool(home, lang=evolution["language"])
+
+    def playbook_tool(args, **context):
+        if not advice_enabled:
+            return in_language(json.dumps({"error": "Playbook access has not been enabled for this Hermes profile."}))
+        return in_language(lessons_tool.handle(args, **context))
 
     ctx.register_tool(name=TOOL["name"], toolset="atlas-evolution", schema=TOOL, handler=advisory_tool,
                       check_fn=lambda: advice_enabled)
-    ctx.register_cli_command("evolution", "Review Hermes health and coordinate operations", setup, operator_cli)
+    ctx.register_tool(name=LESSONS_TOOL["name"], toolset="atlas-evolution", schema=LESSONS_TOOL, handler=playbook_tool,
+                      check_fn=lambda: advice_enabled)
+    ctx.register_cli_command("evolution", "Review Hermes health, learning and operations", setup, operator_cli)

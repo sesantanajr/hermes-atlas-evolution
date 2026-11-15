@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .operations import _day, database
+from .operations import _day, record
 
 HOOKS = ("subagent_start", "subagent_stop", "post_compaction", "post_curator_run", "on_kanban_worker_exited")
 DELEGATE_OUTCOMES = {"completed", "failed", "error", "partial", "timeout", "cancelled", "interrupted"}
@@ -35,13 +35,13 @@ def observe_native(home: Path, hook: str, payload: dict, *, now: float | None = 
     if hook == "on_kanban_worker_exited":
         status = payload.get("exit_kind")
         outcome = status if isinstance(status, str) and status in WORKER_OUTCOMES else "unknown"
-    with database(home, observer=True) as conn:
-        conn.execute("""INSERT INTO native_activity VALUES(?,?,?,1,?,?,?,?)
+    now = time.time() if now is None else now
+    row = (_day(now), hook, outcome, duration, tokens_before, tokens_after, measured)
+    record(home, lambda conn: conn.execute(
+        """INSERT INTO native_activity VALUES(?,?,?,1,?,?,?,?)
             ON CONFLICT DO UPDATE SET events=events+1, duration_ms=duration_ms+excluded.duration_ms,
             tokens_before=tokens_before+excluded.tokens_before, tokens_after=tokens_after+excluded.tokens_after,
-            measured=measured+excluded.measured""", (
-            _day(time.time() if now is None else now), hook, outcome, duration, tokens_before, tokens_after, measured,
-        ))
+            measured=measured+excluded.measured""", row), now=now)
 
 
 def native_summary(conn, *, now: float, days: int) -> dict:

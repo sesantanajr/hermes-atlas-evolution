@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 import sqlite3
 from collections import defaultdict
@@ -121,7 +120,9 @@ def _findings(items: Iterable[Mapping]) -> Iterable[dict]:
         if not isinstance(item, Mapping):
             continue
         code, severity = item.get("code", item.get("id")), item.get("severity")
-        if _valid_code(code) and isinstance(severity, str) and severity in _CATEGORIES:
+        # A diagnosis that proposes no action, such as healthy page cache, is context and not a notice.
+        actionable = item.get("action_ids") != []
+        if actionable and _valid_code(code) and isinstance(severity, str) and severity in _CATEGORIES:
             yield {"code": code, "severity": severity, "source": "finding"}
 
 

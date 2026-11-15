@@ -16,6 +16,14 @@ class OpsMetricTests(unittest.TestCase):
         self.assertEqual(metrics["cpu_psi_pct"], 6.2)
         self.assertNotIn("queue_depth", metrics)
 
+    def test_tool_timeouts_raise_the_tool_error_rate(self):
+        usage = {"groups": [{"lane": "tool", "outcome": "ok", "requests": 6},
+                            {"lane": "tool", "outcome": "timeout", "requests": 3},
+                            {"lane": "tool", "outcome": "error", "requests": 1},
+                            {"lane": "tool", "outcome": "blocked", "requests": 50}]}
+        metrics = current_metrics({}, usage, {"kanban": {"status": "not_found", "counts": {}}}, {})
+        self.assertEqual(metrics["tool_error_pct"], 40)
+
     def test_correlation_requires_actionable_coverage_without_authorizing_a_write(self):
         workloads = {"kanban": {"status": "ok", "counts": {"ready": 4}},
                      "cron": {"status": "ok", "schedule": {"peak_scheduled_agent_starts": 3}}}

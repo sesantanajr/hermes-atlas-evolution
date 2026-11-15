@@ -1,5 +1,4 @@
 import json
-import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -10,7 +9,7 @@ from unittest.mock import patch
 from hermes_evolution.cli import _report, execute
 from hermes_evolution.integration import shared_context, slash
 from hermes_evolution.memory import GLOBAL_SCOPE, MemoryStore
-from hermes_evolution.operations import database, observe, recommendations, run_policy, summarize
+from hermes_evolution.operations import close_observers, database, observe, recommendations, run_policy, summarize
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 
@@ -19,6 +18,7 @@ class EvolutionTest(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
+        self.addCleanup(close_observers)  # Windows cannot remove a database that is still open.
         self.home = Path(self.folder.name)
 
     def test_uses_normalized_tokens_and_keeps_payload_out_of_storage(self):
@@ -60,6 +60,72 @@ class EvolutionTest(unittest.TestCase):
             report = summarize(conn, days=1, now=NOW, rates={})
         self.assertEqual({item["code"] for item in recommendations(report)}, {"large_main_prompt", "llm_rate_limit"})
 
+    def test_tool_timeouts_count_as_failed_attempts(self):
+        for n in range(10):
+            observe(self.home, "tool", {"turn_id": "t", "tool_call_id": str(n),
+                                        "status": "timeout" if n < 4 else "ok"}, now=NOW)
+        with database(self.home) as conn:
+            report = summarize(conn, days=1, now=NOW, rates={})
+        self.assertEqual({row["outcome"]: row["requests"] for row in report["groups"]}, {"ok": 6, "timeout": 4})
+        finding, = recommendations(report)
+        self.assertEqual((finding["code"], finding["errors"], finding["attempts"]), ("tool_errors", 4, 10))
+
+    def test_provider_failures_use_the_hermes_reason_and_auxiliary_error_type(self):
+        attempts = (
+            ("api_error", {"reason": "timeout", "status_code": None}, "timeout"),
+            ("api_error", {"reason": "overloaded", "status_code": 529}, "upstream"),
+            ("api_error", {"reason": "upstream_blocked", "status_code": 403}, "upstream"),
+            ("api_error", {"reason": "rate_limit", "status_code": None}, "rate_limit"),
+            ("api_error", {"reason": "unknown", "status_code": 401}, "auth"),
+            ("api_error", {"reason": "format_error", "status_code": 400}, "error"),
+            ("aux", {"error": "RateLimitError: PRIVATE provider text", "error_type": "RateLimitError"}, "rate_limit"),
+            ("aux", {"error": "APIStatusError: Error code: 503 - PRIVATE", "error_type": "APIStatusError"}, "upstream"),
+            ("aux", {"error": "ReadTimeout: PRIVATE", "error_type": "ReadTimeout"}, "timeout"),
+            ("aux", {"error": "ValueError: PRIVATE 429", "error_type": "ValueError"}, "error"),
+        )
+        for index, (event, fields, expected) in enumerate(attempts):
+            observe(self.home, event, {"turn_id": "t", "api_request_id": str(index), "provider": f"p{index}",
+                                       "model": "m", "aux_task": "compression", **fields}, now=NOW)
+        with database(self.home) as conn:
+            report = summarize(conn, days=1, now=NOW, rates={})
+            self.assertNotIn("PRIVATE", "\n".join(conn.iterdump()))
+        outcomes = {row["provider"]: row["outcome"] for row in report["groups"]}
+        self.assertEqual(outcomes, {f"p{index}": expected for index, (_, _, expected) in enumerate(attempts)})
+
+    def test_each_failed_attempt_of_one_request_is_counted_once(self):
+        # Hermes 0.23.1 reuses "<turn>:api:<n>" for all retries of a request.
+        request = {"turn_id": "turn", "api_request_id": "turn:api:1", "provider": "example", "model": "a",
+                   "status_code": 429}
+        for retry in range(3):
+            attempt = {**request, "retry_count": retry, "ended_at": NOW + retry}
+            for _ in range(2):
+                observe(self.home, "api_error", attempt, now=NOW)
+        with database(self.home) as conn:
+            report = summarize(conn, days=1, now=NOW, rates={})
+        self.assertEqual([(row["outcome"], row["requests"]) for row in report["groups"]], [("rate_limit", 3)])
+        self.assertEqual([item["code"] for item in recommendations(report)], ["llm_rate_limit"])
+
+    def test_reused_request_and_tool_call_ids_do_not_hide_real_events(self):
+        usage = {"usage": {"input_tokens": 10}, "provider": "example", "model": "a"}
+        refunded = {"turn_id": "turn", "api_request_id": "turn:api:2", **usage}
+        for ended in (NOW + 1, NOW + 1, NOW + 9):
+            observe(self.home, "api", {**refunded, "ended_at": ended}, now=NOW)
+        for request in ("turn:api:1", "turn:api:1", "turn:api:2"):
+            observe(self.home, "tool", {"turn_id": "turn", "tool_call_id": "call_0", "api_request_id": request,
+                                        "status": "ok"}, now=NOW)
+        with database(self.home) as conn:
+            report = summarize(conn, days=1, now=NOW, rates={})
+        self.assertEqual({row["lane"]: row["requests"] for row in report["groups"]}, {"main": 2, "tool": 2})
+        self.assertEqual(report["groups"][0]["input_tokens"], 20)
+
+    def test_model_reported_as_a_file_path_is_not_stored(self):
+        for index, model in enumerate(("/home/alice/models/q.gguf", "../models/q.gguf", "models//q.gguf", "vendor/q:free",
+                                       "C:/Users/alice/q.gguf")):
+            observe(self.home, "api", {"provider": f"p{index}", "model": model}, now=NOW)
+        with database(self.home) as conn:
+            stored = dict(conn.execute("SELECT provider, model FROM metric"))
+        self.assertEqual(stored, {"p0": "unknown", "p1": "unknown", "p2": "unknown", "p3": "vendor/q:free", "p4": "unknown"})
+
     def test_decisions_learn_across_days_and_recover(self):
         def critical():
             return [{"code": "disk", "severity": "critical"}]
@@ -79,6 +145,19 @@ class EvolutionTest(unittest.TestCase):
             self.assertEqual(run_policy(conn, [], now=NOW + 87600, recovery_ready=False)["mode"], "conservative")
             self.assertEqual(run_policy(conn, [], now=NOW + 88200)["mode"], "conservative")
             self.assertEqual(run_policy(conn, [], now=NOW + 88800)["mode"], "normal")
+
+    def test_policy_keeps_one_decision_per_code_and_survives_unknown_feedback(self):
+        reported = [{"code": "disk", "severity": "warning"}, {"code": "disk", "severity": "critical"},
+                    {"code": "queue", "severity": "info"}]
+        with database(self.home) as conn:
+            first = run_policy(conn, [dict(item) for item in reported], now=NOW)
+            self.assertEqual([(item["code"], item["severity"]) for item in first["findings"]],
+                             [("disk", "critical"), ("queue", "info")])
+            self.assertEqual(first["mode"], "conservative")
+            conn.execute("UPDATE maintenance SET feedback='written-by-a-newer-version' WHERE code='queue'")
+            later = run_policy(conn, [dict(item) for item in reported], now=NOW + 86400)
+            self.assertEqual([item["observed_days"] for item in later["findings"]], [2, 2])
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM maintenance").fetchone()[0], 2)
 
     def test_one_auxiliary_finding_per_task_across_models(self):
         for n in range(6):
