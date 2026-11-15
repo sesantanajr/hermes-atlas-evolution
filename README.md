@@ -12,6 +12,10 @@ hermes evolution ops inspect --upstream-tag v0.23.1
 
 The installed plugin ID is `hermes-evolution`. Observation is the default. See [Linux remediation](#remediação-no-linux) for the systemd policy and its validation requirements.
 
+## Autor
+
+Criado por **Sérgio Sant'Ana Júnior**. [LinkedIn](https://www.linkedin.com/in/sergiosantanacloud/)
+
 ## Guia em português
 
 Supervisor operacional open source para **Hermes Agent 0.23.1**, licenciado sob MIT. Examina o que o Hermes grava, mede a carga do agente e do Linux, e cruza evidências para sugerir testes, melhorar o desempenho e conduzir remediações reversíveis. Usa os ganchos públicos do Hermes e preserva seu provedor de memória, seus plugins e seu roteador. Requer Python 3.11 ou superior. O modo padrão usa somente a biblioteca padrão de Python, com nenhuma chamada adicional a modelos.
