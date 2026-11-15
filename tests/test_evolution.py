@@ -1,0 +1,144 @@
+import json
+import sqlite3
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from hermes_evolution.cli import _report
+from hermes_evolution.integration import shared_context, slash
+from hermes_evolution.memory import GLOBAL_SCOPE, MemoryStore
+from hermes_evolution.operations import database, observe, recommendations, run_policy, summarize
+
+NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
+
+
+class EvolutionTest(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.home = Path(self.folder.name)
+
+    def test_uses_normalized_tokens_and_keeps_payload_out_of_storage(self):
+        payload = {
+            "turn_id": "canary-turn", "api_request_id": "canary-attempt", "provider": "Example", "model": "A",
+            "user_message": "do not store this canary prompt", "request": {"api_key": "api-key-canary"},
+            "usage": {"input_tokens": 100, "cache_read_tokens": 200, "cache_write_tokens": 300,
+                      "output_tokens": 10, "reasoning_tokens": 4}, "api_duration": 0.5,
+        }
+        for _ in range(2):
+            observe(self.home, "api", payload, now=NOW)
+        observe(self.home, "aux", {"aux_task": "compression", "model": "B", "streaming": True}, now=NOW)
+        rates = {"example": {"a": {"input": 2, "output": 4, "cache_write": 3, "cache_read": 1}}}
+        with database(self.home) as conn:
+            report = summarize(conn, days=1, now=NOW, rates=rates)
+            backing_store = "\n".join(conn.iterdump())
+        self.assertEqual(report["successful_llm_calls"], 2)
+        self.assertEqual(report["usage_samples"], 1)
+        self.assertEqual(report["priced_calls"], 1)
+        self.assertAlmostEqual(report["estimated_usd"], 0.00134)
+        for secret in ("canary-turn", "canary-attempt", "canary prompt", "api-key-canary"):
+            self.assertNotIn(secret, backing_store)
+
+    def test_identifies_repeated_rate_limits_and_high_prompt_budget(self):
+        for n in range(5):
+            attempt = {"api_request_id": str(n), "turn_id": "rate", "provider": "example", "model": "a"}
+            observe(self.home, "api_error", {**attempt, "status_code": 429}, now=NOW)
+            observe(self.home, "api", {**attempt, "usage": {"input_tokens": 6000}}, now=NOW)
+        with database(self.home) as conn:
+            report = summarize(conn, days=1, now=NOW, rates={})
+        self.assertEqual({item["code"] for item in recommendations(report)}, {"large_main_prompt", "llm_rate_limit"})
+
+    def test_decisions_learn_across_days_and_recover(self):
+        def critical():
+            return [{"code": "disk", "severity": "critical"}]
+
+        with database(self.home) as conn:
+            first = run_policy(conn, critical(), now=NOW)
+            self.assertEqual(first["mode"], "conservative")
+            conn.execute("UPDATE maintenance SET feedback='helpful' WHERE code='disk'")
+            same_day = run_policy(conn, critical(), now=NOW + 600)
+            self.assertEqual(same_day["changes"], [])
+            self.assertEqual(same_day["findings"][0]["observed_days"], 1)
+            next_day = run_policy(conn, critical(), now=NOW + 86400)
+            self.assertEqual(next_day["findings"][0]["observed_days"], 2)
+            self.assertEqual(next_day["findings"][0]["feedback"], "helpful")
+            self.assertEqual(run_policy(conn, [], now=NOW + 87000)["mode"], "conservative")
+            self.assertEqual(run_policy(conn, [], now=NOW + 87001)["mode"], "conservative")
+            self.assertEqual(run_policy(conn, [], now=NOW + 87600, recovery_ready=False)["mode"], "conservative")
+            self.assertEqual(run_policy(conn, [], now=NOW + 88200)["mode"], "conservative")
+            self.assertEqual(run_policy(conn, [], now=NOW + 88800)["mode"], "normal")
+
+    def test_one_auxiliary_finding_per_task_across_models(self):
+        for n in range(6):
+            observe(self.home, "aux", {"aux_task": "compression", "model": str(n % 2),
+                                       "usage": {"input_tokens": 4000}}, now=NOW)
+        with database(self.home) as conn:
+            findings = recommendations(summarize(conn, days=1, now=NOW, rates={}))
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["tokens"], 24_000)
+
+    def test_dm_explicit_storage_isolated_from_users_workspaces_and_group_dms(self):
+        def source(**overrides):
+            return SimpleNamespace(**({"platform": "telegram", "chat_type": "dm", "chat_id": "1", "user_id": "2",
+                                       "scope_id": "first"} | overrides))
+
+        response = slash(self.home, "remember writing Memorável para documentação", source=source())
+        self.assertTrue(response.startswith("Saved"))
+        self.assertIn("documentação", slash(self.home, "recall memorável", source=source()))
+        for other in (source(user_id="3"), source(scope_id="other"), source(chat_id="4")):
+            self.assertEqual(slash(self.home, "recall memorável", source=other), "No matching memories.")
+        for other in (source(chat_type="group"), source(shared_session=True), source(is_bot=True),
+                      source(role_authorized=True), source(thread_id="t")):
+            self.assertNotIn("documentação", slash(self.home, "recall memorável", source=other))
+        self.assertEqual(slash(self.home, "recall memorável", platform="cli"), "No matching memories.")
+
+    def test_context_only_uses_opted_in_shared_lessons_and_respects_budget(self):
+        request = {"user_message": "continuidade avaliação"}
+        with database(self.home) as conn:
+            store = MemoryStore(conn)
+            store.remember("local", "lesson", "continuidade avaliação SECRET")
+            store.remember(GLOBAL_SCOPE, "preference", "continuidade avaliação PRIVATE")
+            store.remember(GLOBAL_SCOPE, "lesson", "continuidade avaliação SHARED " + '"' * 110)
+        self.assertIsNone(shared_context(self.home, request))
+        self._settings({"legacy_memory_commands": True, "automatic_shared_recall": True, "daily_estimated_budget_usd": 0.01,
+                        "rates_usd_per_million": {"example": {"a": {"input": 20, "output": 0,
+                                                                     "cache_read": 0, "cache_write": 0}}}})
+        context = shared_context(self.home, request)["context"]
+        self.assertIn("SHARED", context)
+        self.assertNotIn("SECRET", context)
+        self.assertNotIn("PRIVATE", context)
+        self.assertLessEqual(len(context), 480)
+        self.assertIsNone(shared_context(self.home, {**request, "parent_session_id": "parent"}))
+        observe(self.home, "api", {"provider": "example", "model": "a", "usage": {"input_tokens": 2000}}, now=NOW)
+        tick = SimpleNamespace(evolution_action="tick", days=7, upstream_tag=None, changes_only=False)
+        self.assertEqual(_report(tick, self.home, now=NOW)["decision"]["mode"], "conservative")
+        self.assertIsNone(shared_context(self.home, request))
+
+    def _settings(self, value):
+        (self.home / "evolution" / "settings.json").write_text(json.dumps(value), encoding="utf-8")
+
+    def test_old_telemetry_pruned_while_explicit_notes_remain(self):
+        observe(self.home, "api", {"api_request_id": "old", "turn_id": "old"}, now=NOW - 36 * 86400)
+        with database(self.home) as conn:
+            note = MemoryStore(conn).remember("local", "lesson", "Mantenha configuração versionada")
+            run_policy(conn, [], now=NOW)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM metric").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0], 0)
+            self.assertEqual(MemoryStore(conn).search("local", "configuração")[0]["id"], note["id"])
+
+    def test_unknown_resource_does_not_clear_previously_observed_pressure(self):
+        tick = SimpleNamespace(evolution_action="tick", days=7, upstream_tag=None, changes_only=False)
+        measured = {"host": {"disk": {}, "memory": None, "cgroup_memory": None}, "database": {"status": "ok"},
+                    "findings": [{"id": "low_disk", "severity": "warning", "recommendation": "Review disk."}]}
+        unknown = {**measured, "host": {**measured["host"], "disk": None}, "findings": []}
+        clear = {**measured, "findings": []}
+        with patch("hermes_evolution.cli.snapshot", side_effect=[measured, unknown, clear, clear]):
+            modes = [_report(tick, self.home, now=NOW + i * 600)["decision"]["mode"] for i in range(4)]
+        self.assertEqual(modes, ["conservative", "conservative", "conservative", "normal"])
+
+
+if __name__ == "__main__":
+    unittest.main()
