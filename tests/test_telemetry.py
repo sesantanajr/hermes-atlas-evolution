@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hermes_evolution.operations import database
+from hermes_evolution.operations import close_observers, database
 from hermes_evolution.telemetry import ResearchTracker, research_summary
 
 
@@ -10,6 +10,7 @@ class ResearchTrackerTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
+        self.addCleanup(close_observers)
         self.home = Path(self.folder.name)
 
     def summary(self, now=2000):

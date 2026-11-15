@@ -10,7 +10,7 @@ from unittest.mock import patch
 from hermes_evolution.cli import _report, execute
 from hermes_evolution.integration import shared_context, slash
 from hermes_evolution.memory import GLOBAL_SCOPE, MemoryStore
-from hermes_evolution.operations import database, observe, recommendations, run_policy, summarize
+from hermes_evolution.operations import close_observers, database, observe, recommendations, run_policy, summarize
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 
@@ -19,6 +19,7 @@ class EvolutionTest(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
+        self.addCleanup(close_observers)  # Windows cannot remove a database that is still open.
         self.home = Path(self.folder.name)
 
     def test_uses_normalized_tokens_and_keeps_payload_out_of_storage(self):

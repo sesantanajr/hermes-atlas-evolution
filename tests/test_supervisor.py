@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from hermes_evolution.learning import record_outcome, retrospective
 from hermes_evolution.linux_actions import SystemPolicy, Systemd, Unit, attribute, pair_sample
-from hermes_evolution.operations import database
+from hermes_evolution.operations import close_observers, database
 from hermes_evolution.supervisor import _journal, journal_history, supervise
 from hermes_evolution.telemetry import ResearchTracker, research_summary
 
@@ -55,6 +55,7 @@ class SupervisorTest(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
+        self.addCleanup(close_observers)
         self.home = Path(folder.name)
         self.backend = FakeSystemd()
         self.policy = SystemPolicy("apply", "user", "hermes.service", "index.service", ("cpu",))
