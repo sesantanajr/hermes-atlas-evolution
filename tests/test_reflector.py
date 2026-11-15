@@ -142,6 +142,10 @@ class CycleTest(Base):
         measure_only = cycle(self.home, now=NOW, config={"evolution": {"reflector": True, "lessons": "off"}},
                              reflect=self.ask({"applies": True, "lesson": "When X, do Y every single time."}))
         self.assertEqual((measure_only["reflector"], self.calls), ({"status": "lessons_off"}, []))
+        cycle(self.home, now=NOW + 15 * 86_400, config={"evolution": {"reflector": True, "lessons": "off"}},
+              reflect=self.ask({"applies": True, "lesson": "When X, do Y every single time."}))
+        with experience(self.home) as conn:   # measure-only mode still ages excerpts out after 14 days
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_sample").fetchone()[0], 0)
         failing(self.home)
         on = cycle(self.home, now=NOW, config=config,
                    reflect=self.ask({"applies": True, "lesson": "Quando um script lê um CSV, confira as colunas antes de indexar."}))

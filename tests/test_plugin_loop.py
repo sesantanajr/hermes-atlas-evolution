@@ -167,6 +167,18 @@ class PluginLoopTest(unittest.TestCase):
         self.assertEqual(context.sections, {})
         self.assertIn("post_tool_call", context.hooks)   # measurement continues
 
+    def test_error_excerpts_are_kept_only_when_the_reflector_could_use_them(self):
+        crash = json.dumps({"output": "Traceback (most recent call last):\nKeyError: 'column'", "exit_code": 1})
+        for lessons_mode, expected in (("off", 0), ("suggest", 1)):
+            with self.subTest(lessons=lessons_mode):
+                self.settings(evolution={"lessons": lessons_mode, "reflector": True})
+                context = self.plugin()
+                context.fire("post_tool_call", tool_name="terminal", status="error", result=crash,
+                             session_id="s", turn_id="t", tool_call_id=f"c-{lessons_mode}")
+                close_observers()
+                with experience(self.home) as conn:
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_sample").fetchone()[0], expected)
+
     def test_hooks_fail_open_when_storage_is_unusable_and_tolerate_odd_payloads(self):
         self.settings(evolution={"lessons": "auto"}, agent_advice=True)
         context = self.plugin()

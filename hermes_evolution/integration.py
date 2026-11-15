@@ -186,7 +186,9 @@ def register(ctx):
         try:
             failure = classify(payload.get("tool_name"), payload.get("status"), payload.get("error_message"),
                                payload.get("result"), payload.get("args"))
-            record_tool(home, payload, failure=failure, sample=evolution["reflector"])
+            # An excerpt is kept only when the reflector could use it: on, and lessons not off.
+            record_tool(home, payload, failure=failure,
+                        sample=evolution["reflector"] and evolution["lessons"] != "off")
             call = payload.get("tool_call_id")
             if failure and isinstance(call, str) and 0 < len(call) <= 400:
                 with recent_lock:
