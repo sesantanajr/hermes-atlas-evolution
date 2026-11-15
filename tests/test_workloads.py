@@ -86,6 +86,20 @@ class WorkloadsTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         self.assertNotIn(_SECRET, json.dumps(report))
 
+    def test_cron_job_that_cannot_be_scheduled_or_dispatched_is_reported(self):
+        base = {"enabled": True, "last_status": "ok", "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+                "prompt": _SECRET}
+        healthy = {**base, "state": "scheduled", "next_run_at": _iso(3600)}
+        for broken in ({**base, "state": "error", "next_run_at": None, "last_error": _SECRET},
+                       {**healthy, "last_fire_error": {"at": _iso(-120), "detail": _SECRET}}):
+            self._write_cron({"jobs": [healthy, broken]})
+            report = self._inspect()
+            self.assertEqual([item["code"] for item in report["recommendations"]], ["cron_dispatch_or_failures"])
+            self.assertEqual(report["cron"]["counts"]["schedule_errors"] + report["cron"]["counts"]["recent_fire_errors"], 1)
+            self.assertNotIn(_SECRET, json.dumps(report))
+        self._write_cron({"jobs": [healthy, {**healthy, "last_fire_error": {"at": _iso(-90000), "detail": _SECRET}}]})
+        self.assertEqual(self._inspect()["recommendations"], [])
+
     def test_cron_json_and_record_limits_report_incomplete_coverage(self):
         path = self._write_cron({"jobs": [{"enabled": True}, {"enabled": True}]})
         with patch("hermes_evolution.workloads._JOB_LIMIT", 1):
@@ -109,6 +123,7 @@ class WorkloadsTest(unittest.TestCase):
             _task(db, 3, "running", started=_NOW - 22000, heartbeat=_NOW - 4100, claim=_NOW - 4)
             _task(db, 4, "running", started=_NOW - 22000, heartbeat=_NOW - 10, claim=_NOW + 30)
             _task(db, 5, "blocked", failures=2)
+            _task(db, 6, "scheduled")
             db.executemany("INSERT INTO task_runs VALUES (?, ?, ?)", [
                 ("timed_out", _NOW - 50, _SECRET), ("done", _NOW - 30, _SECRET),
                 ("failed", _NOW - 90000, _SECRET), ("blocked", _NOW - 40, _SECRET),
@@ -120,6 +135,7 @@ class WorkloadsTest(unittest.TestCase):
         self.assertEqual(board["status"], "ok")
         self.assertEqual(board["configured_max_in_progress"], 2)
         self.assertEqual(board["configured_max_in_progress_per_profile"], 1)
+        self.assertEqual(board["counts"]["scheduled"], 1)
         self.assertEqual(board["counts"]["ready_with_assignee"], 1)
         self.assertEqual(board["counts"]["ready_without_assignee"], 1)
         self.assertEqual(board["counts"]["expired_claims"], 1)

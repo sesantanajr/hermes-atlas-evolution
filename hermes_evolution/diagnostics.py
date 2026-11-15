@@ -37,7 +37,13 @@ _LOG_SIGNALS = {
     "timeout": re.compile(r"timed?\s*out|timeout|deadline exceeded", re.I),
 }
 _FAILURE_WORD = re.compile(r"failed|error|unavailable", re.I)
-_MEMORY_WORD = re.compile(r"\b(?:memory|recall)\b", re.I)
+# Hermes writes "<level>[ [session]] <logger>: <message>". The logger says which component failed.
+# Free text does not: a file name, a GPU probe or a tool's output can also say "memory" and "failed".
+_LOG_HEAD = re.compile(r"(?:\[[^\]]{0,160}\]\s+)?([A-Za-z_][A-Za-z0-9_.-]{0,160}):\s+(.*)", re.S)
+_TOOL_RESULT = re.compile(r"Tool \S{1,160} returned error\b")
+_MEMORY_SOURCE = re.compile(r"memory|recall", re.I)
+_MEMORY_PROVIDER = re.compile(r".{0,80}\bmemory provider\b", re.I)
+_MEMORY_FAILURE = re.compile(r"fail|error|unavailable|timed?[ -]?out|stuck|abandon", re.I)
 _PLUGIN_WORD = re.compile(r"\b(?:plugin|mcp)\b", re.I)
 _PLUGIN_DEPENDENCY = re.compile(r"ModuleNotFoundError|ImportError|No module named", re.I)
 _PLUGIN_CONTRACT = re.compile(r"TypeError|AttributeError|unexpected keyword argument|unknown hook", re.I)
@@ -236,9 +242,30 @@ def _marker_age(value: object) -> float | None:
     return round(age, 1) if age >= 0 else None
 
 
+def _host_gateway(home: Path) -> tuple[dict, dict] | None:
+    """The record of the root gateway when it lists this named profile among the ones it serves.
+
+    Hermes 0.23.1 multiplexes named profiles through one gateway. A served profile then has no
+    gateway.pid or gateway_state.json of its own: both stay in the home that launched the gateway.
+    """
+    if home.parent.name != "profiles":
+        return None
+    root = home.parent.parent
+    marker = _json_state(root / "gateway_state.json")
+    served = marker.get("served_profiles")
+    if not isinstance(served, list) or home.name not in served:
+        return None
+    return marker, _json_state(root / "gateway.pid")
+
+
 def _gateway(home: Path) -> dict:
     marker = _json_state(home / "gateway_state.json")
     pid_file = _json_state(home / "gateway.pid")
+    hosted = None if marker or pid_file else _host_gateway(home)
+    if hosted:
+        marker, pid_file = hosted
+    # A host gateway keys the platforms of its named profiles as "<profile>:<platform>".
+    own = (lambda key: key.startswith(home.name + ":")) if hosted else (lambda key: ":" not in key)
     process = _process_liveness(pid_file or marker)
     if process != "confirmed" and pid_file and pid_file != marker:
         process_from_marker = _process_liveness(marker)
@@ -252,8 +279,8 @@ def _gateway(home: Path) -> dict:
     )
     platform_states = marker.get("platforms")
     attention = sum(
-        isinstance(value, dict) and value.get("needs_attention") is True
-        for value in platform_states.values()
+        isinstance(key, str) and own(key) and isinstance(value, dict) and value.get("needs_attention") is True
+        for key, value in platform_states.items()
     ) if isinstance(platform_states, dict) else 0
     store = marker.get("session_store")
     store_status = store.get("status") if isinstance(store, dict) else None
@@ -271,6 +298,7 @@ def _gateway(home: Path) -> dict:
         "heartbeat": heartbeat,
         "platforms_needing_attention": attention,
         "reported_session_store": store_status if store_status in ("ok", "unavailable", "retrying") else None,
+        "served_by_host_gateway": bool(hosted),
     }
 
 
@@ -316,18 +344,23 @@ def _log_signals(home: Path) -> dict:
                 continue
             lines_seen.add(line)
             counts[match[2].lower()] += 1
-            for name, pattern in _LOG_SIGNALS.items():
-                if pattern.search(match[3]):
-                    counts[name] += 1
-            if _FAILURE_WORD.search(match[3]):
-                if _MEMORY_WORD.search(match[3]):
-                    counts["memory_failure"] += 1
-                if _PLUGIN_WORD.search(match[3]):
-                    counts["plugin_failure"] += 1
-                    if _PLUGIN_DEPENDENCY.search(match[3]):
-                        counts["plugin_dependency_error"] += 1
-                    if _PLUGIN_CONTRACT.search(match[3]):
-                        counts["plugin_contract_error"] += 1
+            head = _LOG_HEAD.match(match[3])
+            source, message = (head[1], head[2]) if head else ("", match[3])
+            if source == "agent.tool_executor" and _TOOL_RESULT.match(message):
+                # The rest of the line is the tool's own output. The observer already measures tool errors.
+                counts["tool_result_error"] += 1
+                continue
+            for signal, pattern in _LOG_SIGNALS.items():
+                if pattern.search(message):
+                    counts[signal] += 1
+            if _MEMORY_FAILURE.search(message) and (_MEMORY_SOURCE.search(source) or _MEMORY_PROVIDER.match(message)):
+                counts["memory_failure"] += 1
+            if _FAILURE_WORD.search(message) and _PLUGIN_WORD.search(message):
+                counts["plugin_failure"] += 1
+                if _PLUGIN_DEPENDENCY.search(message):
+                    counts["plugin_dependency_error"] += 1
+                if _PLUGIN_CONTRACT.search(message):
+                    counts["plugin_contract_error"] += 1
     return {"window_hours": _LOG_HOURS, "files_sampled": files, "truncated": truncated, "events": dict(counts)}
 
 
