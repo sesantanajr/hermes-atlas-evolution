@@ -54,7 +54,7 @@ class HintIndex:
         if clock - self._loaded < REFRESH_SECONDS:
             return
         self._loaded = clock
-        with experience(self.home, observer=True) as conn:
+        with experience(self.home) as conn:   # once a minute at most; WAL readers never wait for a writer
             self._index = lessons.hint_index(conn, lang=self.lang)
 
     def lookup(self, signature: str, session: str, *, clock: float | None = None) -> tuple[int, str] | None:

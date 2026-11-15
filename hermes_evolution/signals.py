@@ -400,7 +400,7 @@ class TurnTracker:
                int(duration >= self.slow_ms), int(turn.calls > 0), turn.errors, duration, duration, *buckets)
 
         skill_rows = [(utc_day(stamp), skill, int(failed), int(interrupted), int(duration >= self.slow_ms),
-                       int(turn.errors > 0), duration) for skill in sorted(turn.skills)] if turn.surface != "subagent" else []
+                       int(turn.errors > 0), duration) for skill in sorted(turn.skills)] if turn.surface in ("local", "gateway") else []
 
         def write(conn):
             conn.executemany("""INSERT INTO skill_outcome_daily VALUES (?, ?, 1, ?, ?, ?, ?, 0, ?)

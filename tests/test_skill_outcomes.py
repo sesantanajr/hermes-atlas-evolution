@@ -41,7 +41,7 @@ class TrackingTest(Base):
     def test_loaded_skills_are_attached_to_the_open_turn_of_their_session_or_task(self):
         self.turn(day=NOW, skills=("deploy", "notes"), failed=True, tool_error=True)
         self.turn(day=NOW, skills=("deploy",), skill_session=False)          # matched by task only
-        self.turn(day=NOW, skills=("deploy",), platform="cron")              # cron turns count too
+        self.turn(day=NOW, skills=("deploy",), platform="cron")              # compared with interactive turns only
         self.tracker.skill({"action": "loaded", "skill_name": "orphan", "session_id": "nobody", "task_id": "x"})
         self.tracker.skill({"action": "patched", "skill_name": "deploy", "session_id": "s"})
         self.tracker.start({"turn_id": "child", "session_id": "c", "task_id": "c", "platform": "cli",
@@ -52,7 +52,7 @@ class TrackingTest(Base):
             deploy = skill_window(conn, "deploy", utc_day(NOW), utc_day(NOW))
             notes = skill_window(conn, "notes", utc_day(NOW), utc_day(NOW))
             self.assertEqual(skill_window(conn, "orphan", utc_day(NOW), utc_day(NOW))["turns"], 0)
-        self.assertEqual((deploy["turns"], deploy["failed_pct"], deploy["tool_error_turns_pct"]), (3, 33.3, 33.3))
+        self.assertEqual((deploy["turns"], deploy["failed_pct"], deploy["tool_error_turns_pct"]), (2, 50.0, 50.0))
         self.assertEqual((notes["turns"], notes["failed_pct"]), (1, 100.0))
 
     def test_a_correction_is_charged_to_the_skills_of_the_turn_being_corrected(self):
