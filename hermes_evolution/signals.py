@@ -236,13 +236,19 @@ def surface_of(platform) -> str:
     return "gateway"
 
 
+MAX_SKILLS_PER_TURN = 16
+CORRECTION_WINDOW_SECONDS = 1800
+
+
 @dataclass
 class _Turn:
     started: float
     surface: str
+    owners: tuple = ()
     calls: int = 0
     errors: int = 0
     seen: set[bytes] = field(default_factory=set)
+    skills: set[str] = field(default_factory=set)
 
 
 def _key(identifier) -> bytes | None:
@@ -258,7 +264,15 @@ class TurnTracker:
         self.home = home
         self.slow_ms = slow_ms
         self._turns: OrderedDict[bytes, _Turn] = OrderedDict()
+        self._owner: OrderedDict[bytes, bytes] = OrderedDict()   # session or task key -> open turn key
+        self._last: OrderedDict[bytes, tuple[float, tuple[str, ...]]] = OrderedDict()   # session -> finished turn skills
         self._lock = threading.Lock()
+
+    def _forget(self, key: bytes) -> None:
+        turn = self._turns.pop(key, None)
+        for owner in turn.owners if turn else ():
+            if self._owner.get(owner) == key:
+                del self._owner[owner]
 
     def start(self, payload: dict, *, clock: float | None = None) -> None:
         key = _key(payload.get("turn_id"))
@@ -266,12 +280,43 @@ class TurnTracker:
             return
         clock = time.monotonic() if clock is None else clock
         surface = "subagent" if payload.get("parent_session_id") else surface_of(payload.get("platform"))
+        owners = tuple(owner for owner in (_key(payload.get("session_id")), _key(payload.get("task_id"))) if owner)
         with self._lock:
             if key in self._turns:
                 return
-            self._turns[key] = _Turn(clock, surface)
+            self._turns[key] = _Turn(clock, surface, owners)
+            for owner in owners:
+                self._owner[owner] = key
+                self._owner.move_to_end(owner)
             while len(self._turns) > 512 or clock - next(iter(self._turns.values())).started > 6 * 3600:
-                self._turns.popitem(last=False)
+                self._forget(next(iter(self._turns)))
+            while len(self._owner) > 1024:
+                self._owner.popitem(last=False)
+
+    def skill(self, payload: dict) -> None:
+        """Attach a loaded skill to the open turn of its session or task."""
+        if payload.get("action") != "loaded":
+            return
+        skill = label(payload.get("skill_name"), fallback="")
+        if not skill or len(skill) > 80:
+            return
+        with self._lock:
+            for owner in (_key(payload.get("session_id")), _key(payload.get("task_id"))):
+                turn = self._turns.get(self._owner.get(owner)) if owner else None
+                if turn is not None:
+                    if len(turn.skills) < MAX_SKILLS_PER_TURN:
+                        turn.skills.add(skill)
+                    return
+
+    def recent_skills(self, session_id, *, clock: float | None = None) -> tuple[str, ...]:
+        """Skills of the session's last finished turn, when it ended within the correction window."""
+        session = _key(session_id)
+        clock = time.monotonic() if clock is None else clock
+        with self._lock:
+            entry = self._last.get(session) if session else None
+        if entry is None or clock - entry[0] > CORRECTION_WINDOW_SECONDS:
+            return ()
+        return entry[1]
 
     def tool(self, payload: dict) -> None:
         if payload.get("status") not in ("ok", "error", "blocked"):
@@ -293,7 +338,14 @@ class TurnTracker:
             return False
         clock = time.monotonic() if clock is None else clock
         with self._lock:
-            turn = self._turns.pop(key, None)
+            turn = self._turns.get(key)
+            self._forget(key)
+            session = turn.owners[0] if turn is not None and turn.owners else None
+            if session is not None and turn.surface in ("local", "gateway"):
+                self._last[session] = (clock, tuple(sorted(turn.skills)))
+                self._last.move_to_end(session)
+                while len(self._last) > 256:
+                    self._last.popitem(last=False)
         if turn is None or clock < turn.started:
             return False
         duration = min(14_400_000, int((clock - turn.started) * 1000))
@@ -306,7 +358,15 @@ class TurnTracker:
         row = (utc_day(stamp), turn.surface, int(completed), int(failed), int(interrupted),
                int(duration >= self.slow_ms), int(turn.calls > 0), turn.errors, duration, duration, *buckets)
 
+        skill_rows = [(utc_day(stamp), skill, int(failed), int(interrupted), int(duration >= self.slow_ms),
+                       int(turn.errors > 0), duration) for skill in sorted(turn.skills)] if turn.surface != "subagent" else []
+
         def write(conn):
+            conn.executemany("""INSERT INTO skill_outcome_daily VALUES (?, ?, 1, ?, ?, ?, ?, 0, ?)
+                ON CONFLICT DO UPDATE SET turns=turns+1, failed=failed+excluded.failed,
+                  interrupted=interrupted+excluded.interrupted, slow=slow+excluded.slow,
+                  tool_error_turns=tool_error_turns+excluded.tool_error_turns,
+                  duration_ms=duration_ms+excluded.duration_ms""", skill_rows)
             conn.execute("""INSERT INTO turn_daily VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT DO UPDATE SET turns=turns+1, completed=completed+excluded.completed,
                   failed=failed+excluded.failed, interrupted=interrupted+excluded.interrupted,
@@ -375,6 +435,15 @@ def record_feedback(home: Path, kinds, *, now: float | None = None) -> None:
     if rows:
         record(home, lambda conn: conn.executemany("""INSERT INTO feedback_daily VALUES (?, ?, 1)
             ON CONFLICT DO UPDATE SET count=count+1""", rows), now=stamp)
+
+
+def record_skill_correction(home: Path, skills, *, now: float | None = None) -> None:
+    """Count an owner correction against the skills of the turn being corrected."""
+    stamp = time.time() if now is None else now
+    rows = [(utc_day(stamp), skill) for skill in skills if isinstance(skill, str) and skill]
+    if rows:
+        record(home, lambda conn: conn.executemany("""INSERT INTO skill_outcome_daily VALUES (?, ?, 0, 0, 0, 0, 0, 1, 0)
+            ON CONFLICT DO UPDATE SET corrected=corrected+1""", rows), now=stamp)
 
 
 def record_skill_event(home: Path, payload: dict, *, now: float | None = None) -> None:

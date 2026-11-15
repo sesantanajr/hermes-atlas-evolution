@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS skill_daily (
     day TEXT NOT NULL, skill TEXT NOT NULL, action TEXT NOT NULL, count INTEGER NOT NULL,
     PRIMARY KEY (day, skill, action)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS skill_outcome_daily (
+    day TEXT NOT NULL, skill TEXT NOT NULL, turns INTEGER NOT NULL, failed INTEGER NOT NULL,
+    interrupted INTEGER NOT NULL, slow INTEGER NOT NULL, tool_error_turns INTEGER NOT NULL,
+    corrected INTEGER NOT NULL, duration_ms INTEGER NOT NULL, PRIMARY KEY (day, skill)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS review_daily (
     day TEXT NOT NULL, result TEXT NOT NULL, reviews INTEGER NOT NULL, calls INTEGER NOT NULL,
     input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cache_read_tokens INTEGER NOT NULL,
@@ -110,7 +115,8 @@ def record(home: Path, job, *, now: float | None = None) -> None:
 def prune(conn: sqlite3.Connection, *, now: float) -> None:
     """Drop aggregates older than the retention window. Lessons and open proposals are kept."""
     cutoff = day_offset(now, RETENTION_DAYS)
-    for table in ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "review_daily"):
+    for table in ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "review_daily",
+                  "skill_outcome_daily"):
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))
     old = now - RETENTION_DAYS * 86_400
     conn.execute("DELETE FROM failure WHERE last_seen < ? AND signature NOT IN "

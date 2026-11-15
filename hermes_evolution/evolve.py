@@ -14,7 +14,7 @@ from pathlib import Path
 from . import experiments, lessons, logwatch, proposals, signals
 from .i18n import resolve
 from .experience import day_offset, experience, prune, utc_day
-from .skill_health import read_usage, skill_health
+from .skill_health import read_usage, skill_health, skill_outcomes
 
 DEFAULTS = {"lessons": "suggest", "tool_hints": True, "feedback_signals": True, "language": "auto",
             "slow_turn_seconds": 60, "owner_sender_ids": ()}
@@ -73,8 +73,9 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             if record and (record["locked"] or record["pinned"]):
                 conn.execute("UPDATE proposal SET status='applied', updated=? WHERE id=?", (now, row["id"]))
                 closed += 1
+        outcomes = skill_outcomes(conn, start_day=day_offset(now, 13), end_day=utc_day(now))
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
-                                    changes=verdicts)
+                                    changes=verdicts, outcomes=outcomes)
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in created]
     return {"lessons_mode": opts["lessons"], "new_lessons": new_lessons,
             "lesson_effects": [item for item in effects if item["verdict"]],

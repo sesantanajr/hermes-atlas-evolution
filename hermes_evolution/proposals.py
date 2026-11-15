@@ -32,7 +32,8 @@ def _upsert(conn, seen: set, code: str, kind: str, risk: str, subject: str, evid
 
 
 def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None, reviews: dict | None = None,
-            failures: list | None = None, turns: dict | None = None, changes: list | None = None) -> list[dict]:
+            failures: list | None = None, turns: dict | None = None, changes: list | None = None,
+            outcomes: dict | None = None) -> list[dict]:
     """Rebuild open proposals from current evidence. Proposals whose evidence is gone expire."""
     seen: set[str] = set()
     for row in conn.execute("SELECT l.*, COALESCE(f.total,0) AS total, COALESCE(f.sessions,0) AS sessions FROM lesson l "
@@ -58,6 +59,11 @@ def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None,
         elif finding["code"] == "skill_never_used":
             _upsert(conn, seen, f"skill_archive:{skill}", "skill_archive", "low", skill,
                     {"age_days": finding["age_days"]}, f"hermes curator archive {skill}", now)
+    for finding in (outcomes or {}).get("findings", ()):
+        skill = finding["skill"]
+        _upsert(conn, seen, f"skill_outcome:{skill}", "skill_outcome", "low", skill,
+                {"turns": finding["turns"], "worse": finding["worse"], "skill_rates": finding["skill_rates"],
+                 "profile_rates": finding["profile_rates"]}, f"hermes curator ledger --skill {skill}", now)
     if reviews and reviews.get("reviews", 0) >= 10 and (reviews.get("empty_pct") or 0) >= 50:
         _upsert(conn, seen, "review_interval", "review_interval", "medium", "skills.creation_nudge_interval",
                 {"reviews": reviews["reviews"], "empty_pct": reviews["empty_pct"], "model_calls": reviews["model_calls"],
