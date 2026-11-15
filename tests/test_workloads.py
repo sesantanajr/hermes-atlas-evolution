@@ -109,6 +109,7 @@ class WorkloadsTest(unittest.TestCase):
             _task(db, 3, "running", started=_NOW - 22000, heartbeat=_NOW - 4100, claim=_NOW - 4)
             _task(db, 4, "running", started=_NOW - 22000, heartbeat=_NOW - 10, claim=_NOW + 30)
             _task(db, 5, "blocked", failures=2)
+            _task(db, 6, "scheduled")
             db.executemany("INSERT INTO task_runs VALUES (?, ?, ?)", [
                 ("timed_out", _NOW - 50, _SECRET), ("done", _NOW - 30, _SECRET),
                 ("failed", _NOW - 90000, _SECRET), ("blocked", _NOW - 40, _SECRET),
@@ -120,6 +121,7 @@ class WorkloadsTest(unittest.TestCase):
         self.assertEqual(board["status"], "ok")
         self.assertEqual(board["configured_max_in_progress"], 2)
         self.assertEqual(board["configured_max_in_progress_per_profile"], 1)
+        self.assertEqual(board["counts"]["scheduled"], 1)
         self.assertEqual(board["counts"]["ready_with_assignee"], 1)
         self.assertEqual(board["counts"]["ready_without_assignee"], 1)
         self.assertEqual(board["counts"]["expired_claims"], 1)
