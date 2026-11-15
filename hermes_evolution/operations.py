@@ -148,12 +148,20 @@ def observe(home: Path, event: str, info: dict, *, now: float | None = None) -> 
         seconds = info.get("api_duration", info.get("duration"))
         duration = seconds * 1000 if type(seconds) in (int, float) else 0
     duration = int(min(duration, 86_400_000)) if 0 <= duration < math.inf else 0
-    # Only the main API and tool hooks document IDs with per-attempt semantics.
+    # The IDs only guard against one event being delivered twice, such as a plugin registered twice.
     correlation = info.get("tool_call_id" if event == "tool" else "api_request_id")
     turn = info.get("turn_id")
+    identity = (event, turn, correlation)
+    if event == "api_error":
+        # Hermes keeps one api_request_id for every retry of a request. The attempt number and its
+        # end time separate the failed attempts, and are equal for a repeated delivery.
+        retry, ended = info.get("retry_count"), info.get("ended_at")
+        attempt = (retry if type(retry) is int else None,
+                   ended if type(ended) in (int, float) and math.isfinite(ended) else None)
+        identity += attempt if attempt != (None, None) else ()
     with database(home, observer=True) as conn:
         if event != "aux" and all(isinstance(part, str) and 0 < len(part) <= 400 for part in (turn, correlation)):
-            key = hashlib.sha256(repr((event, turn, correlation)).encode()).hexdigest()
+            key = hashlib.sha256(repr(identity).encode()).hexdigest()
             if not conn.execute("INSERT OR IGNORE INTO seen VALUES (?, ?)", (key, _day(now))).rowcount:
                 return
         conn.execute("""
