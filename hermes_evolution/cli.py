@@ -210,7 +210,13 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None):
         result = cycle(home, now=now, runtime_config=runtime_config, config=config, lang=lang)
         return notify_view(result) if args.notify_only else result
     if action == "skills":
-        return skill_health(home, now=now, days=args.days)
+        from .experience import day_offset, utc_day
+        from .skill_health import skill_outcomes
+
+        report = skill_health(home, now=now, days=args.days)
+        with experience(home) as conn:
+            report["outcomes"] = skill_outcomes(conn, start_day=day_offset(now, args.days - 1), end_day=utc_day(now))
+        return report
     if action == "report" and args.schedule_spec:
         from .evolve import digest_schedule_spec
 

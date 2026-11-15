@@ -126,7 +126,8 @@ def register(ctx):
     from .evolve import DEFAULTS, options
     from .experience import experience
     from .hints import HintIndex, attach
-    from .signals import FeedbackSensor, TurnTracker, classify, record_skill_event, record_tool
+    from .signals import (FeedbackSensor, TurnTracker, classify, record_skill_correction, record_skill_event,
+                          record_tool)
 
     home = get_hermes_home()
     research = ResearchTracker(home)
@@ -219,10 +220,11 @@ def register(ctx):
 
     def before_turn(**payload):
         try:
+            if sensor is not None and {"correction", "reask"} & set(sensor.observe(payload)):
+                # The owner is correcting the previous turn: count it against the skills that turn loaded.
+                record_skill_correction(home, turns.recent_skills(payload.get("session_id")))
             research.start(payload)
             turns.start(payload)
-            if sensor is not None:
-                sensor.observe(payload)
             return shared_context(home, payload) if legacy_enabled else None
         except storage_errors:
             return None
@@ -241,6 +243,7 @@ def register(ctx):
 
     def skill_event(**payload):
         try:
+            turns.skill(payload)
             record_skill_event(home, payload)
         except storage_errors:
             _warn_once(failed, "skill")

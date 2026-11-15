@@ -14,7 +14,7 @@ import sqlite3
 from pathlib import Path
 
 from .experience import day_offset, label, utc_day
-from .skill_health import read_ledger
+from .skill_health import compare_skill_windows, read_ledger, skill_window
 
 WINDOW_DAYS = 7
 MIN_AFTER_DAYS = 3
@@ -176,16 +176,26 @@ def evaluate_changes(conn: sqlite3.Connection, ops: sqlite3.Connection | None, *
     rows = conn.execute("""SELECT * FROM change WHERE evaluated IS NULL AND kind != 'lesson' AND at <= ?
         ORDER BY at""", (now - MIN_AFTER_DAYS * 86_400,)).fetchall()
     for row in rows:
-        before = window_metrics(conn, ops, day_offset(row["at"], WINDOW_DAYS), day_offset(row["at"], 1))
-        after_end = min(day_offset(row["at"], -WINDOW_DAYS), today)
-        after = window_metrics(conn, ops, day_offset(row["at"], -1), after_end)
-        outcome = compare(before, after)
+        before_start, before_end = day_offset(row["at"], WINDOW_DAYS), day_offset(row["at"], 1)
+        after_start, after_end = day_offset(row["at"], -1), min(day_offset(row["at"], -WINDOW_DAYS), today)
+        before = window_metrics(conn, ops, before_start, before_end)
+        after = window_metrics(conn, ops, after_start, after_end)
+        if row["kind"] == "skill":
+            # A skill rewrite is judged by the turns that loaded that skill, not by the whole profile.
+            skill_before = skill_window(conn, row["subject"], before_start, before_end)
+            skill_after = skill_window(conn, row["subject"], after_start, after_end)
+            outcome = {**compare_skill_windows(skill_before, skill_after), "skill_turns_before": skill_before["turns"],
+                       "skill_turns_after": skill_after["turns"]}
+        else:
+            outcome = compare(before, after)
         concurrent = conn.execute("SELECT COUNT(*) FROM change WHERE id != ? AND at BETWEEN ? AND ?",
                                   (row["id"], row["at"] - WINDOW_DAYS * 86_400, row["at"] + WINDOW_DAYS * 86_400)).fetchone()[0]
         final = now - row["at"] >= (WINDOW_DAYS + 1) * 86_400
         metrics = {**outcome, "samples_before": {k: before[k] for k in ("turns", "tool_calls", "api_calls")},
                    "samples_after": {k: after[k] for k in ("turns", "tool_calls", "api_calls")},
-                   "concurrent_changes": concurrent, "method": "same_metrics_week_before_vs_week_after_correlational"}
+                   "concurrent_changes": concurrent,
+                   "method": ("turns_that_loaded_the_skill_week_before_vs_week_after" if row["kind"] == "skill"
+                              else "same_metrics_week_before_vs_week_after_correlational")}
         conn.execute("UPDATE change SET verdict=?, metrics=?, evaluated=? WHERE id=?",
                      (outcome["verdict"], json.dumps(metrics), now if final else None, row["id"]))
         results.append({"id": row["id"], "kind": row["kind"], "subject": row["subject"], "final": final, **metrics})
