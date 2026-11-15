@@ -85,7 +85,8 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             conn.execute("DELETE FROM failure_sample")   # nothing waits for a reflector that is off
             reflection = {"status": "off"}
         elif opts["lessons"] == "off":
-            reflection = {"status": "lessons_off"}   # measure-only mode spends nothing on drafts
+            reflector.prune_samples(conn, now=now)   # measure-only mode spends nothing on drafts; excerpts still expire
+            reflection = {"status": "lessons_off"}
         elif not callable(reflect):
             # Run outside Hermes (python -m): no model access here. Excerpts wait for a run inside Hermes and
             # expire after 14 days.
