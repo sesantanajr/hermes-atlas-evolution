@@ -518,7 +518,13 @@ def run_policy(conn: sqlite3.Connection, findings: list[dict], *, now: float, re
     _prune(conn, now)
     conn.execute("DELETE FROM maintenance WHERE active=0 AND feedback IS NULL AND last_seen < ?",
                  (now - 90 * 86400,))
-    current = {item["code"]: item for item in findings}
+    order = {"critical": 0, "error": 0, "warning": 1, "info": 2}
+    current = {}
+    for item in findings:  # One decision per code. A code reported twice keeps its most severe report.
+        known = current.get(item["code"])
+        if known is None or order.get(item.get("severity"), 3) < order.get(known.get("severity"), 3):
+            current[item["code"]] = item
+    findings = list(current.values())
     prior = {row["code"]: dict(row) for row in conn.execute("SELECT * FROM maintenance")}
     changed = []
     for code, item in current.items():
@@ -558,8 +564,7 @@ def run_policy(conn: sqlite3.Connection, findings: list[dict], *, now: float, re
     ))
     if previous != mode:
         changed.append({"code": "evolution_mode", "transition": mode})
-    order = {"critical": 0, "error": 0, "warning": 1, "info": 2}
-    feedback_order = {"helpful": 0, None: 1, "dismissed": 2}
-    findings.sort(key=lambda item: (order.get(item.get("severity"), 3), feedback_order[item["feedback"]],
+    feedback_order = {"helpful": 0, "dismissed": 2}
+    findings.sort(key=lambda item: (order.get(item.get("severity"), 3), feedback_order.get(item["feedback"], 1),
                                     -item["observed_days"], item["code"]))
     return {"mode": mode, "changes": changed, "findings": findings}

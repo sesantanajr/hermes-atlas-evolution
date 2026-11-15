@@ -132,6 +132,19 @@ class EvolutionTest(unittest.TestCase):
             self.assertEqual(run_policy(conn, [], now=NOW + 88200)["mode"], "conservative")
             self.assertEqual(run_policy(conn, [], now=NOW + 88800)["mode"], "normal")
 
+    def test_policy_keeps_one_decision_per_code_and_survives_unknown_feedback(self):
+        reported = [{"code": "disk", "severity": "warning"}, {"code": "disk", "severity": "critical"},
+                    {"code": "queue", "severity": "info"}]
+        with database(self.home) as conn:
+            first = run_policy(conn, [dict(item) for item in reported], now=NOW)
+            self.assertEqual([(item["code"], item["severity"]) for item in first["findings"]],
+                             [("disk", "critical"), ("queue", "info")])
+            self.assertEqual(first["mode"], "conservative")
+            conn.execute("UPDATE maintenance SET feedback='written-by-a-newer-version' WHERE code='queue'")
+            later = run_policy(conn, [dict(item) for item in reported], now=NOW + 86400)
+            self.assertEqual([item["observed_days"] for item in later["findings"]], [2, 2])
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM maintenance").fetchone()[0], 2)
+
     def test_one_auxiliary_finding_per_task_across_models(self):
         for n in range(6):
             observe(self.home, "aux", {"aux_task": "compression", "model": str(n % 2),
