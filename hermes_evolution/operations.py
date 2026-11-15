@@ -126,6 +126,7 @@ class _Observer:
         self.dropped = 0
         self.connection: sqlite3.Connection | None = None
         self.identity = None
+        self.swept = ""
 
     def _file(self):
         try:
@@ -181,7 +182,7 @@ class _Observer:
                     self._release()
                 raise
             try:
-                self._write(None, time.time())  # Events that arrived during the caller's transaction.
+                self._write(None, time.time(), sweep=False)  # Events that arrived during the caller's transaction.
             except (OSError, ValueError, sqlite3.Error):
                 pass
         finally:
@@ -204,7 +205,7 @@ class _Observer:
             else:
                 self.dropped += 1
 
-    def _write(self, job, now: float) -> None:
+    def _write(self, job, now: float, *, sweep: bool = True) -> None:
         with self.guard:
             waiting, dropped = list(self.pending), self.dropped
         jobs = waiting + ([job] if job is not None else [])
@@ -222,6 +223,8 @@ class _Observer:
                 if dropped:
                     connection.execute("""INSERT INTO metric VALUES (?, 'observer', '', '', 'dropped', ?, 0, 0, 0, 0, 0, 0, 0)
                         ON CONFLICT DO UPDATE SET requests=requests+excluded.requests""", (day, dropped))
+                if sweep and day > self.swept:
+                    _prune(connection, now)
                 connection.execute("COMMIT")
             except BaseException:
                 _rollback(connection)
@@ -238,6 +241,8 @@ class _Observer:
             self._settle(waiting, lost=len(waiting))
             raise
         self._settle(waiting, lost=-dropped)
+        if sweep:
+            self.swept = max(self.swept, day)
 
     def _settle(self, written: list, *, lost: int) -> None:
         with self.guard:
@@ -253,7 +258,7 @@ class _Observer:
             try:
                 if self.pending or self.dropped:
                     self._connect().execute(f"PRAGMA busy_timeout={int(wait * 1000)}")
-                    self._write(None, time.time())
+                    self._write(None, time.time(), sweep=False)
             except (OSError, ValueError, sqlite3.Error):
                 pass
             self._release()
@@ -501,14 +506,16 @@ def recommendations(usage: dict) -> list[dict]:
     return proposals
 
 
+def _prune(conn: sqlite3.Connection, now: float) -> None:
+    cutoff = (datetime.fromtimestamp(now, timezone.utc).date() - timedelta(days=RETENTION_DAYS - 1)).isoformat()
+    for table in ("seen", "metric", "research_latency", "native_activity"):
+        conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))
+
+
 def run_policy(conn: sqlite3.Connection, findings: list[dict], *, now: float, recovery_ready: bool = True) -> dict:
     """Advance decisions at most once per UTC day of evidence and report transitions."""
     today = _day(now)
-    cutoff = (datetime.fromtimestamp(now, timezone.utc).date() - timedelta(days=RETENTION_DAYS - 1)).isoformat()
-    conn.execute("DELETE FROM seen WHERE day < ?", (cutoff,))
-    conn.execute("DELETE FROM metric WHERE day < ?", (cutoff,))
-    conn.execute("DELETE FROM research_latency WHERE day < ?", (cutoff,))
-    conn.execute("DELETE FROM native_activity WHERE day < ?", (cutoff,))
+    _prune(conn, now)
     conn.execute("DELETE FROM maintenance WHERE active=0 AND feedback IS NULL AND last_seen < ?",
                  (now - 90 * 86400,))
     current = {item["code"]: item for item in findings}
