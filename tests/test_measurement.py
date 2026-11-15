@@ -13,6 +13,8 @@ from hermes_evolution.report import build, markdown
 from hermes_evolution.signals import TurnTracker, record_tool
 from hermes_evolution.skill_health import read_ledger, read_usage, skill_health
 
+from hermes_evolution.operations import close_observers  # noqa: E402
+
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400
 
@@ -29,6 +31,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
+        self.addCleanup(close_observers)   # Windows cannot remove a database that is still open.
         self.home = Path(folder.name)
         (self.home / "skills").mkdir()
         (self.home / "logs").mkdir()

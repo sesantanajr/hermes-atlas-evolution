@@ -14,7 +14,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from . import lessons
-from .experience import experience
+from .experience import experience, record
 
 REFRESH_SECONDS = 60
 MAX_HINTS_PER_SESSION = 6
@@ -75,5 +75,4 @@ class HintIndex:
             return entry
 
     def count(self, lesson_id: int) -> None:
-        with experience(self.home, observer=True) as conn:
-            lessons.count_hint(conn, lesson_id)
+        record(self.home, lambda conn: lessons.count_hint(conn, lesson_id))

@@ -17,6 +17,7 @@ from pathlib import Path
 
 BUCKETS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 RETENTION_DAYS = 35
+SCHEMA_VERSION = 4
 RECOVERY_SPACING_SECONDS = 300
 OBSERVER_BUSY_SECONDS = 0.035
 _OBSERVER_LOCK_SECONDS = 0.05
@@ -68,11 +69,14 @@ def _open(path: Path, timeout: float, **options) -> sqlite3.Connection:
     try:
         connection.row_factory = sqlite3.Row
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version in (0, 1, 2):
+        if version in (0, 1, 2, 3):
             if version == 0:
                 connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript("BEGIN IMMEDIATE;" + SCHEMA + "PRAGMA user_version=3; COMMIT;")
-        elif version != 3:
+            from .experience import SCHEMA as experience_schema   # version 4 adds the evolution loop tables
+
+            connection.executescript("BEGIN IMMEDIATE;" + SCHEMA + experience_schema
+                                     + f"PRAGMA user_version={SCHEMA_VERSION}; COMMIT;")
+        elif version != SCHEMA_VERSION:
             raise ValueError(f"Unsupported Evolution database schema {version}")
         connection.execute("PRAGMA foreign_keys=ON")
     except BaseException:
@@ -513,6 +517,9 @@ def _prune(conn: sqlite3.Connection, now: float) -> None:
     cutoff = (datetime.fromtimestamp(now, timezone.utc).date() - timedelta(days=RETENTION_DAYS - 1)).isoformat()
     for table in ("seen", "metric", "research_latency", "native_activity"):
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))
+    from .experience import prune
+
+    prune(conn, now=now)
 
 
 def run_policy(conn: sqlite3.Connection, findings: list[dict], *, now: float, recovery_ready: bool = True) -> dict:
