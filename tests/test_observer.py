@@ -115,6 +115,15 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual([(item["code"], item["count"]) for item in recommendations(report)],
                          [("observer_dropped_events", 12)])
 
+    def test_retention_applies_without_a_scheduled_tick(self):
+        observe(self.home, "tool", tool("old"), now=NOW - 40 * 86400)
+        observe(self.home, "tool", tool("kept"), now=NOW - 34 * 86400)
+        observe(self.home, "tool", tool("new"), now=NOW)
+        with database(self.home) as conn:
+            days = [row[0] for row in conn.execute("SELECT day FROM metric ORDER BY day")]
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0], 2)
+        self.assertEqual(days, ["2026-10-12", "2026-11-15"])
+
     def test_replaced_database_and_forked_process_get_a_new_connection(self):
         observe(self.home, "tool", tool("first"), now=NOW)
         first = operations._observer(self.home).connection
