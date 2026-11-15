@@ -44,7 +44,8 @@ PLUGIN_ID = "hermes-evolution"
 NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "language"),
                "tool_hints": ("evolution", "tool_hints"), "feedback_signals": ("evolution", "feedback_signals"),
                "slow_turn_seconds": ("evolution", "slow_turn_seconds"),
-               "owner_sender_ids": ("evolution", "owner_sender_ids"), "agent_tools": ("agent_advice",)}
+               "owner_sender_ids": ("evolution", "owner_sender_ids"), "agent_tools": ("agent_advice",),
+               "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit")}
 
 
 def native_settings(runtime_config) -> dict:
@@ -227,7 +228,7 @@ def _memory(conn, args):
     return store.audit(scope)
 
 
-def _evolution(args, home: Path, *, now: float, runtime_config=None):
+def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=None):
     """Commands of the evolution loop: lessons, skills, proposals, experiments and the digest."""
     from . import experiments, lessons, proposals
     from .evolve import cycle, notify_view, options
@@ -240,7 +241,7 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None):
     opts = options(config, runtime_config)
     lang = getattr(args, "lang", None) or opts["language"]
     if action == "learn":
-        result = cycle(home, now=now, runtime_config=runtime_config, config=config, lang=lang)
+        result = cycle(home, now=now, runtime_config=runtime_config, config=config, lang=lang, reflect=reflect)
         return notify_view(result) if args.notify_only else result
     if action == "skills":
         from .experience import day_offset, utc_day
@@ -283,7 +284,7 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None):
         return proposals.decide(conn, args.id, task, now=now, note=args.note)
 
 
-def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=None):
+def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=None, reflect=None):
     """Run the evolution pass from `ops tick`, at most once an hour. Returns its notification view."""
     from .evolve import cycle, notify_view
     from .experience import experience
@@ -297,17 +298,17 @@ def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=Non
         if 0 <= now - last < CYCLE_INTERVAL_SECONDS:
             return None
         conn.execute("INSERT OR REPLACE INTO cursor VALUES ('last_cycle', ?)", (repr(now),))
-    return notify_view(cycle(home, now=now, runtime_config=runtime_config, config=config))
+    return notify_view(cycle(home, now=now, runtime_config=runtime_config, config=config, reflect=reflect))
 
 
 def _report(args, home: Path, *, running_version=None, provider=None, now: float, runtime_config=None,
-            hermes_source=None, kanban_home=None, supplemental=(), health_override=None):
+            hermes_source=None, kanban_home=None, supplemental=(), health_override=None, reflect=None):
     action = args.evolution_action
     if action in EVOLUTION_ACTIONS:
-        return _evolution(args, home, now=now, runtime_config=runtime_config)
+        return _evolution(args, home, now=now, runtime_config=runtime_config, reflect=reflect)
     if action == "ops":
         return _ops(args, home, now=now, running_version=running_version, provider=provider,
-                    runtime_config=runtime_config, source=hermes_source, kanban_home=kanban_home)
+                    runtime_config=runtime_config, source=hermes_source, kanban_home=kanban_home, reflect=reflect)
     health = None
     if action in {"health", "tick"}:
         health = health_override or snapshot(home, upstream_tag=args.upstream_tag, provider=provider,
@@ -388,7 +389,7 @@ def _rollback_trial(home: Path, now: float) -> dict:
     return result
 
 
-def _ops(args, home: Path, *, now, running_version, provider, runtime_config, source, kanban_home):
+def _ops(args, home: Path, *, now, running_version, provider, runtime_config, source, kanban_home, reflect=None):
     from .advisory import plan
     from .inventory import scan_inventory
     from .learning import record_feedback, retrospective, review as adaptive_review
@@ -485,7 +486,7 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
                                     days=args.days, changes_only=False)
     maintenance = _report(args_for_tick, home, now=now, health_override=health, supplemental=context_actions)
     try:
-        evolution = _scheduled_cycle(home, config, now=now, runtime_config=runtime_config)
+        evolution = _scheduled_cycle(home, config, now=now, runtime_config=runtime_config, reflect=reflect)
     except (OSError, ValueError, sqlite3.Error):
         evolution = None   # the learning pass never blocks operational supervision
     if args.notify_only:
@@ -514,7 +515,7 @@ def _output_language(args, home: Path, runtime_config) -> str:
 
 
 def execute(args, home: Path, *, running_version=None, provider=None, runtime_config=None, hermes_source=None,
-            kanban_home=None) -> None:
+            kanban_home=None, reflect=None) -> None:
     from .i18n import localize, text
 
     now = time.time()
@@ -523,7 +524,8 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
         args.lang = language
     try:
         result = _report(args, home, running_version=running_version, provider=provider, now=now,
-                         runtime_config=runtime_config, hermes_source=hermes_source, kanban_home=kanban_home)
+                         runtime_config=runtime_config, hermes_source=hermes_source, kanban_home=kanban_home,
+                         reflect=reflect)
     except (OSError, ValueError, sqlite3.Error) as error:
         recovery = ""
         if args.evolution_action == "ops" and args.ops_action == "tick":

@@ -184,7 +184,7 @@ def register(ctx):
         try:
             failure = classify(payload.get("tool_name"), payload.get("status"), payload.get("error_message"),
                                payload.get("result"), payload.get("args"))
-            record_tool(home, payload, failure=failure)
+            record_tool(home, payload, failure=failure, sample=evolution["reflector"])
             call = payload.get("tool_call_id")
             if failure and isinstance(call, str) and len(call) <= 400:
                 with recent_lock:
@@ -267,6 +267,21 @@ def register(ctx):
     def command(raw_args, *, source=None, platform=""):
         return slash(home, raw_args, source=source, platform=platform)
 
+    reflect = None
+    if evolution["reflector"] and callable(getattr(ctx, "register_auxiliary_task", None)):
+        from .reflector import host_caller
+
+        try:
+            ctx.register_auxiliary_task(
+                "evolution_reflector", display_name="Atlas Evolution reflector",
+                description="Drafts lessons from recurring tool failures. Each draft waits for operator approval.",
+                inherit_from="compression")
+            reflect = host_caller(ctx)
+        except Exception:   # an older host without plugin LLM access: the loop runs without drafts
+            from logging import getLogger
+
+            getLogger(__name__).warning("Atlas Evolution reflector is unavailable on this Hermes build")
+
     def operator_cli(args):
         import hermes_cli.config as hermes_config
 
@@ -278,7 +293,8 @@ def register(ctx):
         # loaded its own package, so the attribute is read from there; None simply skips the update check.
         version = getattr(sys.modules.get("hermes_cli"), "__version__", None)
         execute(args, home, running_version=version if isinstance(version, str) else None, provider=provider,
-                runtime_config=config, hermes_source=source, kanban_home=get_default_hermes_root(home=home))
+                runtime_config=config, hermes_source=source, kanban_home=get_default_hermes_root(home=home),
+                reflect=reflect)
 
     ctx.register_hook("post_tool_call", after_tool)
     ctx.register_hook("pre_llm_call", before_turn)

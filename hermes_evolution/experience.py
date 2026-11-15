@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS skill_outcome_daily (
     interrupted INTEGER NOT NULL, slow INTEGER NOT NULL, tool_error_turns INTEGER NOT NULL,
     corrected INTEGER NOT NULL, duration_ms INTEGER NOT NULL, PRIMARY KEY (day, skill)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS failure_sample (
+    signature TEXT PRIMARY KEY, excerpt TEXT NOT NULL, updated REAL NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS review_daily (
     day TEXT NOT NULL, result TEXT NOT NULL, reviews INTEGER NOT NULL, calls INTEGER NOT NULL,
     input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cache_read_tokens INTEGER NOT NULL,

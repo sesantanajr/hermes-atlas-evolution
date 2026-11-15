@@ -194,7 +194,8 @@ def _session_tag(session_id) -> str:
     return ""
 
 
-def record_tool(home: Path, payload: dict, *, now: float | None = None, failure: dict | None = None) -> dict | None:
+def record_tool(home: Path, payload: dict, *, now: float | None = None, failure: dict | None = None,
+                sample: bool = False) -> dict | None:
     """Count one finished tool call and, for a failure, its signature. Returns the classification."""
     status = payload.get("status")
     if status not in ("ok", "error", "blocked"):
@@ -210,6 +211,12 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     row = (today, failure["tool"] if failure else tool, int(status == "error"), int(status == "blocked"), duration)
     seen = ((failure["signature"], failure["tool"], failure["klass"], failure["hint"], now, now,
              _session_tag(payload.get("session_id"))) if failure else None)
+    excerpt = ""
+    if sample and failure:
+        from .reflector import UNTEMPLATED, scrub
+
+        if failure["klass"] in UNTEMPLATED:   # only the reflector reads it, and only when it is switched on
+            excerpt = scrub(_error_text(payload.get("error_message"), payload.get("result"))[0])
 
     def write(conn):
         conn.execute("""INSERT INTO tool_daily VALUES (?, ?, 1, ?, ?, ?)
@@ -221,6 +228,10 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
                   sessions=sessions + (last_session != excluded.last_session), last_session=excluded.last_session""", seen)
             conn.execute("""INSERT INTO failure_daily VALUES (?, ?, 1)
                 ON CONFLICT DO UPDATE SET count=count+1""", (today, seen[0]))
+            if excerpt:
+                from .reflector import keep_sample
+
+                keep_sample(conn, seen[0], seen[2], excerpt, now)
 
     record(home, write, now=now)
     return failure
