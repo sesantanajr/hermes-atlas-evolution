@@ -27,7 +27,9 @@ _RUN_WINDOW = 86400
 _UPCOMING_SECONDS = 900
 _PAST_DUE_SECONDS = 300
 _FIRE_CLAIM_SECONDS = 300
-_TASK_STATES = ("triage", "todo", "ready", "running", "review", "blocked", "done", "archived", "failed", "cancelled")
+# Hermes 0.23.1 columns (hermes_cli.kanban_workflow) plus names used by earlier boards.
+_TASK_STATES = ("triage", "todo", "scheduled", "ready", "running", "review", "blocked", "done", "archived",
+                "failed", "cancelled")
 
 
 def _mapping(value) -> Mapping:
