@@ -28,10 +28,13 @@ body:
       options:
         - Signals and failure classes
         - Lessons and delivery to the agent
+        - Reflector
+        - Skills by outcome
         - Measurement and verdicts
         - Proposals and digest
         - Operations supervisor
         - Hermes integration or packaging
+        - Language (English or Portuguese text)
         - Documentation
     validations:
       required: true
