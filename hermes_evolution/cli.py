@@ -39,6 +39,39 @@ def settings(home: Path) -> dict:
     return result
 
 
+PLUGIN_ID = "hermes-evolution"
+# Keys the Hermes settings form edits (plugin.yaml config_schema) -> where they live in settings.json.
+NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "language"),
+               "tool_hints": ("evolution", "tool_hints"), "feedback_signals": ("evolution", "feedback_signals"),
+               "slow_turn_seconds": ("evolution", "slow_turn_seconds"),
+               "owner_sender_ids": ("evolution", "owner_sender_ids"), "agent_tools": ("agent_advice",)}
+
+
+def native_settings(runtime_config) -> dict:
+    """`plugins.entries.hermes-evolution.settings` from the Hermes configuration, when present."""
+    plugins = runtime_config.get("plugins") if isinstance(runtime_config, dict) else None
+    entries = plugins.get("entries") if isinstance(plugins, dict) else None
+    entry = entries.get(PLUGIN_ID) if isinstance(entries, dict) else None
+    values = entry.get("settings") if isinstance(entry, dict) else None
+    return values if isinstance(values, dict) else {}
+
+
+def effective_settings(home: Path, runtime_config=None) -> dict:
+    """settings.json with the values set through Hermes' plugin settings on top (Hermes wins per key)."""
+    result = settings(home)
+    for key, path in NATIVE_KEYS.items():
+        value = native_settings(runtime_config).get(key)
+        if value is None:
+            continue
+        target = result
+        for part in path[:-1]:
+            nested = target.get(part)
+            target[part] = nested = dict(nested) if isinstance(nested, dict) else {}
+            target = nested
+        target[path[-1]] = value
+    return result
+
+
 def _accept_lang_everywhere(parser: argparse.ArgumentParser, help_text: str) -> None:
     """Let `--lang` follow any subcommand too. A subcommand without it would reject the option."""
     for action in parser._actions:   # argparse exposes subparsers only through this attribute
@@ -203,7 +236,7 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None):
     from .skill_health import skill_health
 
     action = args.evolution_action
-    config = settings(home)
+    config = effective_settings(home, runtime_config)
     opts = options(config, runtime_config)
     lang = getattr(args, "lang", None) or opts["language"]
     if action == "learn":
@@ -382,7 +415,7 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
         return schedule_spec(home, every_minutes=args.every_minutes, upstream_tag=args.upstream_tag)
     if action == "rollback":
         return _rollback_trial(home, now)
-    config = settings(home)
+    config = effective_settings(home, runtime_config)
     if action == "handoff":
         return create_handoff(home, config, kind=args.kind, subject=args.subject, now=now, lang=args.lang)
     if action == "similar":
@@ -474,7 +507,7 @@ def _output_language(args, home: Path, runtime_config) -> str:
     if chosen:
         return chosen
     try:
-        configured = (settings(home).get("evolution") or {}).get("language")
+        configured = (effective_settings(home, runtime_config).get("evolution") or {}).get("language")
     except (OSError, ValueError):
         configured = None
     return resolve(configured if isinstance(configured, str) else None, runtime_config)

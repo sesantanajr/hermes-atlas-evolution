@@ -31,3 +31,43 @@ provides_hooks:
   - post_compaction
   - post_curator_run
   - on_kanban_worker_exited
+config_schema:
+  lessons:
+    type: str
+    choices: ["off", suggest, auto]
+    default: suggest
+    label: Lessons
+    description: >-
+      off: measure only. suggest: lessons wait for your approval before the agent sees them.
+      auto: recurring failures become active lessons and ineffective ones are retired automatically.
+  language:
+    type: str
+    choices: [auto, en, pt]
+    default: auto
+    label: Language
+    description: Language of lessons, messages and the digest. auto follows HERMES_LANGUAGE and display.language.
+  tool_hints:
+    type: bool
+    default: true
+    label: Lesson on failure
+    description: Add the matching lesson to a failing tool result, once per session.
+  feedback_signals:
+    type: bool
+    default: true
+    label: Owner signals
+    description: Count your corrections, repeated questions and thanks as numbers. No message text is stored.
+  agent_tools:
+    type: bool
+    default: false
+    label: Agent tools
+    description: Offer atlas_evolution_plan and atlas_evolution_lessons to the agent. Proposed lessons stay quarantined.
+  slow_turn_seconds:
+    type: int
+    default: 60
+    label: Slow turn (seconds)
+    description: A turn longer than this counts as slow. From 5 to 3600.
+  owner_sender_ids:
+    type: list
+    default: []
+    label: Owner sender ids
+    description: Gateway sender ids whose corrections count as yours (local CLI, TUI and Desktop always count).

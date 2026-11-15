@@ -180,3 +180,38 @@ class PluginLoopTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NativeSettingsTest(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.addCleanup(close_observers)
+        self.home = Path(folder.name)
+
+    def test_values_from_the_hermes_settings_form_override_the_settings_file(self):
+        from hermes_evolution.cli import effective_settings
+
+        (self.home / "evolution").mkdir()
+        (self.home / "evolution" / "settings.json").write_text(json.dumps(
+            {"evolution": {"lessons": "off", "language": "en", "slow_turn_seconds": 30}, "agent_advice": False,
+             "rates_usd_per_million": {}}))
+        runtime = {"plugins": {"entries": {"hermes-evolution": {"settings": {
+            "lessons": "auto", "agent_tools": True, "language": None, "owner_sender_ids": ["u1"]}}}}}
+        merged = effective_settings(self.home, runtime)
+        self.assertEqual(merged["evolution"]["lessons"], "auto")
+        self.assertEqual(merged["evolution"]["language"], "en")          # unset in Hermes: the file value stays
+        self.assertEqual(merged["evolution"]["slow_turn_seconds"], 30)
+        self.assertEqual(merged["evolution"]["owner_sender_ids"], ["u1"])
+        self.assertTrue(merged["agent_advice"])
+        self.assertEqual(effective_settings(self.home, None)["evolution"]["lessons"], "off")
+        self.assertEqual(effective_settings(self.home, {"plugins": "garbage"})["evolution"]["lessons"], "off")
+
+    def test_manifest_schema_matches_the_keys_the_code_reads(self):
+        from hermes_evolution.cli import NATIVE_KEYS
+
+        manifest = (Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(encoding="utf-8")
+        schema = manifest.split("config_schema:", 1)[1]
+        declared = {line.strip()[:-1] for line in schema.splitlines() if line.startswith("  ") and not line.startswith("   ")
+                    and line.strip().endswith(":")}
+        self.assertEqual(declared, set(NATIVE_KEYS))
