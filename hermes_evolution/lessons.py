@@ -148,6 +148,16 @@ def add_custom(conn: sqlite3.Connection, text: str, *, tool: str, origin: str, n
     return cursor.lastrowid
 
 
+def add_reflected(conn: sqlite3.Connection, *, signature: str, tool: str, klass: str, hint: str, text: str,
+                  now: float) -> int:
+    """Store a reflector draft bound to its failure. It stays quarantined until an operator approves it."""
+    if not valid_text(text):
+        raise ValueError(f"A lesson is one sentence of 12 to {TEXT_LIMIT} characters without secrets")
+    cursor = conn.execute("""INSERT INTO lesson(signature, tool, klass, hint, origin, status, text, created, updated)
+        VALUES (?, ?, ?, ?, 'reflector', 'quarantined', ?, ?, ?)""", (signature, tool, klass, hint, text, now, now))
+    return cursor.lastrowid
+
+
 def set_status(conn: sqlite3.Connection, lesson_id: int, status: str, *, now: float) -> dict:
     if status not in ("active", "retired"):
         raise ValueError("A lesson can be activated or retired")

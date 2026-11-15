@@ -11,13 +11,13 @@ import os
 import sqlite3
 from pathlib import Path
 
-from . import experiments, lessons, logwatch, proposals, signals
+from . import experiments, lessons, logwatch, proposals, reflector, signals
 from .i18n import resolve
 from .experience import day_offset, experience, prune, utc_day
 from .skill_health import read_usage, skill_health, skill_outcomes
 
 DEFAULTS = {"lessons": "suggest", "tool_hints": True, "feedback_signals": True, "language": "auto",
-            "slow_turn_seconds": 60, "owner_sender_ids": ()}
+            "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": False, "reflector_daily_limit": 6}
 
 
 def options(config, runtime_config=None) -> dict:
@@ -33,14 +33,20 @@ def options(config, runtime_config=None) -> dict:
     if not isinstance(owners, (list, tuple)) or len(owners) > 20 or any(
             not isinstance(item, str) or not 0 < len(item) <= 200 for item in owners):
         raise ValueError("evolution.owner_sender_ids must list up to 20 sender ids")
+    daily = raw.get("reflector_daily_limit", DEFAULTS["reflector_daily_limit"])
+    if type(daily) is not int or not 1 <= daily <= 50:
+        raise ValueError("evolution.reflector_daily_limit must be an integer from 1 to 50")
     return {"lessons": mode, "tool_hints": raw.get("tool_hints", True) is not False,
+            "reflector": raw.get("reflector") is True, "reflector_daily_limit": daily,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
             "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
             "owner_sender_ids": tuple(owners)}
 
 
-def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None) -> dict:
-    """Run one evolution pass and return what changed. `lang` overrides the configured language of the output."""
+def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None) -> dict:
+    """Run one evolution pass and return what changed. `lang` overrides the configured language of the output.
+
+    `reflect(instructions, text)` asks a model for a lesson draft; it is used only when the reflector is on."""
     from .operations import database
 
     opts = options(config or {}, runtime_config)
@@ -55,6 +61,12 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             if not step.get("more"):
                 break
         created = lessons.derive(conn, now=now, mode=opts["lessons"])
+        if opts["reflector"] and callable(reflect):
+            reflection = reflector.reflect(conn, reflect, now=now, lang=opts["language"],
+                                           daily_limit=opts["reflector_daily_limit"])
+        else:
+            conn.execute("DELETE FROM failure_sample")   # nothing waits for a reflector that is off
+            reflection = {"status": "off" if not opts["reflector"] else "unavailable_without_hermes_llm"}
         effects = lessons.evaluate(conn, now=now, mode=opts["lessons"])
         skills = skill_health(home, now=now, days=7)
         detected = experiments.detect_changes(conn, home, runtime_config, now=now)
@@ -77,7 +89,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
                                     changes=verdicts, outcomes=outcomes)
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in created]
-    return {"lessons_mode": opts["lessons"], "new_lessons": new_lessons,
+    return {"lessons_mode": opts["lessons"], "new_lessons": new_lessons, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
             "proposals_closed_as_applied": closed, "open_proposals": pending}
@@ -88,10 +100,11 @@ def notify_view(result: dict) -> dict | None:
     regressions = [item for item in result["change_verdicts"] if item["verdict"] == "regressed"]
     retired = [item for item in result["lesson_effects"] if item["retired"]]
     urgent = [item for item in result["open_proposals"] if item["risk"] == "high"]
-    if not (result["new_lessons"] or regressions or retired or urgent):
+    drafts = result.get("reflector", {}).get("drafted") or []
+    if not (result["new_lessons"] or regressions or retired or urgent or drafts):
         return None
-    return {"new_lessons": result["new_lessons"], "regressions": regressions, "lessons_retired": retired,
-            "high_risk_proposals": urgent}
+    return {"new_lessons": result["new_lessons"], "reflector_drafts": drafts, "regressions": regressions,
+            "lessons_retired": retired, "high_risk_proposals": urgent}
 
 
 def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: int = 7, lang: str = "en",
