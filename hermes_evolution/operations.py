@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS native_activity (
 
 def _database_path(home: Path) -> Path:
     folder = home / "evolution"
-    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    folder.mkdir(mode=0o700, exist_ok=True)  # A mistyped profile path must fail, not become a new tree.
     path = folder / "evolution.sqlite3"
     # Create the file with private POSIX permissions before SQLite creates sidecars.
     if not path.exists():
