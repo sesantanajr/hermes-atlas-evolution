@@ -74,7 +74,7 @@ def scrub(text: str) -> str:
     try:
         from agent.redact import redact_sensitive_text
 
-        excerpt = redact_sensitive_text(excerpt)
+        excerpt = redact_sensitive_text(excerpt, force=True)   # even when the profile turned redaction off
     except Exception:   # outside Hermes, or a redactor failure: the patterns below still apply
         pass
     for pattern, replacement in _SCRUB:
