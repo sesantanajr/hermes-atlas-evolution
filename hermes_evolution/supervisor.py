@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS baseline (day TEXT PRIMARY KEY, average_prompt_tokens
 @contextmanager
 def _journal(home: Path):
     folder = home / "evolution"
-    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    folder.mkdir(mode=0o700, exist_ok=True)  # A mistyped profile path must fail, not become a new tree.
     path = folder / "supervisor.sqlite3"
     try:
         path.touch(mode=0o600, exist_ok=False)

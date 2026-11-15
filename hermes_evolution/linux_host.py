@@ -198,13 +198,22 @@ def _disk(home: Path) -> dict | None:
 
 
 def _gateway(process_root: Path, home: Path) -> tuple[Path | None, dict]:
+    def recorded(marker):
+        return isinstance(marker, dict) and marker.get("kind") == "hermes-gateway"
+
     try:
         marker = json.loads(_read(home / "gateway.pid", 4096) or "null")
-        if not isinstance(marker, dict) or marker.get("kind") != "hermes-gateway":
+        if not recorded(marker):
             marker = json.loads(_read(home / "gateway_state.json", 65_536) or "null")
+        if not recorded(marker) and home.parent.name == "profiles":
+            # Hermes 0.23.1 serves named profiles from the root gateway and keeps its record there.
+            marker = json.loads(_read(home.parent.parent / "gateway_state.json", 65_536) or "null")
+            served = marker.get("served_profiles") if recorded(marker) else None
+            if not isinstance(served, list) or home.name not in served:
+                marker = None
     except (ValueError, RecursionError):
         return None, {"status": "unverified"}
-    if not isinstance(marker, dict) or marker.get("kind") != "hermes-gateway":
+    if not recorded(marker):
         return None, {"status": "unverified"}
     pid, start = marker.get("pid"), marker.get("start_time")
     if type(pid) is not int or not 0 < pid < 2**31 or type(start) is not int:

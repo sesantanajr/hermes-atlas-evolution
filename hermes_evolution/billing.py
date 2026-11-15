@@ -70,8 +70,9 @@ def _accumulate(rollup: dict, counts: tuple, costs: tuple) -> None:
 
 def _with_cache(rollup: dict) -> dict:
     prompt = rollup["input_tokens"] + rollup["cache_read_tokens"] + rollup["cache_write_tokens"]
+    costs = {name: None if rollup[name] is None else round(rollup[name], 8) for name in _COST_FIELDS}
     return {
-        **rollup, "prompt_tokens": prompt,
+        **rollup, **costs, "prompt_tokens": prompt,
         "cache_read_share": round(rollup["cache_read_tokens"] / prompt, 4) if prompt else None,
     }
 

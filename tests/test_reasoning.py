@@ -30,6 +30,14 @@ class ReasoningTests(unittest.TestCase):
         self.assertEqual(result["confidence"], "medium")
         self.assertNotIn("pause_optional_context", result["action_ids"])
 
+    def test_timed_out_tools_are_failed_attempts(self):
+        usage = {"groups": [{"lane": "tool", "outcome": "ok", "requests": 7},
+                            {"lane": "tool", "outcome": "timeout", "requests": 3},
+                            {"lane": "tool", "outcome": "cancelled", "requests": 40}]}
+        finding = self.by_code(usage=usage)["tool_failure_pattern"]
+        evidence = {item["signal"]: item["value"] for item in finding["evidence"]}
+        self.assertEqual((evidence["tools.executed_attempts"], evidence["tools.failed_attempts"]), (10, 3))
+
     def test_native_write_capacity_connects_inode_exhaustion_and_logs(self):
         health = {"logs": {"events": {"storage_io": 2, "database_locked": 0}}}
         host = {"disk": {"total_bytes": 100, "free_bytes": 75, "inodes_available": 1, "inodes_total": 100}}

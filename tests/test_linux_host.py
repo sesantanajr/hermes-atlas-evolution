@@ -94,6 +94,22 @@ class LinuxHostTest(unittest.TestCase):
         self.assertEqual(report["processes"]["gateway"], {"status": "unverified"})
         self.assertIsNone(report["cgroup"])
 
+    def test_named_profile_is_measured_in_the_cgroup_of_the_root_gateway_that_serves_it(self):
+        record = {"kind": "hermes-gateway", "pid": 42, "start_time": 77, "served_profiles": ["default", "work"]}
+        self.write("root/gateway_state.json", json.dumps(record))
+        self.write("proc/42/stat", "42 (agent process) S " + "0 " * 18 + "77 0 0\n")
+        self.write("proc/42/status", "VmRSS: 1360 kB\n")
+        self.write("proc/42/cgroup", "0::/gateway\n")
+        self.write("proc/self/cgroup", "0::/shell\n")
+        self.write("sys/fs/cgroup/gateway/memory.current", "500\n")
+        self.write("sys/fs/cgroup/shell/memory.current", "9\n")
+        for name, scope, measured in (("work", "gateway", 500), ("idle", "collector", 9)):
+            self.home = self.base / "root" / "profiles" / name
+            self.home.mkdir(parents=True)
+            report = self.scan()
+            self.assertEqual((report["cgroup"]["scope"], report["cgroup"]["memory_current_bytes"]), (scope, measured))
+            self.assertEqual(report["processes"]["gateway"]["status"], "verified" if scope == "gateway" else "unverified")
+
     def test_inventory_is_bounded_and_reports_only_known_roots(self):
         self.write("profile/cache/file-one", "abc")
         self.write("profile/cache/file-two", "de")
