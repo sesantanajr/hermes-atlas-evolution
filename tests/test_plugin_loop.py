@@ -140,6 +140,26 @@ class PluginLoopTest(unittest.TestCase):
             item = lessons.listing(conn)[0]
             self.assertEqual((item["shown_in_sessions"], item["hints_given"]), (1, 1))
 
+    def test_a_new_session_gets_the_playbook_while_another_process_holds_the_write_lock(self):
+        import sqlite3
+
+        self.settings(evolution={"lessons": "auto", "language": "en"})
+        with experience(self.home) as conn:
+            lessons.add_custom(conn, "Validate PowerShell with PSScriptAnalyzer before delivering it.", tool="terminal",
+                               origin="operator", now=1.0, active=True)
+        context = self.plugin()
+        writer = sqlite3.connect(self.home / "evolution" / "evolution.sqlite3", timeout=0)
+        writer.execute("BEGIN IMMEDIATE")   # e.g. `hermes evolution learn` running in another process
+        try:
+            text = context.sections["atlas-evolution.playbook"]["content"]({"session_id": "busy"})
+        finally:
+            writer.execute("ROLLBACK")
+            writer.close()
+        self.assertIn("PSScriptAnalyzer", text)
+        close_observers()   # the queued "shown" counter is written once the database is free
+        with experience(self.home) as conn:
+            self.assertEqual(lessons.listing(conn)[0]["shown_in_sessions"], 1)
+
     def test_lessons_off_registers_no_injection_surface(self):
         self.settings(evolution={"lessons": "off"})
         context = self.plugin()
@@ -172,11 +192,54 @@ class PluginLoopTest(unittest.TestCase):
         self.assertTrue(tool["check"]())
         self.assertEqual(json.loads(tool["handler"]({"action": "search"})), {"lessons": []})
 
-    def test_invalid_settings_fall_back_to_safe_defaults(self):
+    def test_invalid_settings_never_switch_on_what_the_operator_switched_off(self):
         self.settings(evolution={"lessons": "everything", "slow_turn_seconds": "fast"})
-        context = self.plugin()
-        self.assertIn("atlas-evolution.playbook", context.sections)   # 'suggest': shown only after approval
+        with self.assertLogs("hermes_evolution.integration", level="WARNING"):
+            context = self.plugin()
+        self.assertEqual(context.sections, {})                    # an invalid mode means off
+        self.assertNotIn("transform_tool_result", context.hooks)
+        self.settings(evolution={"lessons": "off", "slow_turn_seconds": 120.5})   # another key is wrong
+        self.assertEqual(self.plugin().sections, {})
+        self.settings(evolution={"lessons": "auto", "slow_turn_seconds": 120.0})  # a form may store whole floats
+        self.assertIn("atlas-evolution.playbook", self.plugin().sections)
+        (self.home / "evolution" / "settings.json").write_text("{not json")
+        self.assertEqual(self.plugin().sections, {})              # unreadable file: measure only
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NativeSettingsTest(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.addCleanup(close_observers)
+        self.home = Path(folder.name)
+
+    def test_values_from_the_hermes_settings_form_override_the_settings_file(self):
+        from hermes_evolution.cli import effective_settings
+
+        (self.home / "evolution").mkdir()
+        (self.home / "evolution" / "settings.json").write_text(json.dumps(
+            {"evolution": {"lessons": "off", "language": "en", "slow_turn_seconds": 30}, "agent_advice": False,
+             "rates_usd_per_million": {}}))
+        runtime = {"plugins": {"entries": {"hermes-evolution": {"settings": {
+            "lessons": "auto", "agent_tools": True, "language": None, "owner_sender_ids": ["u1"]}}}}}
+        merged = effective_settings(self.home, runtime)
+        self.assertEqual(merged["evolution"]["lessons"], "auto")
+        self.assertEqual(merged["evolution"]["language"], "en")          # unset in Hermes: the file value stays
+        self.assertEqual(merged["evolution"]["slow_turn_seconds"], 30)
+        self.assertEqual(merged["evolution"]["owner_sender_ids"], ["u1"])
+        self.assertTrue(merged["agent_advice"])
+        self.assertEqual(effective_settings(self.home, None)["evolution"]["lessons"], "off")
+        self.assertEqual(effective_settings(self.home, {"plugins": "garbage"})["evolution"]["lessons"], "off")
+
+    def test_manifest_schema_matches_the_keys_the_code_reads(self):
+        from hermes_evolution.cli import NATIVE_KEYS
+
+        manifest = (Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(encoding="utf-8")
+        schema = manifest.split("config_schema:", 1)[1]
+        declared = {line.strip()[:-1] for line in schema.splitlines() if line.startswith("  ") and not line.startswith("   ")
+                    and line.strip().endswith(":")}
+        self.assertEqual(declared, set(NATIVE_KEYS))

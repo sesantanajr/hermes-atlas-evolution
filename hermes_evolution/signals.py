@@ -33,13 +33,17 @@ _RULES = (
         r"|requires an? '(?P<hint2>[A-Za-z_][\w.-]{0,47})'"
         r"|the following arguments are required:[ \t]*-{0,2}(?P<hint3>[A-Za-z_][\w-]{0,47})", re.I)),
     ("missing_argument", re.compile(r"missing required argument", re.I)),   # the argument was not named
+    # Hermes' approval gate: the user denied, nobody answered, no approver can be reached, or the context
+    # cannot approve. Hermes tells the agent not to reach the same outcome another way; no lesson may differ.
+    ("approval_refused", re.compile(
+        r"User denied|has NOT consented|Silence is not consent|timed out without user response|"
+        r"Failed to send (?:\w+ )?approval request|set approvals\.\w+: approve|nobody (?:can|could) approve", re.I)),
     ("locked_resource", re.compile(r"is locked by the user|locked by (?:the )?operator", re.I)),
     ("review_precondition", re.compile(r"Refusing background curator patch|has not been loaded in this review", re.I)),
     ("edit_precondition", re.compile(
         r"Refusing to overwrite|has not seen its|must (?:be )?(?:read|view(?:ed)?)\b.{0,40}\bbefore", re.I)),
     ("edit_mismatch", re.compile(
         r"Could not find a match for old_string|Found \d+ matches for old_string|No edit was applied", re.I)),
-    ("approval_timeout", re.compile(r"timed out without user response|approval (?:request )?timed out", re.I)),
     ("blocked_by_policy", re.compile(r"\bBLOCKED:|flagged as dangerous|blocked by (?:policy|security)|not permitted by policy", re.I)),
     ("rate_limited", re.compile(r"rate.?limit|too many requests|\b429\b|quota exceeded", re.I)),
     ("timeout", re.compile(r"timed out|\btimeout\b|deadline exceeded", re.I)),
@@ -65,7 +69,8 @@ _TARGET_TOOL = re.compile(r"tool_call to '(?P<tool>[A-Za-z0-9_][\w.:-]{0,95})'")
 CLASSES = tuple(dict.fromkeys(name for name, _ in _RULES)) + ("command_failed", "other")
 
 _CORRECTION = re.compile(
-    r"^\W{0,3}(?:n[ãa]o[,.! ]|n[ãa]o era|n[ãa]o foi isso|n[ãa]o [ée] isso|errado|incorreto|est[áa] errado|de novo\b|"
+    r"^\W{0,3}(?:n[ãa]o[,.!]|n[ãa]o era isso|n[ãa]o foi isso|n[ãa]o [ée] isso|n[ãa]o funcionou|errado|incorreto|"
+    r"est[áa] errado|ainda (?:est[áa] )?errado|de novo[,.!]|"
     r"novamente\b|refa[çc]a|corrija|voc[êe] (?:errou|n[ãa]o entendeu)|no[,.!] |nope\b|wrong\b|that'?s (?:not|wrong)|"
     r"not what i|incorrect\b|try again|redo\b|you (?:missed|misunderstood)|still (?:wrong|not|broken))", re.I)
 _POSITIVE = re.compile(
@@ -103,18 +108,18 @@ def _clean_hint(value) -> str:
     redact = _native_redactor()
     if redact is not None:
         try:
-            if redact(value) != value:
+            if redact(value, force=True) != value:   # force: redact even when the profile turned redaction off
                 return ""
         except Exception:   # a redactor failure must not let the value through
             return ""
     return value
 
 
-def _error_text(error_message, result) -> tuple[str, int | None]:
-    parts = []
-    exit_code = None
+def _error_parts(error_message, result) -> tuple[str, str, int | None]:
+    """(text Hermes or the tool wrote about the error, command output, exit code)."""
+    errors, output, exit_code = [], "", None
     if isinstance(error_message, str):
-        parts.append(error_message[:2000])
+        errors.append(error_message[:2000])
     if isinstance(result, str) and len(result) <= _RESULT_LIMIT and result.lstrip()[:1] == "{":
         try:
             data = json.loads(result)
@@ -124,16 +129,31 @@ def _error_text(error_message, result) -> tuple[str, int | None]:
             for key in ("error", "hint", "approval", "message"):
                 value = data.get(key)
                 if isinstance(value, str):
-                    parts.append(value[:2000])
-            output = data.get("output")
-            if isinstance(output, str):
-                parts.append(output[-1500:])
+                    errors.append(value[:2000])
+            value = data.get("output")
+            if isinstance(value, str):
+                output = value[-1500:]
             code = data.get("exit_code")
             if type(code) is int and -255 <= code <= 255:
                 exit_code = code
     elif isinstance(result, str):
-        parts.append(result[:1500])
-    return "\n".join(parts), exit_code
+        output = result[:1500]
+    return "\n".join(errors), output, exit_code
+
+
+def _error_text(error_message, result) -> tuple[str, int | None]:
+    errors, output, exit_code = _error_parts(error_message, result)
+    return "\n".join(part for part in (errors, output) if part), exit_code
+
+
+_OUTPUT_HINT = re.compile(r"[a-z_][a-z0-9_+-]{0,31}\Z")
+_MODULE_HINT = re.compile(r"[a-z_][a-z0-9_]{0,31}(?:\.[a-z_][a-z0-9_]{0,31}){0,3}\Z")
+
+
+def _output_hint(value, *, module: bool = False) -> str:
+    """A hint read from command output is anyone's text: keep only lower-case command or module names."""
+    value = _clean_hint(value)
+    return value if (_MODULE_HINT if module else _OUTPUT_HINT).fullmatch(value) else ""
 
 
 def effective_tool(tool_name, args=None) -> str:
@@ -158,17 +178,27 @@ def classify(tool_name, status, error_message=None, result=None, args=None) -> d
     if status not in ("error", "blocked"):
         return None
     tool = effective_tool(tool_name, args)
-    text, exit_code = _error_text(error_message, result)
-    target = _TARGET_TOOL.search(text)
-    if target:
-        tool = label(target.group("tool"), fallback=tool)
+    errors, output, exit_code = _error_parts(error_message, result)
+    text = "\n".join(part for part in (errors, output) if part)
+    if tool == "tool_call":   # the wrapper did not say which tool; Hermes names it in its own error text
+        target = _TARGET_TOOL.search(errors)
+        if target and len(target.group("tool")) <= 96:
+            named = _clean_hint(target.group("tool")) if len(target.group("tool")) <= 32 else label(target.group("tool"))
+            tool = named or tool
     klass, hint = "", ""
-    for name, pattern in _RULES:
-        match = pattern.search(text)
-        if match:
-            klass = name
-            groups = match.groupdict()
-            hint = next((_clean_hint(groups[key]) for key in ("hint", "hint2", "hint3") if groups.get(key)), "")
+    for source, from_output in ((errors, False), (output, True)):
+        for name, pattern in _RULES:
+            match = pattern.search(source) if source else None
+            if match:
+                klass = name
+                groups = match.groupdict()
+                key = next((key for key in ("hint", "hint2", "hint3") if groups.get(key)), None)
+                if key and from_output:
+                    hint = _output_hint(groups[key], module=name == "missing_dependency" and key == "hint2")
+                elif key:
+                    hint = _clean_hint(groups[key])
+                break
+        if klass:
             break
     if klass == "code_exception":
         found = _EXCEPTION.findall(text)
@@ -194,7 +224,8 @@ def _session_tag(session_id) -> str:
     return ""
 
 
-def record_tool(home: Path, payload: dict, *, now: float | None = None, failure: dict | None = None) -> dict | None:
+def record_tool(home: Path, payload: dict, *, now: float | None = None, failure: dict | None = None,
+                sample: bool = False) -> dict | None:
     """Count one finished tool call and, for a failure, its signature. Returns the classification."""
     status = payload.get("status")
     if status not in ("ok", "error", "blocked"):
@@ -210,6 +241,12 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     row = (today, failure["tool"] if failure else tool, int(status == "error"), int(status == "blocked"), duration)
     seen = ((failure["signature"], failure["tool"], failure["klass"], failure["hint"], now, now,
              _session_tag(payload.get("session_id"))) if failure else None)
+    excerpt = ""
+    if sample and failure:
+        from .reflector import UNTEMPLATED, scrub
+
+        if failure["klass"] in UNTEMPLATED:   # only the reflector reads it, and only when it is switched on
+            excerpt = scrub(_error_text(payload.get("error_message"), payload.get("result"))[0])
 
     def write(conn):
         conn.execute("""INSERT INTO tool_daily VALUES (?, ?, 1, ?, ?, ?)
@@ -221,6 +258,10 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
                   sessions=sessions + (last_session != excluded.last_session), last_session=excluded.last_session""", seen)
             conn.execute("""INSERT INTO failure_daily VALUES (?, ?, 1)
                 ON CONFLICT DO UPDATE SET count=count+1""", (today, seen[0]))
+            if excerpt:
+                from .reflector import keep_sample
+
+                keep_sample(conn, seen[0], seen[2], excerpt, now)
 
     record(home, write, now=now)
     return failure
@@ -236,13 +277,19 @@ def surface_of(platform) -> str:
     return "gateway"
 
 
+MAX_SKILLS_PER_TURN = 16
+CORRECTION_WINDOW_SECONDS = 1800
+
+
 @dataclass
 class _Turn:
     started: float
     surface: str
+    owners: tuple = ()
     calls: int = 0
     errors: int = 0
     seen: set[bytes] = field(default_factory=set)
+    skills: set[str] = field(default_factory=set)
 
 
 def _key(identifier) -> bytes | None:
@@ -258,7 +305,15 @@ class TurnTracker:
         self.home = home
         self.slow_ms = slow_ms
         self._turns: OrderedDict[bytes, _Turn] = OrderedDict()
+        self._owner: OrderedDict[bytes, bytes] = OrderedDict()   # session or task key -> open turn key
+        self._last: OrderedDict[bytes, tuple[float, tuple[str, ...]]] = OrderedDict()   # session -> finished turn skills
         self._lock = threading.Lock()
+
+    def _forget(self, key: bytes) -> None:
+        turn = self._turns.pop(key, None)
+        for owner in turn.owners if turn else ():
+            if self._owner.get(owner) == key:
+                del self._owner[owner]
 
     def start(self, payload: dict, *, clock: float | None = None) -> None:
         key = _key(payload.get("turn_id"))
@@ -266,12 +321,43 @@ class TurnTracker:
             return
         clock = time.monotonic() if clock is None else clock
         surface = "subagent" if payload.get("parent_session_id") else surface_of(payload.get("platform"))
+        owners = tuple(owner for owner in (_key(payload.get("session_id")), _key(payload.get("task_id"))) if owner)
         with self._lock:
             if key in self._turns:
                 return
-            self._turns[key] = _Turn(clock, surface)
+            self._turns[key] = _Turn(clock, surface, owners)
+            for owner in owners:
+                self._owner[owner] = key
+                self._owner.move_to_end(owner)
             while len(self._turns) > 512 or clock - next(iter(self._turns.values())).started > 6 * 3600:
-                self._turns.popitem(last=False)
+                self._forget(next(iter(self._turns)))
+            while len(self._owner) > 1024:
+                self._owner.popitem(last=False)
+
+    def skill(self, payload: dict) -> None:
+        """Attach a loaded skill to the open turn of its session or task."""
+        if payload.get("action") != "loaded":
+            return
+        skill = label(payload.get("skill_name"), fallback="")
+        if not skill or len(skill) > 80:
+            return
+        with self._lock:
+            for owner in (_key(payload.get("session_id")), _key(payload.get("task_id"))):
+                turn = self._turns.get(self._owner.get(owner)) if owner else None
+                if turn is not None:
+                    if len(turn.skills) < MAX_SKILLS_PER_TURN:
+                        turn.skills.add(skill)
+                    return
+
+    def recent_skills(self, session_id, *, clock: float | None = None) -> tuple[str, ...]:
+        """Skills of the session's last finished turn, when it ended within the correction window."""
+        session = _key(session_id)
+        clock = time.monotonic() if clock is None else clock
+        with self._lock:
+            entry = self._last.get(session) if session else None
+        if entry is None or clock - entry[0] > CORRECTION_WINDOW_SECONDS:
+            return ()
+        return entry[1]
 
     def tool(self, payload: dict) -> None:
         if payload.get("status") not in ("ok", "error", "blocked"):
@@ -293,7 +379,14 @@ class TurnTracker:
             return False
         clock = time.monotonic() if clock is None else clock
         with self._lock:
-            turn = self._turns.pop(key, None)
+            turn = self._turns.get(key)
+            self._forget(key)
+            session = turn.owners[0] if turn is not None and turn.owners else None
+            if session is not None and turn.surface in ("local", "gateway"):
+                self._last[session] = (clock, tuple(sorted(turn.skills)))
+                self._last.move_to_end(session)
+                while len(self._last) > 256:
+                    self._last.popitem(last=False)
         if turn is None or clock < turn.started:
             return False
         duration = min(14_400_000, int((clock - turn.started) * 1000))
@@ -306,7 +399,15 @@ class TurnTracker:
         row = (utc_day(stamp), turn.surface, int(completed), int(failed), int(interrupted),
                int(duration >= self.slow_ms), int(turn.calls > 0), turn.errors, duration, duration, *buckets)
 
+        skill_rows = [(utc_day(stamp), skill, int(failed), int(interrupted), int(duration >= self.slow_ms),
+                       int(turn.errors > 0), duration) for skill in sorted(turn.skills)] if turn.surface != "subagent" else []
+
         def write(conn):
+            conn.executemany("""INSERT INTO skill_outcome_daily VALUES (?, ?, 1, ?, ?, ?, ?, 0, ?)
+                ON CONFLICT DO UPDATE SET turns=turns+1, failed=failed+excluded.failed,
+                  interrupted=interrupted+excluded.interrupted, slow=slow+excluded.slow,
+                  tool_error_turns=tool_error_turns+excluded.tool_error_turns,
+                  duration_ms=duration_ms+excluded.duration_ms""", skill_rows)
             conn.execute("""INSERT INTO turn_daily VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT DO UPDATE SET turns=turns+1, completed=completed+excluded.completed,
                   failed=failed+excluded.failed, interrupted=interrupted+excluded.interrupted,
@@ -375,6 +476,15 @@ def record_feedback(home: Path, kinds, *, now: float | None = None) -> None:
     if rows:
         record(home, lambda conn: conn.executemany("""INSERT INTO feedback_daily VALUES (?, ?, 1)
             ON CONFLICT DO UPDATE SET count=count+1""", rows), now=stamp)
+
+
+def record_skill_correction(home: Path, skills, *, now: float | None = None) -> None:
+    """Count an owner correction against the skills of the turn being corrected."""
+    stamp = time.time() if now is None else now
+    rows = [(utc_day(stamp), skill) for skill in skills if isinstance(skill, str) and skill]
+    if rows:
+        record(home, lambda conn: conn.executemany("""INSERT INTO skill_outcome_daily VALUES (?, ?, 0, 0, 0, 0, 0, 1, 0)
+            ON CONFLICT DO UPDATE SET corrected=corrected+1""", rows), now=stamp)
 
 
 def record_skill_event(home: Path, payload: dict, *, now: float | None = None) -> None:

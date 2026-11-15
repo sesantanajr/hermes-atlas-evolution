@@ -11,48 +11,67 @@ import os
 import sqlite3
 from pathlib import Path
 
-from . import experiments, lessons, logwatch, proposals, signals
+from . import experiments, lessons, logwatch, proposals, reflector, signals
+from .i18n import resolve
 from .experience import day_offset, experience, prune, utc_day
-from .skill_health import read_usage, skill_health
+from .skill_health import read_usage, skill_health, skill_outcomes
 
 DEFAULTS = {"lessons": "suggest", "tool_hints": True, "feedback_signals": True, "language": "auto",
-            "slow_turn_seconds": 60, "owner_sender_ids": ()}
+            "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": False, "reflector_daily_limit": 6}
 
 
-def _language(value) -> str:
-    if value in lessons.LANGUAGES:
-        return value
-    for name in ("LC_ALL", "LC_MESSAGES", "LANG"):
-        locale = os.environ.get(name, "")
-        if locale:
-            return "pt" if locale.lower().startswith("pt") else "en"
-    return "en"
+def _whole(value):
+    """An integer, also when a settings form stored it as 60.0."""
+    if type(value) is float and value.is_integer():
+        return int(value)
+    return value
 
 
-def options(config) -> dict:
-    """Validated evolution settings. Unknown or malformed values fall back to the safe default."""
+def options(config, runtime_config=None, *, strict: bool = True, problems: list | None = None) -> dict:
+    """Validated evolution settings.
+
+    strict (the CLI): an invalid value is an error the operator sees. Lenient (inside the gateway): each
+    invalid value falls back on its own, and an invalid `lessons` value means `off`, so a typo can never
+    switch on what the operator switched off."""
     raw = config.get("evolution") if isinstance(config, dict) and isinstance(config.get("evolution"), dict) else {}
-    mode = raw.get("lessons", DEFAULTS["lessons"])
-    if mode not in lessons.MODES:
-        raise ValueError("evolution.lessons must be off, suggest or auto")
-    slow = raw.get("slow_turn_seconds", DEFAULTS["slow_turn_seconds"])
-    if type(slow) is not int or not 5 <= slow <= 3600:
-        raise ValueError("evolution.slow_turn_seconds must be an integer from 5 to 3600")
-    owners = raw.get("owner_sender_ids", ())
-    if not isinstance(owners, (list, tuple)) or len(owners) > 20 or any(
-            not isinstance(item, str) or not 0 < len(item) <= 200 for item in owners):
-        raise ValueError("evolution.owner_sender_ids must list up to 20 sender ids")
+    problems = [] if problems is None else problems
+
+    def checked(key, value, valid, message, fallback):
+        if valid(value):
+            return value
+        if strict:
+            raise ValueError(message)
+        problems.append(key)
+        return fallback
+
+    mode = checked("lessons", raw.get("lessons", DEFAULTS["lessons"]), lambda value: value in lessons.MODES,
+                   "evolution.lessons must be off, suggest or auto", "off")
+    slow = checked("slow_turn_seconds", _whole(raw.get("slow_turn_seconds", DEFAULTS["slow_turn_seconds"])),
+                   lambda value: type(value) is int and 5 <= value <= 3600,
+                   "evolution.slow_turn_seconds must be an integer from 5 to 3600", DEFAULTS["slow_turn_seconds"])
+    owners = checked("owner_sender_ids", raw.get("owner_sender_ids", ()),
+                     lambda value: isinstance(value, (list, tuple)) and len(value) <= 20 and all(
+                         isinstance(item, str) and 0 < len(item) <= 200 for item in value),
+                     "evolution.owner_sender_ids must list up to 20 sender ids", ())
+    daily = checked("reflector_daily_limit", _whole(raw.get("reflector_daily_limit", DEFAULTS["reflector_daily_limit"])),
+                    lambda value: type(value) is int and 1 <= value <= 50,
+                    "evolution.reflector_daily_limit must be an integer from 1 to 50", DEFAULTS["reflector_daily_limit"])
     return {"lessons": mode, "tool_hints": raw.get("tool_hints", True) is not False,
+            "reflector": raw.get("reflector") is True, "reflector_daily_limit": daily,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
-            "language": _language(raw.get("language", "auto")), "slow_turn_seconds": slow,
+            "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
             "owner_sender_ids": tuple(owners)}
 
 
-def cycle(home: Path, *, now: float, runtime_config=None, config=None) -> dict:
-    """Run one evolution pass and return what changed."""
+def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None) -> dict:
+    """Run one evolution pass and return what changed. `lang` overrides the configured language of the output.
+
+    `reflect(instructions, text)` asks a model for a lesson draft; it is used only when the reflector is on."""
     from .operations import database
 
-    opts = options(config or {})
+    opts = options(config or {}, runtime_config)
+    if lang in lessons.LANGUAGES:
+        opts["language"] = lang
     with experience(home) as conn:
         prune(conn, now=now)
         ingested = 0
@@ -62,6 +81,12 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None) -> dict:
             if not step.get("more"):
                 break
         created = lessons.derive(conn, now=now, mode=opts["lessons"])
+        if opts["reflector"] and callable(reflect):
+            reflection = reflector.reflect(conn, reflect, now=now, lang=opts["language"],
+                                           daily_limit=opts["reflector_daily_limit"])
+        else:
+            conn.execute("DELETE FROM failure_sample")   # nothing waits for a reflector that is off
+            reflection = {"status": "off" if not opts["reflector"] else "unavailable_without_hermes_llm"}
         effects = lessons.evaluate(conn, now=now, mode=opts["lessons"])
         skills = skill_health(home, now=now, days=7)
         detected = experiments.detect_changes(conn, home, runtime_config, now=now)
@@ -72,7 +97,8 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None) -> dict:
             verdicts = experiments.evaluate_changes(conn, None, now=now)
         failures = signals.failure_summary(conn, now=now, days=7)
         turns = signals.turn_summary(conn, now=now, days=7, surfaces=("local", "gateway"))
-        reviews = logwatch.review_summary(conn, start_day=day_offset(now, 7), end_day=utc_day(now + 86_400))
+        start_day, end_day = logwatch.local_days(now, 7)
+        reviews = logwatch.review_summary(conn, start_day=start_day, end_day=end_day)
         usage = read_usage(home)
         closed = 0
         for row in conn.execute("SELECT id, subject FROM proposal WHERE status='approved' AND kind='skill_lock'").fetchall():
@@ -80,24 +106,27 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None) -> dict:
             if record and (record["locked"] or record["pinned"]):
                 conn.execute("UPDATE proposal SET status='applied', updated=? WHERE id=?", (now, row["id"]))
                 closed += 1
+        outcomes = skill_outcomes(conn, start_day=day_offset(now, 13), end_day=utc_day(now))
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
-                                    changes=verdicts)
+                                    changes=verdicts, outcomes=outcomes, lang=opts["language"])
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in created]
-    return {"lessons_mode": opts["lessons"], "new_lessons": new_lessons,
+    return {"now": now, "lessons_mode": opts["lessons"], "new_lessons": new_lessons, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
             "proposals_closed_as_applied": closed, "open_proposals": pending}
 
 
 def notify_view(result: dict) -> dict | None:
-    """What a quiet scheduled run should print: only new lessons, regressions and high-risk proposals."""
-    regressions = [item for item in result["change_verdicts"] if item["verdict"] == "regressed"]
+    """What a quiet scheduled run should print, once: new lessons and drafts, regressions whose verdict became
+    final in this run, lessons retired in this run, and high-risk proposals opened in this run."""
+    regressions = [item for item in result["change_verdicts"] if item["verdict"] == "regressed" and item["final"]]
     retired = [item for item in result["lesson_effects"] if item["retired"]]
-    urgent = [item for item in result["open_proposals"] if item["risk"] == "high"]
-    if not (result["new_lessons"] or regressions or retired or urgent):
+    urgent = [item for item in result["open_proposals"] if item["risk"] == "high" and item["created"] == result.get("now")]
+    drafts = result.get("reflector", {}).get("drafted") or []
+    if not (result["new_lessons"] or regressions or retired or urgent or drafts):
         return None
-    return {"new_lessons": result["new_lessons"], "regressions": regressions, "lessons_retired": retired,
-            "high_risk_proposals": urgent}
+    return {"new_lessons": result["new_lessons"], "reflector_drafts": drafts, "regressions": regressions,
+            "lessons_retired": retired, "high_risk_proposals": urgent}
 
 
 def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: int = 7, lang: str = "en",

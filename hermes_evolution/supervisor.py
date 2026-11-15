@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .learning import action_cooldowns, record_outcome
-from .linux_actions import KINDS, SystemPolicy, Systemd, attribute, memory_application_ready, memory_trial_safe, pair_sample
+from .linux_actions import SystemPolicy, attribute, memory_application_ready, memory_trial_safe, pair_sample
 from .operations import _day
 
 LEASE_SECONDS = 900

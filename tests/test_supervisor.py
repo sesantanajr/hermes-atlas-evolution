@@ -266,7 +266,9 @@ class SupervisorTest(unittest.TestCase):
         tracker.finish(turn, clock=134, now=2000)
         tracker.finish(turn, clock=135, now=2000)
         with database(self.home) as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)   # 4 adds the evolution loop tables
+            from hermes_evolution.operations import SCHEMA_VERSION
+
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM lesson").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT value FROM control WHERE key='legacy'").fetchone()[0], "true")
             measured = research_summary(conn, now=2000, days=1)

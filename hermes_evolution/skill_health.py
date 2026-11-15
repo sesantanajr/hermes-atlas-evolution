@@ -185,3 +185,77 @@ def skill_health(home: Path, *, now: float, days: int = 7, limit: int = 20) -> d
             "rewrites_by_actor": dict(actors), "skills_rewritten": len(by_skill),
             "top": [item for item in skills if item["rewrites"] or item["unreused_rewrites"] >= UNREUSED_PATCHES][:limit],
             "findings": findings, "basis": "hermes_skill_usage_sidecar_and_curator_ledger_metadata"}
+
+
+# ── outcome of the turns that loaded each skill ──────────────────────────────────────────────────
+MIN_SKILL_TURNS = 8
+_RATES = (("failed", 5.0), ("interrupted", 10.0), ("tool_error_turns", 10.0), ("corrected", 5.0), ("slow", 15.0))
+
+
+def _rate_row(row) -> dict:
+    turns = row["turns"]
+    rates = {f"{name}_pct": round(100 * row[name] / turns, 1) if turns else None for name, _ in _RATES}
+    return {"turns": turns, **rates, "mean_ms": row["duration_ms"] // turns if turns else None}
+
+
+def skill_window(conn, skill: str, start_day: str, end_day: str) -> dict:
+    row = conn.execute("""SELECT COALESCE(SUM(turns),0) AS turns, COALESCE(SUM(failed),0) AS failed,
+          COALESCE(SUM(interrupted),0) AS interrupted, COALESCE(SUM(slow),0) AS slow,
+          COALESCE(SUM(tool_error_turns),0) AS tool_error_turns, COALESCE(SUM(corrected),0) AS corrected,
+          COALESCE(SUM(duration_ms),0) AS duration_ms FROM skill_outcome_daily
+        WHERE skill=? AND day BETWEEN ? AND ?""", (skill, start_day, end_day)).fetchone()
+    return _rate_row(row)
+
+
+def compare_skill_windows(before: dict, after: dict, *, min_turns: int = 5) -> dict:
+    """Verdict for a skill change from the turns that loaded the skill before and after it."""
+    if before["turns"] < min_turns or after["turns"] < min_turns:
+        return {"verdict": "insufficient_data", "better": [], "worse": [], "metrics": {}}
+    better, worse, metrics = [], [], {}
+    for name, margin in _RATES:
+        key = f"{name}_pct"
+        old, new = before[key], after[key]
+        metrics[key] = {"before": old, "after": new}
+        if new - old >= margin and new >= 1.25 * old:
+            worse.append(key)
+        elif old - new >= margin and new <= 0.8 * old:
+            better.append(key)
+    verdict = "mixed" if worse and better else "regressed" if worse else "improved" if better else "neutral"
+    return {"verdict": verdict, "better": better, "worse": worse, "metrics": metrics}
+
+
+def skill_outcomes(conn, *, start_day: str, end_day: str, min_turns: int = MIN_SKILL_TURNS, limit: int = 20) -> dict:
+    """How the turns that loaded each skill went, next to the profile's interactive turns as a whole."""
+    profile = conn.execute("""SELECT COALESCE(SUM(turns),0) AS turns, COALESCE(SUM(failed),0) AS failed,
+          COALESCE(SUM(interrupted),0) AS interrupted, COALESCE(SUM(slow),0) AS slow,
+          COALESCE(SUM(duration_ms),0) AS duration_ms FROM turn_daily
+        WHERE day BETWEEN ? AND ? AND surface IN ('local','gateway')""", (start_day, end_day)).fetchone()
+    corrections = conn.execute("""SELECT COALESCE(SUM(count),0) FROM feedback_daily
+        WHERE day BETWEEN ? AND ? AND kind IN ('correction','reask')""", (start_day, end_day)).fetchone()[0]
+    turns = profile["turns"]
+    baseline = {"turns": turns,
+                "failed_pct": round(100 * profile["failed"] / turns, 1) if turns else None,
+                "interrupted_pct": round(100 * profile["interrupted"] / turns, 1) if turns else None,
+                "slow_pct": round(100 * profile["slow"] / turns, 1) if turns else None,
+                "corrected_pct": round(100 * corrections / turns, 1) if turns else None}
+    rows = conn.execute("""SELECT skill, SUM(turns) AS turns, SUM(failed) AS failed, SUM(interrupted) AS interrupted,
+          SUM(slow) AS slow, SUM(tool_error_turns) AS tool_error_turns, SUM(corrected) AS corrected,
+          SUM(duration_ms) AS duration_ms FROM skill_outcome_daily WHERE day BETWEEN ? AND ?
+        GROUP BY skill HAVING SUM(turns) > 0 ORDER BY SUM(turns) DESC, skill LIMIT 500""", (start_day, end_day)).fetchall()
+    skills, findings = [], []
+    for row in rows:
+        item = {"skill": row["skill"], **_rate_row(row)}
+        skills.append(item)
+        if item["turns"] < min_turns or not turns:
+            continue
+        worse = [name for name, margin in (("failed", 5.0), ("interrupted", 10.0), ("corrected", 5.0))
+                 if baseline[f"{name}_pct"] is not None
+                 and item[f"{name}_pct"] - baseline[f"{name}_pct"] >= margin
+                 and item[f"{name}_pct"] >= 1.5 * max(baseline[f"{name}_pct"], 1.0)]
+        if worse:
+            findings.append({"code": "skill_underperforming", "skill": row["skill"], "severity": "warning",
+                             "turns": item["turns"], "worse": [f"{name}_pct" for name in worse],
+                             "skill_rates": {f"{name}_pct": item[f"{name}_pct"] for name in worse},
+                             "profile_rates": {f"{name}_pct": baseline[f"{name}_pct"] for name in worse}})
+    return {"profile": baseline, "skills": skills[:limit], "measured_skills": len(skills), "findings": findings,
+            "min_turns": min_turns, "basis": "turns_that_loaded_the_skill_versus_all_interactive_turns"}
