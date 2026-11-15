@@ -88,6 +88,7 @@ _TEXT = {
         "vs": "Versus the previous {days} days", "verdict": "verdict", "failures": "Failures that repeat",
         "failures_none": "No recurring tool failure in this window.", "times": "times", "days": "days",
         "lesson_state": "lesson", "no_lesson": "no lesson yet", "learning": "Self-improvement loop",
+        "never_lesson": "never a lesson: the user's approval decides",
         "reviews": "background reviews", "empty": "produced nothing", "review_tokens": "review tokens (input / output)",
         "share": "of the uncached input and output tokens went to learning (approximate)",
         "rewrites": "skill rewrites", "by_review": "by the automatic review", "skills": "skills",
@@ -111,6 +112,7 @@ _TEXT = {
         "vs": "Comparado aos {days} dias anteriores", "verdict": "veredito", "failures": "Falhas que se repetem",
         "failures_none": "Nenhuma falha de ferramenta recorrente nesta janela.", "times": "vezes", "days": "dias",
         "lesson_state": "lição", "no_lesson": "sem lição ainda", "learning": "Ciclo de auto-melhoria",
+        "never_lesson": "nunca vira lição: quem decide é a aprovação do usuário",
         "reviews": "revisões em segundo plano", "empty": "não produziram nada", "review_tokens": "tokens das revisões (entrada / saída)",
         "share": "dos tokens de entrada sem cache e de saída foram para o aprendizado (aproximado)",
         "rewrites": "reescritas de skills", "by_review": "pela revisão automática", "skills": "skills",
@@ -200,8 +202,10 @@ def markdown(report: dict, lang: str = "en") -> str:
     if report["recurring_failures"]:
         for item in report["recurring_failures"][:8]:
             detail = f" (`{item['hint']}`)" if item["hint"] else ""
+            state = (t["never_lesson"] if item["class"] == "approval_refused"
+                     else f"{t['lesson_state']}: {_STATUS[lang].get(item['lesson'], t['no_lesson'])}")
             lines.append(f"- `{item['tool']}` · {item['class']}{detail}: {item['count']} {t['times']}, {item['days']} {t['days']}"
-                         f" · {t['lesson_state']}: {_STATUS[lang].get(item['lesson'], t['no_lesson'])}")
+                         f" · {state}")
     else:
         lines.append(t["failures_none"])
 
