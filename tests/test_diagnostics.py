@@ -158,6 +158,32 @@ class DiagnosticsTest(unittest.TestCase):
             state.write_text(json.dumps(marker), encoding="utf-8")
             self.assertEqual(snapshot(self.home)["gateway"]["heartbeat"], "unverified")
 
+    def test_named_profile_served_by_the_root_gateway_uses_the_host_record(self):
+        profiles = self.home / "profiles"
+        for name in ("work", "idle"):
+            (profiles / name).mkdir(parents=True)
+        record = {
+            "pid": 123, "kind": "hermes-gateway", "start_time": 321, "gateway_state": "degraded",
+            "code_version": "0.23.1", "updated_at": datetime.now(timezone.utc).isoformat(),
+            "served_profiles": ["default", "work"], "hermes_home": "PRIVATE_HOME",
+            "platforms": {"work:telegram": {"needs_attention": True, "error_message": "PRIVATE_ERROR"},
+                          "other:slack": {"needs_attention": True}, "api_server": {"needs_attention": True}},
+        }
+        (self.home / "gateway_state.json").write_text(json.dumps(record), encoding="utf-8")
+        with patch("hermes_evolution.diagnostics._process_liveness", return_value="confirmed"):
+            served = snapshot(profiles / "work")
+            unserved = snapshot(profiles / "idle")
+            root = snapshot(self.home)
+        self.assertEqual((served["gateway"]["reported_state"], served["gateway"]["platforms_needing_attention"],
+                          served["gateway"]["served_by_host_gateway"]), ("degraded", 1, True))
+        self.assertLessEqual({"gateway_degraded", "gateway_platform_attention"},
+                             {item["id"] for item in served["findings"]})
+        self.assertEqual((unserved["gateway"]["reported_state"], unserved["gateway"]["served_by_host_gateway"]),
+                         (None, False))
+        self.assertEqual((root["gateway"]["platforms_needing_attention"], root["gateway"]["served_by_host_gateway"]),
+                         (1, False))
+        self.assertNotIn("PRIVATE_", json.dumps([served, unserved, root]))
+
 
 if __name__ == "__main__":
     unittest.main()

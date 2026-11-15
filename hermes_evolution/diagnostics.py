@@ -242,9 +242,30 @@ def _marker_age(value: object) -> float | None:
     return round(age, 1) if age >= 0 else None
 
 
+def _host_gateway(home: Path) -> tuple[dict, dict] | None:
+    """The record of the root gateway when it lists this named profile among the ones it serves.
+
+    Hermes 0.23.1 multiplexes named profiles through one gateway. A served profile then has no
+    gateway.pid or gateway_state.json of its own: both stay in the home that launched the gateway.
+    """
+    if home.parent.name != "profiles":
+        return None
+    root = home.parent.parent
+    marker = _json_state(root / "gateway_state.json")
+    served = marker.get("served_profiles")
+    if not isinstance(served, list) or home.name not in served:
+        return None
+    return marker, _json_state(root / "gateway.pid")
+
+
 def _gateway(home: Path) -> dict:
     marker = _json_state(home / "gateway_state.json")
     pid_file = _json_state(home / "gateway.pid")
+    hosted = None if marker or pid_file else _host_gateway(home)
+    if hosted:
+        marker, pid_file = hosted
+    # A host gateway keys the platforms of its named profiles as "<profile>:<platform>".
+    own = (lambda key: key.startswith(home.name + ":")) if hosted else (lambda key: ":" not in key)
     process = _process_liveness(pid_file or marker)
     if process != "confirmed" and pid_file and pid_file != marker:
         process_from_marker = _process_liveness(marker)
@@ -258,8 +279,8 @@ def _gateway(home: Path) -> dict:
     )
     platform_states = marker.get("platforms")
     attention = sum(
-        isinstance(value, dict) and value.get("needs_attention") is True
-        for value in platform_states.values()
+        isinstance(key, str) and own(key) and isinstance(value, dict) and value.get("needs_attention") is True
+        for key, value in platform_states.items()
     ) if isinstance(platform_states, dict) else 0
     store = marker.get("session_store")
     store_status = store.get("status") if isinstance(store, dict) else None
@@ -277,6 +298,7 @@ def _gateway(home: Path) -> dict:
         "heartbeat": heartbeat,
         "platforms_needing_attention": attention,
         "reported_session_store": store_status if store_status in ("ok", "unavailable", "retrying") else None,
+        "served_by_host_gateway": bool(hosted),
     }
 
 
