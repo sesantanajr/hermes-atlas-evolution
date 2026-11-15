@@ -18,6 +18,8 @@ from .native_actions import PLAYBOOKS
 from .operations import RETENTION_DAYS, database, recommendations, run_policy, summarize
 
 RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
+EVOLUTION_ACTIONS = ("learn", "lessons", "skills", "proposals", "experiments", "report")
+CYCLE_INTERVAL_SECONDS = 3600
 
 
 def settings(home: Path) -> dict:
@@ -74,6 +76,35 @@ def setup(parser: argparse.ArgumentParser) -> None:
     feedback.add_argument("code")
     feedback.add_argument("result", choices=("helpful", "dismissed", "reset"))
     commands.add_parser("history", help="Show learned maintenance priorities and feedback")
+
+    learn = commands.add_parser("learn", help="Run one evolution pass: derive lessons, measure changes, refresh proposals")
+    learn.add_argument("--notify-only", action="store_true", help="Print only new lessons, regressions and high-risk proposals")
+    playbook = commands.add_parser("lessons", help="Review the playbook learned from recurring tool failures")
+    playbook_commands = playbook.add_subparsers(dest="lessons_action")
+    listing = playbook_commands.add_parser("list")
+    listing.add_argument("--status", choices=("candidate", "active", "quarantined", "retired"))
+    listing.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS)
+    for name in ("approve", "retire"):
+        playbook_commands.add_parser(name).add_argument("id", type=int)
+    custom = playbook_commands.add_parser("add", help="Add an operator lesson")
+    custom.add_argument("text")
+    custom.add_argument("--tool", default="general")
+    skills = commands.add_parser("skills", help="Show skill churn, flip-flops and rewrites that were never exercised")
+    queue = commands.add_parser("proposals", help="Review and decide what the evolution loop proposes")
+    queue_commands = queue.add_subparsers(dest="proposals_action")
+    queue_list = queue_commands.add_parser("list")
+    queue_list.add_argument("--all", action="store_true", help="Include decided and expired proposals")
+    for name in ("approve", "reject"):
+        decision = queue_commands.add_parser(name)
+        decision.add_argument("id", type=int)
+        decision.add_argument("--note")
+    commands.add_parser("experiments", help="Show tracked changes with their before-and-after verdicts")
+    digest = commands.add_parser("report", help="Print the evolution digest")
+    digest.add_argument("--format", choices=("md", "json"), default="md")
+    for command in (skills, digest):
+        command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
+    for command in (playbook, digest, learn):
+        command.add_argument("--lang", choices=("en", "pt"), help="Language of lessons and the digest")
 
     ops = commands.add_parser("ops", help="Inspect and supervise Hermes and Linux resource contention")
     ops_commands = ops.add_subparsers(dest="ops_action", required=True)
@@ -135,9 +166,66 @@ def _memory(conn, args):
     return store.audit(scope)
 
 
+def _evolution(args, home: Path, *, now: float, runtime_config=None):
+    """Commands of the evolution loop: lessons, skills, proposals, experiments and the digest."""
+    from . import experiments, lessons, proposals
+    from .evolve import cycle, notify_view, options
+    from .experience import experience
+    from .report import build, markdown
+    from .skill_health import skill_health
+
+    action = args.evolution_action
+    config = settings(home)
+    opts = options(config)
+    lang = getattr(args, "lang", None) or opts["language"]
+    if action == "learn":
+        result = cycle(home, now=now, runtime_config=runtime_config, config=config)
+        return notify_view(result) if args.notify_only else result
+    if action == "skills":
+        return skill_health(home, now=now, days=args.days)
+    if action == "report":
+        report = build(home, now=now, days=args.days, lang=lang, rates=config.get("rates_usd_per_million", {}))
+        return markdown(report, lang) if args.format == "md" else report
+    with experience(home) as conn:
+        if action == "experiments":
+            return experiments.listing(conn)
+        if action == "lessons":
+            task = args.lessons_action or "list"
+            if task == "list":
+                return {"mode": opts["lessons"],
+                        "lessons": lessons.listing(conn, lang=lang, status=getattr(args, "status", None))}
+            if task == "add":
+                lesson_id = lessons.add_custom(conn, args.text, tool=args.tool, origin="operator", now=now, active=True)
+                return {"id": lesson_id, "status": "active"}
+            return lessons.set_status(conn, args.id, "active" if task == "approve" else "retired", now=now)
+        task = args.proposals_action or "list"
+        if task == "list":
+            return proposals.listing(conn, status=None if getattr(args, "all", False) else "open")
+        return proposals.decide(conn, args.id, task, now=now, note=args.note)
+
+
+def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=None):
+    """Run the evolution pass from `ops tick`, at most once an hour. Returns its notification view."""
+    from .evolve import cycle, notify_view
+    from .experience import experience
+
+    with experience(home) as conn:
+        saved = conn.execute("SELECT value FROM cursor WHERE key='last_cycle'").fetchone()
+        try:
+            last = float(saved[0]) if saved else 0.0
+        except ValueError:
+            last = 0.0
+        if 0 <= now - last < CYCLE_INTERVAL_SECONDS:
+            return None
+        conn.execute("INSERT OR REPLACE INTO cursor VALUES ('last_cycle', ?)", (repr(now),))
+    return notify_view(cycle(home, now=now, runtime_config=runtime_config, config=config))
+
+
 def _report(args, home: Path, *, running_version=None, provider=None, now: float, runtime_config=None,
             hermes_source=None, kanban_home=None, supplemental=(), health_override=None):
     action = args.evolution_action
+    if action in EVOLUTION_ACTIONS:
+        return _evolution(args, home, now=now, runtime_config=runtime_config)
     if action == "ops":
         return _ops(args, home, now=now, running_version=running_version, provider=provider,
                     runtime_config=runtime_config, source=hermes_source, kanban_home=kanban_home)
@@ -317,14 +405,19 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
     args_for_tick = SimpleNamespace(evolution_action="tick", upstream_tag=args.upstream_tag,
                                     days=args.days, changes_only=False)
     maintenance = _report(args_for_tick, home, now=now, health_override=health, supplemental=context_actions)
+    try:
+        evolution = _scheduled_cycle(home, config, now=now, runtime_config=runtime_config)
+    except (OSError, ValueError, sqlite3.Error):
+        evolution = None   # the learning pass never blocks operational supervision
     if args.notify_only:
         changes = maintenance["decision"]["changes"]
         event = outcome if outcome["status"] in ("active", "rolled_back", "released", "not_applied") else None
-        if not adaptive["alerts"] and not event and not changes:
+        if not adaptive["alerts"] and not event and not changes and not evolution:
             return None
-        return {"alerts": adaptive["alerts"], "host_action": event, "maintenance_changes": changes}
+        return {"alerts": adaptive["alerts"], "host_action": event, "maintenance_changes": changes,
+                "evolution": evolution}
     return {**result, "diagnoses": issues, "paired_contention": candidates, "host_action": outcome,
-            "maintenance": maintenance["decision"], "learning": adaptive}
+            "maintenance": maintenance["decision"], "learning": adaptive, "evolution": evolution}
 
 
 def execute(args, home: Path, *, running_version=None, provider=None, runtime_config=None, hermes_source=None,
@@ -343,8 +436,10 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
             except (OSError, ValueError, sqlite3.Error):
                 recovery = "\nTrial recovery is unverified. Run ops rollback to recheck."
         raise SystemExit(f"Evolution: {error}{recovery}") from None
-    if result is not None:
-        print(json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False))
+    if isinstance(result, str):
+        print(result, end="" if result.endswith("\n") else "\n")
+    elif result is not None:
+        print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
 
 
 def main():
