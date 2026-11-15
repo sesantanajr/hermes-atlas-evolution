@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hermes_evolution.experience import experience, label, prune
+from hermes_evolution.operations import close_observers
 from hermes_evolution.signals import (FeedbackSensor, TurnTracker, classify, effective_tool, failure_summary,
                                       feedback_summary, record_skill_event, record_tool, skill_event_summary,
                                       surface_of, tool_summary, turn_summary)
@@ -103,6 +104,7 @@ class StoreTest(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
+        self.addCleanup(close_observers)   # Windows cannot remove a database that is still open.
         self.home = Path(folder.name)
 
     def test_tool_outcomes_are_counted_without_storing_any_payload_text(self):
@@ -194,8 +196,9 @@ class StoreTest(unittest.TestCase):
     def test_store_is_private_and_rejects_an_unknown_schema(self):
         with experience(self.home):
             pass
-        path = self.home / "evolution" / "experience.sqlite3"
+        path = self.home / "evolution" / "evolution.sqlite3"   # one database for operations and experience
         self.assertEqual(path.stat().st_mode & 0o077, 0)
+        self.assertFalse((self.home / "evolution" / "experience.sqlite3").exists())
         import sqlite3
         raw = sqlite3.connect(path)
         raw.execute("PRAGMA user_version=99")
@@ -203,6 +206,32 @@ class StoreTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             with experience(self.home):
                 pass
+
+    def test_a_missing_profile_is_an_error_not_a_new_tree(self):
+        missing = self.home / "typo"
+        with self.assertRaises(OSError):
+            record_tool(missing, {"tool_name": "terminal", "status": "ok"}, now=NOW)
+        self.assertFalse(missing.exists())
+
+    def test_concurrent_hook_threads_lose_no_event(self):
+        import threading
+
+        def worker(index):
+            for call in range(50):
+                record_tool(self.home, {"tool_name": "terminal", "status": "error" if call % 5 == 0 else "ok",
+                                        "result": result(output="boom", exit_code=2), "session_id": f"s{index}"}, now=NOW)
+
+        threads = [threading.Thread(target=worker, args=(index,)) for index in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        close_observers()   # flush anything a busy thread left in the retry queue
+        with experience(self.home) as conn:
+            tools = tool_summary(conn, now=NOW, days=1)
+            failures = failure_summary(conn, now=NOW, days=1)
+        self.assertEqual((tools["calls"], tools["errors"]), (400, 80))
+        self.assertEqual((failures[0]["count"], failures[0]["sessions"] >= 2), (80, True))
 
 
 if __name__ == "__main__":

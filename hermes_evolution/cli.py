@@ -30,7 +30,10 @@ def settings(home: Path) -> dict:
         return {}
     if len(body) > 65_536:
         raise ValueError("Evolution settings exceed 64 KiB")
-    result = json.loads(body)
+    try:
+        result = json.loads(body)
+    except RecursionError:
+        raise ValueError("Evolution settings are nested too deeply") from None
     if not isinstance(result, dict) or not isinstance(result.get("rates_usd_per_million", {}), dict):
         raise ValueError("Invalid Evolution settings object or rate table")
     return result
@@ -366,7 +369,7 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
     cfg = runtime.get("plugins", {})
     cfg = cfg if isinstance(cfg, dict) else {}
     inventory = scan_inventory(home, source=args.hermes_source or source, enabled_plugins=cfg.get("enabled"),
-                               disabled_plugins=cfg.get("disabled"), now=now)
+                               disabled_plugins=cfg.get("disabled"), memory_limits=runtime.get("memory"), now=now)
     workload_options = {key: runtime.get(key) for key in ("cron", "kanban", "delegation")}
     if config.get("inspect_shared_kanban") is True:
         workload_options["kanban_home"] = kanban_home
@@ -452,6 +455,21 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
         print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
 
 
+def _standalone_config(home: Path) -> dict:
+    """The profile's config.yaml when a YAML parser is installed. Without one the runner uses defaults."""
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    try:
+        with (home / "config.yaml").open("rb") as stream:
+            body = stream.read(1_048_577)
+        loaded = yaml.safe_load(body) if len(body) <= 1_048_576 else None
+    except (OSError, ValueError, RecursionError, yaml.YAMLError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def main():
     parser = argparse.ArgumentParser(prog="python -m hermes_evolution")
     parser.add_argument("--home", type=Path, default=os.environ.get("HERMES_HOME"), help="Explicit Hermes profile path")
@@ -460,4 +478,11 @@ def main():
     args = parser.parse_args()
     if args.home is None:
         parser.error("Pass --home or set HERMES_HOME")
-    execute(args, args.home.expanduser().resolve(), running_version=args.hermes_version)
+    home = args.home.expanduser().resolve()
+    config = _standalone_config(home)
+    memory = config.get("memory")
+    provider = memory.get("provider") if isinstance(memory, dict) else None
+    # Named profiles live in <root>/profiles/<name>; shared Kanban boards belong to the root.
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    execute(args, home, running_version=args.hermes_version, provider=provider if isinstance(provider, str) else None,
+            runtime_config=config, kanban_home=root)

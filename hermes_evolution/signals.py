@@ -16,7 +16,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .experience import day_offset, experience, label, utc_day
+from .experience import day_offset, label, record, utc_day
 
 SURFACES = ("local", "gateway", "cron", "subagent")
 _LOCAL_PLATFORMS = frozenset({"cli", "tui", "desktop", "acp", "local"})
@@ -207,19 +207,22 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     duration = payload.get("duration_ms")
     duration = int(min(duration, 86_400_000)) if type(duration) in (int, float) and 0 <= duration < float("inf") else 0
     today = utc_day(now)
-    with experience(home, observer=True) as conn:
+    row = (today, failure["tool"] if failure else tool, int(status == "error"), int(status == "blocked"), duration)
+    seen = ((failure["signature"], failure["tool"], failure["klass"], failure["hint"], now, now,
+             _session_tag(payload.get("session_id"))) if failure else None)
+
+    def write(conn):
         conn.execute("""INSERT INTO tool_daily VALUES (?, ?, 1, ?, ?, ?)
             ON CONFLICT DO UPDATE SET calls=calls+1, errors=errors+excluded.errors,
-              blocked=blocked+excluded.blocked, duration_ms=duration_ms+excluded.duration_ms""",
-                     (today, failure["tool"] if failure else tool, int(status == "error"), int(status == "blocked"), duration))
-        if failure:
-            session = _session_tag(payload.get("session_id"))
+              blocked=blocked+excluded.blocked, duration_ms=duration_ms+excluded.duration_ms""", row)
+        if seen:
             conn.execute("""INSERT INTO failure VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?)
-                ON CONFLICT(signature) DO UPDATE SET last_seen=excluded.last_seen, total=total+1,
-                  sessions=sessions + (last_session != excluded.last_session), last_session=excluded.last_session""",
-                         (failure["signature"], failure["tool"], failure["klass"], failure["hint"], now, now, session))
+                ON CONFLICT(signature) DO UPDATE SET last_seen=MAX(last_seen, excluded.last_seen), total=total+1,
+                  sessions=sessions + (last_session != excluded.last_session), last_session=excluded.last_session""", seen)
             conn.execute("""INSERT INTO failure_daily VALUES (?, ?, 1)
-                ON CONFLICT DO UPDATE SET count=count+1""", (today, failure["signature"]))
+                ON CONFLICT DO UPDATE SET count=count+1""", (today, seen[0]))
+
+    record(home, write, now=now)
     return failure
 
 
@@ -299,7 +302,11 @@ class TurnTracker:
         completed = payload.get("completed") is True and not failed and not interrupted
         bucket = next((name for limit, name in LATENCY_BUCKETS if duration <= limit), "b_more")
         buckets = [int(bucket == name) for name in ("b15", "b30", "b60", "b120", "b300", "b_more")]
-        with experience(self.home, observer=True) as conn:
+        stamp = time.time() if now is None else now
+        row = (utc_day(stamp), turn.surface, int(completed), int(failed), int(interrupted),
+               int(duration >= self.slow_ms), int(turn.calls > 0), turn.errors, duration, duration, *buckets)
+
+        def write(conn):
             conn.execute("""INSERT INTO turn_daily VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT DO UPDATE SET turns=turns+1, completed=completed+excluded.completed,
                   failed=failed+excluded.failed, interrupted=interrupted+excluded.interrupted,
@@ -307,10 +314,9 @@ class TurnTracker:
                   tool_errors=tool_errors+excluded.tool_errors, duration_ms=duration_ms+excluded.duration_ms,
                   max_ms=MAX(max_ms, excluded.max_ms), b15=b15+excluded.b15, b30=b30+excluded.b30,
                   b60=b60+excluded.b60, b120=b120+excluded.b120, b300=b300+excluded.b300,
-                  b_more=b_more+excluded.b_more""",
-                         (utc_day(time.time() if now is None else now), turn.surface, int(completed), int(failed),
-                          int(interrupted), int(duration >= self.slow_ms), int(turn.calls > 0), turn.errors,
-                          duration, duration, *buckets))
+                  b_more=b_more+excluded.b_more""", row)
+
+        record(self.home, write, now=stamp)
         return True
 
 
@@ -364,11 +370,11 @@ class FeedbackSensor:
 
 
 def record_feedback(home: Path, kinds, *, now: float | None = None) -> None:
-    today = utc_day(time.time() if now is None else now)
-    with experience(home, observer=True) as conn:
-        conn.executemany("""INSERT INTO feedback_daily VALUES (?, ?, 1)
-            ON CONFLICT DO UPDATE SET count=count+1""",
-                         [(today, kind) for kind in kinds if kind in ("correction", "reask", "positive")])
+    stamp = time.time() if now is None else now
+    rows = [(utc_day(stamp), kind) for kind in kinds if kind in ("correction", "reask", "positive")]
+    if rows:
+        record(home, lambda conn: conn.executemany("""INSERT INTO feedback_daily VALUES (?, ?, 1)
+            ON CONFLICT DO UPDATE SET count=count+1""", rows), now=stamp)
 
 
 def record_skill_event(home: Path, payload: dict, *, now: float | None = None) -> None:
@@ -376,13 +382,13 @@ def record_skill_event(home: Path, payload: dict, *, now: float | None = None) -
     skill = label(payload.get("skill_name"), fallback="")
     if action not in _SKILL_ACTIONS or not skill or len(skill) > 80:
         return
-    today = utc_day(time.time() if now is None else now)
+    stamp = time.time() if now is None else now
+    today = utc_day(stamp)
     rows = [(today, skill, action)]
     if action == "loaded" and payload.get("reuse_after_patch") is True:
         rows.append((today, skill, "reused_after_patch"))
-    with experience(home, observer=True) as conn:
-        conn.executemany("""INSERT INTO skill_daily VALUES (?, ?, ?, 1)
-            ON CONFLICT DO UPDATE SET count=count+1""", rows)
+    record(home, lambda conn: conn.executemany("""INSERT INTO skill_daily VALUES (?, ?, ?, 1)
+        ON CONFLICT DO UPDATE SET count=count+1""", rows), now=stamp)
 
 
 # ── summaries ────────────────────────────────────────────────────────────────────────────────────

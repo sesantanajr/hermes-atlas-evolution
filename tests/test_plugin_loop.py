@@ -12,6 +12,7 @@ from hermes_evolution import lessons
 from hermes_evolution.experience import experience
 from hermes_evolution.hints import KEY
 from hermes_evolution.integration import register
+from hermes_evolution.operations import close_observers
 from hermes_evolution.signals import turn_summary
 
 ERROR = json.dumps({"error": "tool_call to 'files_search' is missing required argument(s): servico."})
@@ -63,6 +64,7 @@ class PluginLoopTest(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
+        self.addCleanup(close_observers)   # Windows cannot remove a database that is still open.
         self.home = Path(folder.name)
         constants = types.ModuleType("hermes_constants")
         constants.get_hermes_home = lambda: self.home
@@ -155,10 +157,17 @@ class PluginLoopTest(unittest.TestCase):
         context.fire("pre_llm_call", user_message=None)
         context.fire("on_session_end")
         context.fire("on_skill_lifecycle", action="loaded", skill_name=None)
-        with patch("hermes_evolution.experience.sqlite3.connect", side_effect=__import__("sqlite3").OperationalError("locked")):
-            context.fire("post_tool_call", tool_name="terminal", status="ok", turn_id="t", tool_call_id="c")
-            context.fire("on_skill_lifecycle", action="loaded", skill_name="deploy")
+        close_observers()   # the next write has to open the database again
+        broken = __import__("sqlite3").OperationalError("unable to open database file")
+        with patch("hermes_evolution.operations._open", side_effect=broken), self.assertLogs(
+                "hermes_evolution.integration", level="WARNING") as logged:
+            for _ in range(3):   # a storage failure is reported once per event kind, never raised into the turn
+                context.fire("post_tool_call", tool_name="terminal", status="ok", turn_id="t", tool_call_id="c")
+                context.fire("on_skill_lifecycle", action="loaded", skill_name="deploy")
+            self.assertIsNone(context.fire("transform_tool_result", tool_name="terminal", status="error",
+                                           result="{}", session_id="s", tool_call_id="x"))
             self.assertEqual(context.sections["atlas-evolution.playbook"]["content"]({}), "")
+        self.assertEqual(len(logged.records), 3)   # tool, tool_outcome and skill
         tool = context.tools["atlas_evolution_lessons"]
         self.assertTrue(tool["check"]())
         self.assertEqual(json.loads(tool["handler"]({"action": "search"})), {"lessons": []})

@@ -1,20 +1,19 @@
-"""Profile-local experience store for the evolution loop.
+"""Experience tables of the evolution loop, stored in the profile's Evolution database.
 
-Holds aggregated tool outcomes, turn outcomes, lessons, tracked changes and proposals. Nothing in this
-database contains conversation text, tool arguments, tool output or raw log lines: only counters,
-allowlisted labels and short identifier-like hints.
+They hold aggregated tool outcomes, turn outcomes, lessons, tracked changes and proposals. Nothing here
+contains conversation text, tool arguments, tool output or raw log lines: only counters, allowlisted
+labels and short identifier-like hints. Hook callbacks write through the shared observer connection of
+`operations`, so concurrent threads and processes never lose an event to a busy database.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 RETENTION_DAYS = 90
-SCHEMA_VERSION = 1
 _LABEL = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.:+-]{0,95}\Z")
 _CREDENTIAL = ("sk-", "ghp_", "gho_", "ghs_", "ghr_", "ghu_", "github_pat_", "xox", "akia", "aiza", "hf_")
 
@@ -91,30 +90,21 @@ def label(value, *, fallback: str = "unknown") -> str:
     return fallback
 
 
-@contextmanager
 def experience(home: Path, *, observer: bool = False):
-    """Open the experience database. Observers (hook callbacks) use a short lock wait and never block a turn."""
-    folder = Path(home) / "evolution"
-    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = folder / "experience.sqlite3"
-    if not path.exists():
-        try:
-            path.touch(mode=0o600, exist_ok=False)
-        except FileExistsError:
-            pass
-    connection = sqlite3.connect(path, timeout=0.05 if observer else 3)
-    connection.row_factory = sqlite3.Row
-    try:
-        version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version == 0:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript("BEGIN IMMEDIATE;" + SCHEMA + f"PRAGMA user_version={SCHEMA_VERSION}; COMMIT;")
-        elif version != SCHEMA_VERSION:
-            raise ValueError(f"Unsupported Evolution experience schema {version}")
-        with connection:
-            yield connection
-    finally:
-        connection.close()
+    """Open the profile's Evolution database. Hook callers (`observer=True`) borrow the shared connection."""
+    from .operations import database
+
+    return database(Path(home), observer=observer)
+
+
+def record(home: Path, job, *, now: float | None = None) -> None:
+    """Apply one counter update through the shared observer connection, queued while the database is busy.
+
+    `job(connection)` may run later on another thread, so it must hold only values that are safe to store.
+    """
+    from .operations import record as write
+
+    write(Path(home), job, now=now)
 
 
 def prune(conn: sqlite3.Connection, *, now: float) -> None:

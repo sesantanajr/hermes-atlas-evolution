@@ -148,7 +148,8 @@ def register(ctx):
     recent_failures: dict[str, dict] = {}
     recent_lock = threading.Lock()
     failed: set[str] = set()
-    storage_errors = (OSError, sqlite3.Error, ValueError)
+    # A hook must never raise into a turn: storage problems and anything unexpected are reported once.
+    storage_errors = (Exception,)
 
     def register_observer(hook, event):
         def callback(**payload):
@@ -279,6 +280,11 @@ def register(ctx):
     if legacy_enabled:
         ctx.register_command("evolution", command, description="Access legacy Evolution notes", args_hint="<command>")
     _register_skills(ctx)
+    on_unload = getattr(ctx, "on_unload", None)
+    if callable(on_unload):
+        from .operations import close_observers
+
+        on_unload(close_observers)   # write queued counters and release the shared connection
 
     def advisory_tool(args, **context):
         if not advice_enabled:

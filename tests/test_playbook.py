@@ -10,6 +10,8 @@ from hermes_evolution.experience import experience
 from hermes_evolution.hints import KEY, MAX_HINTS_PER_SESSION, HintIndex, attach
 from hermes_evolution.signals import classify, record_tool
 
+from hermes_evolution.operations import close_observers  # noqa: E402
+
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400
 MISSING = json.dumps({"error": "tool_call to 'files_search' is missing required argument(s): servico."})
@@ -20,6 +22,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
+        self.addCleanup(close_observers)   # Windows cannot remove a database that is still open.
         self.home = Path(folder.name)
 
     def tool_fails(self, *, now, session="s", times=1, body=MISSING, tool="tool_call", args=ARGS):
