@@ -120,11 +120,12 @@ class EvolutionTest(unittest.TestCase):
         self.assertEqual(report["groups"][0]["input_tokens"], 20)
 
     def test_model_reported_as_a_file_path_is_not_stored(self):
-        for index, model in enumerate(("/home/alice/models/q.gguf", "../models/q.gguf", "models//q.gguf", "vendor/q:free")):
+        for index, model in enumerate(("/home/alice/models/q.gguf", "../models/q.gguf", "models//q.gguf", "vendor/q:free",
+                                       "C:/Users/alice/q.gguf")):
             observe(self.home, "api", {"provider": f"p{index}", "model": model}, now=NOW)
         with database(self.home) as conn:
             stored = dict(conn.execute("SELECT provider, model FROM metric"))
-        self.assertEqual(stored, {"p0": "unknown", "p1": "unknown", "p2": "unknown", "p3": "vendor/q:free"})
+        self.assertEqual(stored, {"p0": "unknown", "p1": "unknown", "p2": "unknown", "p3": "vendor/q:free", "p4": "unknown"})
 
     def test_decisions_learn_across_days_and_recover(self):
         def critical():
