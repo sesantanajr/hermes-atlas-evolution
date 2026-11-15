@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a new signal, lesson template, proposal kind or other improvement.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Atlas Evolution observes by default, stores no conversation content and changes nothing in Hermes without the operator.
+        Proposals that keep these properties are the easiest to accept. See CONTRIBUTING.md.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation in your Hermes profile, with the evidence you have.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What do you propose?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Signals and failure classes
+        - Lessons and delivery to the agent
+        - Measurement and verdicts
+        - Proposals and digest
+        - Operations supervisor
+        - Hermes integration or packaging
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: data
+    attributes:
+      label: Data it would read or store
+      description: Which Hermes hooks or files it needs, and what would be written to the plugin's database. Write "none" if it stores nothing new.
+    validations:
+      required: true
+  - type: textarea
+    id: measurement
+    attributes:
+      label: How would we know it works?
+      description: The measurement or test that would show the change helps.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
