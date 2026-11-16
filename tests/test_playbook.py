@@ -145,6 +145,16 @@ class LessonsTest(Base):
             self.assertLessEqual(len(text), 600)
             self.assertGreaterEqual(text.count("\n- "), 2)
 
+    def test_two_lessons_with_the_same_sentence_take_one_line(self):
+        with experience(self.home) as conn:
+            for signature in ("sig-file", "sig-other"):   # e.g. not_found with different details, one template
+                conn.execute("""INSERT INTO lesson(signature, tool, klass, hint, origin, status, created, updated, activated)
+                    VALUES (?, 'terminal', 'not_found', '', 'derived', 'active', ?, ?, ?)""", (signature, NOW, NOW, NOW))
+            chosen: list = []
+            text = lessons.playbook(conn, chosen=chosen)
+        self.assertEqual(text.count("\n- "), 1)
+        self.assertEqual(len(chosen), 2)   # both are in the prompt, so both count as shown
+
 
 class HintsTest(Base):
     def test_attach_keeps_json_valid_and_never_duplicates(self):
