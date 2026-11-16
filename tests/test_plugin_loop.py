@@ -84,6 +84,13 @@ class PluginBase(unittest.TestCase):
         (self.home / "evolution").mkdir(exist_ok=True)
         (self.home / "evolution" / "settings.json").write_text(json.dumps(values))
 
+    def hermes_settings(self, **values):
+        """The plugin's settings as the Hermes settings form keeps them (config.yaml), which the agent cannot write."""
+        config = types.ModuleType("hermes_cli.config")
+        config.load_config_readonly = lambda: {"plugins": {"entries": {"hermes-atlas-evolution": {"settings": values}}}}
+        sys.modules["hermes_cli.config"] = config   # inside the patched sys.modules: removed after the test
+        sys.modules["hermes_cli"].config = config
+
     def plugin(self) -> FakeContext:
         context = FakeContext()
         register(context)
@@ -185,7 +192,10 @@ class PluginLoopTest(PluginBase):
         close_observers()
         with experience(self.home) as conn:
             self.assertEqual(conn.execute("SELECT kind, count FROM guard_daily").fetchall()[0][:], ("gateway_stop", 1))
-        self.settings(evolution={"runtime_guard": False})
+        self.settings(evolution={"runtime_guard": False})   # a file the agent's own tools can write: ignored
+        self.assertEqual(self.plugin().fire("pre_tool_call", tool_name="terminal",
+                                            args={"command": "systemctl --user restart hermes-gateway"})["action"], "block")
+        self.hermes_settings(runtime_guard=False)
         quiet = self.plugin()   # still remembers what the agent wrote, but vetoes nothing
         self.assertIsNone(quiet.fire("pre_tool_call", tool_name="terminal", args={"command": "systemctl --user restart hermes-gateway"}))
 
@@ -210,7 +220,7 @@ class PluginLoopTest(PluginBase):
         poke.assert_called_once()
 
     def test_the_agent_proposal_cap_holds_across_calls_of_the_registered_tool(self):
-        self.settings(agent_advice=True)
+        self.hermes_settings(agent_tools=True)
         context = self.plugin()
         context.fire("pre_llm_call", session_id="own", turn_id="t", platform="cli", user_message="go")
         handler = context.tools["hermes_atlas_evolution_lessons"]["handler"]
@@ -305,7 +315,8 @@ class PluginLoopTest(PluginBase):
                     self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_sample").fetchone()[0], expected)
 
     def test_hooks_fail_open_when_storage_is_unusable_and_tolerate_odd_payloads(self):
-        self.settings(evolution={"lessons": "auto"}, agent_advice=True)
+        self.settings(evolution={"lessons": "auto"})
+        self.hermes_settings(agent_tools=True)
         context = self.plugin()
         for payload in ({}, {"tool_name": None, "status": "error", "result": 7, "args": "x", "tool_call_id": 5},
                         {"tool_name": "t" * 500, "status": "blocked", "result": "{" * 10, "session_id": ["x"]}):
@@ -382,7 +393,8 @@ class SurfacesTest(PluginBase):
             self.assertEqual(conn.execute("SELECT status FROM lesson").fetchone()[0], "active")
 
     def test_a_chat_gets_template_lessons_only_and_the_tools_answer_only_the_owner(self):
-        self.settings(evolution={"lessons": "auto"}, agent_advice=True)
+        self.settings(evolution={"lessons": "auto"})
+        self.hermes_settings(agent_tools=True)
         context = self.plugin()
         with experience(self.home) as conn:
             lessons.add_custom(conn, "Use ssh admin@10.0.0.7 for the tenant MCP.", tool="terminal", origin="operator",
@@ -402,7 +414,13 @@ class SurfacesTest(PluginBase):
         self.assertIn("lessons", json.loads(tool({"action": "search"}, session_id="a")))
 
     def test_an_owner_listed_in_owner_sender_ids_is_the_owner_in_a_chat_too(self):
+        # In settings.json, which the agent's own file tools can write, the id makes nobody the owner.
         self.settings(evolution={"lessons": "auto", "owner_sender_ids": ["555"]}, agent_advice=True)
+        context = self.plugin()
+        self.turn(context, "dm", "t1", platform="telegram", sender_id="555")
+        self.assertEqual(context.tools["hermes_atlas_evolution_lessons"]["check"](), False)
+        self.settings(evolution={"lessons": "auto"})
+        self.hermes_settings(owner_sender_ids=["555"], agent_tools=True)
         context = self.plugin()
         self.turn(context, "dm", "t1", platform="telegram", sender_id="555")
         tool = context.tools["hermes_atlas_evolution_lessons"]["handler"]
@@ -440,7 +458,8 @@ class HostIsolationTest(PluginBase):
 
 class OwnerPlatformLoopTest(PluginBase):
     def test_a_platform_listed_as_the_owners_gets_every_lesson_from_its_first_message(self):
-        self.settings(evolution={"lessons": "auto", "owner_platforms": ["api_server"]}, agent_advice=True)
+        self.settings(evolution={"lessons": "auto"})
+        self.hermes_settings(owner_platforms=["api_server"], agent_tools=True)
         context = self.plugin()
         with experience(self.home) as conn:
             lessons.add_custom(conn, "Use the staging tenant for every Atlas UI test run.", tool="terminal",

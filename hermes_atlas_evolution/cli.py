@@ -92,9 +92,63 @@ def legacy_install(home: Path, runtime_config) -> str | None:
     return None
 
 
+# Values that widen whom the plugin trusts or switch a protection off. The agent's own file tools can write
+# settings.json (Hermes guards only its config.yaml), so these count only from the Hermes configuration: the
+# plugin settings form or `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> ...`.
+# settings.json may still narrow them. Settings key -> (where settings.json keeps it, whether a value widens).
+TRUSTED_ONLY = {
+    "owner_sender_ids": (("evolution", "owner_sender_ids"), lambda value: value not in (None, [], ())),
+    "owner_platforms": (("evolution", "owner_platforms"), lambda value: value not in (None, [], ())),
+    "agent_tools": (("agent_advice",), lambda value: value is True),
+    "runtime_guard": (("evolution", "runtime_guard"), lambda value: value is False),
+}
+
+
+def _nested(data: dict, path: tuple) -> tuple[bool, object]:
+    for part in path[:-1]:
+        data = data.get(part) if isinstance(data, dict) else None
+    return (isinstance(data, dict) and path[-1] in data), (data.get(path[-1]) if isinstance(data, dict) else None)
+
+
+def ignored_settings(raw: dict) -> dict:
+    """The values of settings.json that widen trust and are therefore ignored: {settings key: value}."""
+    found = {}
+    for key, (path, widens) in TRUSTED_ONLY.items():
+        present, value = _nested(raw, path)
+        if present and widens(value):
+            found[key] = value
+    return found
+
+
+def _trusted(raw: dict) -> dict:
+    """settings.json without the values that widen trust (see TRUSTED_ONLY). The input is not changed."""
+    result = dict(raw)
+    for key in ignored_settings(raw):
+        path = TRUSTED_ONLY[key][0]
+        target = result
+        for part in path[:-1]:
+            target[part] = dict(target[part])
+            target = target[part]
+        del target[path[-1]]
+    return result
+
+
+def settings_command(home: Path, key: str, value) -> str:
+    """The `hermes config set` command that writes one plugin setting where the Hermes settings form keeps it."""
+    import shlex
+
+    from .native_actions import _profile_args
+
+    profile = " ".join(_profile_args(Path(home)))   # explicit even for default: Hermes may follow a sticky profile
+    literal = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, tuple, bool)) else str(value)
+    return " ".join(part for part in ("hermes", profile, "config set", f"plugins.entries.{PLUGIN_ID}.settings.{key}",
+                                      shlex.quote(literal)) if part)
+
+
 def effective_settings(home: Path, runtime_config=None, *, base: dict | None = None) -> dict:
-    """settings.json (or `base`) with the values set through Hermes' plugin settings on top (Hermes wins per key)."""
-    result = settings(home) if base is None else base
+    """settings.json (or `base`) with the values set through Hermes' plugin settings on top (Hermes wins per key).
+    Values of settings.json that widen trust are left out (see TRUSTED_ONLY)."""
+    result = _trusted(settings(home) if base is None else base)
     for key, path in NATIVE_KEYS.items():
         value = native_settings(runtime_config).get(key)
         if value is None:
@@ -299,7 +353,13 @@ _OWNER_TEXT = {
            "col_sessions": "sessions", "col_senders": "senders (sessions)", "col_you": "counts as you",
            "yes": "yes", "no": "no", "empty": "No chat session in 30 days: your CLI, TUI and Desktop always count as you.",
            "add": "To count a sender as you", "platform": "To count every chat of a channel as you (a private bot, your own UI)",
-           "restart": "Then restart the gateway so the running hooks see it", "changed": "Saved in `{path}`: {key} = {value}."},
+           "restart": "Then restart the gateway so the running hooks see it",
+           "run": "Run this in your own terminal (it writes the Hermes settings form's value), then restart the gateway:",
+           "why": "The plugin does not write it itself: who counts as you decides what reaches the agent, so it lives in "
+                  "the Hermes configuration, which the agent's file tools cannot change.",
+           "unchanged": "Nothing to change: {key} is already {value}.",
+           "ignored": "Ignored in `settings.json`, because the agent's file tools can write that file: {keys}. To keep a "
+                      "value, add it again with `hermes evolution owner add <id>` or `add-platform <channel>`."},
     "pt": {"title": "Quem é você nos chats", "current": "Contam como você agora", "senders": "ids de remetente",
            "platforms": "plataformas", "none": "nenhum", "channels": "Canais de chat dos últimos 30 dias",
            "col_channel": "canal", "col_sessions": "sessões", "col_senders": "remetentes (sessões)",
@@ -308,45 +368,30 @@ _OWNER_TEXT = {
            "add": "Para contar um remetente como você",
            "platform": "Para contar todo chat de um canal como você (um bot privado, a sua própria interface)",
            "restart": "Depois reinicie o gateway para os hooks em execução verem a mudança",
-           "changed": "Gravado em `{path}`: {key} = {value}."},
+           "run": "Rode isto no seu próprio terminal (grava o valor do formulário de configurações do Hermes) e depois "
+                  "reinicie o gateway:",
+           "why": "O plugin não grava isso sozinho: quem conta como você decide o que chega ao agente, então isso fica na "
+                  "configuração do Hermes, que as ferramentas de arquivo do agente não conseguem alterar.",
+           "unchanged": "Nada a mudar: {key} já é {value}.",
+           "ignored": "Ignorado no `settings.json`, porque as ferramentas de arquivo do agente conseguem gravar esse "
+                      "arquivo: {keys}. Para manter um valor, adicione de novo com `hermes evolution owner add <id>` ou "
+                      "`add-platform <canal>`."},
 }
 
 
-def _save_settings(home: Path, data: dict) -> Path:
-    """Write settings.json atomically, private to the owner."""
-    import tempfile
-
-    folder = Path(home) / "evolution"
-    folder.mkdir(mode=0o700, exist_ok=True)
-    target = folder / "settings.json"
-    handle, temporary = tempfile.mkstemp(dir=folder, prefix=".settings-", suffix=".json")
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump(data, stream, ensure_ascii=False, indent=2)
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, target)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
-    return target
-
-
 def _owner(args, home: Path, *, now: float, runtime_config, lang: str) -> str:
-    """`hermes evolution owner`: the chat channels and senders, and who counts as the owner. Operator only:
-    it shows sender ids, and a change decides what reaches the agent."""
+    """`hermes evolution owner`: the chat channels and senders, and who counts as the owner. Operator only: it
+    shows sender ids. A change is printed as the `hermes config set` command that makes it, never written here:
+    the Hermes configuration is the one place the agent's file tools cannot change."""
     from .evolve import options
     from .status import chat_senders
 
     _operator_only()
     t = _OWNER_TEXT[lang if lang in _OWNER_TEXT else "en"]
     action = getattr(args, "owner_action", None) or "list"
+    chosen = options(effective_settings(home, runtime_config), runtime_config, strict=False)
     if action != "list":
         key = "owner_platforms" if action.endswith("platform") else "owner_sender_ids"
-        if key in native_settings(runtime_config):
-            raise ValueError("This setting is set in the Hermes settings form; change it there")
         value = str(args.value).strip()
         if key == "owner_platforms":
             value = value.lower()
@@ -354,18 +399,15 @@ def _owner(args, home: Path, *, now: float, runtime_config, lang: str) -> str:
                 raise ValueError("Name a platform such as telegram or api_server")
         elif not 0 < len(value) <= 200:
             raise ValueError("A sender id has 1 to 200 characters")
-        stored = settings(home)
-        section = stored.get("evolution") if isinstance(stored.get("evolution"), dict) else {}
-        current = [str(item) for item in section.get(key) or [] if isinstance(item, (str, int)) and not isinstance(item, bool)]
-        current = [*current, value] if action.startswith("add") and value not in current else \
+        current = list(chosen[key])
+        updated = [*current, value] if action.startswith("add") and value not in current else \
             [item for item in current if item != value] if action.startswith("remove") else current
-        if len(current) > 20:
+        if len(updated) > 20:
             raise ValueError("Up to 20 entries are kept; remove one first")
-        stored["evolution"] = {**section, key: current}
-        path = _save_settings(home, stored)
-        return t["changed"].format(path=path, key=key, value=json.dumps(current, ensure_ascii=False)) + \
-            f"\n{t['restart']}: `hermes gateway restart`\n"
-    chosen = options(effective_settings(home, runtime_config), runtime_config, strict=False)
+        if updated == current:
+            return t["unchanged"].format(key=key, value=json.dumps(current, ensure_ascii=False)) + "\n"
+        return "\n".join([t["run"], "", f"    {settings_command(home, key, updated)}", "    hermes gateway restart", "",
+                          t["why"]]) + "\n"
     channels = chat_senders(home, since=now - 30 * 86_400, owners=chosen["owner_sender_ids"],
                             platforms=chosen["owner_platforms"])
     lines = [f"# {t['title']}", "",
@@ -382,8 +424,13 @@ def _owner(args, home: Path, *, now: float, runtime_config, lang: str) -> str:
             lines.append(f"| `{channel['origin']}` | {channel['sessions']} | {senders} | "
                          f"{t['yes'] if channel['covered'] else t['no']} |")
         lines += ["", f"{t['add']}: `hermes evolution owner add <id>`",
-                  f"{t['platform']}: `hermes evolution owner add-platform <channel>`",
-                  f"{t['restart']}: `hermes gateway restart`"]
+                  f"{t['platform']}: `hermes evolution owner add-platform <channel>`"]
+    try:
+        ignored = [key for key in ignored_settings(settings(home)) if key.startswith("owner_")]
+    except (OSError, ValueError, RecursionError):
+        ignored = []
+    if ignored:
+        lines += ["", t["ignored"].format(keys=", ".join(f"`{key}`" for key in ignored))]
     return "\n".join(lines) + "\n"
 
 
@@ -569,18 +616,27 @@ def _review_lessons(conn, lang: str, *, now: float) -> dict:
     order = "CASE origin WHEN 'derived' THEN 0 WHEN 'operator' THEN 1 WHEN 'reflector' THEN 2 ELSE 3 END, id"
     rows = conn.execute(f"SELECT * FROM lesson WHERE status IN ('candidate','quarantined') ORDER BY {order}").fetchall()
     decided = {"approved": [], "rejected": [], "skipped": []}
+    conn.commit()   # nothing is held while the owner reads: the gateway's hooks keep writing meanwhile
     for row in rows:
+        shown = playbook.render(row, lang)
         sys.stderr.write(f"\n#{row['id']} · {row['tool']} · {row['klass']} · {row['origin']}\n  "
-                         f"{playbook.render(row, lang)}\n{_REVIEW_PROMPT.get(lang, _REVIEW_PROMPT['en'])}")
+                         f"{shown}\n{_REVIEW_PROMPT.get(lang, _REVIEW_PROMPT['en'])}")
         sys.stderr.flush()
         answer = sys.stdin.readline().strip().lower()[:1]
         if answer == "x":
             break
         if answer in ("a", "r"):
             approve = answer == "a"
+            # A pass may have changed the lesson while the owner read it: decide only on what was shown.
+            now_row = conn.execute("SELECT * FROM lesson WHERE id=?", (row["id"],)).fetchone()
+            if now_row is None or now_row["status"] not in ("candidate", "quarantined") or \
+                    playbook.render(now_row, lang) != shown:
+                decided["skipped"].append(row["id"])
+                continue
             playbook.set_status(conn, row["id"], "active" if approve else "retired", now=now)
             conn.execute("UPDATE proposal SET status=?, updated=? WHERE code=? AND status IN ('open','approved')",
                          ("applied" if approve else "rejected", now, f"lesson:{row['id']}"))
+            conn.commit()   # each decision is saved at once, and the write lock is released before the next question
             decided["approved" if approve else "rejected"].append(row["id"])
         else:
             decided["skipped"].append(row["id"])

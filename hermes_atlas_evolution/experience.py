@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS guard_daily (
 """
 # Tables added after schema 8 without a version bump. A build that does not know a table ignores it, so
 # adding tables keeps the database open to older builds, where a new column would break their positional
-# inserts. operations creates any that are missing when it opens the database.
+# inserts. operations creates any that are missing (tables and indexes) when it opens the database.
 ADDITIVE_TABLES = (
     # 0.6.0 kept the owner's failures as one total per signature; 0.7.0 keeps them per day (below), so a
     # replay can take back exactly what it counted. Still created, so 0.6.0 keeps working after a downgrade.
@@ -96,14 +96,20 @@ ADDITIVE_TABLES = (
     # Failures seen in the owner's own turns (see signals.record_tool): only these let a lesson activate by itself.
     ("failure_owner_daily", "CREATE TABLE IF NOT EXISTS failure_owner_daily (day TEXT NOT NULL, signature TEXT NOT NULL, "
                             "count INTEGER NOT NULL, PRIMARY KEY (day, signature)) WITHOUT ROWID"),
-    # Refused approvals per session origin and tool: the radar tells refusals nobody could answer from the rest.
+    # Refused approvals per session origin and tool, with the Hermes setting that decided a refusal nobody could
+    # answer ('' when someone could have): the radar tells those from the rest and names the setting.
     ("approval_daily", "CREATE TABLE IF NOT EXISTS approval_daily (day TEXT NOT NULL, source TEXT NOT NULL, "
-                       "tool TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, source, tool)) WITHOUT ROWID"),
+                       "tool TEXT NOT NULL, setting TEXT NOT NULL, count INTEGER NOT NULL, "
+                       "PRIMARY KEY (day, source, tool, setting)) WITHOUT ROWID"),
     # Derived lessons that auto mode left waiting only because the owner's own turns had not hit the failure
     # twice yet: they activate by themselves once they have (lessons.promote). The signature guards against
     # a reused lesson id.
     ("lesson_owner_wait", "CREATE TABLE IF NOT EXISTS lesson_owner_wait (lesson_id INTEGER PRIMARY KEY, "
                           "signature TEXT NOT NULL) WITHOUT ROWID"),
+    # Per-signature lookups (lessons, promotion, the listing) would scan these tables once per signature.
+    ("failure_daily_signature", "CREATE INDEX IF NOT EXISTS failure_daily_signature ON failure_daily(signature)"),
+    ("failure_owner_daily_signature",
+     "CREATE INDEX IF NOT EXISTS failure_owner_daily_signature ON failure_owner_daily(signature)"),
 )
 SCHEMA += "".join(f"{statement};\n" for _, statement in ADDITIVE_TABLES)
 

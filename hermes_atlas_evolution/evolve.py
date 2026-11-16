@@ -118,7 +118,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         created = lessons.derive(conn, now=now, mode=opts["lessons"])
         promoted = lessons.promote(conn, now=now, mode=opts["lessons"])
         # Only once the history is replayed: while it is, failure totals are still being counted (or recounted).
-        withdrawn = lessons.tidy(conn) if history.get("status") in backfill.SETTLED else 0
+        withdrawn = lessons.tidy(conn, now=now) if history.get("status") in backfill.SETTLED else 0
         conn.commit()
         if not opts["reflector"]:
             conn.execute("DELETE FROM failure_sample")   # nothing waits for a reflector that is off

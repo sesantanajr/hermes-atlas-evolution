@@ -81,10 +81,13 @@ class ApprovalTest(Base):
         self.assertEqual((reading["refused"], reading["unattended"]), (7, 6))
         self.assertEqual(reading["by_origin"], {"oneshot": 4, "subagent": 2, "local": 1})
         self.assertEqual(found["approval_unattended"]["kind"], "approval_policy")
-        self.assertIn("approvals.single_query_mode", found["approval_unattended"]["evidence"]["settings"])
+        self.assertEqual(found["approval_unattended"]["evidence"]["by_setting"],
+                         {"approvals.single_query_mode": 4, "delegation.subagent_auto_approve": 2})
+        self.assertEqual(found["approval_unattended"]["command"], "hermes config get approvals")
         text = markdown(build(self.home, now=NOW, days=7, lang="pt"), "pt")
         self.assertIn("Aprovações recusadas", text)
-        self.assertIn("6 onde ninguém podia aprovar", text)
+        self.assertIn("6 onde ninguém podia aprovar (decididas por `approvals.single_query_mode` 4, "
+                      "`delegation.subagent_auto_approve` 2)", text)
         self.assertIn("nunca aprove tudo", text)
 
     def test_a_few_refusals_or_attended_ones_propose_nothing(self):
@@ -171,8 +174,11 @@ class HygieneTest(Base):
             active = self.failure(conn, "web_extract", "timeout", "", 1, 1)                              # decided: kept
             conn.execute("""INSERT INTO lesson(signature, tool, klass, hint, origin, status, created, updated, activated)
                 VALUES (?, 'web_extract', 'timeout', '', 'derived', 'active', 1, 1, 1)""", (active,))
-            self.assertEqual(lessons.tidy(conn), 4)
-            left = {(row[0], row[1], row[2]) for row in conn.execute("SELECT tool, klass, hint FROM lesson")}
+            self.assertEqual(lessons.tidy(conn, now=NOW), 4)
+            left = {(row[0], row[1], row[2]) for row in conn.execute(
+                "SELECT tool, klass, hint FROM lesson WHERE verdict IS NOT 'withdrawn'")}
+            kept = conn.execute("SELECT COUNT(*) FROM lesson WHERE status='retired' AND verdict='withdrawn'").fetchone()[0]
+        self.assertEqual(kept, 4)   # withdrawn, not deleted: their ids are never given to another lesson
         self.assertEqual(left, {("terminal", "timeout", ""), ("terminal", "not_found", "file"), ("terminal", "other", ""),
                                 ("web_extract", "timeout", "")})
 
@@ -218,13 +224,13 @@ class PromoteTest(Base):
             first, second = sorted(lessons.derive(conn, now=NOW, mode="auto"))
             lessons.set_status(conn, first, "retired", now=NOW)                       # the operator said no
             conn.execute("UPDATE failure SET total=1, sessions=1 WHERE signature=?", (stale,))
-            self.assertEqual(lessons.tidy(conn), 1)                                   # its evidence went away
+            self.assertEqual(lessons.tidy(conn, now=NOW), 1)                                   # its evidence went away
             for each in (rejected, stale):
                 conn.execute("INSERT INTO failure_owner_daily VALUES (?, ?, 3)", (utc_day(NOW), each))
             self.assertEqual(lessons.promote(conn, now=NOW, mode="auto"), [])
             waiting = conn.execute("SELECT COUNT(*) FROM lesson_owner_wait").fetchone()[0]
-            states = dict(conn.execute("SELECT id, status FROM lesson").fetchall())
-        self.assertEqual((waiting, states), (0, {first: "retired"}))
+            states = dict(conn.execute("SELECT id, COALESCE(verdict, status) FROM lesson").fetchall())
+        self.assertEqual((waiting, states), (0, {first: "retired", second: "withdrawn"}))
 
     def test_a_pass_reports_the_promoted_lesson_as_new(self):
         from hermes_atlas_evolution.evolve import cycle
@@ -323,24 +329,27 @@ class OwnerCommandTest(Base):
             listing = self.run_cli(owner_action=None)
         self.assertIn("`555` (1)", listing)
         self.assertIn("hermes evolution owner add <id>", listing)
+        key = "plugins.entries.hermes-atlas-evolution.settings"
         saved = self.run_cli(owner_action="add", value="555")
-        self.assertIn('["555"]', saved)
+        self.assertIn(f"hermes --profile default config set {key}.owner_sender_ids '[\"555\"]'", saved)
         self.assertIn("hermes gateway restart", saved)
-        self.run_cli(owner_action="add-platform", value="API_Server")
-        stored = json.loads((self.home / "evolution" / "settings.json").read_text())["evolution"]
-        self.assertEqual((stored["owner_sender_ids"], stored["owner_platforms"]), (["555"], ["api_server"]))
-        if os.name != "nt":   # POSIX permission bits
-            self.assertEqual((self.home / "evolution" / "settings.json").stat().st_mode & 0o077, 0)
-        self.run_cli(owner_action="remove", value="555")
-        stored = json.loads((self.home / "evolution" / "settings.json").read_text())["evolution"]
-        self.assertEqual(stored["owner_sender_ids"], [])
+        self.assertFalse((self.home / "evolution" / "settings.json").exists())   # printed for the owner, never written
+        form = {"plugins": {"entries": {"hermes-atlas-evolution": {"settings": {"owner_sender_ids": ["555"],
+                                                                                "owner_platforms": ["telegram"]}}}}}
+        both = self.run_cli(owner_action="add-platform", value="API_Server", runtime_config=form)
+        self.assertIn(f"{key}.owner_platforms '[\"telegram\", \"api_server\"]'", both)
+        self.assertIn(f"{key}.owner_sender_ids '[]'", self.run_cli(owner_action="remove", value="555", runtime_config=form))
+        self.assertIn("Nada a mudar", self.run_cli(owner_action="add", value="555", runtime_config=form))
         with self.assertRaises(SystemExit) as refused:
             self.run_cli(owner_action="add-platform", value="two words")
         self.assertIn("Informe uma plataforma", str(refused.exception))
-        form = {"plugins": {"entries": {"hermes-atlas-evolution": {"settings": {"owner_sender_ids": ["1"]}}}}}
-        with self.assertRaises(SystemExit) as shadowed:
-            self.run_cli(owner_action="add", value="9", runtime_config=form)
-        self.assertIn("formulário de configurações do Hermes", str(shadowed.exception))
+        # Values an agent could have written to settings.json are shown as ignored, never used.
+        (self.home / "evolution").mkdir(exist_ok=True)
+        (self.home / "evolution" / "settings.json").write_text(json.dumps({"evolution": {"owner_platforms": ["whatsapp"]}}))
+        with patch("time.time", return_value=NOW):
+            listing = self.run_cli(owner_action=None)
+        self.assertIn("plataformas: nenhum", listing)
+        self.assertIn("Ignorado no `settings.json`", listing)
 
     def test_an_agent_cannot_run_it(self):
         with patch.dict(os.environ, {"ATLAS_EVOLUTION_AGENT": "1"}), self.assertRaises(SystemExit):

@@ -179,31 +179,29 @@ def external(conn, *, now: float, days: int = RADAR_DAYS) -> dict:
     return {"plugin_fault": rows.get("plugin_fault", 0), "rewritten_command": rows.get("rewritten_command", 0)}
 
 
-# Session origins where nobody can answer an approval prompt as the turn runs: a one-shot run (`hermes chat -q`),
-# scheduled and automated work, a delegated child, and integrations that bind a session without an approval channel.
-UNATTENDED_ORIGINS = frozenset({"oneshot", "cron", "kanban", "batch", "curator", "subagent", "api_server", "webhook",
-                                "a2a", "tool"})
 MIN_UNATTENDED_REFUSALS = 5
-APPROVAL_SETTINGS = ("approvals.single_query_mode", "approvals.cron_mode", "approvals.unattended_mode",
-                     "command_allowlist")
 
 
 def approvals(conn, *, now: float, days: int = RADAR_DAYS) -> dict:
-    """Refused approvals per session origin and tool. Refusals where nobody could have approved (see
-    UNATTENDED_ORIGINS) are a bottleneck the owner can remove; Hermes' own settings decide what happens there."""
+    """Refused approvals per session origin and tool. A refusal nobody could have answered (a one-shot run, a cron
+    job, a subagent, an unattended platform: see signals.approval_setting) is a bottleneck the owner can remove,
+    and the Hermes setting that decided it is named."""
     from .experience import day_offset, utc_day
 
-    rows = conn.execute("""SELECT source, tool, SUM(count) FROM approval_daily WHERE day BETWEEN ? AND ?
-        GROUP BY source, tool""", (day_offset(now, days - 1), utc_day(now))).fetchall()
-    by_origin, by_tool = {}, {}
-    for source, tool, count in rows:
+    rows = conn.execute("""SELECT source, tool, setting, SUM(count) FROM approval_daily WHERE day BETWEEN ? AND ?
+        GROUP BY source, tool, setting""", (day_offset(now, days - 1), utc_day(now))).fetchall()
+    by_origin, by_tool, by_setting = {}, {}, {}
+    for source, tool, setting, count in rows:
         by_origin[source] = by_origin.get(source, 0) + count
-        if source in UNATTENDED_ORIGINS:
+        if setting:
             by_tool[tool] = by_tool.get(tool, 0) + count
-    unattended = sum(count for source, count in by_origin.items() if source in UNATTENDED_ORIGINS)
-    return {"refused": sum(by_origin.values()), "unattended": unattended,
-            "by_origin": dict(sorted(by_origin.items(), key=lambda item: -item[1])),
-            "unattended_by_tool": dict(sorted(by_tool.items(), key=lambda item: -item[1]))}
+            by_setting[setting] = by_setting.get(setting, 0) + count
+
+    def ranked(counts):
+        return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+    return {"refused": sum(by_origin.values()), "unattended": sum(by_setting.values()), "by_origin": ranked(by_origin),
+            "unattended_by_tool": ranked(by_tool), "by_setting": ranked(by_setting)}
 
 
 # A tool slower than this on average, over at least this many calls in the window, is worth a look.
@@ -215,6 +213,12 @@ def _slow_tools(conn, *, now: float, days: int) -> list[dict]:
     from .signals import slow_tools
 
     return slow_tools(conn, now=now, days=days, limit=5)
+
+
+def _slow_calls(conn, *, now: float, days: int) -> list[dict]:
+    from .signals import slow_calls
+
+    return slow_calls(conn, now=now, days=days, min_calls=MIN_SLOW_TOOL_CALLS, min_mean_s=SLOW_TOOL_SECONDS)
 
 
 def findings(reading: dict) -> list[dict]:
@@ -234,18 +238,18 @@ def findings(reading: dict) -> list[dict]:
                                    "candidates": ["skills.auto_load", "compression.proactive_prune_tokens",
                                                   "tool_budget.mcp_result_size_chars"]},
                       "command": "hermes prompt-size"})
-    for item in reading.get("slow_tools") or ():
-        if item["calls"] >= MIN_SLOW_TOOL_CALLS and item["mean_s"] >= SLOW_TOOL_SECONDS:
-            found.append({"code": f"tool_slow:{item['tool']}", "kind": "tool_latency", "risk": "low", "subject": item["tool"],
-                          "evidence": {"calls": item["calls"], "mean_s": item["mean_s"], "total_min": item["total_min"]},
-                          "command": "hermes evolution report --days 7"})
+    for item in reading.get("slow_calls") or ():   # already at least MIN_SLOW_TOOL_CALLS calls of SLOW_TOOL_SECONDS
+        found.append({"code": f"tool_slow:{item['tool']}", "kind": "tool_latency", "risk": "low", "subject": item["tool"],
+                      "evidence": {"calls": item["calls"], "mean_s": item["mean_s"], "total_min": item["total_min"]},
+                      "command": "hermes evolution report --days 7"})
     refusals = reading.get("approvals") or {}
     if refusals.get("unattended", 0) >= MIN_UNATTENDED_REFUSALS:
+        top = next(iter(refusals["by_setting"]), "approvals")
         found.append({"code": "approval_unattended", "kind": "approval_policy", "risk": "low", "subject": "approvals",
                       "evidence": {"refused": refusals["refused"], "unattended": refusals["unattended"],
                                    "by_origin": refusals["by_origin"], "unattended_by_tool": refusals["unattended_by_tool"],
-                                   "settings": list(APPROVAL_SETTINGS)},
-                      "command": "hermes config get approvals"})
+                                   "by_setting": refusals["by_setting"]},
+                      "command": f"hermes config get {top.split('.', 1)[0]}"})
     squeeze = reading.get("compaction") or {}
     if squeeze.get("compactions", 0) >= MIN_COMPACTIONS and (squeeze.get("kept_pct") or 0) >= 100 * WEAK_COMPACTION_KEPT:
         found.append({"code": "compaction_weak", "kind": "compaction", "risk": "low", "subject": "compression",
@@ -280,7 +284,7 @@ def scan(home: Path, conn, *, now: float, days: int = RADAR_DAYS, own_transform:
     """All readings and their findings. The plugin snapshot of the last process that could take one is kept."""
     reading = {"sessions": None, "context": None, "compaction": compaction(conn, now=now, days=days),
                "external": external(conn, now=now, days=days), "approvals": approvals(conn, now=now, days=days),
-               "slow_tools": _slow_tools(conn, now=now, days=days)}
+               "slow_tools": _slow_tools(conn, now=now, days=days), "slow_calls": _slow_calls(conn, now=now, days=days)}
     source = _history(home)
     if source is not None:
         try:

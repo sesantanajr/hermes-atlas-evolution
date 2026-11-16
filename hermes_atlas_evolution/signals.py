@@ -252,8 +252,9 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     may activate by itself, and only theirs keep an excerpt for the reflector: text a third party controls never
     reaches the model that drafts lessons.
 
-    `origin`: the session's real origin label. A refused approval is also counted per origin and tool, so the
-    radar can tell refusals nobody could have answered (a one-shot run, a cron job, a subagent) from the rest."""
+    `origin`: the session's real origin label. A refused approval is also counted per origin and tool, with the
+    Hermes setting that decided it when nobody could have answered (see approval_setting), so the radar can tell
+    those from the rest and name the setting."""
     status = payload.get("status")
     if status not in ("ok", "error", "blocked"):
         return None
@@ -269,15 +270,18 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     seen = ((failure["signature"], failure["tool"], failure["klass"], failure["hint"], now, now,
              _session_tag(payload.get("session_id"))) if failure else None)
     origin_name = label(origin, fallback="unknown") if isinstance(origin, str) else "unknown"
+    setting = ""
+    if failure and failure["klass"] == "approval_refused":
+        setting = approval_setting(_error_text(payload.get("error_message"), payload.get("result"))[0], origin_name)
     excerpt = ""
     if sample and owner and failure:
-        from .reflector import UNTEMPLATED, scrub
+        from .reflector import EXCERPT_LIMIT, UNTEMPLATED, scrub
 
         if failure["klass"] in UNTEMPLATED:   # only the reflector reads it, and only when it is switched on
             excerpt = scrub(_error_text(payload.get("error_message"), payload.get("result"))[0])
             program = command_program(payload.get("args"))
-            if excerpt and program:   # which program failed makes a draft specific; only an identifier-like name
-                excerpt = f"[{program}] {excerpt}"
+            if excerpt and program:   # which program failed makes a draft specific; only a bare command name
+                excerpt = f"[{program}] {excerpt}"[:EXCERPT_LIMIT]
 
     def write(conn):
         conn.execute("""INSERT INTO tool_daily VALUES (?, ?, 1, ?, ?, ?)
@@ -293,8 +297,8 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
                 conn.execute("""INSERT INTO failure_owner_daily VALUES (?, ?, 1)
                     ON CONFLICT DO UPDATE SET count=count+1""", (today, seen[0]))
             if seen[2] == "approval_refused":
-                conn.execute("""INSERT INTO approval_daily VALUES (?, ?, ?, 1)
-                    ON CONFLICT DO UPDATE SET count=count+1""", (today, origin_name, seen[1]))
+                conn.execute("""INSERT INTO approval_daily VALUES (?, ?, ?, ?, 1)
+                    ON CONFLICT DO UPDATE SET count=count+1""", (today, origin_name, seen[1], setting))
             if excerpt:
                 from .reflector import keep_sample
 
@@ -304,15 +308,20 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     return failure
 
 
-_PROGRAM = re.compile(r"[A-Za-z_][\w.+-]{0,39}\Z")
 _SHELL_TRIVIA = frozenset({"cd", "export", "set", "unset", "source", ".", "echo", "printf", "true", "false", "test",
                            "sleep", "pwd", "exit", "local", "read"})
+# A script's own name can say whose it is (a client, a project): only programs called by name from the PATH, or
+# from a system folder, count.
+_SCRIPT = re.compile(r"\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php|ps1|bat|cmd|exe)\Z", re.I)
+_SYSTEM_BIN = frozenset({"/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin",
+                         "/opt/homebrew/bin"})
 
 
 def command_program(args) -> str:
     """The program a terminal command runs (its first word after variable assignments and wrappers such as sudo,
-    env, timeout or systemd-run, read the way the runtime guard reads them), when it looks like a program name;
-    '' otherwise. Never arguments, paths or other text of the command."""
+    env, timeout or systemd-run, read the way the runtime guard reads them), when it is a bare command name such
+    as git or npm, called from the PATH or from a system folder such as /usr/bin; '' otherwise. Never arguments,
+    other paths, script names or other text of the command, and never a name the redactor would touch."""
     from .guard import _segments, _strip_prefix
 
     command = args.get("command") if isinstance(args, dict) else None
@@ -321,10 +330,35 @@ def command_program(args) -> str:
     found = ""
     for segment in (_segments(command[:4000]) or [])[:16]:   # the last real program of a chain is the likeliest to fail
         tokens = _strip_prefix(segment)
-        name = tokens[0].rsplit("/", 1)[-1] if tokens else ""
-        if name and name not in _SHELL_TRIVIA and _PROGRAM.match(name) and label(name, fallback="") == name:
+        name = tokens[0] if tokens else ""
+        folder, _, base = name.rpartition("/")
+        if folder and folder.rstrip("/") in _SYSTEM_BIN:
+            name = base
+        if not name or name in _SHELL_TRIVIA or "/" in name or "\\" in name or _SCRIPT.search(name):
+            continue
+        if _clean_hint(name) == name:
             found = name
     return found
+
+
+# Where Hermes decides a refused approval that nobody could answer as the turn ran. Hermes names the setting in
+# its own refusal text (approvals.<key>: approve); otherwise the session's origin tells. '' means someone could
+# have answered (a person said no, or a prompt went unanswered in a session someone watches).
+_APPROVAL_SETTING = re.compile(r"\bapprovals\.(single_query_mode|cron_mode|unattended_mode)\b")
+UNATTENDED_SETTINGS = {"oneshot": "approvals.single_query_mode", "cron": "approvals.cron_mode",
+                       "webhook": "approvals.unattended_mode", "msgraph_webhook": "approvals.unattended_mode",
+                       "api_server": "approvals.unattended_mode", "subagent": "delegation.subagent_auto_approve",
+                       # automations and integrations a program drives: nobody watches them to approve
+                       "kanban": "approvals", "batch": "approvals", "curator": "approvals", "a2a": "approvals",
+                       "tool": "approvals"}
+
+
+def approval_setting(text: str, origin: str | None) -> str:
+    """The Hermes setting that decided a refused approval nobody could answer, or '' when someone could have."""
+    match = _APPROVAL_SETTING.search(text[:4000]) if isinstance(text, str) else None
+    if match:
+        return f"approvals.{match.group(1)}"
+    return UNATTENDED_SETTINGS.get(origin or "", "")
 
 
 def surface_of(platform, source=None) -> str:
@@ -629,7 +663,7 @@ def record_skill_event(home: Path, payload: dict, *, now: float | None = None) -
 
 def record_guard(home: Path, kind: str, *, now: float | None = None) -> None:
     """Count a command the runtime guard vetoed. Only the kind is kept, never the command."""
-    if kind not in ("gateway_stop", "runtime_removal"):
+    if kind not in ("gateway_stop", "runtime_removal", "plugin_settings"):
         return
     stamp = time.time() if now is None else now
     record(home, lambda conn: conn.execute("""INSERT INTO guard_daily VALUES (?, ?, 1)
@@ -664,6 +698,20 @@ def tool_summary(conn, *, now: float, days: int, limit: int = 15) -> dict:
 
 # Tools whose time is not latency: they wait for a person (clarify) or run a whole subagent (delegate_task).
 NOT_LATENCY = frozenset({"clarify", "delegate_task", "ask_user", "request_user_input"})
+
+
+def slow_calls(conn, *, now: float, days: int, min_calls: int, min_mean_s: float, limit: int = 5) -> list[dict]:
+    """The tools whose calls take at least `min_mean_s` on average over at least `min_calls` calls in the window,
+    slowest first, whatever their share of the total time. Same exclusions as slow_tools."""
+    start, end = _window(now, days)
+    marks = ",".join("?" * len(NOT_LATENCY))
+    rows = conn.execute(f"""SELECT tool, SUM(calls) AS calls, SUM(duration_ms) AS duration_ms FROM tool_daily
+        WHERE day BETWEEN ? AND ? AND tool NOT IN ({marks}) GROUP BY tool
+        HAVING SUM(calls) >= ? AND SUM(duration_ms) >= ? * SUM(calls)
+        ORDER BY SUM(duration_ms) * 1.0 / SUM(calls) DESC, tool LIMIT ?""",
+                        (start, end, *sorted(NOT_LATENCY), min_calls, int(min_mean_s * 1000), limit)).fetchall()
+    return [{"tool": row["tool"], "calls": row["calls"], "mean_s": round(row["duration_ms"] / row["calls"] / 1000, 1),
+             "total_min": round(row["duration_ms"] / 60_000, 1)} for row in rows]
 
 
 def slow_tools(conn, *, now: float, days: int, limit: int = 3, min_calls: int = 3) -> list[dict]:

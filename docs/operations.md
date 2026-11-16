@@ -121,7 +121,7 @@ The provider, the model and the prices above are placeholders.
 
 `ops plan` returns a read-only plan with a suggested budget: search queries, page extracts and parallel lanes for research, parallel lanes and review passes for delegation, and comparable samples for operations. Research plans include source discovery, evidence verification and a record of uncertainties. Delegation plans point to `delegate_task` for answers the current agent must wait for and to Kanban for work that must survive restarts (`--durable`).
 
-Turn on `agent_tools` in the Hermes plugin settings, or set `"agent_advice": true` in `<HERMES_HOME>/evolution/settings.json`, and reload the plugin to expose `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` to the profile. Include `hermes-atlas-evolution` when the profile uses an explicit list of toolsets. The plan tool returns only the plan.
+Turn on `agent_tools` in the Hermes plugin settings (or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.agent_tools true` from your own terminal) and reload the plugin to expose `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` to the profile. Include `hermes-atlas-evolution` when the profile uses an explicit list of toolsets. The plan tool returns only the plan.
 
 Reading shared Kanban boards requires `"inspect_shared_kanban": true`. Creating a card requires your own handoff authorization, independently of that key. The example assigns verifications to the profile `reviewer` on the existing board `ops`.
 
@@ -181,7 +181,7 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 
 ## Configuration keys
 
-`<HERMES_HOME>/evolution/settings.json` is an optional JSON object of up to 64 KiB. The plugin reads it when it loads, so restart the gateway after a change; each autopilot pass and each command read it again. The options of the evolution loop are described in [The evolution loop](evolution-loop.md#settings-and-language). Those exposed in the Hermes settings form win over the same keys in this file.
+`<HERMES_HOME>/evolution/settings.json` is an optional JSON object of up to 64 KiB. The plugin reads it when it loads, so restart the gateway after a change; each autopilot pass and each command read it again. The options of the evolution loop are described in [The evolution loop](evolution-loop.md#settings-and-language). Those exposed in the Hermes settings form win over the same keys in this file. The agent's file tools can write this file, so values that would widen trust (`owner_sender_ids`, `owner_platforms`, `agent_advice: true`, `runtime_guard: false`) are ignored here; set them in the Hermes settings form.
 
 | Key | Format | Default | Effect |
 |---|---|---|---|

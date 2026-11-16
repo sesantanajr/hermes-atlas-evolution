@@ -80,7 +80,7 @@ O `plugins update` da linha de comando só troca os arquivos: ele não recarrega
 - **Mede antes e depois.** Cada lição contra a própria falha, cada reescrita de skill pelos turnos que carregaram a skill, cada mudança de configuração pela semana anterior e pela seguinte. No modo `auto`, uma lição que não ajuda é aposentada.
 - **Pede a um modelo de IA quando nenhum modelo fixo serve.** O refletor rascunha uma lição pelo Hermes, com no máximo 6 chamadas por dia, por padrão, e o rascunho espera por você.
 - **Acompanha a saúde do Hermes.** Aponta sessões cortadas sem o encerramento normal, conversas que mandam texto demais ao modelo, compactações que liberam pouco espaço e plugins que falham ao carregar, brigam entre si ou quebram comandos de outro plugin (essas falhas nunca viram lição).
-- **Protege o Hermes em execução.** Barra comandos do agente que parariam, reiniciariam ou matariam o gateway (como unidade systemd no Linux, LaunchAgent no macOS ou serviço ou tarefa do Windows) ou apagariam o Python, o código ou o perfil em que o Hermes roda. O agente é orientado a deixar o reinício com você.
+- **Protege o Hermes em execução.** Barra comandos do agente que parariam, reiniciariam ou matariam o gateway (como unidade systemd no Linux, LaunchAgent no macOS ou serviço ou tarefa do Windows) ou apagariam o Python, o código ou o perfil em que o Hermes roda, e impede o agente de mudar as configurações deste plugin ou desligá-lo. O agente é orientado a deixar isso com você.
 - **Roda sozinho e pergunta antes de mudar o Hermes.** Uma passada em segundo plano roda no máximo uma vez por hora em cada perfil. Mudanças no Hermes, como travar uma skill, são propostas com o comando exato para você rodar.
 - **Fala a sua língua.** Todas as mensagens, o resumo e as lições saem em inglês ou em português do Brasil, conforme o perfil.
 
@@ -97,13 +97,13 @@ Subcomandos de `hermes evolution`. O `--lang en|pt` funciona com todos eles.
 | `lessons approve <id>` | Ativa uma lição que está esperando, depois de mostrar o texto exato. |
 | `proposals list`, `proposals approve <id>`, `proposals reject <id>` | A fila de propostas e a sua decisão sobre uma delas. |
 | `learn` | Faz uma passada agora, sem esperar a de segundo plano. |
-| `owner` | Lista cada canal de chat com os remetentes; `owner add <id>` ou `owner add-platform <nome>` marca um deles como você. Só no seu próprio terminal. |
+| `owner` | Lista cada canal de chat com os remetentes; `owner add <id>` ou `owner add-platform <nome>` imprime o comando `hermes config set` que marca um deles como você. Só no seu próprio terminal. |
 
 Todos os comandos e opções: [Comandos](docs/pt-BR/evolution-loop.md#comandos).
 
 ## Configurações
 
-Ajuste no Hermes Desktop, em Configurações → Plugins, ou no `config.yaml` do perfil, em `plugins.entries.hermes-atlas-evolution.settings`. Reinicie o gateway depois de mudar.
+Ajuste no Hermes Desktop, em Configurações → Plugins, ou no `config.yaml` do perfil, em `plugins.entries.hermes-atlas-evolution.settings`. Reinicie o gateway depois de mudar. `owner_sender_ids`, `owner_platforms`, `agent_tools: true` e `runtime_guard: false` só valem por ali, nunca pelo `settings.json` do plugin, que as ferramentas de arquivo do agente conseguem gravar.
 
 | Opção | Padrão | O que faz |
 |---|---|---|

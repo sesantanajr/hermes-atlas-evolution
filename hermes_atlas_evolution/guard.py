@@ -69,6 +69,10 @@ MESSAGES = {
         "runtime_removal": ("Atlas Evolution runtime guard: this command would delete or move {path}, which the running "
                             "Hermes needs; Hermes would stop working until someone repairs it by hand. Leave it in place. "
                             "Removing it is for the owner to do from their own terminal, with Hermes stopped."),
+        "plugin_settings": ("Atlas Evolution runtime guard: this command would change the settings of Atlas Evolution "
+                            "(who counts as the owner, its protections) or switch the plugin off. Only the owner decides "
+                            "that, from their own terminal. Do not retry it in another form; tell the owner what you "
+                            "wanted to change and why."),
     },
     "pt": {
         "gateway_stop": ("Guarda de runtime do Atlas Evolution: este comando pararia ou reiniciaria o gateway do Hermes em "
@@ -78,6 +82,9 @@ MESSAGES = {
         "runtime_removal": ("Guarda de runtime do Atlas Evolution: este comando apagaria ou moveria {path}, de que o Hermes "
                             "em execução precisa; o Hermes pararia de funcionar até alguém consertar à mão. Deixe como está. "
                             "Remover isso fica para o dono, no próprio terminal, com o Hermes parado."),
+        "plugin_settings": ("Guarda de runtime do Atlas Evolution: este comando mudaria as configurações do Atlas Evolution "
+                            "(quem conta como o dono, as proteções dele) ou desligaria o plugin. Só o dono decide isso, no "
+                            "próprio terminal. Não tente de outra forma; diga ao dono o que você queria mudar e por quê."),
     },
 }
 
@@ -308,6 +315,25 @@ def _stops_gateway(verb: str, rest: list[str], words: list[str]) -> bool:
     return False
 
 
+PLUGIN_ID = "hermes-atlas-evolution"
+# This plugin's settings as `hermes config set|unset` names them, the whole plugins section included.
+_PLUGIN_KEY = re.compile(r"plugins(?:\.entries(?:\.(?:hermes-atlas-evolution|hermes-evolution)(?:\..*)?)?)?\Z")
+
+
+def _changes_plugin(verb: str, words: list[str]) -> bool:
+    """The agent's `hermes config set|unset` of this plugin's settings, and `hermes plugins disable|remove` of this
+    plugin: who counts as the owner and whether the guard runs are the owner's decisions."""
+    if verb != "hermes":
+        return False
+    for index, word in enumerate(words[:-2]):
+        following = words[index + 1]
+        if word == "config" and following in ("set", "unset") and _PLUGIN_KEY.match(words[index + 2]):
+            return True
+        if word == "plugins" and following in ("disable", "remove", "rm", "uninstall") and PLUGIN_ID in words[index + 2:]:
+            return True
+    return False
+
+
 def _removed_paths(verb: str, rest: list[str], words: list[str]) -> list[str]:
     """The paths a removing command would delete or move away."""
     if verb in _REMOVERS:
@@ -364,6 +390,8 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
         words = [token for token in rest if not token.startswith("-")]
         if _stops_gateway(verb, rest, words):
             return {"kind": "gateway_stop"}
+        if _changes_plugin(verb, words):
+            return {"kind": "plugin_settings"}
         path = _hit(_removed_paths(verb, rest, words), protected=protected, home=home, profile=profile)
         if path:
             return {"kind": "runtime_removal", "path": path}

@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from .experience import RETENTION_DAYS, experience, label, record, utc_day
+from .experience import RETENTION_DAYS, day_offset, experience, label, record, utc_day
 from .operations import batched
 from .signals import (DEFAULT_SLOW_TURN_MS, FeedbackSensor, TurnTracker, owner_turn, record_skill_correction,
                       record_skill_event, record_tool, surface_of)
@@ -53,11 +53,21 @@ _REQUIRED = {"sessions": {"id", "source", "started_at"},
 _OPTIONAL = {"sessions": ("parent_session_id", "ended_at", "end_reason", "user_id")}
 _TEXT_ERROR = re.compile(r"(?:error|erro)\b\s*[:\-]|traceback \(most recent call last\)|blocked:", re.I)
 _STATE_KEYS = ("observed_since", "backfill_cursor", "backfill_done", "backfill_totals", "backfill_version",
-               "backfill_until")
+               "backfill_until", "backfill_owner")
 
 
 def _day_start(day: str) -> float:
     return datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+
+
+def owner_fingerprint(owner_sender_ids=(), owner_platforms=()) -> str:
+    """A short fingerprint of who counts as the owner. The replay decides, turn by turn, whether the owner was
+    served, so a history replayed under other owner settings is replayed again (see step)."""
+    body = json.dumps([sorted({str(item) for item in owner_sender_ids}), sorted({str(item) for item in owner_platforms})])
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
+_NO_OWNER = owner_fingerprint()   # also what a replay recorded before the fingerprint existed
 
 
 def mark_observed(home: Path, *, now: float) -> None:
@@ -170,7 +180,7 @@ def _state(home: Path) -> dict:
         until = since
     return {"since": since, "until": until, "cursor": (started, position[2]), "position": values.get("backfill_cursor"),
             "done": values.get("backfill_done"), "version": values.get("backfill_version"),
-            "totals": {key: _count(totals.get(key)) for key in _TOTALS}}
+            "owner": values.get("backfill_owner") or _NO_OWNER, "totals": {key: _count(totals.get(key)) for key in _TOTALS}}
 
 
 def replay_until(home: Path) -> float | None:
@@ -178,24 +188,25 @@ def replay_until(home: Path) -> float | None:
     return _state(Path(home))["until"]
 
 
-def _redo(home: Path, *, since: float, now: float) -> None:
-    """Take back what an earlier version's backfill counted, so the history is replayed again.
+def _redo(home: Path, *, since: float, now: float, fingerprint: str = _NO_OWNER) -> None:
+    """Take back what an earlier backfill counted, so the history is replayed again.
 
-    0.5.0 counted each copy Hermes' compaction keeps of a message, and 0.6.0 did not count the owner's
-    failures per day nor refused approvals per origin. Whole UTC days before the first observed day hold
-    nothing but backfilled counts: they are cleared and replayed. The first observed day is shared
-    with the hooks and keeps what it has. Failure totals lose what the cleared days added, a failure only
-    those days had seen waits for the replay to find it again, and lesson baselines frozen from those days
-    are counted again once the replay is done."""
+    0.5.0 counted each copy Hermes' compaction keeps of a message, 0.6.0 did not count the owner's failures
+    per day nor refused approvals per origin, and a replay made under other owner settings attributed the
+    turns to someone else. Whole UTC days before the first observed day hold nothing but backfilled counts:
+    they are cleared and replayed. The first observed day is shared with the hooks and keeps what it has.
+    Failure totals lose what the cleared days added, except days older than the retention window, which the
+    replay does not read again; a failure only those days had seen waits for the replay to find it again,
+    and lesson baselines frozen from those days are counted again once the replay is done."""
     day = utc_day(since)
     boundary = _day_start(day)
     with experience(home) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        current = conn.execute("SELECT value FROM cursor WHERE key='backfill_version'").fetchone()
-        if current and current[0] == VERSION:
+        current = dict(conn.execute("SELECT key, value FROM cursor WHERE key IN ('backfill_version', 'backfill_owner')"))
+        if current.get("backfill_version") == VERSION and (current.get("backfill_owner") or _NO_OWNER) == fingerprint:
             return   # another pass redid it first
-        for signature, count in conn.execute("SELECT signature, SUM(count) FROM failure_daily WHERE day < ? "
-                                             "GROUP BY signature", (day,)).fetchall():
+        for signature, count in conn.execute("SELECT signature, SUM(count) FROM failure_daily WHERE day < ? AND day >= ? "
+                                             "GROUP BY signature", (day, day_offset(now, RETENTION_DAYS))).fetchall():
             # sessions restarts at one: the replay counts the history's sessions again
             conn.execute("UPDATE failure SET total=total-?, sessions=1, last_session='' WHERE signature=?", (count, signature))
         conn.execute("DELETE FROM failure WHERE total <= 0")
@@ -208,7 +219,7 @@ def _redo(home: Path, *, since: float, now: float) -> None:
                      (boundary + _BASELINE_DAYS * 86_400, now - (RETENTION_DAYS - _BASELINE_DAYS) * 86_400))
         conn.execute("DELETE FROM cursor WHERE key IN ('backfill_cursor', 'backfill_done', 'backfill_totals')")
         conn.executemany("INSERT OR REPLACE INTO cursor VALUES (?, ?)",
-                         (("backfill_version", VERSION), ("backfill_until", repr(boundary))))
+                         (("backfill_version", VERSION), ("backfill_until", repr(boundary)), ("backfill_owner", fingerprint)))
 
 
 class _Replay:
@@ -361,8 +372,10 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
     """Replay the next slices of Hermes' history within `budget_s`. Returns the status and running totals."""
     home = Path(home)
     state = _state(home)
-    if state["since"] is not None and state["version"] != VERSION and (state["position"] or state["done"] == "done"):
-        _redo(home, since=state["since"], now=now)
+    fingerprint = owner_fingerprint(owner_sender_ids, owner_platforms)
+    replayed = state["position"] or state["done"] == "done"
+    if state["since"] is not None and replayed and (state["version"] != VERSION or state["owner"] != fingerprint):
+        _redo(home, since=state["since"], now=now, fingerprint=fingerprint)
         state = _state(home)
     if state["done"]:
         return {"status": state["done"], **state["totals"]}
@@ -370,7 +383,7 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
         return {"status": "waiting", **state["totals"]}   # the hooks have not marked the start yet
     path = home / "state.db"
     if not path.is_file():
-        return _settle(home, "no_history", state["totals"])
+        return _settle(home, "no_history", state["totals"], fingerprint)
     try:
         source = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=2)
     except sqlite3.Error:
@@ -382,11 +395,13 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
         except sqlite3.DatabaseError:
             return {"status": "unreadable", **state["totals"]}
         if any(not need <= present[table] for table, need in _REQUIRED.items()):
-            return _settle(home, "unsupported_history", state["totals"])
+            return _settle(home, "unsupported_history", state["totals"], fingerprint)
         optional = ", ".join(f"{column}" if column in present["sessions"] else f"NULL AS {column}"
                              for column in _OPTIONAL["sessions"])
         until = state["until"]
-        start = until - BACKFILL_DAYS * 86_400
+        # Never older than what retention keeps: those days would be pruned at once, and a redo cannot take back
+        # what they added once their daily counts are gone.
+        start = max(until - BACKFILL_DAYS * 86_400, _day_start(day_offset(now, RETENTION_DAYS)))
         cursor_start, cursor_id = state["cursor"]
         totals = dict(state["totals"])
         replay = _Replay(home, sample=sample, owner_sender_ids=owner_sender_ids, slow_ms=slow_ms,
@@ -403,7 +418,7 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
             except sqlite3.DatabaseError:
                 return {"status": "unreadable", **totals}
             if not rows:
-                return _settle(home, "done", totals)
+                return _settle(home, "done", totals, fingerprint)
             before = dict(replay.counts)
             position = f"{float(rows[-1]['started_at'])!r}|{rows[-1]['id']}"
             try:
@@ -423,7 +438,8 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
                     summary = json.dumps(counted)
                     record(home, lambda conn, p=position, s=summary: conn.executemany(
                         "INSERT OR REPLACE INTO cursor VALUES (?, ?)",
-                        (("backfill_cursor", p), ("backfill_totals", s), ("backfill_version", VERSION))))
+                        (("backfill_cursor", p), ("backfill_totals", s), ("backfill_version", VERSION),
+                         ("backfill_owner", fingerprint))))
             except _CursorMoved:
                 return {"status": "running", **state["totals"]}
             except _Unreadable:
@@ -437,8 +453,9 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
         source.close()
 
 
-def _settle(home: Path, status: str, totals: dict) -> dict:
+def _settle(home: Path, status: str, totals: dict, fingerprint: str = _NO_OWNER) -> dict:
     """Finish the backfill for good. A history that is missing or of another shape is not retried."""
     record(home, lambda conn: conn.executemany("INSERT OR REPLACE INTO cursor VALUES (?, ?)",
-                                               (("backfill_done", status), ("backfill_version", VERSION))))
+                                               (("backfill_done", status), ("backfill_version", VERSION),
+                                                ("backfill_owner", fingerprint))))
     return {"status": status, **totals}

@@ -80,7 +80,7 @@ The command-line `plugins update` only replaces the files: it does not reload a 
 - **Measures before and after.** Each lesson against its own failure, each skill rewrite by the turns that loaded the skill, each setting change by the week before and the week after. In `auto` mode a lesson that does not help is retired.
 - **Asks an AI model when no template fits.** The reflector drafts a lesson through Hermes, at most 6 calls a day by default, and the draft waits for you.
 - **Watches Hermes' health.** It points out sessions cut off instead of closing normally, conversations that send too much text to the model, compactions that free little room, and plugins that fail to load, clash with each other or break another plugin's commands (those failures never become lessons).
-- **Protects the running Hermes.** It vetoes agent commands that would stop, restart or kill the gateway (as a systemd unit on Linux, a LaunchAgent on macOS or a Windows service or task) or delete the Python, the code or the profile that Hermes runs on. The agent is told to leave a restart to you.
+- **Protects the running Hermes.** It vetoes agent commands that would stop, restart or kill the gateway (as a systemd unit on Linux, a LaunchAgent on macOS or a Windows service or task) or delete the Python, the code or the profile that Hermes runs on, and it keeps the agent from changing this plugin's settings or switching it off. The agent is told to leave those to you.
 - **Runs by itself and asks before changing Hermes.** A background pass runs at most once an hour per profile. Changes to Hermes, such as locking a skill, are proposed with the exact command for you to run.
 - **Speaks your language.** Every message, the digest and the lessons come in English or Brazilian Portuguese, following the profile.
 
@@ -97,13 +97,13 @@ Subcommands of `hermes evolution`. `--lang en|pt` works with any of them.
 | `lessons approve <id>` | Activates one waiting lesson after showing its exact text. |
 | `proposals list`, `proposals approve <id>`, `proposals reject <id>` | The queue of proposals, and your decision on one. |
 | `learn` | Runs a pass now instead of waiting for the background one. |
-| `owner` | Lists each chat channel with its senders; `owner add <id>` or `owner add-platform <name>` marks one as you. In your own terminal only. |
+| `owner` | Lists each chat channel with its senders; `owner add <id>` or `owner add-platform <name>` prints the `hermes config set` command that marks one as you. In your own terminal only. |
 
 Every command and option: [Commands](docs/evolution-loop.md#commands).
 
 ## Settings
 
-Set them in Hermes Desktop under Settings → Plugins, or in the profile's `config.yaml` under `plugins.entries.hermes-atlas-evolution.settings`. Restart the gateway after a change.
+Set them in Hermes Desktop under Settings → Plugins, or in the profile's `config.yaml` under `plugins.entries.hermes-atlas-evolution.settings`. Restart the gateway after a change. `owner_sender_ids`, `owner_platforms`, `agent_tools: true` and `runtime_guard: false` count only from there, never from the plugin's own `settings.json`, which the agent's file tools can write.
 
 | Option | Default | What it does |
 |---|---|---|

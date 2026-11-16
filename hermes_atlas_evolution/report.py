@@ -122,11 +122,13 @@ _TEXT = {
         "plugins_line": "Plugins of this process", "enabled": "enabled", "load_errors": "failed to load",
         "undeclared": "register hooks they do not declare", "overlap": "compete for", "first_wins": "only the first result counts",
         "guard_line": "Runtime guard", "vetoed": "commands vetoed", "gateway_stop": "gateway restart or kill",
-        "runtime_removal": "removal of the running Hermes", "health_none": "Nothing measured yet.",
+        "runtime_removal": "removal of the running Hermes", "plugin_settings": "changes to this plugin's settings",
+        "health_none": "Nothing measured yet.",
         "external_line": "Failures caused by other plugins",
         "approvals_line": "Refused approvals", "approvals_unattended": "where nobody could approve",
         "slow_line": "Slowest tools", "slow_mean": "s on average", "slow_calls": "calls",
-        "approvals_hint": "review `hermes config get approvals` and `command_allowlist`; never approve everything",
+        "approvals_decided": "decided by",
+        "approvals_hint": "review those settings with `hermes config get`, and the `command_allowlist`; never approve everything",
         "external_fault": "calls blocked because a plugin's pre_tool_call hung or failed",
         "external_rewrite": "commands rewritten by a plugin that then failed (never turned into lessons)",
         "research_line": "Web research", "research_turns": "turns", "research_slow": "over {limit} s",
@@ -165,11 +167,13 @@ _TEXT = {
         "plugins_line": "Plugins deste processo", "enabled": "ativos", "load_errors": "falharam ao carregar",
         "undeclared": "registram hooks que não declaram", "overlap": "disputam", "first_wins": "só o primeiro resultado vale",
         "guard_line": "Guarda de runtime", "vetoed": "comandos barrados", "gateway_stop": "reinício ou kill do gateway",
-        "runtime_removal": "remoção do Hermes em execução", "health_none": "Nada medido ainda.",
+        "runtime_removal": "remoção do Hermes em execução", "plugin_settings": "mudanças nas configurações deste plugin",
+        "health_none": "Nada medido ainda.",
         "external_line": "Falhas causadas por outros plugins",
         "approvals_line": "Aprovações recusadas", "approvals_unattended": "onde ninguém podia aprovar",
         "slow_line": "Ferramentas mais lentas", "slow_mean": "s em média", "slow_calls": "chamadas",
-        "approvals_hint": "revise `hermes config get approvals` e o `command_allowlist`; nunca aprove tudo",
+        "approvals_decided": "decididas por",
+        "approvals_hint": "revise essas configurações com `hermes config get`, e o `command_allowlist`; nunca aprove tudo",
         "external_fault": "chamadas bloqueadas porque o pre_tool_call de um plugin travou ou falhou",
         "external_rewrite": "comandos reescritos por um plugin que depois falharam (nunca viram lição)",
         "research_line": "Pesquisas na web", "research_turns": "turnos", "research_slow": "acima de {limit} s",
@@ -273,7 +277,10 @@ def _health(report: dict, lang: str) -> list[str]:
         line = (f"- **{t['approvals_line']}:** {_number(refusals['refused'], lang)} ({origins}) · "
                 f"{_number(refusals['unattended'], lang)} {t['approvals_unattended']}")
         if refusals["unattended"]:
-            line += f" · {t['approvals_hint']}"
+            settings = ", ".join(f"`{name}` {_number(count, lang)}"
+                                 for name, count in list((refusals.get("by_setting") or {}).items())[:4])
+            line += f" ({t['approvals_decided']} {settings}) · {t['approvals_hint']}" if settings else \
+                f" · {t['approvals_hint']}"
         lines.append(line)
     research = report.get("research") or {}
     if research.get("turns"):
