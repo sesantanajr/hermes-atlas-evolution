@@ -25,6 +25,7 @@ from urllib.parse import quote
 from .experience import experience, record
 from .operations import batched
 from .signals import DEFAULT_SLOW_TURN_MS, FeedbackSensor, TurnTracker, record_skill_correction, record_skill_event, record_tool
+from .telemetry import ResearchTracker
 
 BACKFILL_DAYS = 14
 SLICE_SESSIONS = 25
@@ -144,6 +145,7 @@ class _Replay:
         self.sample = sample
         self.turns = TurnTracker(home, slow_ms=slow_ms)
         self.sensor = FeedbackSensor(home, owner_sender_ids=owner_sender_ids)
+        self.research = ResearchTracker(home)   # web research turns: timing, calls and errors
         self.counts = {"sessions": 0, "turns": 0, "tool_calls": 0, "failures": 0}
 
     def session(self, source: sqlite3.Connection, row: dict, *, start: float, until: float) -> None:
@@ -172,6 +174,7 @@ class _Replay:
                 open_turn, final, last, answered = f"backfill:{sid}:{message['id']}", False, stamp, False
                 self.turns.start({"turn_id": open_turn, "session_id": sid, "platform": platform,
                                   "parent_session_id": parent}, clock=stamp)
+                self.research.start({"turn_id": open_turn}, clock=stamp)
                 self.counts["turns"] += 1
             elif role == "assistant":
                 requested = _calls(message["tool_calls"])
@@ -195,6 +198,7 @@ class _Replay:
                    "session_id": sid, "turn_id": turn, "tool_call_id": message["tool_call_id"]}
         failure = record_tool(self.home, payload, now=stamp, sample=self.sample)
         self.turns.tool(payload)
+        self.research.tool(payload)
         self.counts["tool_calls"] += 1
         self.counts["failures"] += int(failure is not None)
         skill = args.get("name") if name == "skill_view" and status == "ok" else None
@@ -210,6 +214,7 @@ class _Replay:
         else:
             outcome = {"failed": True}
         self.turns.finish({"turn_id": turn, **outcome}, clock=ended, now=ended)
+        self.research.finish({"turn_id": turn}, clock=ended, now=ended)
 
 
 def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int = SLICE_SESSIONS, sample: bool = False,

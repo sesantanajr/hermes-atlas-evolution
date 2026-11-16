@@ -140,6 +140,20 @@ class BackfillTest(Base):
             self.assertEqual(tuple(row), (2, 2, 0))
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM feedback_daily WHERE kind='reask'").fetchone()[0], 0)
 
+    def test_research_turns_of_the_past_are_timed_and_reach_the_digest(self):
+        from hermes_atlas_evolution.report import build, markdown
+
+        self.history.session("s", start=NOW - DAY)
+        self.history.tool_turn("s", NOW - DAY + 10, tool="web_search", args={"query": "x"},
+                               result=json.dumps({"results": []}),
+                               extra_tools=(("web_extract", {"urls": ["u"]}, json.dumps({"error": "fetch failed"})),))
+        self.history.save()
+        self.run_backfill()
+        report = build(self.home, now=NOW, days=7, lang="pt")
+        self.assertEqual((report["research"]["turns"], report["research"]["tool_calls"], report["research"]["tool_errors"]),
+                         (1, 2, 1))
+        self.assertIn("Pesquisas na web", markdown(report, "pt"))
+
     def test_nothing_after_the_plugin_started_observing_is_counted_and_a_rerun_adds_nothing(self):
         self.history.session("s", start=NOW - DAY)
         self.history.tool_turn("s", NOW - DAY + 10, result=MISSING)
