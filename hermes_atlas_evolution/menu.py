@@ -40,6 +40,7 @@ TEXT = {
         "suggest_os_repair": "Finish the system update that stopped half-way",
         "suggest_env": "See {n} thing(s) to fix across your profiles (plugins, skills)",
         "advice": "What to do",
+        "and_more": " and {n} more",
         "env_title": "Environment: every profile of this Hermes",
         "env_mode": "Mode: {mode} · looked after by profile `{lead}` · last look: {when}",
         "env_lead_elsewhere": "Profile `{lead}` looks after every profile; this screen shows and decides through it.",
@@ -48,11 +49,12 @@ TEXT = {
         "env_catalog": "Hermes plugin catalog: {plugins} plugins ({tiers}) · {removed} removed for safety",
         "env_tiers": {"official": "official", "verified": "verified", "community": "community"},
         "env_profiles": "Profiles ({n}):",
-        "env_row": "{profile:<18} {sessions:>4} sessions in 7 days · plugins {on} on, {idle} never loaded · {skills} skills · Atlas Evolution {self}",
+        "env_row": "{profile:<18} {sessions:>4} sessions in 7 days · plugins: {on} on, {idle} never loaded · {skills} skills · Atlas Evolution: {self}",
         "env_todo": "What to do ({n}), most important first:",
         "env_clean": "Nothing to fix: no plugin conflict, duplicate, removed plugin or leftover found.",
         "env_prompt": "Number to see and decide · v look again now · Enter back: ",
         "env_scanning": "Looking at every profile...",
+        "env_auto_mark": "⚙ = the Mode auto does it by itself in the next pass (and you can undo it in the history).",
         "suggest_os_security": "Install {n} security update(s) of the system",
         "suggest_unused": "Free {size} of old Hermes tool versions",
         "deliver_prompt": "Deliver it where? local, or a channel such as telegram (Enter = local): ",
@@ -212,19 +214,21 @@ TEXT = {
         "suggest_os_repair": "Terminar a atualização do sistema que parou no meio",
         "suggest_env": "Ver {n} coisa(s) para arrumar nos seus perfis (plugins, skills)",
         "advice": "O que fazer",
+        "and_more": " e mais {n}",
         "env_title": "Ambiente: todos os perfis deste Hermes",
         "env_mode": "Modo: {mode} · cuidado pelo perfil `{lead}` · última olhada: {when}",
         "env_lead_elsewhere": "O perfil `{lead}` cuida de todos os perfis; esta tela mostra e decide por meio dele.",
         "env_none": "Nenhum perfil tem o Atlas Evolution ligado, então ninguém cuida do Hermes inteiro ainda.",
         "env_not_yet": "Ainda não olhado: tecle v para olhar agora (uns 15 segundos num Hermes grande).",
-        "env_catalog": "Catálogo de plugins do Hermes: {plugins} plugins ({tiers}) · {removed} removidos por segurança",
+        "env_catalog": "Catálogo de plugins do Hermes: {plugins} plugins ({tiers}) · {removed} removido(s) por segurança",
         "env_tiers": {"official": "oficiais", "verified": "verificados", "community": "da comunidade"},
         "env_profiles": "Perfis ({n}):",
-        "env_row": "{profile:<18} {sessions:>4} sessões em 7 dias · plugins {on} ligados, {idle} nunca carregados · {skills} skills · Atlas Evolution {self}",
+        "env_row": "{profile:<18} {sessions:>4} sessões em 7 dias · plugins: {on} ligado(s), {idle} nunca carregado(s) · {skills} skills · Atlas Evolution: {self}",
         "env_todo": "O que fazer ({n}), do mais importante para o menos:",
         "env_clean": "Nada para arrumar: nenhum conflito, duplicidade, plugin removido ou resto de instalação.",
         "env_prompt": "Número para ver e decidir · v olhar de novo agora · Enter volta: ",
         "env_scanning": "Olhando todos os perfis...",
+        "env_auto_mark": "⚙ = o Modo Auto faz sozinho na próxima passada (e você pode desfazer no histórico).",
         "suggest_os_security": "Instalar {n} atualização(ões) de segurança do sistema",
         "suggest_unused": "Liberar {size} de versões antigas das ferramentas do Hermes",
         "deliver_prompt": "Entregar onde? local, ou um canal como telegram (Enter = local): ",
@@ -579,7 +583,8 @@ class Menu:
             found.append((self.t["suggest_waiting"].format(n=waiting), self.waiting))
         changes = [item for item in items if item["explain"]["can_apply"]]
         if changes:
-            what = ", ".join(dict.fromkeys(item["explain"]["title"].lower() for item in changes))
+            titles = list(dict.fromkeys(item["explain"]["title"] for item in changes))
+            what = titles[0] + (self.t["and_more"].format(n=len(titles) - 1) if len(titles) > 1 else "")
             found.append((self.t["suggest_apply"].format(n=len(changes), what=what), lambda: self.apply_all(changes)))
         if (state.get("auto_actions") or {}).get("mode") != "auto":
             found.append((self.t["suggest_full"], lambda: self.set_auto("auto")))
@@ -888,6 +893,8 @@ class Menu:
                     told = item["explain"]
                     auto = " ⚙" if told.get("automatic") and values.get("mode") == "auto" else ""
                     self.io.say(f"  {number:>2}  [{told['risk']}] {told['title']} · {item['subject']}{auto}")
+                if values.get("mode") == "auto" and any(item["explain"].get("automatic") for item in items):
+                    self.io.say(self.t["env_auto_mark"])
             answer = self.io.ask(self.t["env_prompt"]).lower()
             if not answer:
                 return

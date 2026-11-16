@@ -216,7 +216,7 @@ class MenuActionsTest(Base):
                 "hermes evolution report --days 7", "low")
         shown = self.menu("a", "s", "0", lang="pt")
         self.assertIn("Sugestões:", shown)
-        self.assertIn("Aplicar 1 mudança(s) recomendada(s): travar skill reescrita em excesso", shown)
+        self.assertIn("Aplicar 1 mudança(s) recomendada(s): Travar skill reescrita em excesso", shown)
         self.assertIn("1 aplicada(s).", shown)
         self.assertEqual(self.hermes.calls[0][-3:], ["curator", "lock", "hermes-admin"])
 

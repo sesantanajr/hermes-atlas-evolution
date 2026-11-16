@@ -389,8 +389,19 @@ def _iso(value) -> float | None:
         return None
 
 
+def _bundled(base: Path) -> set[str]:
+    """The skills Hermes ships and keeps in every profile (`skills/.bundled_manifest`, `name:hash` lines): Hermes'
+    own, re-synced on update, so never the owner's to archive, merge or share."""
+    try:
+        text = (base / ".bundled_manifest").read_text(encoding="utf-8", errors="replace")[:1_000_000]
+    except OSError:
+        return set()
+    return {line.split(":", 1)[0].strip() for line in text.splitlines() if line.strip()}
+
+
 def _skills_of(home: Path) -> list[dict]:
     base = Path(home) / "skills"
+    bundled = _bundled(base)
     try:
         usage = json.loads((base / ".usage.json").read_text(encoding="utf-8"))
         usage = usage if isinstance(usage, dict) else {}
@@ -423,6 +434,7 @@ def _skills_of(home: Path) -> list[dict]:
                       "last_used": _iso(record.get("last_used_at")), "created": _iso(record.get("created_at")),
                       "uses": record.get("use_count") if type(record.get("use_count")) is int else 0,
                       "pinned": record.get("pinned") is True, "locked": record.get("locked") is True,
+                      "bundled": folder in bundled or (name or folder) in bundled,
                       "state": record.get("state") if isinstance(record.get("state"), str) else "active"})
     return found
 
@@ -466,8 +478,8 @@ def _similar(left: dict, right: dict) -> float:
     return len(a & b) / len(a | b) if a and b else 0.0
 
 
-def _finding(kind: str, profile: str, subject: str, *, risk: str, evidence: dict, command: str = "") -> dict:
-    return {"code": f"env:{kind}:{profile}:{subject}"[:240], "kind": kind, "risk": risk,
+def _finding(kind: str, profile: str, subject: str, *, risk: str, evidence: dict, command: str = "", key: str = "") -> dict:
+    return {"code": (f"env:{kind}:{profile}:{subject}" + (f":{key}" if key else ""))[:240], "kind": kind, "risk": risk,
             "subject": f"{profile}/{subject}" if subject else profile, "evidence": {"profile": profile, **evidence},
             "command": command}
 
@@ -521,7 +533,8 @@ def findings(reading: dict, catalog: dict, known: dict, *, now: float | None = N
                         continue   # different tools: both changes apply
                     protected = _protected(later, notes) and not _protected(first, notes)
                     off = first if protected else later
-                    found.append(_finding("plugin_transform_overlap", profile, off["folder"],
+                    other = later if off is first else first
+                    found.append(_finding("plugin_transform_overlap", profile, off["folder"], key=f"{hook}:{other['folder']}",
                                           risk="high" if _protected(later, notes) else "medium",
                                           evidence={"hook": hook, "first": first["folder"], "later": later["folder"],
                                                     "tools": shared, "first_tools": a, "later_tools": b,
@@ -580,7 +593,7 @@ def findings(reading: dict, catalog: dict, known: dict, *, now: float | None = N
                                   evidence={"days": IDLE_PROFILE_DAYS, "plugins": len(on), "skills": len(row["skills"])},
                                   command=_cmd(profile, "evolution status")))
         # Skills: unused, the same text twice, near twins, and copies kept in every profile.
-        skills = [item for item in row["skills"] if item["state"] == "active"]
+        skills = [item for item in row["skills"] if item["state"] == "active" and not item.get("bundled")]
         unused = [item for item in skills if not (item["pinned"] or item["locked"])
                   and now - (item["last_used"] or item["created"] or now) > UNUSED_SKILL_DAYS * 86_400]
         if unused:

@@ -779,7 +779,7 @@ _ENV_TEXT = {
     "pt": {"none": "Nenhum perfil tem o Atlas Evolution ligado, então ninguém cuida do Hermes inteiro ainda.",
            "not_yet": "Ainda não olhado. A primeira olhada acontece na próxima passada do perfil `{lead}` (ou menu → Ambiente → v).",
            "head": "Cuidado pelo perfil `{lead}` · última olhada {when} · modo {mode}.",
-           "catalog": "Catálogo de plugins do Hermes: {plugins} plugins ({tiers}), {removed} removidos por segurança.",
+           "catalog": "Catálogo de plugins do Hermes: {plugins} plugins ({tiers}), {removed} removido(s) por segurança.",
            "cols": "| Perfil | Sessões 7 d | Plugins ligados | Nunca carregados | Skills | Atlas Evolution |",
            "todo": "O que fazer ({n})", "clean": "Nada para arrumar: nenhum conflito, duplicidade, plugin removido ou resto de instalação.",
            "seen": "Visto", "advice": "O que fazer", "run": "Comando", "where": "Decida no perfil `{lead}`: a aba Propostas dele, ou `hermes{p} evolution` → 14.",
@@ -802,10 +802,12 @@ def environment_markdown(home: Path, lang: str = "en", *, mode: str = "auto") ->
     if not found:
         return t["not_yet"].format(lead=name) + "\n"
     stamp = datetime.fromtimestamp(float(found.get("at") or 0)).strftime("%d/%m %H:%M" if lang == "pt" else "%Y-%m-%d %H:%M")
-    lines = [t["head"].format(lead=name, when=stamp, mode=mode), ""]
+    shown = {"auto": "Auto", "assist": "Assistido" if lang == "pt" else "Assisted", "manual": "Manual"}.get(mode, mode)
+    lines = [t["head"].format(lead=name, when=stamp, mode=shown), ""]
     catalog = found.get("catalog") or {}
     if catalog.get("plugins"):
-        tiers = ", ".join(f"{count} {tier}" for tier, count in sorted((catalog.get("tiers") or {}).items()))
+        names = {"official": "oficiais", "verified": "verificados", "community": "da comunidade"} if lang == "pt" else {}
+        tiers = ", ".join(f"{count} {names.get(tier, tier)}" for tier, count in sorted((catalog.get("tiers") or {}).items()))
         lines += [t["catalog"].format(plugins=catalog["plugins"], tiers=tiers, removed=catalog.get("removed", 0)), ""]
     lines += [t["cols"], "|---|---:|---:|---:|---:|---|"]
     for row in found.get("profiles") or ():

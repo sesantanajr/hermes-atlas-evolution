@@ -67,7 +67,7 @@
       applyAll: "Apply the {n} change(s)", applyAllHint: "Reversible changes to Hermes, each one recorded with its undo.",
       applyNow: "Apply now", dismiss: "Dismiss", seen: "What was seen", undoHow: "To undo",
       category: { change: "the plugin applies it", lesson: "lesson", manual: "you apply it", advice: "observation" },
-      autoLine: "Automatic actions", autoNames: { off: "off", safe: "safe", full: "full" },
+      autoLine: "Mode", autoNames: { auto: "Auto", assist: "Assisted", manual: "Manual" },
       copy: "Copy", copied: "Copied",
       share: "Share what this profile learned with another profile:",
       s: {
@@ -148,7 +148,7 @@
       applyAll: "Aplicar as {n} mudança(s)", applyAllHint: "Mudanças reversíveis no Hermes, cada uma registrada com o desfazer.",
       applyNow: "Aplicar agora", dismiss: "Dispensar", seen: "O que foi visto", undoHow: "Para desfazer",
       category: { change: "o plugin aplica", lesson: "lição", manual: "você aplica", advice: "observação" },
-      autoLine: "Ações automáticas", autoNames: { off: "desligadas", safe: "seguras", full: "completas" },
+      autoLine: "Modo", autoNames: { auto: "Auto", assist: "Assistido", manual: "Manual" },
       copy: "Copiar", copied: "Copiado",
       share: "Leve o que este perfil aprendeu para outro perfil:",
       s: {
@@ -780,7 +780,7 @@
         data ? h("div", { className: "hae-subtitle" }, t.profile + " ", h("code", { className: "hae-code" }, data.profile), " · v" + data.version) : null),
       h("div", { className: "hae-actions" },
         data ? h(Pill, { tone: data.mode === "off" ? "muted" : "good" }, t.mode[data.mode] || data.mode) : null,
-        data && data.automatic ? h(Pill, { tone: data.automatic.mode === "off" ? "muted" : "good" },
+        data && data.automatic ? h(Pill, { tone: data.automatic.mode === "manual" ? "muted" : "good" },
           t.autoLine + ": " + (t.autoNames[data.automatic.mode] || data.automatic.mode)) : null,
         data ? h(Pill, { tone: (data.status.runtime_guard || {}).enabled ? "good" : "bad" },
                  (data.status.runtime_guard || {}).enabled ? t.guardOn : t.guardOff) : null,
