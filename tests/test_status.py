@@ -133,5 +133,25 @@ class StatusTest(unittest.TestCase):
         self.assertIn("Nenhum evento", status.markdown(report, "pt"))
 
 
+
+class GuardStateTest(unittest.TestCase):
+    setUp = StatusTest.setUp   # the same profiles, without running StatusTest's tests again
+
+    def test_the_guard_says_what_it_covers_and_that_it_is_off_in_a_plugin_host(self):
+        import sys
+        import types
+
+        report = status.build(self.home, now=NOW, config={})
+        self.assertEqual(report["runtime_guard"]["state"], "on")
+        self.assertIn("LaunchAgent", status.markdown(report, "en"))
+        self.assertIn("serviço ou tarefa do Windows", status.markdown(report, "pt"))
+        isolation = types.ModuleType("hermes_cli.plugin_isolation")
+        isolation.isolation_mode = lambda config=None: "host"
+        with patch.dict(sys.modules, {"hermes_cli.plugin_isolation": isolation}):
+            report = status.build(self.home, now=NOW, config={})
+        self.assertEqual(report["runtime_guard"]["state"], "host")
+        self.assertIn("plugins.isolation: host", status.markdown(report, "pt"))
+
+
 if __name__ == "__main__":
     unittest.main()

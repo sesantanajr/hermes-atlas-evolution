@@ -226,7 +226,8 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
                     "awaiting_approval": lessons.get("candidate", 0) + lessons.get("quarantined", 0),
                     "retired": lessons.get("retired", 0)},
         "proposals_open": proposals,
-        "runtime_guard": {"enabled": opts["runtime_guard"], "vetoed_7d": sum(vetoed.values())},
+        "runtime_guard": {"enabled": opts["runtime_guard"], "state": _guard_state(opts["runtime_guard"]),
+                          "vetoed_7d": sum(vetoed.values())},
         "profiles": _profiles(Path(home), now=now),
         "stale_runtimes": stale,
     }
@@ -266,11 +267,15 @@ _TEXT = {
     "en": {"title": "Atlas Evolution {version} · profile `{profile}`", "since": "Observing since",
            "today": "Today (UTC)", "tool_calls": "tool calls", "turns": "turns", "model_calls": "model calls",
            "autopilot": "Autopilot", "every": "every {minutes} min", "off": "off (run `hermes evolution learn` yourself)",
-           "last": "last pass", "ok": "ok", "failed": "failed", "never": "has not run yet; it starts after the next turn",
+           "last": "last pass", "ok": "ok", "failed": "failed",
+           "never": "has not run yet; it runs two minutes after Hermes loads the plugin",
            "backfill": "Hermes history", "reflector": "Reflector", "on": "on", "calls": "calls today",
            "drafts": "drafts waiting", "lessons": "Lessons", "mode": "mode", "active": "active",
            "awaiting": "awaiting approval", "retired": "retired", "proposals": "Open proposals",
            "guard": "Runtime guard", "vetoed": "commands vetoed in 7 days", "attention": "Needs attention",
+           "guard_covers": "knows the gateway as a systemd unit (Linux), a LaunchAgent (macOS) and a Windows service or task",
+           "guard_host": "off: plugins run in a plugin host here (plugins.isolation: host), where a crashed host would "
+                         "block every tool",
            "no_events_today": "No event from the hooks today. If the profile was used today, check that Hermes loaded the plugin in this profile (`hermes plugins list`).",
            "autopilot_off": "The autopilot is off: the loop only runs when you call `hermes evolution learn`.",
            "no_autopilot_pass": "The autopilot has not run a pass in this profile yet.",
@@ -291,11 +296,16 @@ _TEXT = {
     "pt": {"title": "Atlas Evolution {version} · perfil `{profile}`", "since": "Observando desde",
            "today": "Hoje (UTC)", "tool_calls": "chamadas de ferramentas", "turns": "turnos", "model_calls": "chamadas ao modelo",
            "autopilot": "Autopilot", "every": "a cada {minutes} min", "off": "desligado (rode `hermes evolution learn` você mesmo)",
-           "last": "última passada", "ok": "ok", "failed": "falhou", "never": "ainda não rodou; começa depois do próximo turno",
+           "last": "última passada", "ok": "ok", "failed": "falhou",
+           "never": "ainda não rodou; roda dois minutos depois que o Hermes carrega o plugin",
            "backfill": "Histórico do Hermes", "reflector": "Refletor", "on": "ligado", "calls": "chamadas hoje",
            "drafts": "rascunhos aguardando", "lessons": "Lições", "mode": "modo", "active": "ativas",
            "awaiting": "aguardando aprovação", "retired": "aposentadas", "proposals": "Propostas abertas",
            "guard": "Guarda de runtime", "vetoed": "comandos barrados em 7 dias", "attention": "Precisa de atenção",
+           "guard_covers": "reconhece o gateway como unidade systemd (Linux), LaunchAgent (macOS) e serviço ou tarefa "
+                           "do Windows",
+           "guard_host": "desligada: aqui os plugins rodam num host de plugins (plugins.isolation: host), onde um host "
+                         "que caísse bloquearia todas as ferramentas",
            "no_events_today": "Nenhum evento dos hooks hoje. Se o perfil foi usado hoje, confira se o Hermes carregou o plugin neste perfil (`hermes plugins list`).",
            "autopilot_off": "O autopilot está desligado: o ciclo só roda quando você chama `hermes evolution learn`.",
            "no_autopilot_pass": "O autopilot ainda não fez nenhuma passada neste perfil.",
@@ -341,8 +351,13 @@ def markdown(report: dict, lang: str = "en") -> str:
                  f"{playbook['awaiting_approval']} {t['awaiting']} · {playbook['retired']} {t['retired']}")
     lines.append(f"- **{t['proposals']}:** {report['proposals_open']}")
     guard = report["runtime_guard"]
-    lines.append(f"- **{t['guard']}:** " + (f"{t['on']} · {guard['vetoed_7d']} {t['vetoed']}" if guard["enabled"]
-                                             else t["off"].split(" (")[0]))
+    if guard.get("state") == "host":
+        state = t["guard_host"]
+    elif guard["enabled"]:
+        state = f"{t['on']} · {guard['vetoed_7d']} {t['vetoed']} · {t['guard_covers']}"
+    else:
+        state = t["off"].split(" (")[0]
+    lines.append(f"- **{t['guard']}:** {state}")
     if report.get("first_pass"):
         lines += ["", "> " + t["first_pass"].format(**report["first_pass"])]
     lines += ["", f"## {t['attention']}", ""]
@@ -383,6 +398,19 @@ _NOTICE = {
            "risky": "{n} proposta(s) de risco alto", "failing": "a última passada de aprendizado falhou",
            "lead": "Atlas Evolution", "tail": "Veja `hermes evolution status`."},
 }
+
+
+def _guard_state(enabled: bool) -> str:
+    """on, off, or host: Hermes runs this profile's plugins in a plugin host, where the guard stays off."""
+    module = sys.modules.get("hermes_cli.plugin_isolation")
+    mode = getattr(module, "isolation_mode", None)
+    try:
+        isolation = mode() if callable(mode) else None
+    except Exception:
+        isolation = None
+    if isolation == "host":
+        return "host"
+    return "on" if enabled else "off"
 
 
 def pending_notice(home: Path, *, now: float, lang: str = "en") -> dict | None:

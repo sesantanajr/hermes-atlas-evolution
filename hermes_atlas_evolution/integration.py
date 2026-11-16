@@ -505,7 +505,18 @@ def _start(plugin: _Plugin) -> None:
 
 
 def _register_guard(ctx, plugin: _Plugin) -> None:
-    """pre_tool_call: remember what the agent wrote and, with runtime_guard on, veto what would take Hermes down."""
+    """pre_tool_call: remember what the agent wrote and, with runtime_guard on, veto what would take Hermes down.
+
+    Not in a plugin host (plugins.isolation: host). There every pre_tool_call is a call into the host, and
+    Hermes blocks a tool whose pre_tool_call fails: a host that crashed would block every tool of the profile."""
+    import os
+
+    if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
+        from logging import getLogger
+
+        getLogger(__name__).info("Atlas Evolution runs in a plugin host here: the runtime guard stays off so a crashed "
+                                 "host cannot block every tool of this profile")
+        return
     if plugin.evolution["runtime_guard"]:
         from hermes_constants import get_default_hermes_root
 
@@ -514,7 +525,8 @@ def _register_guard(ctx, plugin: _Plugin) -> None:
 
         home = plugin.home
         plugin.guard = RuntimeGuard(protected=protected_paths(hermes_root=get_default_hermes_root(home=home), profile_home=home),
-                                    home=Path.home(), lang=plugin.lang, on_block=lambda kind: record_guard(home, kind))
+                                    home=Path.home(), profile=home, lang=plugin.lang,
+                                    on_block=lambda kind: record_guard(home, kind))
     ctx.register_hook("pre_tool_call", plugin.pre_tool)
 
 

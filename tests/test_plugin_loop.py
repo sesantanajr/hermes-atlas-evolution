@@ -427,6 +427,16 @@ class SurfacesTest(PluginBase):
         self.assertIn("1", notice["message"])
 
 
+
+class HostIsolationTest(PluginBase):
+    def test_in_a_plugin_host_nothing_is_registered_that_could_block_every_tool(self):
+        with patch.dict("os.environ", {"HERMES_PLUGIN_HOST_PROCESS": "1"}):
+            hosted = self.plugin()
+        self.assertNotIn("pre_tool_call", hosted.hooks)
+        self.assertIn("post_tool_call", hosted.hooks)          # everything else still observes
+        self.assertIn("pre_tool_call", self.plugin().hooks)
+
+
 if __name__ == "__main__":
     unittest.main()
 

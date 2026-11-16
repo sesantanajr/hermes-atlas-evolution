@@ -103,5 +103,101 @@ class HookTest(unittest.TestCase):
         self.assertTrue(all(isinstance(path, Path) and path.is_absolute() for path in paths))
 
 
+
+class PlatformTest(unittest.TestCase):
+    """How Hermes runs its gateway on each system: systemd units with a suffix, launchd, Windows."""
+
+    def test_profile_and_custom_home_units_are_vetoed(self):
+        for command in ("systemctl --user restart hermes-gateway-atlas-ai", "systemctl --user restart hermes-gateway-atlas-ai.service",
+                        "systemctl restart hermes-gateway-1a2b3c4d.service", "service hermes-gateway-coder restart"):
+            with self.subTest(command):
+                self.assertEqual(verdict(command), "gateway_stop")
+        self.assertIsNone(verdict("systemctl --user status hermes-gateway-atlas-ai"))
+
+    def test_launchd_stops_are_vetoed_and_reads_pass(self):
+        for command in ("launchctl kickstart -k gui/501/ai.hermes.gateway", "launchctl kickstart -kp gui/501/ai.hermes.gateway-coder",
+                        "launchctl stop ai.hermes.gateway", "launchctl bootout gui/501/ai.hermes.gateway",
+                        "launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist", "launchctl remove ai.hermes.gateway-coder",
+                        "launchctl kill SIGTERM gui/501/ai.hermes.gateway"):
+            with self.subTest(command):
+                self.assertEqual(verdict(command), "gateway_stop")
+        for command in ("launchctl kickstart gui/501/ai.hermes.gateway", "launchctl print gui/501/ai.hermes.gateway",
+                        "launchctl list | grep hermes", "launchctl stop com.example.other"):
+            with self.subTest(command):
+                self.assertIsNone(verdict(command))
+
+    def test_windows_service_and_task_stops_are_vetoed_and_reads_pass(self):
+        for command in ("sc stop Hermes_Gateway", "sc.exe stop Hermes_Gateway_coder", "net stop Hermes_Gateway",
+                        "powershell -Command \"Stop-Service -Name Hermes_Gateway\"",
+                        "pwsh -NoProfile -c 'Restart-Service Hermes_Gateway'", "Stop-ScheduledTask -TaskName Hermes_Gateway",
+                        "schtasks /End /TN Hermes_Gateway", "taskkill /F /IM hermes.exe", "Stop-Process -Name hermes -Force",
+                        "cmd //c \"sc stop Hermes_Gateway\"", "C:/Windows/System32/sc.exe stop Hermes_Gateway"):
+            with self.subTest(command):
+                self.assertEqual(verdict(command), "gateway_stop")
+        for command in ("sc query Hermes_Gateway", "schtasks /Query /TN Hermes_Gateway", "Get-Service Hermes_Gateway",
+                        "net start Hermes_Gateway", "taskkill /F /IM notepad.exe"):
+            with self.subTest(command):
+                self.assertIsNone(verdict(command))
+
+    def test_windows_paths_are_compared_in_every_spelling(self):
+        from unittest.mock import patch
+
+        from hermes_atlas_evolution import guard
+
+        home, profile = Path("C:/Users/owner"), "C:/Users/owner/AppData/Local/hermes"
+        env = {"LOCALAPPDATA": "C:\\Users\\owner\\AppData\\Local"}
+        with patch.object(guard, "_WINDOWS", True), patch.dict(guard.os.environ, env):
+            def windows(command):
+                found = check("terminal", {"command": command}, protected=(profile, "S:/hermes/runtime"), home=home)
+                return found["kind"] if found else None
+
+            for command in ("rm -rf 'C:\\Users\\owner\\AppData\\Local\\hermes'", "rm -rf C:/Users/owner/AppData/Local/hermes",
+                            "rm -rf /c/Users/owner/AppData/Local/hermes", "rm -rf /C/users/OWNER/appdata/local/HERMES/",
+                            "rm -rf ~/AppData/Local/hermes", "rm -rf $LOCALAPPDATA/hermes",
+                            "Remove-Item -Recurse -Force $env:LOCALAPPDATA/hermes", "del /s /q 'C:\\Users\\owner\\AppData'",
+                            "rm -rf 'S:\\hermes'"):
+                with self.subTest(command):
+                    self.assertEqual(windows(command), "runtime_removal")
+            for command in ("rm -rf C:/Users/owner/AppData/Local/hermes-backup", "del /s /q 'S:\\tmp\\build'",
+                            "rm -rf $UNSET_VARIABLE/hermes", "rm -rf ./hermes", "Remove-Item C:/Users/owner/Downloads/x.zip"):
+                with self.subTest(command):
+                    self.assertIsNone(windows(command))
+
+    def test_a_linked_runtime_is_protected_under_the_name_commands_use(self):
+        import os
+        import sys
+        from unittest.mock import patch
+
+        from hermes_atlas_evolution.guard import protected_paths
+
+        root = Path(tempfile.mkdtemp())
+        real = root / "uv" / "python" / "cpython-3.11.16-linux-x86_64-gnu"
+        (real / "bin").mkdir(parents=True)
+        link = root / "uv" / "python" / "cpython-3.11-linux-x86_64-gnu"
+        os.symlink(real, link)
+        venv = root / "hermes-agent" / "venv"
+        venv.mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text(f"home = {link / 'bin'}\ninclude-system-site-packages = false\n")
+        data = root / "data" / "hermes"
+        data.mkdir(parents=True)
+        home_link = root / "owner" / ".hermes"
+        home_link.parent.mkdir()
+        os.symlink(data, home_link)
+        with patch.object(sys, "prefix", str(venv)), patch.object(sys, "exec_prefix", str(venv)), \
+                patch.object(sys, "base_prefix", str(real)), patch.object(sys, "_base_executable", str(link / "bin" / "python3.11")):
+            paths = protected_paths(hermes_root=home_link, profile_home=home_link / "profiles" / "work")
+        self.assertTrue({link, real, home_link, data.resolve()} <= set(paths), paths)
+        for command in (f"rm -rf {link}", f"rm -rf {root}/uv/python/cpython-3.11*", f"rm -rf {home_link}",
+                        f"mv {link} /tmp/old"):
+            with self.subTest(command):
+                found = check("terminal", {"command": command}, protected=paths, home=root / "owner")
+                self.assertEqual(found and found["kind"], "runtime_removal")
+
+    def test_hermes_home_in_a_command_is_the_profile(self):
+        profile = Path("/home/owner/.hermes/profiles/work")
+        found = check("terminal", {"command": "rm -rf $HERMES_HOME"}, protected=(profile,), home=HOME, profile=profile)
+        self.assertEqual(found["kind"], "runtime_removal")
+
+
 if __name__ == "__main__":
     unittest.main()
