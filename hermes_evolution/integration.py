@@ -357,6 +357,30 @@ def register(ctx):
         guard = RuntimeGuard(protected=protected_paths(hermes_root=get_default_hermes_root(home=home), profile_home=home),
                              home=Path.home(), lang=evolution["language"], on_block=lambda kind: record_guard(home, kind))
         ctx.register_hook("pre_tool_call", guard)
+    def session_finalized(**payload):
+        """A short notice about decisions waiting for the owner: once a day, and only on the owner's own
+        surfaces (CLI, TUI, Desktop). Never in a gateway chat, where the other side may be someone else."""
+        try:
+            from .signals import surface_of
+            from .status import pending_notice
+
+            if payload.get("parent_session_id") or surface_of(payload.get("platform")) != "local":
+                return None
+            import time as _time
+
+            return pending_notice(home, now=_time.time(), lang=evolution["language"])
+        except Exception:   # a notice is a convenience; it must never disturb the end of a session
+            return None
+
+    def dispatch_tick(**_payload):
+        try:
+            autopilot.poke()   # a 60-second clock while the gateway is idle; O(1) unless a check is due
+        except Exception:
+            return None
+        return None
+
+    ctx.register_hook("on_session_finalize", session_finalized)
+    ctx.register_hook("on_kanban_dispatch_tick", dispatch_tick)
     ctx.register_hook("post_tool_call", after_tool)
     ctx.register_hook("pre_llm_call", before_turn)
     ctx.register_hook("post_llm_call", after_turn)

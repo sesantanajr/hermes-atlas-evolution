@@ -188,6 +188,26 @@ class PluginLoopTest(PluginBase):
         self.settings(evolution={"runtime_guard": False})
         self.assertNotIn("pre_tool_call", self.plugin().hooks)
 
+    def test_pending_decisions_are_announced_once_a_day_and_only_to_the_owner(self):
+        self.settings(evolution={"language": "en"})
+        context = self.plugin()
+        self.assertIsNone(context.fire("on_session_finalize", session_id="s", platform="cli", reason="exit"))  # nothing pending
+        with experience(self.home) as conn:
+            lessons.add_custom(conn, "When the build fails, read the first error line first.", tool="terminal",
+                               origin="operator", now=1.0)
+        self.assertIsNone(context.fire("on_session_finalize", session_id="s", platform="whatsapp", reason="exit"))
+        notice = context.fire("on_session_finalize", session_id="s", platform="cli", reason="exit")
+        self.assertIn("hermes evolution status", notice["message"])
+        self.assertIn("1 lesson", notice["message"])
+        close_observers()
+        self.assertIsNone(context.fire("on_session_finalize", session_id="s2", platform="tui", reason="exit"))  # once a day
+
+    def test_the_kanban_tick_only_nudges_the_autopilot(self):
+        context = self.plugin()
+        with patch.object(Autopilot, "poke", return_value=True) as poke:
+            self.assertIsNone(context.fire("on_kanban_dispatch_tick", board="default", outcome="idle"))
+        poke.assert_called_once()
+
     def test_error_excerpts_are_kept_only_when_the_reflector_could_use_them(self):
         crash = json.dumps({"output": "Traceback (most recent call last):\nKeyError: 'column'", "exit_code": 1})
         for lessons_mode, expected in (("off", 0), ("suggest", 1)):

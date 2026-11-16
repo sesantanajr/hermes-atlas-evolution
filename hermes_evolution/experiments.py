@@ -28,6 +28,8 @@ CONFIG_KEYS = (
     ("skills", "creation_nudge_interval"), ("auxiliary", "background_review", "enabled"),
     ("auxiliary", "background_review", "model"), ("auxiliary", "compression", "model"),
     ("tool_budget", "mcp_result_size_chars"), ("curator", "enabled"), ("curator", "consolidate"),
+    ("compression", "threshold"), ("compression", "target_ratio"), ("compression", "protect_last_n"),
+    ("skills", "auto_load"),
 )
 # metric -> (absolute change that matters, lower is better)
 _METRICS = {

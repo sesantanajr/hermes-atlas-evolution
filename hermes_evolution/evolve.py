@@ -137,13 +137,17 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
                 conn.execute("UPDATE proposal SET status='applied', updated=? WHERE id=?", (now, row["id"]))
                 closed += 1
         outcomes = skill_outcomes(conn, start_day=day_offset(now, 13), end_day=utc_day(now))
+        from . import radar
+
+        reading = radar.scan(home, conn, now=now)
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
-                                    changes=verdicts, outcomes=outcomes, lang=opts["language"])
+                                    changes=verdicts, outcomes=outcomes, radar=reading["findings"], lang=opts["language"])
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in created]
     return {"now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
-            "proposals_closed_as_applied": closed, "open_proposals": pending}
+            "proposals_closed_as_applied": closed, "radar": [item["code"] for item in reading["findings"]],
+            "open_proposals": pending}
 
 
 def notify_view(result: dict) -> dict | None:

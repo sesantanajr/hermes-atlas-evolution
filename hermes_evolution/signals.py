@@ -19,7 +19,7 @@ from pathlib import Path
 from .experience import day_offset, label, record, utc_day
 
 SURFACES = ("local", "gateway", "cron", "subagent")
-_LOCAL_PLATFORMS = frozenset({"cli", "tui", "desktop", "acp", "local"})
+_LOCAL_PLATFORMS = frozenset({"cli", "tui", "desktop", "gui", "acp", "local"})
 LATENCY_BUCKETS = ((15_000, "b15"), (30_000, "b30"), (60_000, "b60"), (120_000, "b120"), (300_000, "b300"))
 DEFAULT_SLOW_TURN_MS = 60_000
 _RESULT_LIMIT = 262_144

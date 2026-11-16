@@ -18,7 +18,7 @@ from .native_actions import PLAYBOOKS
 from .operations import RETENTION_DAYS, database, recommendations, run_policy, summarize
 
 RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
-EVOLUTION_ACTIONS = ("learn", "lessons", "skills", "proposals", "experiments", "report")
+EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report")
 CYCLE_INTERVAL_SECONDS = 3600
 
 
@@ -133,6 +133,8 @@ def setup(parser: argparse.ArgumentParser) -> None:
     feedback.add_argument("result", choices=("helpful", "dismissed", "reset"))
     commands.add_parser("history", help=_("Show learned maintenance priorities and feedback"))
 
+    state = commands.add_parser("status", help=_("Show whether the plugin is observing, learning and protecting this profile"))
+    state.add_argument("--format", choices=("md", "json"), default="md")
     learn = commands.add_parser("learn", help=_("Run one evolution pass: derive lessons, measure changes, refresh proposals"))
     learn.add_argument("--notify-only", action="store_true", help=_("Print only new lessons, regressions and high-risk proposals"))
     playbook = commands.add_parser("lessons", help=_("Review the playbook learned from recurring tool failures"))
@@ -169,7 +171,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     digest.add_argument("--deliver", default="local", help=_("Hermes delivery target for the scheduled digest"))
     for command in (skills, digest):
         command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
-    for command in (playbook, digest, learn):
+    for command in (playbook, digest, learn, state):
         command.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS,
                              help=_("Language of lessons, messages and the digest"))
 
@@ -246,6 +248,11 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
     config = effective_settings(home, runtime_config)
     opts = options(config, runtime_config)
     lang = getattr(args, "lang", None) or opts["language"]
+    if action == "status":
+        from . import status
+
+        state = status.build(home, now=now, config=config, runtime_config=runtime_config)
+        return status.markdown(state, lang) if args.format == "md" else state
     if action == "learn":
         from .autopilot import run_exclusive
 
