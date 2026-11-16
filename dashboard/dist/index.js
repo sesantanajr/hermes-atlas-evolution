@@ -42,6 +42,7 @@
               undo: "Undone.", settings: "Saved. It applies within a minute, without restarting.", proposal: "Recorded.",
               applied: "Applied. You can undo it in the History tab.", dismissed: "Dismissed: it stays closed while nothing changes.",
               appliedN: "Applied {n}. You can undo each one in the History tab.", already: "It was already so in Hermes: nothing to undo.",
+              notApplied: "Not applied ({n}):",
               changed: "It changed meanwhile: look at it again." },
       skippedChanged: "{n} skipped: they changed since you saw them.",
       lessonsEmpty: "No lessons yet. A tool failure that comes back (3 times, in 2 sessions or on 2 days) becomes one.",
@@ -115,6 +116,7 @@
               undo: "Desfeito.", settings: "Salvo. Vale em até um minuto, sem reiniciar.", proposal: "Registrado.",
               applied: "Aplicada. Dá para desfazer na aba Histórico.", dismissed: "Dispensada: fica fechada enquanto nada mudar.",
               appliedN: "{n} aplicada(s). Dá para desfazer cada uma na aba Histórico.", already: "Já estava assim no Hermes: nada a desfazer.",
+              notApplied: "Não aplicadas ({n}):",
               changed: "Mudou nesse meio-tempo: veja de novo." },
       skippedChanged: "{n} puladas: mudaram desde que você as viu.",
       lessonsEmpty: "Ainda não há lições. Uma falha de ferramenta que volta (3 vezes, em 2 sessões ou em 2 dias) vira uma.",
@@ -309,6 +311,14 @@
     return data && data.target ? "&profile=current&target=" + encodeURIComponent(data.target) : "";
   }
 
+  // fetchJSON throws "<status>: <body>"; the body of the decide route carries a translated `message`
+  function failure(error) {
+    let text = String(error && error.message || error);
+    const body = text.indexOf("{") >= 0 ? text.slice(text.indexOf("{")) : "";
+    try { const parsed = JSON.parse(body); text = parsed.message || parsed.error || text; } catch (e) { /* as is */ }
+    return text;
+  }
+
   function useActions(props) {
     const state = hooks.useState(null);
     const working = state[0], setWorking = state[1];
@@ -323,14 +333,30 @@
         props.reload();
       }).catch(function (error) {
         setWorking(null);
-        // fetchJSON throws "<status>: <body>"; the body of this route carries a translated `message`
-        let text = String(error && error.message || error);
-        const body = text.indexOf("{") >= 0 ? text.slice(text.indexOf("{")) : "";
-        try { const parsed = JSON.parse(body); text = parsed.message || parsed.error || text; } catch (e) { /* as is */ }
-        props.notify(text, true);
+        props.notify(failure(error), true);
       });
     };
-    return { send: send, working: working };
+    // Several requests one after the other (each answers in seconds, so no proxy in front of the dashboard times out),
+    // then one notice with what happened to all of them.
+    const sendAll = function (bodies, done) {
+      if (!props.data.can_decide || !bodies.length) return;
+      setWorking("batch");
+      const results = [];
+      const next = function (index) {
+        if (index >= bodies.length) {
+          setWorking(null);
+          props.notify(done(results), false);
+          props.reload();
+          return;
+        }
+        SDK.fetchJSON("/api/plugins/" + NAME + "/decide?lang=" + props.lang + scope(props.data), {
+          method: "POST", headers: { "Content-Type": "application/json", "X-Atlas-Evolution": "1" }, body: JSON.stringify(bodies[index])
+        }).then(function (result) { results.push(result); next(index + 1); })
+          .catch(function (error) { setWorking(null); props.notify(failure(error), true); props.reload(); });
+      };
+      next(0);
+    };
+    return { send: send, sendAll: sendAll, working: working };
   }
 
   function LessonActions(props) {
@@ -461,8 +487,20 @@
       if (result && Array.isArray(result.applied)) return fill(t.done.appliedN, { n: result.applied.length });
       return result && result.reason === "already" ? t.done.already : t.done.changed;
     };
-    const applyAll = function () {   // one request: the plugin applies them one after the other
-      act.send({ kind: "apply_all", ids: changes.map(function (row) { return row.id; }) }, applied);
+    const applyAll = function () {   // batches of 10; the plugin applies each batch one change after the other
+      const ids = changes.map(function (row) { return row.id; }), bodies = [];
+      for (let at = 0; at < ids.length; at += 10) bodies.push({ kind: "apply_all", ids: ids.slice(at, at + 10) });
+      act.sendAll(bodies, function (results) {
+        let done = 0;
+        const reasons = [];
+        results.forEach(function (result) {
+          done += (result.applied || []).length;
+          (result.skipped || []).forEach(function (item) {
+            reasons.push("#" + item.id + " " + (item.reason === "already" ? t.done.already : item.reason === "not_open" ? t.done.changed : String(item.reason || "")));
+          });
+        });
+        return fill(t.done.appliedN, { n: done }) + (reasons.length ? " " + fill(t.done.notApplied, { n: reasons.length }) + " " + reasons.join("; ") : "");
+      });
     };
     const order = ["change", "lesson", "manual", "advice"];
     const sorted = rows.slice().sort(function (a, b) {

@@ -509,6 +509,7 @@ def markdown(report: dict, lang: str = "en") -> str:
             continue
         if code == "settings_ignored":
             lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report["settings_ignored"])))
+            continue
         if code == "settings_reload":
             lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report["settings_reload"])))
             continue

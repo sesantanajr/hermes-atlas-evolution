@@ -197,8 +197,10 @@ def _does(kind: str, subject: str, lang: str) -> str:
                        " e as suas próprias edições continuam valendo.",
                        "Locks the skill: the agent and the curator stop rewriting it; it is still read and loaded, and"
                        " your own edits still apply."),
-        "skill_archive": ("Arquiva a skill: ela sai da lista ativa e pode ser restaurada.",
-                          "Archives the skill: it leaves the active list and can be restored."),
+        "skill_archive": ("Arquiva a skill: ela sai da lista ativa. No Hermes 0.23.1, `hermes curator restore` não a"
+                          " devolve ao mesmo lugar; por isso o plugin só mostra o comando.",
+                          "Archives the skill: it leaves the active list. In Hermes 0.23.1, `hermes curator restore` does"
+                          " not put it back where it was, so the plugin only shows the command."),
         "lesson": ("Ativa a lição: o agente passa a lê-la no começo de cada sessão.",
                    "Activates the lesson: the agent reads it at the start of every session."),
         "lesson_retire": ("Aposenta a lição: o agente deixa de lê-la.", "Retires the lesson: the agent stops reading it."),

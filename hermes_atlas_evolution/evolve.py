@@ -179,6 +179,9 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         outcomes = skill_outcomes(conn, start_day=day_offset(now, 13), end_day=utc_day(now))
         from . import radar
 
+        from .actions import recover
+
+        recover(conn)   # before the refresh: a claim the loop did not write itself expires there
         conn.commit()   # Hermes' state.db is read with no write lock held on this database
         reading = radar.scan(home, conn, now=now, own_transform=opts["tool_hints"] and opts["lessons"] != "off")
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,

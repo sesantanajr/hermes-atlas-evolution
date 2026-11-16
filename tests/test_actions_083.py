@@ -382,7 +382,7 @@ class Review083Test(Base):
         second = actions.automatic(self.home, now=NOW + 60, mode="full", runner=failing, usage={})
         self.assertEqual([item["subject"] for item in second["applied"]], ["other"])
         late = Hermes()
-        actions.automatic(self.home, now=NOW + 120, mode="full", runner=late, usage={}, deadline=clock.monotonic() + 30)
+        actions.automatic(self.home, now=NOW + 120, mode="full", runner=late, usage={}, deadline=clock.monotonic() + 5)
         self.assertEqual(late.calls, [])
         tomorrow = actions.automatic(self.home, now=NOW + 90_000, mode="full", runner=Hermes(fail_on="gone"), usage={})
         self.assertEqual(len(tomorrow["failed"]), 1)   # tried again a day later
@@ -411,6 +411,78 @@ class Review083Test(Base):
              clock=lambda: NOW).run()
         self.assertIn("`runtime_guard`", script.text)
         self.assertNotIn("{keys}", script.text)
+
+
+class Recheck083Test(Base):
+    """The second pass of the review on the fixes: each confirmed finding, as a test."""
+
+    def setUp(self):
+        super().setUp()
+        executable = patch.object(admin, "hermes_executable", return_value="/usr/local/bin/hermes")
+        executable.start()
+        self.addCleanup(executable.stop)
+
+    def test_a_claim_taken_back_meanwhile_records_nothing(self):
+        proposal = propose(self.home, "skill_lock", "hermes-admin", LOCK, "hermes curator lock hermes-admin")
+
+        def another_process(command, **kwargs):   # it thought this claim dead, applied and recorded it
+            with experience(self.home) as conn:
+                conn.execute("UPDATE proposal SET status='applied' WHERE id=?", (proposal,))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        result = actions.apply_proposal(self.home, proposal, now=NOW - 2000, runner=another_process, usage={})
+        self.assertEqual(result["reason"], "not_open")
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0], 0)
+            claimed = conn.execute("SELECT updated FROM proposal WHERE id=?", (proposal,)).fetchone()[0]
+        self.assertGreater(claimed, NOW - 1000)   # claims carry the real clock, never the pass's start time
+
+    def test_a_claim_the_loop_did_not_write_expires_before_it_can_apply(self):
+        from hermes_atlas_evolution import proposals
+
+        with experience(self.home) as conn:
+            conn.execute("""INSERT INTO proposal(code, kind, risk, subject, evidence, command, status, created, updated)
+                VALUES ('skill_lock:victim', 'skill_lock', 'medium', 'victim', '{}', 'x', 'applying', 0, 0)""")
+            actions.recover(conn)
+            proposals.refresh(conn, now=NOW)
+            self.assertEqual(conn.execute("SELECT status FROM proposal").fetchone()[0], "expired")
+        hermes = Hermes()
+        actions.automatic(self.home, now=NOW, mode="full", runner=hermes, usage={})
+        self.assertEqual(hermes.calls, [])
+
+    def test_a_lock_kept_under_the_folder_name_is_the_owners(self):
+        folder = self.home / "skills" / "ops" / "nested-dir"
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text("---\nname: nested-skill\ndescription: x\n---\nBody\n", encoding="utf-8")
+        proposal = propose(self.home, "skill_lock", "nested-skill", LOCK, "hermes curator lock nested-skill")
+        hermes = Hermes()
+        result = actions.apply_proposal(self.home, proposal, now=NOW, runner=hermes,
+                                        usage={"nested-dir": {"locked": True}})
+        self.assertEqual((result["reason"], hermes.calls), ("already", []))
+
+    def test_a_name_hermes_would_refuse_never_holds_up_the_others(self):
+        propose(self.home, "skill_lock", "análise dados", LOCK, "x")
+        propose(self.home, "skill_lock", "good-skill", LOCK, "hermes curator lock good-skill")
+        done = actions.automatic(self.home, now=NOW, mode="full", runner=Hermes(), usage={})
+        self.assertEqual(([item["subject"] for item in done["applied"]], done["failed"]), (["good-skill"], []))
+
+    def test_settings_the_agent_tried_to_widen_are_listed_once(self):
+        from hermes_atlas_evolution import status
+
+        (self.home / "evolution").mkdir(exist_ok=True)
+        (self.home / "evolution" / "settings.json").write_text(json.dumps({"evolution": {"auto_actions": "full"}}),
+                                                               encoding="utf-8")
+        text = status.markdown(status.build(self.home, now=NOW, config={}, runtime_config={}), "pt")
+        self.assertIn("`auto_actions`", text)
+        self.assertNotIn("{keys}", text)
+
+    def test_a_busy_store_stops_apply_all_and_says_so(self):
+        import sqlite3
+
+        ids = [propose(self.home, "skill_lock", f"s{n}", LOCK, f"hermes curator lock s{n}") for n in range(3)]
+        with patch.object(actions, "apply_proposal", side_effect=sqlite3.OperationalError("database is locked")):
+            result = actions.apply_many(self.home, ids, now=NOW)
+        self.assertEqual((result["applied"], result["skipped"]), ([], [{"id": ids[0], "reason": "busy"}]))
 
 
 if __name__ == "__main__":

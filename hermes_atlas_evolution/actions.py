@@ -24,6 +24,7 @@ MAX_MEMORY_PER_PASS = 10
 FAILURE_BACKOFF_SECONDS = 86_400   # an automatic change Hermes refused is tried again a day later
 STALE_APPLYING_SECONDS = 900       # a claim left by a process that died while Hermes ran
 COMMAND_SECONDS = 180              # Hermes may finish its own maintenance before the command (after an update)
+COMMAND_MIN_SECONDS = 30           # a pass this close to its deadline runs no Hermes command (a lock takes ~2 s)
 
 
 def _hermes(home: Path, args: list, *, runner=None) -> None:
@@ -32,9 +33,36 @@ def _hermes(home: Path, args: list, *, runner=None) -> None:
     run_hermes(home, args, runner=runner, timeout=COMMAND_SECONDS, what="command")
 
 
-def _recover(conn, now: float) -> None:
+def recover(conn) -> None:
+    """Reopen a claim a process left when it died while Hermes ran. The learning pass calls it before it refreshes the
+    proposals, so a claim the loop did not write itself expires there instead of being applied."""
+    import time
+
+    real = time.time()   # claims carry the real clock, never a pass's start time
     conn.execute("UPDATE proposal SET status='open', updated=? WHERE status='applying' AND updated < ?",
-                 (now, now - STALE_APPLYING_SECONDS))
+                 (real, real - STALE_APPLYING_SECONDS))
+
+
+def _held_by_owner(home: Path, subject: str, usage: dict) -> bool:
+    """Whether the skill is already locked or pinned. Hermes keys both by the skill's folder, which may differ from the
+    name a proposal carries (the SKILL.md frontmatter): the folders that declare this name count too."""
+    names = {subject}
+    root = Path(home) / "skills"
+    try:
+        for found, skill_file in enumerate(root.rglob("SKILL.md")):
+            if found >= 2000 or len(skill_file.relative_to(root).parts) > 5:
+                break
+            try:
+                head = skill_file.read_text(encoding="utf-8", errors="replace")[:4096]
+            except OSError:
+                continue
+            if any(line.split(":", 1)[1].strip().strip("'\"") == subject for line in head.splitlines()[:30]
+                   if line.startswith("name:")):
+                names.add(skill_file.parent.name)
+    except OSError:
+        pass
+    return any(isinstance(usage.get(name), dict) and (usage[name].get("locked") or usage[name].get("pinned"))
+               for name in names)
 
 
 def _usage(home: Path) -> dict:
@@ -58,8 +86,10 @@ def apply_proposal(home: Path, proposal_id: int, *, now: float, actor: str = "te
     from . import decisions, explain
     from .experience import experience
 
+    import time
+
     with experience(home) as conn:
-        _recover(conn, now)
+        recover(conn)
         row = conn.execute("SELECT * FROM proposal WHERE id=?", (int(proposal_id),)).fetchone()
         if row is None:
             raise ValueError(f"Unknown proposal id {proposal_id}")
@@ -68,11 +98,10 @@ def apply_proposal(home: Path, proposal_id: int, *, now: float, actor: str = "te
             raise ValueError("The plugin cannot apply this proposal; approve it to see the command")
         previous = row["status"]
         claimed = conn.execute("UPDATE proposal SET status='applying', updated=? WHERE id=? AND status IN "
-                               "('open', 'approved')", (now, row["id"])).rowcount
+                               "('open', 'approved')", (time.time(), row["id"])).rowcount
     if not claimed:
         return {"id": row["id"], "applied": False, "reason": "not_open"}
-    record = (usage if usage is not None else _usage(home)).get(row["subject"])
-    if row["kind"] == "skill_lock" and isinstance(record, dict) and (record.get("locked") or record.get("pinned")):
+    if row["kind"] == "skill_lock" and _held_by_owner(home, row["subject"], usage if usage is not None else _usage(home)):
         with experience(home) as conn:
             conn.execute("UPDATE proposal SET status='applied', updated=? WHERE id=? AND status='applying'", (now, row["id"]))
         return {"id": row["id"], "applied": False, "reason": "already"}
@@ -84,7 +113,10 @@ def apply_proposal(home: Path, proposal_id: int, *, now: float, actor: str = "te
                          (previous, now, row["id"]))
         raise
     with experience(home) as conn:
-        conn.execute("UPDATE proposal SET status='applied', updated=? WHERE id=? AND status='applying'", (now, row["id"]))
+        still = conn.execute("UPDATE proposal SET status='applied', updated=? WHERE id=? AND status='applying'",
+                             (now, row["id"])).rowcount
+        if not still:   # the claim was taken back meanwhile (a process thought this one dead): the other one records it
+            return {"id": row["id"], "applied": False, "reason": "not_open"}
         decision = decisions.record_applied(conn, row["id"], code=row["code"], before=previous, apply=found[0],
                                             undo=found[1], now=now, actor=actor)
     return {"id": row["id"], "applied": True, "decision": decision, "undo": "hermes " + " ".join(found[1])}
@@ -92,6 +124,8 @@ def apply_proposal(home: Path, proposal_id: int, *, now: float, actor: str = "te
 
 def apply_many(home: Path, ids: list, *, now: float, actor: str = "terminal", runner=None) -> dict:
     """Apply several proposals one after the other (the panel's and the menu's "apply all")."""
+    import sqlite3
+
     applied, skipped = [], []
     usage = _usage(home)
     for raw in ids[:50]:
@@ -100,6 +134,9 @@ def apply_many(home: Path, ids: list, *, now: float, actor: str = "terminal", ru
         except (TypeError, ValueError) as error:
             skipped.append({"id": raw, "reason": str(error)[:160]})
             continue
+        except (OSError, sqlite3.Error):
+            skipped.append({"id": raw, "reason": "busy"})
+            break
         (applied.append(result["id"]) if result.get("applied") else skipped.append({"id": result["id"],
                                                                                    "reason": result.get("reason")}))
     return {"applied": applied, "skipped": skipped}
@@ -171,7 +208,6 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
 
     usage = usage if isinstance(usage, dict) else _usage(home)
     with experience(home) as conn:
-        _recover(conn, now)
         held = {}
         for key, value in conn.execute("SELECT key, value FROM cursor WHERE key LIKE 'auto_skip:%' OR key LIKE 'auto_fail:%'"):
             held[key] = value
@@ -180,10 +216,11 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
     for row in rows:
         if len(done["applied"]) >= MAX_CHANGES_PER_PASS:
             break
-        if deadline is not None and deadline - time.monotonic() < COMMAND_SECONDS + 10:
+        if deadline is not None and deadline - time.monotonic() < COMMAND_MIN_SECONDS:
             break
-        if row["code"] != f"{row['kind']}:{row['subject']}" or f"auto_skip:{row['code']}" in held:
-            continue   # only the proposals the loop writes itself, and never one the owner undid
+        if row["code"] != f"{row['kind']}:{row['subject']}" or f"auto_skip:{row['code']}" in held \
+                or explain.plan(dict(row)) is None:
+            continue   # only the proposals the loop writes itself, with a plain name, and never one the owner undid
         try:
             failed_at = float(held.get(f"auto_fail:{row['code']}") or 0)
         except ValueError:

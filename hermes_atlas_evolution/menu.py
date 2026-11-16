@@ -43,7 +43,7 @@ TEXT = {
         "suggest_advice": "Read {n} observation(s) with their numbers",
         "apply_all_q": "Apply these {n} change(s) to Hermes now? Each one can be undone in the history.",
         "applied": "Applied. To undo: {undo} (or from the history).", "applied_n": "Applied {n}.",
-        "already": "It was already so in Hermes (the skill was already locked): nothing to undo.",
+        "already": "It was already so in Hermes (the skill was already locked or pinned): nothing to undo.",
         "auto_names": {"off": "off", "safe": "safe", "full": "full"},
         "auto_title": "Automatic actions", "auto_q": "Set the automatic actions to “{mode}”?",
         "auto_now": "Now: {mode}.",
@@ -146,7 +146,7 @@ TEXT = {
         "suggest_advice": "Ler {n} observação(ões) com os números",
         "apply_all_q": "Aplicar estas {n} mudança(s) no Hermes agora? Cada uma pode ser desfeita no histórico.",
         "applied": "Aplicada. Para desfazer: {undo} (ou pelo histórico).", "applied_n": "{n} aplicada(s).",
-        "already": "Já estava assim no Hermes (a skill já estava travada): nada a desfazer.",
+        "already": "Já estava assim no Hermes (a skill já estava travada ou fixada): nada a desfazer.",
         "auto_names": {"off": "desligadas", "safe": "seguras", "full": "completas"},
         "auto_title": "Ações automáticas", "auto_q": "Passar as ações automáticas para “{mode}”?",
         "auto_now": "Agora: {mode}.",
@@ -550,7 +550,7 @@ class Menu:
             self.io.say(f"   · {item['explain']['title']}: {item['subject']}")
         if not self.confirm(self.t["apply_all_q"].format(n=len(changes))):
             return
-        result = admin.decide(self.home, self.runtime, {"kind": "apply_all", "ids": [item["id"] for item in changes]},
+        result = admin.decide(self.home, self.runtime, {"kind": "apply_all", "ids": [item["id"] for item in changes][:50]},
                               now=self.clock(), lang=self.lang, actor="terminal")
         self.io.say(self.t["applied_n"].format(n=len(result["applied"])))
         for item in result["skipped"]:

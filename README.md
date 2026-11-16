@@ -184,7 +184,7 @@ Every option, `settings.json` and what happens with an invalid value: [Settings 
 - **Model calls.** Only the reflector calls an AI model, through Hermes and its provider settings (auxiliary task `evolution_reflector`), at most 3 times per pass and 6 times a day by default. `reflector: false` stops it.
 - **Network.** No connection of its own and no telemetry.
 - **Gateway chats.** The plugin sends nothing to a chat. Its notices appear only in Hermes on your own machine (CLI, TUI, Desktop), never in a gateway chat. What the other side of a chat sees is what the agent writes.
-- **Decisions.** Only you decide: in your own terminal (the menu or the commands, which refuse to run in the agent's terminal) or in a dashboard that asks for a login. The plugin changes its own data, its own settings through Hermes' `hermes config set`, Hermes' memory files only to take out a repeat (the one you chose, or an exact repeat with `auto_actions`), and skills only with `hermes curator lock` or `archive`, on your approval or with `auto_actions: full`, each with its undo; other changes to Hermes are printed as commands for you.
+- **Decisions.** Only you decide: in your own terminal (the menu or the commands, which refuse to run in the agent's terminal) or in a dashboard that asks for a login. The plugin changes its own data, its own settings through Hermes' `hermes config set`, Hermes' memory files only to take out a repeat (the one you chose, or an identical copy with `auto_actions`), and skills only with `hermes curator lock` (and `unlock` to undo it), on your approval or with `auto_actions: full`, each with its undo; other changes to Hermes are printed as commands for you.
 
 Details: [SECURITY.md](SECURITY.md).
 
