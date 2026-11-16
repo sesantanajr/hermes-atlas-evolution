@@ -10,6 +10,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from collections import OrderedDict
 from pathlib import Path
 
 from .advisory import TOOL, tool_handler
@@ -139,6 +140,14 @@ def _register_skills(ctx) -> None:
                 getLogger(__name__).warning("Atlas Evolution could not register the bundled skill %s", child.name)
 
 
+# Session ends whose on_session_finalize text Hermes 0.23.1 drops: a local session closed by its viewer
+# (CLI, TUI, Desktop are viewers of the gateway) or reaped. See gateway/session_viewer_close.py.
+_UNSHOWN_END_REASONS = frozenset({"cli_close", "tui_close", "new_session", "session_reset", "ws_orphan_reap",
+                                  "startup_orphan_reap", "ws_disconnect", "idle_timeout", "lru_evict", "tui_shutdown"})
+_OWNER_ONLY_TOOL = ("Atlas Evolution's tools answer only in the owner's own sessions (CLI, TUI, Desktop, automations, "
+                    "or a chat with a sender listed in owner_sender_ids).")
+
+
 class _Plugin:
     """One load of the plugin in one profile: its settings, trackers and hook callbacks.
 
@@ -160,6 +169,9 @@ class _Plugin:
         self.recent: dict[str, dict] = {}   # tool_call_id -> failure, for the transform that follows the tool
         self.commands: dict[str, str] = {}  # tool_call_id -> hash of the command the agent wrote (memory only)
         self.counted: dict[str, None] = {}  # sessions whose playbook render was already counted
+        # session id -> whether its latest turn served the owner (see signals.owner_turn); memory only
+        self.sessions: OrderedDict[str, bool] = OrderedDict()
+        self.owners = frozenset(str(item) for item in evolution["owner_sender_ids"] if item not in (None, ""))
         self.guard = None
         self.recent_lock = threading.Lock()
         self.failed: set[str] = set()
@@ -227,6 +239,20 @@ class _Plugin:
         return written is not None and isinstance(command, str) and \
             hashlib.sha256(command.encode("utf-8", "replace")).hexdigest() != written
 
+    def _remember_owner(self, session, owner: bool) -> None:
+        if isinstance(session, str) and 0 < len(session) <= 400:
+            with self.recent_lock:
+                self.sessions[session] = owner
+                self.sessions.move_to_end(session)
+                while len(self.sessions) > 2048:
+                    self.sessions.popitem(last=False)
+
+    def served_owner(self, session) -> bool:
+        """Whether the session's latest turn served the owner. Unknown (no turn seen since the plugin loaded)
+        counts as someone else: what depends on it is held back, never given away."""
+        with self.recent_lock:
+            return self.sessions.get(session) is True if isinstance(session, str) else False
+
     def after_tool(self, **payload):
         from .signals import classify, reclassify, record_tool
 
@@ -242,7 +268,7 @@ class _Plugin:
             if self._rewritten(payload) and failure and failure["klass"] != "plugin_fault":
                 failure = reclassify(failure, "rewritten_command")   # the agent did not write what failed
             # An excerpt is kept only when the reflector could use it: on, and lessons not off.
-            record_tool(self.home, payload, failure=failure,
+            record_tool(self.home, payload, failure=failure, owner=self.served_owner(payload.get("session_id")),
                         sample=self.evolution["reflector"] and self.evolution["lessons"] != "off")
             call = payload.get("tool_call_id")
             if failure and isinstance(call, str) and 0 < len(call) <= 400:
@@ -254,8 +280,14 @@ class _Plugin:
             self.warn("tool_outcome")
 
     def before_turn(self, **payload):
-        from .signals import record_skill_correction
+        from .signals import owner_turn, record_skill_correction, turn_surface
 
+        try:
+            surface = turn_surface(payload)
+            payload = {**payload, "surface": surface}
+            self._remember_owner(payload.get("session_id"), owner_turn(surface, payload.get("sender_id"), self.owners))
+        except Exception:
+            pass
         try:
             if self.sensor is not None and {"correction", "reask"} & set(self.sensor.observe(payload)):
                 # The owner is correcting the previous turn: count it against the skills that turn loaded.
@@ -319,7 +351,7 @@ class _Plugin:
                                           payload.get("result"), payload.get("args"))
             if not failure:
                 return None
-            entry = self.hints.lookup(failure["signature"], session)
+            entry = self.hints.lookup(failure["signature"], session, templates_only=not self.served_owner(session))
             if entry is None:
                 return None
             changed = attach(payload.get("result"), entry[1], self.lang)
@@ -335,12 +367,19 @@ class _Plugin:
         once, however often Hermes renders its prompt again (compaction, a fork, an inspection)."""
         from . import lessons as playbook
         from .experience import experience, record
+        from .signals import session_source, surface_of
 
         try:
             shown: list = []
+            info = session_info if hasattr(session_info, "get") else {}
+            platform = info.get("platform")
+            # A chat where someone else may be on the other side gets template lessons only: the prompt is built
+            # before the first message, so who is writing is not known yet.
+            others = surface_of(platform, session_source(platform)) == "gateway" \
+                and not self.served_owner(info.get("session_id"))
             with experience(self.home) as conn:   # its own connection: WAL readers never wait for a writer
-                text = playbook.playbook(conn, lang=self.lang, chosen=shown)
-            session = session_info.get("session_id") if hasattr(session_info, "get") else None
+                text = playbook.playbook(conn, lang=self.lang, chosen=shown, templates_only=others)
+            session = info.get("session_id")
             if isinstance(session, str) and session:
                 with self.recent_lock:
                     seen = session in self.counted
@@ -367,6 +406,8 @@ class _Plugin:
         try:
             if payload.get("parent_session_id") or surface_of(payload.get("platform")) != "local":
                 return None
+            if payload.get("reason") in _UNSHOWN_END_REASONS:
+                return None   # Hermes drops this text (no viewer is left): the day's notice waits for one it shows
             return pending_notice(self.home, now=time.time(), lang=self.lang)
         except Exception:   # a notice is a convenience; it must never disturb the end of a session
             return None
@@ -387,11 +428,15 @@ class _Plugin:
     def advisory_tool(self, args, **context):
         if not self.advice:
             return self.in_language(json.dumps({"error": "Planning permission has not been enabled for this Hermes profile."}))
+        if not self.served_owner(context.get("session_id")):
+            return self.in_language(json.dumps({"error": _OWNER_ONLY_TOOL}))
         return self.in_language(tool_handler(args, **context))
 
     def playbook_tool(self, args, **context):
         if not self.advice:
             return self.in_language(json.dumps({"error": "Playbook access has not been enabled for this Hermes profile."}))
+        if not self.served_owner(context.get("session_id")):
+            return self.in_language(json.dumps({"error": _OWNER_ONLY_TOOL}))
         return self.in_language(self.lessons_tool.handle(args, **context))
 
 

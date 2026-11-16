@@ -29,7 +29,8 @@ from urllib.parse import quote
 
 from .experience import RETENTION_DAYS, experience, record, utc_day
 from .operations import batched
-from .signals import DEFAULT_SLOW_TURN_MS, FeedbackSensor, TurnTracker, record_skill_correction, record_skill_event, record_tool
+from .signals import (DEFAULT_SLOW_TURN_MS, FeedbackSensor, TurnTracker, owner_turn, record_skill_correction,
+                      record_skill_event, record_tool, surface_of)
 from .telemetry import ResearchTracker
 
 BACKFILL_DAYS = 14
@@ -44,7 +45,6 @@ _REPLAYED_DAILY = ("tool_daily", "failure_daily", "turn_daily", "feedback_daily"
 _BASELINE_DAYS = 14   # lessons.BASELINE_DAYS, kept here to avoid an import cycle
 _LOOKAHEAD = 64
 _IDLE_SECONDS = 600   # a session quiet this long before observation began is not in the middle of a turn
-_LOCAL_SOURCES = frozenset({"local", "cli", "tui", "gui", "desktop", "acp", "oneshot"})
 _INTERRUPTED_ENDS = frozenset({"startup_orphan_reap", "ws_orphan_reap", "session_reset"})
 _FINAL = frozenset({"stop", "end_turn", "verification_required"})
 _REQUIRED = {"sessions": {"id", "source", "started_at"},
@@ -200,6 +200,7 @@ def _redo(home: Path, *, since: float, now: float) -> None:
         for table in _REPLAYED_DAILY:
             conn.execute(f"DELETE FROM {table} WHERE day < ?", (day,))
         conn.execute("DELETE FROM failure_sample WHERE signature NOT IN (SELECT signature FROM failure)")
+        conn.execute("DELETE FROM failure_owner WHERE signature NOT IN (SELECT signature FROM failure)")
         conn.execute("""UPDATE lesson SET baseline_failures=NULL, baseline_calls=NULL
             WHERE activated IS NOT NULL AND activated < ? AND activated >= ?""",
                      (boundary + _BASELINE_DAYS * 86_400, now - (RETENTION_DAYS - _BASELINE_DAYS) * 86_400))
@@ -259,9 +260,11 @@ class _Replay:
         return None if not rows else ""
 
     def session(self, source: sqlite3.Connection, row: dict, *, start: float, until: float) -> None:
-        sid, parent = row["id"], row.get("parent_session_id") or None
-        kind = row.get("source") or ""
-        platform = "cli" if kind in _LOCAL_SOURCES else kind or "gateway"
+        # The session's own source decides, as in the hooks: kanban and cron are automations, "subagent" is a
+        # delegated child, and a child of /new, /branch or a compression stays where its source puts it.
+        sid, surface = row["id"], surface_of(row.get("source") or "gateway")
+        owner = owner_turn(surface, row.get("user_id"), self.sensor.owners)
+        first = float(row.get("started_at") or 0) >= start   # its first message is in the window
         open_turn, final, last, answered = None, False, None, False
         calls: dict = {}
         seen: set = set()
@@ -280,13 +283,13 @@ class _Replay:
                 if open_turn:
                     self._finish(open_turn, final=final, ended=last, interrupted=True)
                 content = message["content"]
-                payload = {"session_id": sid, "platform": platform, "user_message": content if isinstance(content, str) else "",
-                           "sender_id": row.get("user_id"), "parent_session_id": parent}
+                payload = {"session_id": sid, "surface": surface, "user_message": content if isinstance(content, str) else "",
+                           "sender_id": row.get("user_id"), "is_first_turn": first}
+                first = False
                 if {"correction", "reask"} & set(self.sensor.observe(payload, clock=stamp, now=stamp)):
                     record_skill_correction(self.home, self.turns.recent_skills(sid, clock=stamp), now=stamp)
                 open_turn, final, last, answered = f"backfill:{sid}:{message['id']}", False, stamp, False
-                self.turns.start({"turn_id": open_turn, "session_id": sid, "platform": platform,
-                                  "parent_session_id": parent}, clock=stamp)
+                self.turns.start({"turn_id": open_turn, "session_id": sid, "surface": surface}, clock=stamp)
                 self.research.start({"turn_id": open_turn}, clock=stamp)
                 self.counts["turns"] += 1
             elif role == "assistant":
@@ -294,7 +297,8 @@ class _Replay:
                 calls.update(requested)
                 final, last, answered = message["finish_reason"] in _FINAL and not requested, stamp, True
             elif role == "tool":
-                self._tool(message, calls.pop(message["tool_call_id"], (None, {})), sid=sid, turn=open_turn, stamp=stamp)
+                self._tool(message, calls.pop(message["tool_call_id"], (None, {})), sid=sid, turn=open_turn, stamp=stamp,
+                           owner=owner)
                 final, last, answered = False, stamp, True
         if open_turn:
             following = self._following(source, sid, until, seen)
@@ -306,13 +310,13 @@ class _Replay:
                 self._finish(open_turn, final=final, ended=last, interrupted=True)   # over before observation began
             # anything else is a turn cut by the start of observation: the hooks saw its end
 
-    def _tool(self, message, call, *, sid, turn, stamp) -> None:
+    def _tool(self, message, call, *, sid, turn, stamp, owner: bool = True) -> None:
         name, args = call
         name = message["tool_name"] or name
         status = _status(message["content"])
         payload = {"tool_name": name, "status": status, "result": message["content"], "args": args,
                    "session_id": sid, "turn_id": turn, "tool_call_id": message["tool_call_id"]}
-        failure = record_tool(self.home, payload, now=stamp, sample=self.sample)
+        failure = record_tool(self.home, payload, now=stamp, sample=self.sample, owner=owner)
         self.turns.tool(payload)
         self.research.tool(payload)
         self.counts["tool_calls"] += 1

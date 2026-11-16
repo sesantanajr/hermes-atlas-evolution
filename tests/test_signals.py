@@ -184,7 +184,7 @@ class StoreTest(unittest.TestCase):
                                            clock=1000.0 + seconds, now=NOW))
         tracker.start({"turn_id": "cron", "platform": "cron"}, clock=0.0)
         tracker.finish({"turn_id": "cron", "completed": True}, clock=1.0, now=NOW)
-        tracker.start({"turn_id": "child", "platform": "telegram", "parent_session_id": "p"}, clock=0.0)
+        tracker.start({"turn_id": "child", "platform": "subagent", "parent_session_id": "p"}, clock=0.0)
         tracker.finish({"turn_id": "child", "interrupted": True}, clock=1.0, now=NOW)
         self.assertFalse(tracker.finish({"turn_id": "never-started", "completed": True}, clock=1.0, now=NOW))
         with experience(self.home) as conn:
@@ -215,7 +215,7 @@ class StoreTest(unittest.TestCase):
                                          "user_message": "não, errado"}, clock=0.0, now=NOW), [])
         self.assertEqual(sensor.observe({"session_id": "d", "platform": "whatsapp", "sender_id": "owner-1",
                                          "user_message": "wrong, try again"}, clock=0.0, now=NOW), ["correction"])
-        self.assertEqual(sensor.observe({"session_id": "e", "platform": "cli", "parent_session_id": "p",
+        self.assertEqual(sensor.observe({"session_id": "e", "platform": "subagent", "parent_session_id": "p",
                                          "user_message": "não, errado"}, clock=0.0, now=NOW), [])
         self.assertEqual(sensor.observe({"session_id": "f", "platform": "cli", "user_message": ["multimodal"]},
                                         clock=0.0, now=NOW), [])

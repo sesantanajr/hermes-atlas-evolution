@@ -44,7 +44,7 @@ class TrackingTest(Base):
         self.turn(day=NOW, skills=("deploy",), platform="cron")              # compared with interactive turns only
         self.tracker.skill({"action": "loaded", "skill_name": "orphan", "session_id": "nobody", "task_id": "x"})
         self.tracker.skill({"action": "patched", "skill_name": "deploy", "session_id": "s"})
-        self.tracker.start({"turn_id": "child", "session_id": "c", "task_id": "c", "platform": "cli",
+        self.tracker.start({"turn_id": "child", "session_id": "c", "task_id": "c", "platform": "subagent",
                             "parent_session_id": "p"}, clock=0.0)
         self.tracker.skill({"action": "loaded", "skill_name": "deploy", "session_id": "c", "task_id": "c"})
         self.tracker.finish({"turn_id": "child", "failed": True}, clock=1.0, now=NOW)   # subagents are not attributed

@@ -46,7 +46,7 @@ class HintIndex:
     def __init__(self, home: Path, *, lang: str = "en"):
         self.home = home
         self.lang = lang
-        self._index: dict[str, tuple[int, str]] = {}
+        self._index: dict[str, tuple[int, str, bool]] = {}
         self._loaded = float("-inf")
         self._given: OrderedDict[str, set[str]] = OrderedDict()
         self._lock = threading.Lock()
@@ -58,13 +58,15 @@ class HintIndex:
         with experience(self.home) as conn:   # once a minute at most; WAL readers never wait for a writer
             self._index = lessons.hint_index(conn, lang=self.lang)
 
-    def lookup(self, signature: str, session: str, *, clock: float | None = None) -> tuple[int, str] | None:
-        """The lesson for this failure, once per session and at most MAX_HINTS_PER_SESSION per session."""
+    def lookup(self, signature: str, session: str, *, clock: float | None = None,
+               templates_only: bool = False) -> tuple[int, str] | None:
+        """The lesson for this failure, once per session and at most MAX_HINTS_PER_SESSION per session.
+        `templates_only`: a chat where someone else may read along gets template lessons only."""
         clock = time.monotonic() if clock is None else clock
         with self._lock:
             self._refresh(clock)
             entry = self._index.get(signature)
-            if entry is None:
+            if entry is None or templates_only and not entry[2]:
                 return None
             given = self._given.setdefault(session, set())
             self._given.move_to_end(session)
@@ -73,7 +75,7 @@ class HintIndex:
             if signature in given or len(given) >= MAX_HINTS_PER_SESSION:
                 return None
             given.add(signature)
-            return entry
+            return entry[0], entry[1]
 
     def count(self, lesson_id: int) -> None:
         record(self.home, lambda conn: lessons.count_hint(conn, lesson_id))

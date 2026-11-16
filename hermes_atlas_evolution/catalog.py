@@ -332,6 +332,10 @@ PAIRS = (
     ("Evolution storage is temporarily unavailable.", "O armazenamento do Evolution está indisponível no momento."),
     ("Planning permission has not been enabled for this Hermes profile.", "A permissão de planejamento não foi liberada neste perfil do Hermes."),
     ("Playbook access has not been enabled for this Hermes profile.", "O acesso ao playbook não foi liberado neste perfil do Hermes."),
+    ("Atlas Evolution's tools answer only in the owner's own sessions (CLI, TUI, Desktop, automations, or a chat with a "
+     "sender listed in owner_sender_ids).",
+     "As ferramentas do Atlas Evolution só respondem nas sessões do próprio dono (CLI, TUI, Desktop, automações ou uma "
+     "conversa com um remetente listado em owner_sender_ids)."),
     ("Expected a supported plan kind, effort and optional boolean durable flag",
      "Informe um tipo de plano e um esforço válidos e, se quiser, o indicador booleano durable"),
     ("Unexpected planning field", "Campo de planejamento inesperado"),

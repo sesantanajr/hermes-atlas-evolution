@@ -89,6 +89,7 @@ def _open(path: Path, timeout: float, **options) -> sqlite3.Connection:
                 raise
         elif version < 0:
             raise ValueError(f"Unsupported Evolution database schema {version}")
+        _ensure_additive(connection, path)
         # A newer version of the plugin only ever adds tables and columns, so a database it upgraded still
         # works here after a downgrade: what this version reads and writes is all still there.
         connection.execute("PRAGMA foreign_keys=ON")
@@ -96,6 +97,31 @@ def _open(path: Path, timeout: float, **options) -> sqlite3.Connection:
         connection.close()
         raise
     return connection
+
+
+_ADDITIVE_READY: set[str] = set()
+
+
+def _ensure_additive(connection: sqlite3.Connection, path: Path) -> None:
+    """Create the tables added after schema 8 (experience.ADDITIVE_TABLES) that this database lacks. Checked
+    once per database file and process; the check is a read, so readers never wait for a writer here."""
+    key = os.fspath(path)
+    if key in _ADDITIVE_READY:
+        return
+    from .experience import ADDITIVE_TABLES
+
+    present = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    missing = [statement for name, statement in ADDITIVE_TABLES if name not in present]
+    if missing:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            for statement in missing:
+                connection.execute(statement)
+            connection.execute("COMMIT")
+        except BaseException:
+            _rollback(connection)
+            raise
+    _ADDITIVE_READY.add(key)
 
 
 @contextmanager

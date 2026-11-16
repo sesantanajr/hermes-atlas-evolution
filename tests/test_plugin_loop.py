@@ -158,7 +158,7 @@ class PluginLoopTest(PluginBase):
         writer = sqlite3.connect(self.home / "evolution" / "evolution.sqlite3", timeout=0)
         writer.execute("BEGIN IMMEDIATE")   # e.g. `hermes evolution learn` running in another process
         try:
-            text = context.sections["hermes-atlas-evolution.playbook"]["content"]({"session_id": "busy"})
+            text = context.sections["hermes-atlas-evolution.playbook"]["content"]({"session_id": "busy", "platform": "tui"})
         finally:
             writer.execute("ROLLBACK")
             writer.close()
@@ -211,9 +211,12 @@ class PluginLoopTest(PluginBase):
 
     def test_the_agent_proposal_cap_holds_across_calls_of_the_registered_tool(self):
         self.settings(agent_advice=True)
-        handler = self.plugin().tools["hermes_atlas_evolution_lessons"]["handler"]
+        context = self.plugin()
+        context.fire("pre_llm_call", session_id="own", turn_id="t", platform="cli", user_message="go")
+        handler = context.tools["hermes_atlas_evolution_lessons"]["handler"]
         replies = [json.loads(handler({"action": "propose", "tool": "terminal",
-                                       "lesson": f"When the build number {index} fails, read the first error line first."}))
+                                       "lesson": f"When the build number {index} fails, read the first error line first."},
+                                      session_id="own"))
                    for index in range(7)]
         accepted = [reply for reply in replies if "error" not in reply]
         self.assertEqual(len(accepted), 5)   # PROPOSALS_PER_HOUR, kept by the one tool instance of this load
@@ -250,11 +253,18 @@ class PluginLoopTest(PluginBase):
         failing = dict(tool_name="tool_call", status="error", result=ERROR, args=ARGS, session_id="s1", tool_call_id="c1")
         self.settings(evolution={"lessons": "auto"})
         context = self.plugin()
+        context.fire("pre_llm_call", session_id="s1", turn_id="t1", platform="cli", user_message="go")
         # Registered (the manifest declares it) but silent: only the first string of all plugins counts, so a
         # hint would discard another plugin's transform of the same result.
         self.assertIsNone(context.fire("transform_tool_result", **failing))
         self.settings(evolution={"lessons": "auto", "tool_hints": True})
-        self.assertIn("files_search", self.plugin().fire("transform_tool_result", **failing))
+        context = self.plugin()
+        context.fire("pre_llm_call", session_id="s1", turn_id="t1", platform="cli", user_message="go")
+        context.fire("pre_llm_call", session_id="g1", turn_id="t2", platform="whatsapp", sender_id="stranger",
+                     user_message="go")
+        self.assertIn("files_search", context.fire("transform_tool_result", **failing))
+        # an operator's free text never goes to a chat where someone else may read it
+        self.assertIsNone(context.fire("transform_tool_result", **{**failing, "session_id": "g1", "tool_call_id": "c2"}))
 
     def test_a_lesson_counts_as_shown_once_per_session(self):
         self.settings(evolution={"lessons": "auto"})
@@ -264,7 +274,7 @@ class PluginLoopTest(PluginBase):
                                origin="operator", now=1.0, active=True)
         render = context.sections["hermes-atlas-evolution.playbook"]["content"]
         for session in ("a", "a", "a", "b"):   # re-renders of one session count once
-            self.assertIn("build fails", render({"session_id": session}))
+            self.assertIn("build fails", render({"session_id": session, "platform": "cli"}))
         close_observers()
         with experience(self.home) as conn:
             self.assertEqual(lessons.listing(conn)[0]["shown_in_sessions"], 2)
@@ -287,6 +297,7 @@ class PluginLoopTest(PluginBase):
             with self.subTest(lessons=lessons_mode):
                 self.settings(evolution={"lessons": lessons_mode, "reflector": True})
                 context = self.plugin()
+                context.fire("pre_llm_call", session_id="s", turn_id="t", platform="cli", user_message="go")
                 context.fire("post_tool_call", tool_name="terminal", status="error", result=crash,
                              session_id="s", turn_id="t", tool_call_id=f"c-{lessons_mode}")
                 close_observers()
@@ -316,7 +327,8 @@ class PluginLoopTest(PluginBase):
         self.assertEqual(len(logged.records), 3)   # tool, tool_outcome and skill
         tool = context.tools["hermes_atlas_evolution_lessons"]
         self.assertTrue(tool["check"]())
-        self.assertEqual(json.loads(tool["handler"]({"action": "search"})), {"lessons": []})
+        context.fire("pre_llm_call", session_id="own", turn_id="t9", platform="cli", user_message="go")
+        self.assertEqual(json.loads(tool["handler"]({"action": "search"}, session_id="own")), {"lessons": []})
 
     def test_invalid_settings_never_switch_on_what_the_operator_switched_off(self):
         self.settings(evolution={"lessons": "everything", "slow_turn_seconds": "fast"})
@@ -330,6 +342,89 @@ class PluginLoopTest(PluginBase):
         self.assertIn("hermes-atlas-evolution.playbook", self.plugin().sections)
         (self.home / "evolution" / "settings.json").write_text("{not json")
         self.assertEqual(self.plugin().sections, {})              # unreadable file: measure only
+
+
+
+class SurfacesTest(PluginBase):
+    """Who is being served decides what reaches the agent and what may change the owner's prompt."""
+
+    MISSING_GIT = json.dumps({"output": "bash: git: command not found", "exit_code": 127})
+
+    def turn(self, context, session, turn, **who):
+        context.fire("pre_llm_call", session_id=session, turn_id=turn, user_message="go", **who)
+
+    def failing_call(self, context, session, turn, call):
+        context.fire("post_tool_call", tool_name="terminal", status="error", args={"command": "git status"},
+                     result=self.MISSING_GIT, session_id=session, turn_id=turn, tool_call_id=call)
+
+    def test_failures_a_stranger_causes_never_activate_a_lesson_by_themselves(self):
+        from hermes_atlas_evolution.evolve import cycle
+
+        self.settings(evolution={"lessons": "auto", "reflector": False})
+        context = self.plugin()
+        for index in range(4):   # a member of a free-response group makes the agent fail, in two chats
+            session = f"group-{index % 2}"
+            self.turn(context, session, f"t{index}", platform="whatsapp", sender_id="stranger")
+            self.failing_call(context, session, f"t{index}", f"c{index}")
+        close_observers()
+        cycle(self.home, now=__import__("time").time(), config={"evolution": {"lessons": "auto", "reflector": False}})
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT total FROM failure").fetchone()[0], 4)   # still measured
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_owner").fetchone()[0], 0)
+            self.assertEqual([row[0] for row in conn.execute("SELECT status FROM lesson")], ["candidate"])
+        for index in range(2):   # the owner hits it twice in their own terminal: now it may activate by itself
+            self.turn(context, f"own-{index}", f"o{index}", platform="cli")
+            self.failing_call(context, f"own-{index}", f"o{index}", f"oc{index}")
+        close_observers()
+        with experience(self.home) as conn:
+            conn.execute("DELETE FROM lesson")
+            self.assertEqual(len(lessons.derive(conn, now=__import__("time").time(), mode="auto")), 1)
+            self.assertEqual(conn.execute("SELECT status FROM lesson").fetchone()[0], "active")
+
+    def test_a_chat_gets_template_lessons_only_and_the_tools_answer_only_the_owner(self):
+        self.settings(evolution={"lessons": "auto"}, agent_advice=True)
+        context = self.plugin()
+        with experience(self.home) as conn:
+            lessons.add_custom(conn, "Use ssh admin@10.0.0.7 for the tenant MCP.", tool="terminal", origin="operator",
+                               now=1.0, active=True)
+            conn.execute("""INSERT INTO lesson(signature, tool, klass, hint, origin, status, created, updated, activated)
+                VALUES ('sig', 'terminal', 'missing_dependency', 'rg', 'derived', 'active', 1, 1, 1)""")
+        render = context.sections["hermes-atlas-evolution.playbook"]["content"]
+        own, chat = render({"session_id": "a", "platform": "cli"}), render({"session_id": "b", "platform": "telegram"})
+        self.assertIn("10.0.0.7", own)
+        self.assertIn("`rg`", chat)
+        self.assertNotIn("10.0.0.7", chat)
+        tool = context.tools["hermes_atlas_evolution_lessons"]["handler"]
+        self.turn(context, "b", "t1", platform="telegram", sender_id="stranger")
+        self.turn(context, "a", "t2", platform="cli")
+        self.assertIn("error", json.loads(tool({"action": "search"}, session_id="b")))
+        self.assertIn("error", json.loads(tool({"action": "search"}, session_id="never-seen")))
+        self.assertIn("lessons", json.loads(tool({"action": "search"}, session_id="a")))
+
+    def test_an_owner_listed_in_owner_sender_ids_is_the_owner_in_a_chat_too(self):
+        self.settings(evolution={"lessons": "auto", "owner_sender_ids": ["555"]}, agent_advice=True)
+        context = self.plugin()
+        self.turn(context, "dm", "t1", platform="telegram", sender_id="555")
+        tool = context.tools["hermes_atlas_evolution_lessons"]["handler"]
+        self.assertIn("lessons", json.loads(tool({"action": "search"}, session_id="dm")))
+        self.failing_call(context, "dm", "t1", "c1")
+        close_observers()
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT total FROM failure_owner").fetchone()[0], 1)
+
+    def test_the_owner_notice_waits_for_a_session_end_hermes_shows(self):
+        self.settings(evolution={"lessons": "suggest"})
+        context = self.plugin()
+        with experience(self.home) as conn:
+            conn.execute("""INSERT INTO lesson(signature, tool, klass, hint, origin, status, created, updated)
+                VALUES ('sig', 'terminal', 'missing_dependency', 'rg', 'derived', 'candidate', 1, 1)""")
+        for reason in ("cli_close", "ws_orphan_reap", "startup_orphan_reap", "tui_close", "new_session"):
+            self.assertIsNone(context.fire("on_session_finalize", session_id="s", platform="cli", reason=reason), reason)
+        close_observers()
+        with experience(self.home) as conn:
+            self.assertIsNone(conn.execute("SELECT value FROM cursor WHERE key='notice_day'").fetchone())
+        notice = context.fire("on_session_finalize", session_id="s", platform="cli", reason="user_exit")
+        self.assertIn("1", notice["message"])
 
 
 if __name__ == "__main__":
