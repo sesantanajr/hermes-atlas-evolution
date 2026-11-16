@@ -19,7 +19,13 @@
       lang: "en", sessions: "sessions", title: "Atlas Evolution", profile: "profile", loading: "Reading what this profile learned…",
       busy: "The Evolution store is busy right now. Try again in a moment.", failed: "The panel could not load:",
       retry: "Reload", days: "days",
-      tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", settings: "Settings", history: "History",
+      health: { none: "No reading yet: the learning pass reads Hermes' health and the system's within 6 hours.",
+                gateway: "Gateway", running: "running", stopped: "not running", rss: "memory", disk: "Free disk", of: "of",
+                full: "full in {days} days", memory: "Free memory", swap: "Swap in use", db: "Session database",
+                tools: "Old tools", os: "System updates", security: "{n} security", reboot: "Reboot waiting",
+                yes: "yes", no: "no", attention: "Needs attention", nothing: "Nothing needs attention.",
+                how: "Checks and repairs", hint: "Hermes' checks and repairs (hermes doctor, pm doctor, pm gc) and the system's update run from the menu in your terminal, with a backup first, never by the agent:" },
+      tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", health: "Health", settings: "Settings", history: "History",
               digest: "Digest", status: "Status" },
       mode: { auto: "lessons: auto", suggest: "lessons: suggest", off: "lessons: off" },
       guardOn: "guard on", guardOff: "guard off", reflectorOn: "reflector on", reflectorOff: "reflector off",
@@ -93,7 +99,13 @@
       lang: "pt", sessions: "sessões", title: "Atlas Evolution", profile: "perfil", loading: "Lendo o que este perfil aprendeu…",
       busy: "O banco do Evolution está ocupado agora. Tente de novo em instantes.", failed: "O painel não carregou:",
       retry: "Recarregar", days: "dias",
-      tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", settings: "Configurações", history: "Histórico",
+      health: { none: "Ainda sem leitura: a passada de aprendizado lê a saúde do Hermes e a do sistema em até 6 horas.",
+                gateway: "Gateway", running: "rodando", stopped: "parado", rss: "memória", disk: "Disco livre", of: "de",
+                full: "enche em {days} dias", memory: "Memória livre", swap: "Swap em uso", db: "Banco de sessões",
+                tools: "Ferramentas antigas", os: "Atualizações do sistema", security: "{n} de segurança", reboot: "Reinício pendente",
+                yes: "sim", no: "não", attention: "Pede atenção", nothing: "Nada pede atenção.",
+                how: "Checagens e reparos", hint: "As checagens e os reparos do Hermes (hermes doctor, pm doctor, pm gc) e a atualização do sistema rodam pelo menu no seu terminal, com backup antes, nunca pelo agente:" },
+      tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", health: "Saúde", settings: "Configurações", history: "Histórico",
               digest: "Resumo", status: "Status" },
       mode: { auto: "lições: auto", suggest: "lições: suggest", off: "lições: off" },
       guardOn: "guarda ligada", guardOff: "guarda desligada", reflectorOn: "refletor ligado", reflectorOff: "refletor desligado",
@@ -397,6 +409,48 @@
   }
 
   // ── the tabs
+  function gb(value) {
+    return typeof value === "number" ? (value / 1073741824).toFixed(1) + " GB" : "—";
+  }
+
+  // Hermes' own health and the operating system's, as the last learning pass read them: read-only here; the menu in
+  // the terminal runs Hermes' checks and repairs and the system's update.
+  function Health(props) {
+    const t = props.t, h2 = t.health, status = props.data.status || {};
+    const care = status.care || null, system = status.system || null;
+    if (!care && !system) return h("p", { className: "hae-muted" }, h2.none);
+    const gate = (care && care.gateway) || {}, db = (care && care.database) || {}, mem = (care && care.memory) || {};
+    const kpis = [];
+    if (care) {
+      kpis.push(h(Kpi, { key: "g", label: h2.gateway, value: gate.running ? h2.running : h2.stopped, alert: !gate.running || gate.stale,
+                         detail: (gate.version ? "v" + gate.version + " · " : "") + h2.rss + " " + gb(gate.rss) }));
+      kpis.push(h(Kpi, { key: "d", label: h2.disk, value: gb(care.free), alert: (care.findings || []).some(function (c) { return /^disk_/.test(c); }),
+                         detail: h2.of + " " + gb(care.total) + (care.days_to_full ? " · " + fill(h2.full, { days: care.days_to_full }) : "") }));
+      kpis.push(h(Kpi, { key: "m", label: h2.memory, value: gb(mem.available), alert: (care.findings || []).indexOf("memory_low") >= 0,
+                         detail: h2.of + " " + gb(mem.total) }));
+      kpis.push(h(Kpi, { key: "s", label: h2.swap, value: gb(mem.swap_used), alert: (care.findings || []).indexOf("swap_full") >= 0,
+                         detail: h2.of + " " + gb(mem.swap_total) }));
+      kpis.push(h(Kpi, { key: "b", label: h2.db, value: db.journal || "—", alert: (care.findings || []).some(function (c) { return /^state_db/.test(c); }),
+                         detail: "WAL " + gb(db.wal) + (db.quick_check ? " · " + db.quick_check : "") }));
+      kpis.push(h(Kpi, { key: "t", label: h2.tools, value: gb(care.reclaimable), alert: (care.findings || []).indexOf("unused_tools") >= 0,
+                         detail: (care.unused_tools || []).map(function (item) { return item.folder; }).slice(0, 3).join(", ") || "—" }));
+    }
+    if (system && system.supported) {
+      kpis.push(h(Kpi, { key: "o", label: h2.os, value: String(system.upgradable || 0), alert: !!system.security,
+                         detail: (system.os || {}).name + " · " + fill(h2.security, { n: system.security || 0 }) }));
+      kpis.push(h(Kpi, { key: "r", label: h2.reboot, value: system.reboot_required ? h2.yes : h2.no, alert: !!system.reboot_required,
+                         detail: (system.reboot_packages || []).join(", ") || "—" }));
+    }
+    return h("div", { className: "hae-stack" },
+      h("div", { className: "hae-kpis" }, kpis),
+      h(Section, { title: h2.attention },
+        props.data.health_md ? h(Markdown, { text: props.data.health_md }) : h("p", { className: "hae-muted" }, h2.nothing)),
+      h(Section, { title: h2.how },
+        h("div", { className: "hae-stack" },
+          h("span", { className: "hae-muted" }, h2.hint),
+          props.data.commands && props.data.commands.menu ? h(CopyCommand, { t: t, command: props.data.commands.menu }) : null)));
+  }
+
   function Overview(props) {
     const t = props.t, data = props.data, state = data.status || {}, digest = data.report || {};
     const lessons = state.lessons || {};
@@ -676,7 +730,7 @@
       }))));
   }
 
-  const TABS = ["overview", "lessons", "proposals", "settings", "history", "digest", "status"];
+  const TABS = ["overview", "lessons", "proposals", "health", "settings", "history", "digest", "status"];
 
   function EvolutionPage() {
     const i18n = useI18n() || {};
@@ -744,6 +798,7 @@
     else if (tab === "proposals") body = h(Proposals, common);
     else if (tab === "settings") body = h(Settings, common);
     else if (tab === "history") body = h(History, common);
+    else if (tab === "health") body = h(Health, common);
     else if (tab === "digest") body = h(Markdown, { text: data.report_md });
     else body = h(Markdown, { text: data.status_md });
 

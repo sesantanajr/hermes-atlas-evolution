@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 
 from . import lessons as playbook
@@ -174,6 +175,13 @@ def record_applied(conn: sqlite3.Connection, proposal_id: int, *, code: str, bef
                                                   "undo": list(undo)})
 
 
+def record_cron(conn: sqlite3.Connection, job: str, *, name: str, schedule: str, deliver: str, now: float,
+                actor: str = "terminal") -> int:
+    """Log a no-agent job the plugin created with `hermes cron create` (undone with `hermes cron remove <job>`)."""
+    return _log(conn, now=now, actor=actor, kind="cron", target=name, action="create", before={},
+                after={"job": job, "schedule": schedule, "deliver": deliver})
+
+
 def record_memory(conn: sqlite3.Connection, name: str, mark: str, *, position: int, backup: str, before: int,
                   after: int, copies: int = 1, now: float, actor: str = "terminal") -> int:
     """Log an entry taken out of a memory file: its fingerprint, where it was, how many copies the file held and the
@@ -245,6 +253,11 @@ def undo(conn: sqlite3.Connection, decision_id: int, *, now: float, actor: str =
                     "reason": "changed_since" if current is not ... else "unknown_current"}
         return {"id": decision_id, "undone": False, "restorable": True, "kind": "setting", "key": row["target"],
                 "restore": before.get("value")}
+    if row["kind"] == "cron":   # a job the plugin created with Hermes' cron: removed with `hermes cron remove`
+        job = str(after.get("job") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", job):
+            return {"id": decision_id, "undone": False, "reason": "changed_since"}
+        return {"id": decision_id, "undone": False, "restorable": True, "kind": "cron_create", "job": job}
     if row["kind"] == "memory":   # the caller puts the entry back (memory_care.restore), then calls mark_undone
         return {"id": decision_id, "undone": False, "restorable": True, "kind": "memory", "file": row["target"],
                 "fingerprint": before.get("fingerprint"), "backup": before.get("backup"),

@@ -697,6 +697,9 @@ Subcomandos de `hermes evolution`. A saída é JSON, exceto no `report` e no `st
 | Comando | O que faz |
 |---|---|
 | *(nenhum)*, `menu` | O menu interativo (veja [O menu do terminal](#o-menu-do-terminal)). Sem um terminal para responder, ou no shell do agente, o comando sozinho mostra o `status`, e `menu` diz por que não abriu. |
+| `care [check\|pm-doctor\|doctor\|fix\|gc] [--yes]` | A saúde do Hermes lida dos próprios arquivos dele (`check`, aberto a todos), e as checagens e reparos do próprio Hermes (só do operador). Veja [Manutenção](maintenance.md). |
+| `system [check\|plan\|upgrade\|repair\|report] [--full] [--skip PACOTE...] [--yes]` | A atualização do sistema operacional, Linux com apt: `check` e `report` leem; `plan`, `upgrade` e `repair` são do operador, como root. Veja [Manutenção](maintenance.md). |
+| `schedule-digest [--deliver local\|<canal>]` | O resumo semanal como um job de cron do Hermes sem agente, uma vez; desfeito pelo `decisions`. Só do operador. |
 | `status [--format md\|json] [--no-learn]` | Mostra se o plugin está observando, aprendendo e protegendo este perfil, e a situação de cada perfil da mesma raiz do Hermes (veja [Status e aviso ao dono](#status-e-aviso-ao-dono)). Faz a primeira passada quando o perfil nunca teve uma, salvo com `--no-learn`. |
 | `owner [list \| add <id> \| remove <id> \| add-platform <nome> \| remove-platform <nome>]` | Quem conta como você nos chats (veja [Quem é atendido](#quem-é-atendido)). Só o operador. |
 | `learn [--notify-only]` | Uma passada agora: reprocessa o histórico enquanto a leitura não termina, deriva lições, consulta o refletor se ligado, mede, lê o radar, atualiza as propostas. Espera até 30 segundos por uma passada que já esteja rodando. |
@@ -724,7 +727,7 @@ Subcomandos de `hermes evolution`. A saída é JSON, exceto no `report` e no `st
 
 | Tela | O que mostra e faz |
 |---|---|
-| Resumo | O modo das lições, as lições ativas e as que esperam, as propostas abertas, a última passada, a guarda, o refletor e as ações automáticas; o que pede atenção, em frases completas; e até cinco **sugestões** com uma letra (`a`, `b`…) que agem na hora: decidir as lições que esperam, aplicar as mudanças recomendadas, ligar as ações automáticas completas, organizar a memória, ler as observações |
+| Resumo | O modo das lições, as lições ativas e as que esperam, as propostas abertas, a última passada, a guarda, o refletor e as ações automáticas; o que pede atenção, em frases completas; e até seis **sugestões** com uma letra (`a`, `b`…) que agem na hora: decidir as lições que esperam, aplicar as mudanças recomendadas, ligar as ações automáticas completas, organizar a memória, terminar uma atualização do sistema interrompida ou instalar atualizações de segurança, liberar versões antigas de ferramentas, agendar o resumo semanal, ler as observações |
 | 1 Lições esperando você | Cada uma com a frase exata e a origem; aprove ou rejeite uma, ou aprove todas depois de ler cada frase (as propostas do próprio agente são aprovadas uma a uma) |
 | 2 Propostas abertas | Agrupadas em mudanças que o plugin aplica, lições, mudanças que você aplica e observações, cada uma com título, risco, o que foi visto (com os números), o que aplicá-la faz e como desfazer. `a` aplica uma mudança na hora com o próprio comando do Hermes, `t` aplica todas, `d` dispensa uma observação, `e` escreve a lição de uma falha que nenhum modelo fixo cobre |
 | 3 Lições ativas | Com o efeito medido; aposente uma |
@@ -735,6 +738,8 @@ Subcomandos de `hermes evolution`. A saída é JSON, exceto no `report` e no `st
 | 8 Memória do Hermes | Veja [Memória do Hermes](#memória-do-hermes) |
 | 9, 10 | O resumo de 7 dias e a situação completa |
 | 11 | Uma passada de aprendizado na hora |
+| 12 Saúde do Hermes | Lida dos próprios arquivos do Hermes, sem agente, rede ou token: o gateway, o banco de sessões, disco e crescimento das pastas, memória, swap, CPU, versões antigas de ferramentas; e o `pm doctor`, o `doctor`, o `doctor --fix` (depois de um backup) e o `pm gc` do próprio Hermes (veja [Manutenção](maintenance.md)) |
+| 13 Sistema operacional | Checagem, plano, atualização, reparo e último relatório do sistema (Linux com apt; veja [Manutenção](maintenance.md)) |
 
 Uma decisão é tomada pelo mesmo código do painel do dashboard (`admin.py`) e gravada no mesmo histórico, com `terminal` como lugar. O menu só abre no terminal do operador: nunca onde os comandos que decidem se recusam a rodar (o shell do agente, veja o [SECURITY.md](../../SECURITY.md)), e nunca sem um terminal nas duas pontas.
 

@@ -34,6 +34,51 @@ TEXT = {
                   "Decision history and undo", "Automatic actions ({auto})", "Settings", "Who is you in chats",
                   "Hermes memory: repeats and room", "Digest of the last 7 days", "Full status",
                   "Run a learning pass now"],
+        "items_more": ["Hermes health (no agent, no tokens)", "Operating system ({os})"],
+        "suggest_digest": "Schedule the weekly digest in your chat (Hermes cron, no agent, no tokens)",
+        "suggest_os_repair": "Finish the system update that stopped half-way",
+        "suggest_os_security": "Install {n} security update(s) of the system",
+        "suggest_unused": "Free {size} of old Hermes tool versions",
+        "deliver_prompt": "Deliver it where? local, or a channel such as telegram (Enter = local): ",
+        "digest_done": "Scheduled: Mondays at 08:00, job {job}. Undo it in the history.",
+        "digest_already": "The weekly digest is already scheduled.",
+        "care_title": "Hermes health (read from Hermes' own files: no agent, no network, no tokens)",
+        "care_gateway": "Gateway: {state} · version {version} · memory {rss} · heartbeat {age} s ago",
+        "care_db": "Session database: journal {journal} · WAL {wal} · integrity {quick}",
+        "care_disk": "Disk where Hermes writes: {free} free of {total}{pace}",
+        "care_pace": " · it loses {per_day} a day (full in {days} days)",
+        "care_memory": "Memory: {available} free of {total} · swap {used} of {swap} · load {load} on {cpus} CPUs",
+        "care_folders": "Largest folders: {folders}",
+        "care_unused": "Old tool versions nothing uses ({size}): {list}",
+        "care_none": "Nothing needs attention.",
+        "care_menu": ["Check again now (no network)", "Integrity of the installation (hermes pm doctor, offline)",
+                      "Hermes' full check (hermes doctor: calls the providers' APIs; one-token ping only for an /anthropic endpoint)",
+                      "Repair with Hermes (hermes backup --quick, then hermes doctor --fix)",
+                      "Free old tool versions (hermes pm gc)"],
+        "care_prompt": "Number · Enter back: ", "care_q": "Run `{command}` now?",
+        "care_ok": "Done (exit {code}).", "care_failed": "Hermes answered with exit {code}:",
+        "os_title": "Operating system",
+        "os_unsupported": "This system is not one the plugin updates (Linux with apt: Ubuntu, Debian).",
+        "os_line": "{name} · kernel {kernel}",
+        "os_updates": "Updates waiting: {count} ({security} security) · package lists of {when}",
+        "os_reboot": "Reboot waiting: {state}", "os_auto": "Automatic security updates: {state}",
+        "os_health": "dpkg: {dpkg} · apt: {apt} · package manager busy: {busy}",
+        "os_units": "Hermes' services after a reboot: {units}", "os_ready": "Ready to update: {state}",
+        "os_menu": ["Check again", "Plan (refresh the lists and simulate the update)",
+                    "Update now (your terminal, as root)", "Repair an update that stopped half-way",
+                    "Show the last update's report"],
+        "os_plan": "{upgrade} upgrade(s), {install} new, {remove} removed, {kept} kept back.",
+        "os_attention": {"restarts_containers": "restarts the containers (Docker)", "needs_reboot": "needs a reboot",
+                         "restarts_web": "restarts the web server", "remote_access": "remote access (SSH/sudo)",
+                         "boot": "the boot loader", "package_manager": "the package manager itself"},
+        "os_skip": "Packages to leave out this time, separated by spaces (Enter = none): ",
+        "os_upgrade_q": "Update {n} package(s) now? A list of every package and a copy of /etc are kept first.",
+        "os_running": "Updating in its own service ({unit}); Ctrl-C leaves it running.",
+        "os_progress": "  {done} step(s)…", "os_background": "The update goes on in the background. Come back here for its report.",
+        "os_report": "Exit {exit} · {changed} package(s) changed · dpkg {dpkg} · apt {apt} · Hermes {hermes} · reboot waiting: {reboot}",
+        "os_stopped": "Services that were running and stopped: {units}", "os_folder": "Report and copies: {folder}",
+        "os_repair_q": "Finish the interrupted update now (dpkg --configure -a, then apt-get -f install)?",
+        "os_no_report": "No update yet.", "yes_word": "yes", "no_word": "no", "unknown": "unknown",
         "auto_line": "Automatic actions: {mode} · {count} in 7 days",
         "attention_title": "Needs attention:", "suggest_title": "Suggestions:",
         "suggest_waiting": "Decide {n} lesson(s) waiting for you",
@@ -137,6 +182,51 @@ TEXT = {
                   "Histórico de decisões e desfazer", "Ações automáticas ({auto})", "Configurações",
                   "Quem é você nos chats", "Memória do Hermes: repetições e espaço", "Resumo dos últimos 7 dias",
                   "Situação completa", "Rodar uma passada de aprendizado agora"],
+        "items_more": ["Saúde do Hermes (sem agente, sem tokens)", "Sistema operacional ({os})"],
+        "suggest_digest": "Agendar o resumo semanal no seu chat (cron do Hermes, sem agente, sem tokens)",
+        "suggest_os_repair": "Terminar a atualização do sistema que parou no meio",
+        "suggest_os_security": "Instalar {n} atualização(ões) de segurança do sistema",
+        "suggest_unused": "Liberar {size} de versões antigas das ferramentas do Hermes",
+        "deliver_prompt": "Entregar onde? local, ou um canal como telegram (Enter = local): ",
+        "digest_done": "Agendado: segundas às 08:00, job {job}. Dá para desfazer no histórico.",
+        "digest_already": "O resumo semanal já está agendado.",
+        "care_title": "Saúde do Hermes (lida dos próprios arquivos do Hermes: sem agente, sem rede, sem tokens)",
+        "care_gateway": "Gateway: {state} · versão {version} · memória {rss} · sinal de vida há {age} s",
+        "care_db": "Banco de sessões: modo {journal} · WAL {wal} · integridade {quick}",
+        "care_disk": "Disco onde o Hermes grava: {free} livres de {total}{pace}",
+        "care_pace": " · perde {per_day} por dia (enche em {days} dias)",
+        "care_memory": "Memória: {available} livres de {total} · swap {used} de {swap} · carga {load} em {cpus} CPUs",
+        "care_folders": "Pastas maiores: {folders}",
+        "care_unused": "Versões antigas de ferramentas que nada usa ({size}): {list}",
+        "care_none": "Nada pede atenção.",
+        "care_menu": ["Checar de novo agora (sem rede)", "Integridade da instalação (hermes pm doctor, sem rede)",
+                      "Checagem completa do Hermes (hermes doctor: consulta as APIs dos provedores; ping de 1 token só para endpoint /anthropic)",
+                      "Reparar com o Hermes (hermes backup --quick e depois hermes doctor --fix)",
+                      "Liberar versões antigas de ferramentas (hermes pm gc)"],
+        "care_prompt": "Número · Enter volta: ", "care_q": "Rodar `{command}` agora?",
+        "care_ok": "Feito (saída {code}).", "care_failed": "O Hermes respondeu com saída {code}:",
+        "os_title": "Sistema operacional",
+        "os_unsupported": "Este sistema não é um que o plugin atualiza (Linux com apt: Ubuntu, Debian).",
+        "os_line": "{name} · kernel {kernel}",
+        "os_updates": "Atualizações esperando: {count} ({security} de segurança) · listas de pacotes de {when}",
+        "os_reboot": "Reinício pendente: {state}", "os_auto": "Atualizações automáticas de segurança: {state}",
+        "os_health": "dpkg: {dpkg} · apt: {apt} · gerenciador de pacotes ocupado: {busy}",
+        "os_units": "Serviços do Hermes depois de um reinício: {units}", "os_ready": "Pronto para atualizar: {state}",
+        "os_menu": ["Checar de novo", "Planejar (atualizar as listas e simular a atualização)",
+                    "Atualizar agora (no seu terminal, como root)", "Reparar uma atualização que parou no meio",
+                    "Ver o relatório da última atualização"],
+        "os_plan": "{upgrade} atualização(ões), {install} nova(s), {remove} removida(s), {kept} retida(s).",
+        "os_attention": {"restarts_containers": "reinicia os containers (Docker)", "needs_reboot": "pede reinício",
+                         "restarts_web": "reinicia o servidor web", "remote_access": "acesso remoto (SSH/sudo)",
+                         "boot": "o carregador de boot", "package_manager": "o próprio gerenciador de pacotes"},
+        "os_skip": "Pacotes para deixar de fora desta vez, separados por espaço (Enter = nenhum): ",
+        "os_upgrade_q": "Atualizar {n} pacote(s) agora? Antes, guarda a lista de todos os pacotes e uma cópia do /etc.",
+        "os_running": "Atualizando num serviço próprio ({unit}); Ctrl-C deixa a atualização seguir.",
+        "os_progress": "  {done} etapa(s)…", "os_background": "A atualização segue em segundo plano. Volte aqui para ver o relatório.",
+        "os_report": "Saída {exit} · {changed} pacote(s) mudaram · dpkg {dpkg} · apt {apt} · Hermes {hermes} · reinício pendente: {reboot}",
+        "os_stopped": "Serviços que rodavam e pararam: {units}", "os_folder": "Relatório e cópias: {folder}",
+        "os_repair_q": "Terminar a atualização interrompida agora (dpkg --configure -a e depois apt-get -f install)?",
+        "os_no_report": "Nenhuma atualização ainda.", "yes_word": "sim", "no_word": "não", "unknown": "desconhecido",
         "auto_line": "Ações automáticas: {mode} · {count} em 7 dias",
         "attention_title": "Pede atenção:", "suggest_title": "Sugestões:",
         "suggest_waiting": "Decidir {n} lição(ões) esperando você",
@@ -305,6 +395,15 @@ class Console:
             self.say(textwrap.fill(line, width=self.width, initial_indent=pad, subsequent_indent=pad) if line else "")
 
 
+def _bytes(value) -> str:
+    if not isinstance(value, (int, float)):
+        return "?"
+    for unit, size in (("GB", 2**30), ("MB", 2**20)):
+        if abs(value) >= size:
+            return f"{value / size:.1f} {unit}"
+    return f"{int(value)} B"
+
+
 def _when(stamp, lang: str) -> str:
     try:
         moment = datetime.fromtimestamp(float(stamp))
@@ -434,10 +533,20 @@ class Menu:
         repeats = len(memory_care.review(self.home, self.runtime)["issues"])
         if repeats:
             found.append((self.t["suggest_memory"].format(n=repeats), self.memory))
+        system = state.get("system") or {}
+        if "dpkg_interrupted" in (system.get("findings") or ()):
+            found.insert(0, (self.t["suggest_os_repair"], self.operating_system))
+        elif system.get("security"):
+            found.append((self.t["suggest_os_security"].format(n=system["security"]), self.operating_system))
+        care = state.get("care") or {}
+        if "unused_tools" in (care.get("findings") or ()):
+            found.append((self.t["suggest_unused"].format(size=_bytes(care.get("reclaimable"))), self.care))
+        if "digest_unscheduled" in (state.get("attention") or ()):
+            found.append((self.t["suggest_digest"], self.schedule_digest))
         advice = [item for item in items if item["explain"]["category"] == "advice"]
         if advice:
             found.append((self.t["suggest_advice"].format(n=len(advice)), self.proposals))
-        return found[:5]
+        return found[:6]
 
     def run(self) -> None:
         try:
@@ -470,21 +579,24 @@ class Menu:
                 if ideas:
                     self.io.say()
                     self.io.say(self.io.bold(self.t["suggest_title"]))
-                    for letter, (text, _action) in zip("abcde", ideas):
+                    for letter, (text, _action) in zip("abcdef", ideas):
                         self.io.say(f"   {letter}  {text}")
                 self.io.say()
-                for number, label in enumerate(self.t["items"], start=1):
+                os_name = ((state.get("system") or {}).get("os") or {}).get("name") or "Linux"
+                labels = [*self.t["items"], *(label.format(os=os_name) for label in self.t["items_more"])]
+                for number, label in enumerate(labels, start=1):
                     self.io.say(f"  {number:>2}  {label.format(**counts)}")
                 self.io.say(f"   0  {self.t['quit']}")
                 answer = self.io.ask(self.t["choose"]).lower()
                 if answer in ("0", "q", "x", "exit", "quit", "sair"):
                     raise Quit
-                letters = dict(zip("abcde", ideas))
+                letters = dict(zip("abcdef", ideas))
                 if answer in letters:
                     self.guarded(letters[answer][1])
                     continue
                 screens = [self.waiting, self.proposals, self.active, self.history, self.automatic, self.settings,
-                           self.owner, self.memory, self.digest, self.full_status, self.learn]
+                           self.owner, self.memory, self.digest, self.full_status, self.learn, self.care,
+                           self.operating_system]
                 chosen = self.pick(answer, len(screens))
                 if chosen is None:
                     self.io.say(self.t["invalid"])
@@ -967,6 +1079,199 @@ class Menu:
                 self.io.say(self.t["memory_removed"] if result.get("removed") else self.t["memory_changed"])
 
             self.guarded(take_out)
+
+    # ── weekly digest ──────────────────────────────────────────────────────────────────────────────
+    def schedule_digest(self) -> None:
+        from . import admin
+
+        deliver = self.io.ask(self.t["deliver_prompt"]) or "local"
+        result = admin.decide(self.home, self.runtime, {"kind": "schedule_digest", "deliver": deliver}, now=self.clock(),
+                              lang=self.lang, actor="terminal")
+        self.io.say(self.t["digest_done"].format(job=result["job"]) if result.get("scheduled") else self.t["digest_already"])
+
+    # ── Hermes health ──────────────────────────────────────────────────────────────────────────────
+    def care(self) -> None:
+        from . import hermes_care
+        from .experience import experience
+        from .status import _TEXT, _care_values
+
+        force = True
+        while True:
+            with experience(self.home) as conn:
+                found = hermes_care.cached(conn, self.home, now=self.clock(), force=force)
+            force = False
+            self.heading(self.t["care_title"])
+            gate, db, memory = found["gateway"], found["database"], found["memory"]
+            self.io.say(self.t["care_gateway"].format(
+                state=self.t["yes_word"] if gate["running"] else self.t["no_word"], version=gate.get("version") or "?",
+                rss=_bytes(gate.get("rss")), age=gate.get("heartbeat_age") if gate.get("heartbeat_age") is not None else "?"))
+            if db.get("present"):
+                self.io.say(self.t["care_db"].format(journal=db.get("journal") or "?", wal=_bytes(db.get("wal")),
+                                                     quick=db.get("quick_check") or self.t["unknown"]))
+            pace = ""
+            if found.get("disk_per_day") and found["disk_per_day"] > 0 and found.get("days_to_full"):
+                pace = self.t["care_pace"].format(per_day=_bytes(found["disk_per_day"]), days=found["days_to_full"])
+            self.io.say(self.t["care_disk"].format(free=_bytes(found.get("free")), total=_bytes(found.get("total")), pace=pace))
+            load = found.get("load") or {}
+            self.io.say(self.t["care_memory"].format(available=_bytes(memory.get("available")),
+                                                     total=_bytes(memory.get("total")), used=_bytes(memory.get("swap_used")),
+                                                     swap=_bytes(memory.get("swap_total")), load=load.get("15m", "?"),
+                                                     cpus=load.get("cpus", "?")))
+            biggest = sorted(((name, size) for name, size in (found.get("sizes") or {}).items() if isinstance(size, int)),
+                             key=lambda item: -item[1])[:6]
+            if biggest:
+                self.io.para(self.t["care_folders"].format(folders=" · ".join(f"{name} {_bytes(size)}" for name, size in biggest)),
+                             indent=0)
+            if found.get("unused_tools"):
+                self.io.para(self.t["care_unused"].format(size=_bytes(found.get("reclaimable")), list=", ".join(
+                    f"{item['folder']} ({_bytes(item['bytes'])})" for item in found["unused_tools"])), indent=0)
+            texts = _TEXT.get(self.lang, _TEXT["en"])
+            values = _care_values({"care": found, "system": {}})
+            codes = [f"hermes_{code}" for code in found.get("findings") or () if f"hermes_{code}" in texts]
+            self.io.say()
+            if codes:
+                self.io.say(self.io.bold(self.t["attention_title"]))
+                for code in codes:
+                    self.io.para("• " + texts[code].format(**values), indent=2)
+            else:
+                self.io.say(self.t["care_none"])
+            self.io.say()
+            for number, label in enumerate(self.t["care_menu"], start=1):
+                self.io.para(f"{number}  {label}", indent=2)
+            chosen = self.pick(self.io.ask(self.t["care_prompt"]), len(self.t["care_menu"]))
+            if chosen is None:
+                return
+            if chosen == 0:
+                force = True
+                continue
+            key = ("pm_doctor", "doctor", "doctor_fix", "pm_gc")[chosen - 1]
+            command = "hermes " + " ".join(hermes_care.ACTIONS[key][0])
+            if not self.confirm(self.t["care_q"].format(command=command)):
+                continue
+            result = hermes_care.run_action(self.home, key)
+            last = result["steps"][-1]
+            self.io.say(self.t["care_ok"].format(code=last["exit"]) if result["ok"] else self.t["care_failed"].format(code=last["exit"]))
+            doctor = result.get("doctor") or {}
+            for line in (doctor.get("problems") or [])[:8] + (doctor.get("summary") or []):
+                self.io.para(line, indent=4)
+            if not doctor:
+                for line in last.get("tail") or ():
+                    self.io.para(line, indent=4)
+            force = True
+
+    # ── operating system ───────────────────────────────────────────────────────────────────────────
+    def operating_system(self) -> None:
+        import json as _json
+
+        from . import system_update
+        from .experience import experience
+
+        host, planned = system_update.Host(), None
+        while True:
+            with experience(self.home) as conn:
+                found = system_update.cached(conn, self.home, now=self.clock(), force=True)
+            self.heading(self.t["os_title"])
+            if not found or not found.get("supported"):
+                self.io.say(self.t["os_unsupported"])
+                self.pause()
+                return
+            yes, no = self.t["yes_word"], self.t["no_word"]
+            self.io.say(self.t["os_line"].format(name=(found.get("os") or {}).get("name"), kernel=found.get("kernel")))
+            self.io.say(self.t["os_updates"].format(count=found.get("upgradable", 0), security=found.get("security", 0),
+                                                    when=_when(found.get("last_refresh"), self.lang)))
+            reboot = yes + (f" ({', '.join(found.get('reboot_packages') or ())})" if found.get("reboot_packages") else "") \
+                if found.get("reboot_required") else no
+            self.io.say(self.t["os_reboot"].format(state=reboot))
+            self.io.say(self.t["os_auto"].format(state=yes if (found.get("unattended") or {}).get("enabled") else no))
+            self.io.say(self.t["os_health"].format(dpkg="ok" if found.get("dpkg_ok") else "⚠",
+                                                   apt={True: "ok", False: "⚠", None: "?"}[found.get("apt_ok")],
+                                                   busy=", ".join(found.get("busy") or ()) or no))
+            units = [f"{unit['unit']} ({'ok' if unit['enabled'] else '⚠'})" for unit in found.get("units") or ()]
+            if units:
+                self.io.para(self.t["os_units"].format(units=", ".join(units) + (f" · linger {yes if found.get('linger') else no}"
+                                                                                if found.get("linger") is not None else "")), indent=0)
+            self.io.say(self.t["os_ready"].format(state=yes if found.get("ready") else no + " (" + ", ".join(found.get("findings") or ()) + ")"))
+            self.io.say()
+            for number, label in enumerate(self.t["os_menu"], start=1):
+                self.io.say(f"  {number}  {label}")
+            chosen = self.pick(self.io.ask(self.t["care_prompt"]), len(self.t["os_menu"]))
+            if chosen is None:
+                return
+            if chosen == 0:
+                continue
+            if chosen == 1 or (chosen == 2 and planned is None):
+                planned = system_update.plan(host, refresh=True)
+                if planned.get("error"):
+                    self.io.say(self.t["error"].format(message=planned["error"]))
+                    planned = None
+                    continue
+                self.io.say(self.t["os_plan"].format(upgrade=len(planned["upgrade"]), install=len(planned["install"]),
+                                                     remove=len(planned["remove"]), kept=len(planned["kept_back"])))
+                for item in planned["upgrade"] + planned["install"]:
+                    if item["attention"]:
+                        notes = ", ".join(self.t["os_attention"].get(code, code) for code in item["attention"])
+                        self.io.say(f"    · {item['name']} {item.get('from') or ''} → {item['to']}: {notes}")
+                if chosen == 1:
+                    continue
+            if chosen == 2:
+                count = len(planned["upgrade"]) + len(planned["install"])
+                if not count:
+                    continue
+                skip = [name for name in self.io.ask(self.t["os_skip"]).split() if name]
+                if not self.confirm(self.t["os_upgrade_q"].format(n=count)):
+                    continue
+                self.guarded(lambda: self.run_upgrade(host, skip))
+                planned = None
+            elif chosen == 3:
+                if self.confirm(self.t["os_repair_q"]):
+                    def repair():
+                        result = system_update.repair(host)
+                        self.io.say(self.t["care_ok"].format(code=0) if result["ok"] else self.t["care_failed"].format(
+                            code=next((step["exit"] for step in result["steps"] if step["exit"]), "?")))
+                    self.guarded(repair)
+            elif chosen == 4:
+                folders = sorted((self.home / "evolution" / "system").glob("*/report.json"))
+                if not folders:
+                    self.io.say(self.t["os_no_report"])
+                    continue
+                self.show_upgrade(_json.loads(folders[-1].read_text(encoding="utf-8")), folders[-1].parent)
+
+    def run_upgrade(self, host, skip: list) -> None:
+        import time as _time
+
+        from . import system_update
+
+        folder, before, _snapshot = system_update.prepare(self.home, host, now=self.clock())
+        started = system_update.start(host, folder, skip=skip)
+        self.io.say(self.t["os_running"].format(unit=started.get("unit") or started.get("pid") or "process"))
+        last = -1
+        try:
+            while system_update.finished(folder) is None:
+                _time.sleep(2)
+                try:
+                    done = sum(1 for line in (folder / "upgrade.log").read_text(encoding="utf-8", errors="replace").splitlines()
+                               if line.startswith(("Unpacking", "Setting up")))
+                except OSError:
+                    done = 0
+                if done != last:
+                    self.io.say(self.t["os_progress"].format(done=done))
+                    last = done
+        except KeyboardInterrupt:
+            self.io.say(self.t["os_background"])
+            return
+        self.show_upgrade(system_update.after(host, folder, before), folder)
+
+    def show_upgrade(self, report: dict, folder) -> None:
+        yes, no = self.t["yes_word"], self.t["no_word"]
+        self.io.say(self.t["os_report"].format(exit=report.get("exit"), changed=len(report.get("changed") or ()),
+                                               dpkg="ok" if report.get("dpkg_ok") else "⚠",
+                                               apt="ok" if report.get("apt_ok") else "⚠",
+                                               hermes="ok" if report.get("hermes_ok") else "⚠",
+                                               reboot=yes if report.get("reboot_required") else no))
+        if report.get("stopped_units"):
+            self.io.say(self.t["os_stopped"].format(units=", ".join(report["stopped_units"])))
+        self.io.say(self.t["os_folder"].format(folder=folder))
+        self.pause()
 
     # ── reading ────────────────────────────────────────────────────────────────────────────────────
     def digest(self) -> None:

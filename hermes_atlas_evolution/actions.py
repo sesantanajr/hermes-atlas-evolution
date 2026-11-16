@@ -16,6 +16,7 @@ automatically again (`auto_skip:<code>`).
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 MODES = ("off", "safe", "full")
@@ -238,6 +239,42 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
             done["applied"].append({"proposal": row["id"], "kind": row["kind"], "subject": row["subject"],
                                     "decision": result["decision"]})
     return done
+
+
+def schedule_digest(home: Path, *, deliver: str = "local", lang: str = "en", now: float, actor: str = "terminal",
+                    runner=None, weekday: int = 1, hour: int = 8) -> dict:
+    """Schedule the weekly digest as a Hermes cron job that runs no agent and spends no token (`--no-agent`, a
+    script under the profile's scripts/), delivered to `deliver` (local, or a channel such as telegram). Once only:
+    an existing job of the plugin is kept. Recorded with its undo (`hermes cron remove <job>`)."""
+    import os
+
+    from . import decisions
+    from .admin import hermes_output
+    from .evolve import digest_schedule_spec
+    from .experience import experience
+    from .status import _digest_scheduled
+
+    if _digest_scheduled(home):
+        return {"scheduled": False, "reason": "already"}
+    spec = digest_schedule_spec(home, weekday=weekday, hour=hour, lang=lang if lang in ("en", "pt") else "en",
+                                deliver=deliver)
+    script = Path(spec["script_path"])
+    script.parent.mkdir(parents=True, exist_ok=True)
+    temporary = script.with_name(script.name + ".tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(spec["script_content"])
+    os.replace(temporary, script)
+    args = spec["create_args"]
+    args = args[args.index("cron"):]   # run_hermes names the profile itself
+    code, out = hermes_output(home, args, runner=runner, timeout=180)
+    found = re.search(r"Created job:?\s*([A-Za-z0-9_-]{1,64})", out)
+    if code != 0 or not found:
+        raise ValueError(" ".join(out.split())[-200:] or "Hermes refused the command")
+    with experience(home) as conn:
+        decision = decisions.record_cron(conn, found.group(1), name="hermes-atlas-evolution-digest",
+                                         schedule=args[2], deliver=deliver, now=now, actor=actor)
+    return {"scheduled": True, "job": found.group(1), "schedule": args[2], "deliver": deliver, "decision": decision}
 
 
 def recent(conn, *, now: float, days: int = 7) -> list[dict]:

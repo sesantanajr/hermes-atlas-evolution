@@ -2,6 +2,35 @@
 
 *In English: [CHANGELOG.md](CHANGELOG.md), with every version.*
 
+## 0.8.4
+
+O Atlas Evolution agora cuida do próprio Hermes e do servidor em que ele roda, sem agente e sem tokens, e mostra para que serve no topo do README, com telas do painel no dashboard e do terminal.
+
+### Novidades
+
+- **Saúde do Hermes** (`hermes_care.py`; tela 12 do menu, a aba nova **Saúde** do painel, `hermes evolution care`). Lida dos próprios arquivos do Hermes, sem rede, sem modelo e sem nenhum comando `hermes`: o gateway vivo (o sinal de vida dele) e a memória dele diante do normal, o banco de sessões (modo de journal, um log de escrita que cresceu, um `quick_check` semanal), o espaço no disco onde o Hermes grava com o dia em que ele encheria no ritmo da última semana, o crescimento de cada pasta do perfil, memória, swap e CPU, versões de ferramentas gerenciadas pelo Hermes que nada referencia, e um gateway que não voltaria depois de um reinício (unidade de usuário sem linger). A cada 6 horas na passada de aprendizado, com 21 dias de histórico. O `hermes pm doctor` (sem rede), o `hermes doctor`, o `hermes doctor --fix` depois de `hermes backup --quick` e o `hermes pm gc` do próprio Hermes rodam com um clique do dono.
+- **A atualização do sistema operacional** (`system_update.py`; tela 13 do menu, `hermes evolution system check|plan|upgrade|repair|report`), Linux com apt. Uma checagem diária só de leitura; um plano (`apt-get update` e uma simulação que aponta pacotes que reiniciam os containers, pedem reinício, mexem no acesso remoto ou no gerenciador de pacotes); e uma atualização só do dono, como root no próprio terminal: a checagem precisa passar, uma cópia da versão de cada pacote e do `/etc` é guardada, o `apt-get --with-new-pkgs upgrade` roda numa unidade systemd própria mantendo os arquivos de configuração do dono e sem reiniciar serviço nenhum sozinho, e depois dpkg, apt, cada serviço que rodava e o Hermes são checados de novo, e um relatório lista o que mudou e como voltar. Um reparo termina uma atualização que uma queda de energia interrompeu. Nunca reinicia a máquina.
+- **O resumo semanal com uma tecla**: a sugestão do menu ou `hermes evolution schedule-digest --deliver <local|canal>` cria um job de cron do Hermes que roda um script, não o agente; uma vez só; desfeito pelo histórico (`hermes cron remove`).
+- O `status` e o menu mostram o que pede atenção na saúde do Hermes e na do sistema, com os valores; sugestões novas (terminar uma atualização interrompida, instalar atualizações de segurança, liberar versões antigas de ferramentas, agendar o resumo); as telas 12 e 13 vêm depois das que já existiam, então os números que você conhece não mudam.
+- O README começa com para que o plugin serve e telas do painel e do terminal (tiradas de um Hermes 0.23.1 real com dados de demonstração); a atualização e a saída da 0.5.0 estão em `docs/pt-BR/upgrading.md`; a saúde do Hermes e a atualização do sistema em `docs/pt-BR/maintenance.md`.
+
+### Mudanças
+
+- Entradas da memória que diferem num número (uma porta, uma versão, um id) são dois fatos, não uma repetição; a lista de repetições mostra no máximo 100.
+
+### Testado
+
+Além dos testes unitários: a suíte em containers com Ubuntu 26.04 (Python 3.14), Ubuntu 24.04 (3.12) e Debian 13 (3.13); atualizações completas de imagens do Ubuntu 24.04 e 22.04 de abril de 2024 (67 e 55 pacotes) com um pacote deixado de fora e um arquivo de configuração editado mantido; uma queda de energia no meio do dpkg, detectada e reparada; uma atualização do Ubuntu 26.04 com o Hermes 0.23.1 instalado, pelo comando do plugin; um Hermes 0.23.1 real num container (dois perfis, o dashboard com login por senha, `hermes curator lock`, `hermes cron create`, `hermes pm doctor`); e testes de estresse (8 processos aplicando uma proposta, 200 passadas de aprendizado, 100 mil arquivos, 5 mil propostas).
+
+### Atualizar a partir da 0.8.3
+
+```bash
+hermes -p <perfil> plugins update hermes-atlas-evolution   # cada perfil; sem -p para o padrão
+hermes gateway restart
+sudo systemctl restart hermes-dashboard
+hermes evolution                                           # telas 12 e 13
+```
+
 ## 0.8.3
 
 O Atlas Evolution agora age sozinho onde é seguro e diz em palavras simples o que cada proposta significa. Num perfil real, 16 propostas esperavam com códigos como `skill_lock` e `[medium]`, e nada acontecia até o dono rodar cada comando à mão; uma skill tinha sido reescrita 75 vezes numa semana.

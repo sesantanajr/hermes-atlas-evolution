@@ -33,6 +33,7 @@ MAX_BYTES = 512 * 1024
 SIMILAR = 0.6      # words in common over words in either
 CONTAINED = 0.85   # words of the shorter entry found in the longer one
 BACKUPS_KEPT = 100
+MAX_ISSUES = 100   # the most useful first: exact repeats, then what one entry says of another, then similar ones
 LOCK_WAIT_SECONDS = 5.0
 _WORD = re.compile(r"\w{3,}")
 
@@ -105,6 +106,8 @@ def review(home: Path, runtime_config=None) -> dict:
                 a, b = _words(first["text"]), _words(second["text"])
                 if not a or not b:
                     continue
+                if any(any(ch.isdigit() for ch in word) for word in a ^ b):
+                    continue   # they differ in a number (a port, a version, an id): two facts, not one said twice
                 shared = len(a & b)
                 jaccard, contained = shared / len(a | b), shared / min(len(a), len(b))
                 if jaccard >= SIMILAR:
@@ -125,7 +128,9 @@ def review(home: Path, runtime_config=None) -> dict:
                            "suggested_drop": {"file": drop["file"], "fingerprint": drop["fingerprint"]},
                            "tokens_per_turn": 0 if identical else max(1, len(drop["text"]) // 4)})
     issues.sort(key=lambda item: ({"exact": 0, "contained": 1, "similar": 2}[item["kind"]], -item["score"]))
-    return {"files": files, "issues": issues,
+    total = len(issues)
+    issues = issues[:MAX_ISSUES]
+    return {"files": files, "issues": issues, "issues_total": total,
             "tokens_saved_per_turn": sum(item["tokens_per_turn"] for item in issues if item["kind"] == "exact")}
 
 

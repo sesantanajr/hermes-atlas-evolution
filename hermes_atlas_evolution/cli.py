@@ -22,6 +22,7 @@ from .operations import RETENTION_DAYS, database, recommendations, run_policy, s
 RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
 EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report", "owner",
                      "decisions")
+MAINTENANCE_ACTIONS = ("system", "care", "schedule-digest")
 CYCLE_INTERVAL_SECONDS = 3600
 
 
@@ -206,6 +207,16 @@ def setup(parser: argparse.ArgumentParser) -> None:
     commands = parser.add_subparsers(dest="evolution_action", required=False)
     commands.add_parser("menu", help=_("Open the interactive menu: decide, configure, organize Hermes' memory and see "
                                        "the state, step by step"))
+    system = commands.add_parser("system", help=_("Check, plan and run the operating system's update safely (Linux with apt)"))
+    system.add_argument("system_action", nargs="?", default="check", choices=("check", "plan", "upgrade", "repair", "report"))
+    system.add_argument("--full", action="store_true", help=_("Use apt's full-upgrade, which may remove packages"))
+    system.add_argument("--skip", nargs="*", default=[], help=_("Packages to leave out of this update"))
+    system.add_argument("--yes", action="store_true", help=_("Do not ask before updating or repairing"))
+    care = commands.add_parser("care", help=_("Check Hermes' own health without the agent or tokens, and run Hermes' repairs"))
+    care.add_argument("care_action", nargs="?", default="check", choices=("check", "pm-doctor", "doctor", "fix", "gc"))
+    care.add_argument("--yes", action="store_true", help=_("Do not ask before running Hermes' command"))
+    digest = commands.add_parser("schedule-digest", help=_("Schedule the weekly digest as a Hermes cron job with no agent"))
+    digest.add_argument("--deliver", default="local", help=_("Where to deliver it: local, or a channel such as telegram"))
     health = commands.add_parser("health", help=_("Inspect Hermes files and host signals"))
     usage = commands.add_parser("usage", help=_("Summarize provider and tool measurements"))
     tick = commands.add_parser("tick", help=_("Run maintenance and record decisions"))
@@ -885,6 +896,51 @@ def _decisions(args, home: Path, *, now: float, lang: str, runtime_config=None):
         return result
 
 
+def _maintenance(args, home: Path, *, now: float, runtime_config=None):
+    """`system`, `care` and `schedule-digest`: what reads is open to anyone; what changes is the operator's."""
+    from . import actions, hermes_care, system_update
+    from .experience import experience
+
+    lang = getattr(args, "lang", None) or "en"
+    if args.evolution_action == "schedule-digest":
+        _operator_only()
+        return actions.schedule_digest(home, deliver=args.deliver, lang=lang, now=now, actor="terminal")
+    if args.evolution_action == "care":
+        task = args.care_action
+        if task == "check":
+            with experience(home) as conn:
+                return hermes_care.cached(conn, home, now=now, force=True)
+        _operator_only()
+        key = {"pm-doctor": "pm_doctor", "doctor": "doctor", "fix": "doctor_fix", "gc": "pm_gc"}[task]
+        _confirm("hermes " + " ".join(hermes_care.ACTIONS[key][0]), lang, yes=args.yes, apply=True)
+        return hermes_care.run_action(home, key)
+    host, task = system_update.Host(), args.system_action
+    if task == "check":
+        return system_update.check(host, now=now)
+    if task == "report":
+        reports = sorted((Path(home) / "evolution" / "system").glob("*/report.json"))
+        return json.loads(reports[-1].read_text(encoding="utf-8")) if reports else {"report": None}
+    _operator_only()
+    if task == "plan":
+        return system_update.plan(host, refresh=True, full=args.full)
+    if task == "repair":
+        _confirm("dpkg --configure -a && apt-get -f install", lang, yes=args.yes, apply=True)
+        return system_update.repair(host)
+    planned = system_update.plan(host, refresh=True, full=args.full)
+    if planned.get("error"):
+        raise ValueError(planned["error"])
+    count = len(planned["upgrade"]) + len(planned["install"]) + len(planned["remove"])
+    if not count:
+        return {"planned": planned, "upgraded": False, "reason": "nothing_to_do"}
+    _confirm(f"apt-get {'full-upgrade' if args.full else '--with-new-pkgs upgrade'}: {count} "
+             + ("pacote(s)" if lang == "pt" else "package(s)"), lang, yes=args.yes, apply=True)
+    folder, before, _snapshot = system_update.prepare(home, host, now=now)
+    started = system_update.start(host, folder, full=args.full, skip=list(args.skip or ()))
+    while system_update.finished(folder) is None:
+        time.sleep(3)
+    return {"started": started, "report": system_update.after(host, folder, before)}
+
+
 def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=None, reflect=None):
     """Run the evolution pass from `ops tick`, at most once an hour and never alongside the autopilot of a
     running gateway (both claim the same pass). Returns its notification view."""
@@ -912,6 +968,8 @@ def _report(args, home: Path, *, running_version=None, provider=None, now: float
     action = args.evolution_action
     if action in EVOLUTION_ACTIONS:
         return _evolution(args, home, now=now, runtime_config=runtime_config, reflect=reflect)
+    if action in MAINTENANCE_ACTIONS:
+        return _maintenance(args, home, now=now, runtime_config=runtime_config)
     if action == "ops":
         return _ops(args, home, now=now, running_version=running_version, provider=provider,
                     runtime_config=runtime_config, source=hermes_source, kanban_home=kanban_home, reflect=reflect)
