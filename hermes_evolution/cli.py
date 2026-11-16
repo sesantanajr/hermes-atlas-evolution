@@ -18,7 +18,7 @@ from .native_actions import PLAYBOOKS
 from .operations import RETENTION_DAYS, database, recommendations, run_policy, summarize
 
 RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
-EVOLUTION_ACTIONS = ("learn", "lessons", "skills", "proposals", "experiments", "report")
+EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report")
 CYCLE_INTERVAL_SECONDS = 3600
 
 
@@ -45,7 +45,8 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
                "tool_hints": ("evolution", "tool_hints"), "feedback_signals": ("evolution", "feedback_signals"),
                "slow_turn_seconds": ("evolution", "slow_turn_seconds"),
                "owner_sender_ids": ("evolution", "owner_sender_ids"), "agent_tools": ("agent_advice",),
-               "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit")}
+               "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit"),
+               "autopilot_minutes": ("evolution", "autopilot_minutes"), "runtime_guard": ("evolution", "runtime_guard")}
 
 
 def native_settings(runtime_config) -> dict:
@@ -57,9 +58,9 @@ def native_settings(runtime_config) -> dict:
     return values if isinstance(values, dict) else {}
 
 
-def effective_settings(home: Path, runtime_config=None) -> dict:
-    """settings.json with the values set through Hermes' plugin settings on top (Hermes wins per key)."""
-    result = settings(home)
+def effective_settings(home: Path, runtime_config=None, *, base: dict | None = None) -> dict:
+    """settings.json (or `base`) with the values set through Hermes' plugin settings on top (Hermes wins per key)."""
+    result = settings(home) if base is None else base
     for key, path in NATIVE_KEYS.items():
         value = native_settings(runtime_config).get(key)
         if value is None:
@@ -71,6 +72,18 @@ def effective_settings(home: Path, runtime_config=None) -> dict:
             target = nested
         target[path[-1]] = value
     return result
+
+
+def safe_settings(home: Path, runtime_config=None) -> tuple[dict, list]:
+    """effective_settings, or, when settings.json cannot be read, the values from Hermes' settings form with
+    lessons forced off until the file is fixed. Returns (settings, problems)."""
+    try:
+        return effective_settings(home, runtime_config), []
+    except (OSError, ValueError, RecursionError):
+        result = effective_settings(home, runtime_config, base={})
+        evolution = result.get("evolution")
+        result["evolution"] = {**(evolution if isinstance(evolution, dict) else {}), "lessons": "off"}
+        return result, ["settings.json"]
 
 
 def _accept_lang_everywhere(parser: argparse.ArgumentParser, help_text: str) -> None:
@@ -132,6 +145,8 @@ def setup(parser: argparse.ArgumentParser) -> None:
     feedback.add_argument("result", choices=("helpful", "dismissed", "reset"))
     commands.add_parser("history", help=_("Show learned maintenance priorities and feedback"))
 
+    state = commands.add_parser("status", help=_("Show whether the plugin is observing, learning and protecting this profile"))
+    state.add_argument("--format", choices=("md", "json"), default="md")
     learn = commands.add_parser("learn", help=_("Run one evolution pass: derive lessons, measure changes, refresh proposals"))
     learn.add_argument("--notify-only", action="store_true", help=_("Print only new lessons, regressions and high-risk proposals"))
     playbook = commands.add_parser("lessons", help=_("Review the playbook learned from recurring tool failures"))
@@ -168,7 +183,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     digest.add_argument("--deliver", default="local", help=_("Hermes delivery target for the scheduled digest"))
     for command in (skills, digest):
         command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
-    for command in (playbook, digest, learn):
+    for command in (playbook, digest, learn, state):
         command.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS,
                              help=_("Language of lessons, messages and the digest"))
 
@@ -245,8 +260,16 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
     config = effective_settings(home, runtime_config)
     opts = options(config, runtime_config)
     lang = getattr(args, "lang", None) or opts["language"]
+    if action == "status":
+        from . import status
+
+        state = status.build(home, now=now, config=config, runtime_config=runtime_config)
+        return status.markdown(state, lang) if args.format == "md" else state
     if action == "learn":
-        result = cycle(home, now=now, runtime_config=runtime_config, config=config, lang=lang, reflect=reflect)
+        from .autopilot import run_exclusive
+
+        result = run_exclusive(home, lambda: cycle(home, now=now, runtime_config=runtime_config, config=config,
+                                                   lang=lang, reflect=reflect, backfill_budget_s=120.0))
         return notify_view(result) if args.notify_only else result
     if action == "skills":
         from .experience import day_offset, utc_day
@@ -334,20 +357,21 @@ def _confirm(text: str, lang: str, *, yes: bool) -> None:
 
 
 def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=None, reflect=None):
-    """Run the evolution pass from `ops tick`, at most once an hour. Returns its notification view."""
+    """Run the evolution pass from `ops tick`, at most once an hour and never alongside the autopilot of a
+    running gateway (both claim the same pass). Returns its notification view."""
+    from .autopilot import claim, finish
     from .evolve import cycle, notify_view
-    from .experience import experience
 
-    with experience(home) as conn:
-        saved = conn.execute("SELECT value FROM cursor WHERE key='last_cycle'").fetchone()
-        try:
-            last = float(saved[0]) if saved else 0.0
-        except ValueError:
-            last = 0.0
-        if 0 <= now - last < CYCLE_INTERVAL_SECONDS:
-            return None
-        conn.execute("INSERT OR REPLACE INTO cursor VALUES ('last_cycle', ?)", (repr(now),))
-    return notify_view(cycle(home, now=now, runtime_config=runtime_config, config=config, reflect=reflect))
+    owner = f"tick-{os.getpid()}"
+    if not claim(home, now=now, interval_s=CYCLE_INTERVAL_SECONDS, owner=owner):
+        return None
+    try:
+        result = cycle(home, now=now, runtime_config=runtime_config, config=config, reflect=reflect)
+    except BaseException as problem:
+        finish(home, now=now, owner=owner, ok=False, interval_s=CYCLE_INTERVAL_SECONDS, error=type(problem).__name__)
+        raise
+    finish(home, now=now, owner=owner, ok=True, interval_s=CYCLE_INTERVAL_SECONDS)
+    return notify_view(result)
 
 
 def _report(args, home: Path, *, running_version=None, provider=None, now: float, runtime_config=None,

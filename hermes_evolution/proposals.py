@@ -36,7 +36,7 @@ def _upsert(conn, seen: set, code: str, kind: str, risk: str, subject: str, evid
 
 def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None, reviews: dict | None = None,
             failures: list | None = None, turns: dict | None = None, changes: list | None = None,
-            outcomes: dict | None = None, lang: str = "en") -> list[dict]:
+            outcomes: dict | None = None, radar: list | None = None, lang: str = "en") -> list[dict]:
     """Rebuild open proposals from current evidence. Proposals whose evidence is gone expire.
 
     A lesson proposal carries the exact sentence the agent would read. Regressions come from the stored
@@ -84,6 +84,9 @@ def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None,
         _upsert(conn, seen, "slow_turns", "investigate_latency", "medium", "turns",
                 {"turns": turns["turns"], "slow_pct": turns["slow_pct"], "p50_ms": turns["p50_ms"], "p95_ms": turns["p95_ms"]},
                 "hermes evolution report --days 7", now)
+    for finding in radar or ():   # read from Hermes' own records by radar.scan; each names its inspection command
+        _upsert(conn, seen, finding["code"], finding["kind"], finding["risk"], finding["subject"], finding["evidence"],
+                finding["command"], now)
     del changes   # kept for callers; the stored verdicts below are the source of truth
     for row in conn.execute("""SELECT * FROM change WHERE verdict='regressed' AND kind IN ('skill','config')
                                AND at >= ?""", (now - REGRESSION_DAYS * 86_400,)).fetchall():

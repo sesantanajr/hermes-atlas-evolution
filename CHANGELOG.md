@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.5.0
+
+This release makes the loop run by itself and learn from what Hermes already recorded, turns the reflector on by default, and adds a runtime guard, a health radar, a status command and owner notices. The plugin is covered by 257 unit and end-to-end tests against a simulated Hermes context, and passes `hermes plugins validate` on Hermes Agent 0.23.1 without warnings, with the security scan reporting it safe. The reflector made three real model calls through Hermes in production. The autopilot is verified in tests and in the CLI. Windows was only simulated in tests.
+
+### Added
+
+- **Autopilot.** The learning pass runs by itself in a background daemon thread, at most once per `autopilot_minutes` (default 60; 0 leaves passes to the operator; otherwise 15 to 1440). The hooks `post_llm_call`, `on_session_end` and `on_kanban_dispatch_tick` nudge it. A hook only compares clocks, and a check starts at most once every 60 seconds per process. Every process of a profile claims the pass with a compare-and-set lease in the plugin's database; the lease lasts 15 minutes, so a dead owner's lease expires, and a failed pass is retried after 10 minutes. The thread pins the plugin's own profile, because Hermes keeps the active profile in a context variable that new threads do not inherit. Settings are read again for each pass, and an invalid value falls back instead of failing the pass.
+- **Learning from Hermes' history.** On the first passes the plugin replays the last 14 days of the profile's `<HERMES_HOME>/state.db`, read-only and 25 sessions at a time, through the trackers the hooks use: tool results become tool counts and failure signatures, user messages become turns and owner feedback, and skills loaded with `skill_view` are charged with the outcome of their turn. Messages sent before the agent answered join the same turn. Only history older than the moment the plugin started observing the profile is read (for an upgrade, the start of the earliest day with live data), and each slice is written in one transaction together with its cursor, so nothing is counted twice. Budget per pass: 20 seconds in the autopilot, 120 seconds in `learn`. Statuses: `done`, `running`, `waiting`, `no_history`, `unreadable` and `unsupported_history`. On a copy of a real profile: 275 sessions, 436 turns and 6,731 tool calls in 1.2 s and 29 MB, producing 7 lessons on the first pass.
+- **Runtime guard** (`runtime_guard`, on by default), a `pre_tool_call` callback for terminal-like tools. It vetoes commands that would stop, restart or kill the gateway the agent runs on (`systemctl` restart, stop, kill and similar actions on a `hermes-gateway` unit, `service` restart or stop of it, `pkill` or `killall` of hermes, `hermes gateway stop`, also one level inside `bash -c` and similar shells) and tells the agent to use `hermes gateway restart`, which waits for running turns. It also vetoes `rm`, `rmdir`, `unlink`, `shred`, `mv` and `find` with `-delete` aimed at the running interpreter and its environment, the Hermes source, the Hermes root, the profile, a folder above any of them, or a glob that matches one. Only the command word counts, after variable assignments and wrappers such as `sudo` or `timeout`. Here-document bodies are ignored, and commands over 20,000 characters are let through unparsed. Vetoes are counted by kind in the new table `guard_daily`.
+- **Health radar**, read at each pass and shown in the new "Hermes health" section of the digest. All readings are read-only: sessions of the last 7 days that end as orphans (`ws_orphan_reap`, `startup_orphan_reap`), proposed at 10 or more ended sessions and 30% or more orphaned, subagents excluded; prompt tokens per agent call and the cached share, from `session_model_usage` rows with an empty or `main` task, proposed at 50 or more calls and an average of 60,000 tokens or more, with `hermes prompt-size` as the command; compactions that keep 75% or more of the context, with at least 5 samples; and plugins of this process, from the list of Hermes' plugin manager, that failed to load (only the exception name is kept), register more hooks than their manifest declares, or declare the same first-string-wins transform hook (`transform_tool_result`, `transform_terminal_output`, `transform_llm_output`). Findings become advisory proposals of the new kinds `session_lifecycle`, `context_weight`, `compaction`, `plugin_health` and `plugin_conflict`, each with the command to inspect it, and expire when the evidence goes away.
+- **`hermes evolution status [--format md|json] [--lang en|pt]`.** It shows the events the hooks saw today, the last autopilot pass, the backfill status and totals, the reflector (calls today, drafts waiting), lesson counts, open proposals and guard vetoes in 7 days, and the other profiles of the same Hermes root that had sessions in 7 days and do not have the plugin, with the exact install command, since each profile loads its own plugins.
+- **Owner notice** through `on_session_finalize`: at most one short notice per UTC day about decisions waiting (lessons, reflector drafts, high-risk proposals, a failing pass), only on the owner's local surfaces (CLI, TUI, Desktop), never in a gateway chat, where the other side may be someone else.
+- **Settings** `autopilot_minutes` and `runtime_guard`, in the Hermes settings form and in `settings.json`.
+- **Hooks** `pre_tool_call`, `on_session_finalize` and `on_kanban_dispatch_tick`. The manifest declares 17 hooks and 2 tools.
+- **Tracked settings** `compression.threshold`, `compression.target_ratio`, `compression.protect_last_n` and `skills.auto_load`, so a change to one of them gets a before-and-after verdict.
+
+### Changed
+
+- **The reflector is on by default.** An invalid value switches it off. It still keeps excerpts only while `lessons` is not `off`, passes them through Hermes' redactor with `force=True` and the plugin's masks, and calls the auxiliary task `evolution_reflector`, which inherits the compression model. The caps are unchanged: 3 calls per pass and `reflector_daily_limit` per day (default 6). Drafts stay in quarantine in every mode, `auto` included, and the operator approves them. In production, three real calls through Hermes (provider DeepSeek, about 600 tokens and about 2 seconds each) produced three drafts in Portuguese.
+- **Passes never overlap.** A manual `hermes evolution learn` waits up to 30 seconds for a running pass instead of running alongside it, and then counts as the latest pass. `ops tick` uses the same claim.
+- **Short transactions.** No transaction spans a model call or a log read, so hook writers of a running gateway never wait for the reflector.
+- **Background reviews.** The first run also reads `agent.log.1` to `agent.log.5` inside the 14-day window.
+- **Digest.** Lessons awaiting approval are grouped in one line, and up to 20 other open proposals are listed instead of 12 proposals in all.
+- A lesson is not attached to a tool result that already carries a `hint` from Hermes' own tools, such as the terminal's.
+- `gui` counts as a local surface.
+- **Storage.** The database moves to schema 8 automatically, from schemas 0 to 7.
+
+### Fixed
+
+- After a log rotation, the rest of the old `agent.log` is read before the new one, so background reviews logged just before Hermes renamed the file are no longer lost. The first run no longer starts near the end of the log.
+- A pass no longer holds the database write lock while it reads `agent.log` or waits for the reflector's model.
+- Two processes that derive the same lesson at the same time no longer fail the pass: derived lessons are inserted idempotently.
+- A manual `learn` could run at the same time as the pass of `ops tick`. Both now claim the pass.
+- A reflector call is counted before it is made. A crash or a killed process in the middle of a pass could let the next pass exceed the daily cap.
+- An unreadable `settings.json` no longer discards the values set in Hermes' settings form. Lessons stay `off` until the file is fixed, and every other option keeps the form's value.
+- Two active lessons that render the same sentence put it in the prompt once.
+- The digest says "1 lesson awaits approval" in the singular.
+
+### Security
+
+- **Runtime guard** (see Added). On a real server the agent restarted its own gateway with `systemctl` 13 times in a week, 12 of them from one chat on one day, and once deleted the Python runtime the gateway unit used, which caused about an hour of downtime. The guard is a pure function that never raises, because Hermes blocks a tool whose `pre_tool_call` raises, and any doubt lets the command through.
+- **Reflector drafts stay quarantined in every mode**, `auto` included, because a crafted error message could otherwise reach the agent's prompt.
+- **The backfill keeps only what the hooks keep.** It opens `state.db` read-only, and text is classified in memory and discarded.
+- **Owner notices never go to a gateway chat.**
+- **Settings fail safe.** An invalid `reflector` switches the reflector off, an invalid `runtime_guard` keeps the guard on, and an invalid `autopilot_minutes` leaves passes to the operator.
+
+### Upgrade notes
+
+- The first use after upgrading migrates `evolution.sqlite3` to schema 8. Earlier versions cannot open a migrated database. To go back to 0.4.0, restore a backup of the file or delete it.
+- Restart the gateway after upgrading, so that the new hooks, the autopilot and the runtime guard are registered.
+- The reflector is now on in profiles that never set `reflector`. It keeps scrubbed excerpts and can make up to `reflector_daily_limit` model calls a day (6 by default) through `evolution_reflector`, which uses the compression model unless `auxiliary.evolution_reflector` names another. Set `reflector: false` to keep the behaviour of 0.4.0.
+- The runtime guard is on: agent terminal commands that restart or stop the gateway with `systemctl`, `service`, `pkill` or `killall` are vetoed, and the agent is told to use `hermes gateway restart`. Set `runtime_guard: false` to remove it.
+- On an upgrade, the backfill reads only the history older than the earliest day with live data in the plugin's database, so nothing is counted twice. The background review counter keeps its cursor and does not read the rotated logs.
+- A weekly digest recipe or an `ops tick` schedule keeps working; their passes share the autopilot's claim. To run passes only on your own schedule, set `autopilot_minutes` to 0.
+- Hermes loads plugins per profile. Install the plugin in every profile you use with `hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable`; `hermes evolution status` lists the busy profiles that lack it.
+
 ## 0.4.0
 
 This release adds the evolution loop, which is now the main purpose of the plugin, and speaks the profile's language in English or Brazilian Portuguese. The operations supervisor of 0.2.0 and 0.3.0 remains. The plugin is covered by 207 unit and end-to-end tests against a simulated Hermes context, and passes `hermes plugins validate` and `hermes plugins doctor` on Hermes Agent 0.23.1 without warnings. It has not run on a production gateway yet, and the optional reflector has not made a real model call.

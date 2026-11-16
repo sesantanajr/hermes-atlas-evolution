@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -129,7 +130,8 @@ class ReflectTest(Base):
 class CycleTest(Base):
     def test_the_cycle_uses_the_reflector_only_when_it_is_on(self):
         failing(self.home)
-        off = cycle(self.home, now=NOW, config={}, reflect=self.ask({"applies": True, "lesson": "When X, do Y every time."}))
+        off = cycle(self.home, now=NOW, config={"evolution": {"reflector": False}},
+                    reflect=self.ask({"applies": True, "lesson": "When X, do Y every time."}))
         self.assertEqual((off["reflector"], self.calls), ({"status": "off"}, []))
         with experience(self.home) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_sample").fetchone()[0], 0)   # erased when off
@@ -154,6 +156,30 @@ class CycleTest(Base):
         self.assertEqual(notify_view(on)["reflector_drafts"][0]["tool"], "terminal")
         with self.assertRaises(ValueError):
             options({"evolution": {"reflector_daily_limit": 0}})
+
+    def test_the_reflector_is_on_by_default(self):
+        failing(self.home)
+        result = cycle(self.home, now=NOW, config={},
+                       reflect=self.ask({"applies": True, "lesson": "When a script reads a CSV, check the columns first."}))
+        self.assertEqual(len(result["reflector"]["drafted"]), 1)
+
+    def test_no_write_lock_is_held_while_the_model_answers(self):
+        """Hook writers of the gateway must never wait for a model: each call happens outside a transaction."""
+        failing(self.home)
+        observed = []
+
+        def ask(instructions, text):
+            other = sqlite3.connect(self.home / "evolution" / "evolution.sqlite3", timeout=0.05)
+            try:   # a hook writing at this moment must not hit "database is locked"
+                other.execute("INSERT OR REPLACE INTO cursor VALUES ('probe', '1')")
+                other.commit()
+                observed.append("written")
+            finally:
+                other.close()
+            return {"applies": True, "lesson": "When a script reads a CSV, check the columns first."}
+
+        result = cycle(self.home, now=NOW, config={"evolution": {"reflector": True}}, reflect=ask)
+        self.assertEqual((observed, len(result["reflector"]["drafted"])), (["written"], 1))
 
     def test_host_caller_uses_the_plugin_llm_with_the_plugin_task_and_a_schema(self):
         seen = {}

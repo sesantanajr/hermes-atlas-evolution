@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 
 from .advisory import TOOL, tool_handler
-from .cli import effective_settings, execute, settings, setup
+from .cli import execute, safe_settings, settings, setup
 from .memory import GLOBAL_SCOPE, MemoryStore, make_scope
 from .native_signals import HOOKS, observe_native
 from .operations import database, observe
@@ -99,6 +99,27 @@ def _warn_once(seen: set, event: str) -> None:
         getLogger(__name__).warning("Atlas Evolution could not record %s; the turn continues unaffected", event)
 
 
+def autopilot_pass(home: Path, reflect) -> dict:
+    """One evolution pass from the autopilot thread. Settings are read again, so a change made in Hermes'
+    settings form applies to the next pass, and an invalid value falls back instead of failing the pass."""
+    import time
+
+    from .evolve import cycle
+
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        runtime = load_config_readonly() or {}
+    except Exception:   # the pass still runs with the plugin's own settings
+        runtime = {}
+    current, _problems = safe_settings(home, runtime)
+    result = cycle(home, now=time.time(), runtime_config=runtime, config=current, reflect=reflect, strict=False)
+    reflection = result["reflector"]
+    return {"new_lessons": len(result["new_lessons"]), "open_proposals": len(result["open_proposals"]),
+            "reflector_status": reflection.get("status", "ran"), "reflector_drafts": len(reflection.get("drafted") or []),
+            "reviews_ingested": result["reviews_ingested"]}
+
+
 def _register_skills(ctx) -> None:
     """Expose the bundled skills as `hermes-evolution:<name>`. Optional: an older or stricter host skips them."""
     folder = Path(__file__).resolve().parent.parent / "skills"
@@ -139,13 +160,9 @@ def register(ctx):
         runtime_config = {}
     from logging import getLogger
 
-    problems: list = []
-    try:
-        config = effective_settings(home, runtime_config)
-    except (OSError, ValueError, RecursionError):
-        # Unreadable settings: keep measuring, but show nothing to the agent until the file is fixed.
-        config = {"evolution": {"lessons": "off"}}
-        problems.append("settings.json")
+    # Unreadable settings.json: keep measuring with the values from Hermes' form, but show nothing to the
+    # agent until the file is fixed.
+    config, problems = safe_settings(home, runtime_config)
     evolution = options(config, runtime_config, strict=False, problems=problems)
     if problems:
         getLogger(__name__).warning("Atlas Evolution ignored invalid settings (%s); lessons=%s until they are fixed",
@@ -249,12 +266,16 @@ def register(ctx):
             research.finish(payload)
         except storage_errors:
             return None
+        finally:
+            autopilot.poke()
 
     def turn_ended(**payload):
         try:
             turns.finish(payload)
         except storage_errors:
             _warn_once(failed, "turn")
+        finally:
+            autopilot.poke()
 
     def skill_event(**payload):
         try:
@@ -297,6 +318,17 @@ def register(ctx):
 
             getLogger(__name__).warning("Atlas Evolution reflector is unavailable on this Hermes build")
 
+    from .autopilot import Autopilot
+    from .backfill import mark_observed
+
+    try:   # from now on the hooks count; the backfill reads Hermes' history only before this moment
+        import time as _time
+
+        mark_observed(home, now=_time.time())
+    except storage_errors:
+        _warn_once(failed, "start")
+    autopilot = Autopilot(home, lambda: autopilot_pass(home, reflect), interval_minutes=evolution["autopilot_minutes"])
+
     def operator_cli(args):
         import hermes_cli.config as hermes_config
 
@@ -311,6 +343,37 @@ def register(ctx):
                 runtime_config=config, hermes_source=source, kanban_home=get_default_hermes_root(home=home),
                 reflect=reflect)
 
+    if evolution["runtime_guard"]:
+        from .guard import RuntimeGuard, protected_paths
+        from .signals import record_guard
+
+        guard = RuntimeGuard(protected=protected_paths(hermes_root=get_default_hermes_root(home=home), profile_home=home),
+                             home=Path.home(), lang=evolution["language"], on_block=lambda kind: record_guard(home, kind))
+        ctx.register_hook("pre_tool_call", guard)
+    def session_finalized(**payload):
+        """A short notice about decisions waiting for the owner: once a day, and only on the owner's own
+        surfaces (CLI, TUI, Desktop). Never in a gateway chat, where the other side may be someone else."""
+        try:
+            from .signals import surface_of
+            from .status import pending_notice
+
+            if payload.get("parent_session_id") or surface_of(payload.get("platform")) != "local":
+                return None
+            import time as _time
+
+            return pending_notice(home, now=_time.time(), lang=evolution["language"])
+        except Exception:   # a notice is a convenience; it must never disturb the end of a session
+            return None
+
+    def dispatch_tick(**_payload):
+        try:
+            autopilot.poke()   # a 60-second clock while the gateway is idle; O(1) unless a check is due
+        except Exception:
+            return None
+        return None
+
+    ctx.register_hook("on_session_finalize", session_finalized)
+    ctx.register_hook("on_kanban_dispatch_tick", dispatch_tick)
     ctx.register_hook("post_tool_call", after_tool)
     ctx.register_hook("pre_llm_call", before_turn)
     ctx.register_hook("post_llm_call", after_turn)

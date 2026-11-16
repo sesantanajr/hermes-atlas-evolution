@@ -42,7 +42,7 @@ python -m hermes_evolution --home /tmp/evolution-test --hermes-version 0.23.1 re
 ## Code style
 
 - **Standard library only.** The plugin has no runtime dependency. Optional integrations are imported lazily and must degrade when the package is missing.
-- **Public plugin API only.** Use `ctx` and the modules of the published Hermes plugin API. `hermes plugins validate` lists imports of private Hermes modules. Look up optional `ctx` methods with `getattr` so that an older or stricter host still loads the plugin.
+- **Public plugin API only.** Use `ctx` and the modules of the published Hermes plugin API. The one exception is read-only introspection of what Hermes has already loaded (the health radar's plugin list and the guard's view of where Hermes lives): look the module up in `sys.modules` without importing it, wrap the call, and skip the reading when it is missing or fails. `hermes plugins validate` lists imports of private Hermes modules. Look up optional `ctx` methods with `getattr` so that an older or stricter host still loads the plugin.
 - **Tests use `unittest`** and temporary directories. A fix comes with a regression test that fails without it.
 - **Thresholds are named constants** at the top of their module. When you change one, update `docs/evolution-loop.md` and `docs/pt-BR/evolution-loop.md` in the same pull request.
 - **Validate at the edge.** Functions that receive settings or hook payloads check types and ranges and raise `ValueError` with a message an operator can act on. Inside the gateway, settings fall back to safe defaults instead.
@@ -64,10 +64,10 @@ Every change must keep these. A pull request that breaks one will not be merged.
 
 1. **No content is stored or logged.** Conversation text, tool arguments, tool output, memory content and raw log lines may be inspected in memory to classify an event, and are then discarded. The only exception is the reflector's scrubbed excerpt, which exists only while the reflector is on.
 2. **Only safe values reach the database.** A stored value is a counter, a member of a fixed list, or a label that passed `experience.label` or `signals._clean_hint`. Session and turn identifiers are stored only as hashes.
-3. **No network access of the plugin's own and no telemetry.** A model may be called only through Hermes' `ctx.llm`, by a feature that is off by default, within a per-pass and daily cap, and its output starts in quarantine.
+3. **No network access of the plugin's own and no telemetry.** A model may be called only through Hermes' `ctx.llm`, by a feature the operator can switch off with its own setting, within a per-pass and daily cap, and its output starts in quarantine. The reflector is the only such feature; it is on by default since 0.5.0, and its drafts stay in quarantine in every mode.
 4. **Hooks fail open and stay cheap.** A hook callback never raises into a turn. Hook writes go through `experience.record` or `operations.record`, which queue the update while the database is busy.
 5. **The plugin changes only its own data.** Anything that would change Hermes (a skill, a setting, a Kanban card outside the explicit handoff) is shown as a command for the operator.
-6. **Nothing reaches the agent by default, and only the operator decides.** New agent-facing surfaces are off until the operator turns them on. A command that activates, approves or retires something calls the operator guard (`cli._operator_only`) and shows the exact text before it takes effect.
+6. **Nothing learned reaches the agent by default, and only the operator decides.** New surfaces that show learned text to the agent are off until the operator turns them on. The runtime guard's refusal, on by default, is fixed text in the code, not learned content. A command that activates, approves or retires something calls the operator guard (`cli._operator_only`) and shows the exact text before it takes effect.
 7. **Refused approvals are never advice.** No signal, template or draft may teach the agent to reach an outcome the user's approval refused.
 8. **Prove it in a test.** When you add a signal, add a test that feeds it sensitive-looking input and asserts that the text is absent from the stored rows and from the command output.
 

@@ -145,6 +145,16 @@ class LessonsTest(Base):
             self.assertLessEqual(len(text), 600)
             self.assertGreaterEqual(text.count("\n- "), 2)
 
+    def test_two_lessons_with_the_same_sentence_take_one_line(self):
+        with experience(self.home) as conn:
+            for signature in ("sig-file", "sig-other"):   # e.g. not_found with different details, one template
+                conn.execute("""INSERT INTO lesson(signature, tool, klass, hint, origin, status, created, updated, activated)
+                    VALUES (?, 'terminal', 'not_found', '', 'derived', 'active', ?, ?, ?)""", (signature, NOW, NOW, NOW))
+            chosen: list = []
+            text = lessons.playbook(conn, chosen=chosen)
+        self.assertEqual(text.count("\n- "), 1)
+        self.assertEqual(len(chosen), 2)   # both are in the prompt, so both count as shown
+
 
 class HintsTest(Base):
     def test_attach_keeps_json_valid_and_never_duplicates(self):
@@ -157,6 +167,13 @@ class HintsTest(Base):
         for unusable in (None, 42, "x" * 300_000):
             self.assertIsNone(attach(unusable, "Do Y."))
         self.assertIsNone(attach("x", ""))
+
+    def test_a_native_terminal_hint_is_not_repeated_by_a_lesson(self):
+        native = json.dumps({"output": "rg: command not found", "exit_code": 127,
+                             "hint": "Install ripgrep or use grep -r instead."})
+        self.assertIsNone(attach(native, "When rg is missing, use grep -r."))   # Hermes already said it
+        empty_hint = json.dumps({"output": "boom", "exit_code": 1, "hint": None})
+        self.assertIsNotNone(attach(empty_hint, "When boom happens, check the input."))
 
     def test_a_hint_is_given_once_per_session_and_capped(self):
         self.tool_fails(now=NOW - DAY, times=2)

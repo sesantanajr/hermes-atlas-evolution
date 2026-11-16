@@ -374,8 +374,12 @@ PAIRS = (
     ("Confirm with --yes after reading the text with 'proposals list' or 'lessons list'",
      "Confirme com --yes depois de ler o texto em 'proposals list' ou 'lessons list'"),
     ("Cancelled; nothing changed", "Cancelado; nada mudou"),
+    ("Another learning pass is running in this profile. Try again in a minute.",
+     "Outra passada de aprendizado está rodando neste perfil. Tente de novo em um minuto."),
     # ── command-line help ────────────────────────────────────────────────────────────────────────
     ("Review Hermes health, learning and operations", "Saúde, aprendizado e operação do Hermes"),
+    ("Show whether the plugin is observing, learning and protecting this profile",
+     "Mostra se o plugin está observando, aprendendo e protegendo este perfil"),
     ("Inspect Hermes files and host signals", "Examina os arquivos do Hermes e os sinais do host"),
     ("Summarize provider and tool measurements", "Resume as medições de provedores e ferramentas"),
     ("Run maintenance and record decisions", "Roda a manutenção e registra as decisões"),

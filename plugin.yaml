@@ -1,10 +1,11 @@
 name: hermes-evolution
-version: "0.4.0"
+version: "0.5.0"
 requires_hermes: ">=0.23.1"
 description: >-
-  A measured self-improvement loop for Hermes Agent. Turns recurring tool failures into short lessons,
-  shows them to the agent when they matter, measures every lesson, skill rewrite and setting change
-  before and after, and keeps the existing Linux, Cron and Kanban supervision. Observation by default.
+  A measured self-improvement loop for Hermes Agent. Learns from Hermes' own history on the first pass,
+  runs by itself in the background, turns recurring tool failures into short lessons, measures every lesson,
+  skill rewrite and setting change before and after, reports what slows Hermes down, and stops the agent
+  from taking down the gateway it runs on. Lessons wait for your approval by default.
 license: MIT
 homepage: https://github.com/sesantanajr/hermes-atlas-evolution
 author: "Sérgio Sant'Ana Júnior"
@@ -17,6 +18,7 @@ provides_tools:
   - atlas_evolution_plan
   - atlas_evolution_lessons
 provides_hooks:
+  - pre_tool_call
   - post_api_request
   - api_request_error
   - post_auxiliary_call
@@ -31,6 +33,8 @@ provides_hooks:
   - post_compaction
   - post_curator_run
   - on_kanban_worker_exited
+  - on_session_finalize
+  - on_kanban_dispatch_tick
 config_schema:
   lessons:
     type: str
@@ -73,13 +77,29 @@ config_schema:
     description: Gateway sender ids whose corrections count as yours (local CLI, TUI and Desktop always count).
   reflector:
     type: bool
-    default: false
+    default: true
     label: Reflector
     description: >-
-      Draft lessons for recurring failures that have no template, using a model through Hermes (auxiliary task
-      evolution_reflector). Keeps one scrubbed error excerpt per failure until a draft exists. Drafts wait for approval.
+      Draft lessons for recurring failures that have no template, using the model of Hermes' auxiliary task
+      evolution_reflector (it inherits the compression model). Keeps one scrubbed error excerpt per failure until a
+      draft exists. Drafts wait for approval unless lessons is auto.
   reflector_daily_limit:
     type: int
     default: 6
     label: Reflector calls per day
     description: Upper limit of model calls the reflector makes per day. From 1 to 50.
+  autopilot_minutes:
+    type: int
+    default: 60
+    label: Autopilot (minutes)
+    description: >-
+      Run the learning pass by itself in the background, at most once per interval, from 15 to 1440 minutes.
+      0 runs it only when you call hermes evolution learn.
+  runtime_guard:
+    type: bool
+    default: true
+    label: Runtime guard
+    description: >-
+      Stop the agent from taking down the Hermes it runs in. Vetoes terminal commands that restart or kill the
+      gateway (it is told to use hermes gateway restart, which waits for running turns) or that delete the running
+      Python, the Hermes code or this profile.

@@ -32,8 +32,9 @@ def attach(result, sentence: str, lang: str = "en") -> str | None:
         except ValueError:
             data = None
         if isinstance(data, dict):
-            if KEY in data:
-                return None
+            hint = data.get("hint")
+            if KEY in data or isinstance(hint, str) and hint.strip():
+                return None   # already advised, by this plugin or by Hermes' own terminal hints
             data[KEY] = sentence
             return json.dumps(data, ensure_ascii=False)
     return f"{result}\n\n[{lessons.HINT_LABEL.get(lang, lessons.HINT_LABEL['en'])}] {sentence}"

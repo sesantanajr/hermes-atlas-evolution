@@ -19,7 +19,7 @@ from pathlib import Path
 from .experience import day_offset, label, record, utc_day
 
 SURFACES = ("local", "gateway", "cron", "subagent")
-_LOCAL_PLATFORMS = frozenset({"cli", "tui", "desktop", "acp", "local"})
+_LOCAL_PLATFORMS = frozenset({"cli", "tui", "desktop", "gui", "acp", "local"})
 LATENCY_BUCKETS = ((15_000, "b15"), (30_000, "b30"), (60_000, "b60"), (120_000, "b120"), (300_000, "b300"))
 DEFAULT_SLOW_TURN_MS = 60_000
 _RESULT_LIMIT = 262_144
@@ -499,6 +499,21 @@ def record_skill_event(home: Path, payload: dict, *, now: float | None = None) -
         rows.append((today, skill, "reused_after_patch"))
     record(home, lambda conn: conn.executemany("""INSERT INTO skill_daily VALUES (?, ?, ?, 1)
         ON CONFLICT DO UPDATE SET count=count+1""", rows), now=stamp)
+
+
+def record_guard(home: Path, kind: str, *, now: float | None = None) -> None:
+    """Count a command the runtime guard vetoed. Only the kind is kept, never the command."""
+    if kind not in ("gateway_stop", "runtime_removal"):
+        return
+    stamp = time.time() if now is None else now
+    record(home, lambda conn: conn.execute("""INSERT INTO guard_daily VALUES (?, ?, 1)
+        ON CONFLICT DO UPDATE SET count=count+1""", (utc_day(stamp), kind)), now=stamp)
+
+
+def guard_summary(conn, *, now: float, days: int) -> dict:
+    start, end = _window(now, days)
+    return dict(conn.execute("SELECT kind, SUM(count) FROM guard_daily WHERE day BETWEEN ? AND ? GROUP BY kind",
+                             (start, end)).fetchall())
 
 
 # ── summaries ────────────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,225 @@
+"""Radar: what slows Hermes down or wastes its context, read from Hermes' own records.
+
+Every reading is read-only and bounded, and every finding names the native command to inspect it, so the
+operator decides what to change; a change to a tracked setting is then measured before and after by the
+experiments module. Readings:
+
+- sessions that end as orphans (reaped after a disconnect or a restart) instead of being closed, so the
+  end-of-session work of Hermes and its memory never runs for them;
+- the context the agent sends per model call, and how much of it the provider served from cache;
+- compactions that keep most of the context (they cost a model call and buy little room);
+- plugins of this process that failed to load, register hooks they do not declare, or compete for a
+  transform hook where only the first plugin's result counts.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+import sys
+from pathlib import Path
+from urllib.parse import quote
+
+RADAR_DAYS = 7
+ORPHAN_ENDS = ("ws_orphan_reap", "startup_orphan_reap")
+MIN_ENDED_SESSIONS = 10
+ORPHAN_SHARE = 0.3
+MIN_CALLS = 50
+HEAVY_PROMPT_TOKENS = 60_000
+MIN_COMPACTIONS = 5
+WEAK_COMPACTION_KEPT = 0.75
+FIRST_WINS_HOOKS = ("transform_tool_result", "transform_terminal_output", "transform_llm_output")
+_ERROR_NAME = re.compile(r"[A-Za-z_][\w.]{0,60}")
+
+
+def _history(home: Path) -> sqlite3.Connection | None:
+    path = Path(home) / "state.db"
+    if not path.is_file():
+        return None
+    try:
+        source = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=2)
+        source.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+        return source
+    except sqlite3.Error:
+        return None
+
+
+def _columns(source, table: str) -> set[str]:
+    return {row[1] for row in source.execute(f"PRAGMA table_info({table})")}
+
+
+def sessions(source, *, now: float, days: int = RADAR_DAYS) -> dict | None:
+    """How the owner's sessions of the window ended. Subagent sessions are left out."""
+    columns = _columns(source, "sessions")
+    if not {"started_at", "end_reason"} <= columns:
+        return None
+    parent = "AND (parent_session_id IS NULL OR parent_session_id = '')" if "parent_session_id" in columns else ""
+    rows = source.execute(f"""SELECT end_reason, COUNT(*) FROM sessions WHERE started_at >= ? {parent}
+        GROUP BY end_reason""", (now - days * 86_400,)).fetchall()
+    from .experience import label
+
+    by_reason: dict = {}
+    for reason, count in rows:
+        if reason:   # Hermes' own reason codes; anything unexpected is stored as a safe label
+            key = label(str(reason)[:96], fallback="other")
+            by_reason[key] = by_reason.get(key, 0) + count
+    ended = sum(by_reason.values())
+    orphaned = sum(by_reason.get(reason, 0) for reason in ORPHAN_ENDS)
+    return {"ended": ended, "orphaned": orphaned, "open": sum(count for reason, count in rows if not reason),
+            "orphan_pct": round(100 * orphaned / ended, 1) if ended else None, "by_reason": by_reason}
+
+
+def context(source, *, now: float, days: int = RADAR_DAYS) -> dict | None:
+    """Prompt tokens per model call of the agent itself (auxiliary tasks excluded), and the cached share."""
+    columns = _columns(source, "session_model_usage")
+    need = {"task", "api_call_count", "input_tokens", "cache_read_tokens", "last_seen"}
+    if not need <= columns:
+        return None
+    write = "cache_write_tokens" if "cache_write_tokens" in columns else "0"
+    row = source.execute(f"""SELECT SUM(api_call_count), SUM(input_tokens), SUM(cache_read_tokens), SUM({write}),
+          COUNT(DISTINCT session_id) FROM session_model_usage
+        WHERE (task IS NULL OR task IN ('', 'main')) AND last_seen >= ?""", (now - days * 86_400,)).fetchone()
+    calls, fresh, cached, written, count = (value or 0 for value in row)
+    prompt = fresh + cached + written
+    if not calls:
+        return {"calls": 0, "sessions": 0, "avg_prompt_tokens": None, "cache_pct": None}
+    return {"calls": calls, "sessions": count, "avg_prompt_tokens": round(prompt / calls),
+            "cache_pct": round(100 * cached / prompt, 1) if prompt else None}
+
+
+def compaction(conn, *, now: float, days: int = RADAR_DAYS) -> dict:
+    from .experience import day_offset, utc_day
+
+    row = conn.execute("""SELECT SUM(measured), SUM(tokens_before), SUM(tokens_after) FROM native_activity
+        WHERE hook='post_compaction' AND day BETWEEN ? AND ?""", (day_offset(now, days - 1), utc_day(now))).fetchone()
+    measured, before, after = (value or 0 for value in row)
+    return {"compactions": measured, "tokens_before": before, "tokens_after": after,
+            "kept_pct": round(100 * after / before, 1) if before else None}
+
+
+def _declared_hooks(folders) -> dict[str, list[str]]:
+    """provides_hooks of each plugin manifest found in `folders`, by plugin name. Bounded reads."""
+    found = {}
+    for folder in folders:
+        try:
+            entries = sorted(Path(folder).iterdir()) if folder else []
+        except OSError:
+            continue
+        for entry in entries[:500]:
+            manifest = entry / "plugin.yaml"
+            try:
+                if not manifest.is_file() or manifest.stat().st_size > 65_536:
+                    continue
+                text = manifest.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            name, hooks, current = entry.name, [], None
+            for line in text.splitlines():
+                if line.startswith("name:"):
+                    name = line.split(":", 1)[1].strip().strip("'\"") or name
+                if line and not line.startswith((" ", "#", "-")):
+                    current = line.split(":", 1)[0].strip()
+                elif current == "provides_hooks" and line.strip().startswith("- "):
+                    hooks.append(line.strip()[2:].strip().strip("'\""))
+            found[name] = hooks
+    return found
+
+
+def plugins(home: Path) -> dict | None:
+    """Plugins loaded by this process for the profile. None when Hermes' plugin manager is not loaded here."""
+    module = sys.modules.get("hermes_cli.plugins")
+    manager = getattr(module, "get_plugin_manager", None) if module is not None else None
+    if not callable(manager):
+        return None
+    try:
+        rows = [row for row in manager().list_plugins() if isinstance(row, dict)]
+    except Exception:   # a manager in the middle of a reload: try again on the next pass
+        return None
+    try:
+        bundled = module.get_bundled_plugins_dir()
+    except Exception:
+        bundled = None
+    declared = _declared_hooks([bundled, Path(home) / "plugins"])
+    from .experience import label
+
+    enabled = sorted((row for row in rows if row.get("enabled") is True), key=lambda row: str(row.get("key") or ""))
+    errors, undeclared, overlaps = [], [], {}
+    for row in enabled:
+        key = label(str(row.get("key") or row.get("name") or "")[:96], fallback="plugin")
+        if row.get("error"):
+            match = _ERROR_NAME.match(str(row["error"]))
+            errors.append({"plugin": key, "error": label(match.group(0), fallback="error") if match else "error"})
+        hooks = declared.get(str(row.get("name") or key))
+        registered = row.get("hooks")
+        if hooks is not None and type(registered) is int and registered > len(hooks):
+            undeclared.append({"plugin": key, "registered": registered, "declared": len(hooks)})
+        for hook in FIRST_WINS_HOOKS:
+            if hooks and hook in hooks:
+                overlaps.setdefault(hook, []).append(key)
+    return {"enabled": len(enabled), "errors": errors, "undeclared": undeclared,
+            "overlaps": {hook: names for hook, names in overlaps.items() if len(names) > 1}}
+
+
+def findings(reading: dict) -> list[dict]:
+    """Proposals for the readings that cross their thresholds: {code, kind, risk, subject, evidence, command}."""
+    found = []
+    lifecycle = reading.get("sessions")
+    if lifecycle and lifecycle["ended"] >= MIN_ENDED_SESSIONS and lifecycle["orphaned"] / lifecycle["ended"] >= ORPHAN_SHARE:
+        found.append({"code": "sessions_orphaned", "kind": "session_lifecycle", "risk": "low", "subject": "sessions",
+                      "evidence": {"ended": lifecycle["ended"], "orphaned": lifecycle["orphaned"],
+                                   "orphan_pct": lifecycle["orphan_pct"], "by_reason": lifecycle["by_reason"]},
+                      "command": "hermes sessions list"})
+    weight = reading.get("context")
+    if weight and weight["calls"] >= MIN_CALLS and (weight["avg_prompt_tokens"] or 0) >= HEAVY_PROMPT_TOKENS:
+        found.append({"code": "context_heavy", "kind": "context_weight", "risk": "low", "subject": "context",
+                      "evidence": {"calls": weight["calls"], "avg_prompt_tokens": weight["avg_prompt_tokens"],
+                                   "cache_pct": weight["cache_pct"], "sessions": weight["sessions"],
+                                   "candidates": ["skills.auto_load", "compression.proactive_prune_tokens",
+                                                  "tool_budget.mcp_result_size_chars"]},
+                      "command": "hermes prompt-size"})
+    squeeze = reading.get("compaction") or {}
+    if squeeze.get("compactions", 0) >= MIN_COMPACTIONS and (squeeze.get("kept_pct") or 0) >= 100 * WEAK_COMPACTION_KEPT:
+        found.append({"code": "compaction_weak", "kind": "compaction", "risk": "low", "subject": "compression",
+                      "evidence": {"compactions": squeeze["compactions"], "kept_pct": squeeze["kept_pct"],
+                                   "tokens_before": squeeze["tokens_before"], "tokens_after": squeeze["tokens_after"]},
+                      "command": "hermes config get compression"})
+    loaded = reading.get("plugins") or {}
+    for item in loaded.get("errors", ()):
+        found.append({"code": f"plugin_error:{item['plugin']}", "kind": "plugin_health", "risk": "low",
+                      "subject": item["plugin"], "evidence": {"error": item["error"]},
+                      "command": f"hermes plugins doctor {item['plugin']}"})
+    for item in loaded.get("undeclared", ()):
+        found.append({"code": f"plugin_undeclared_hooks:{item['plugin']}", "kind": "plugin_health", "risk": "low",
+                      "subject": item["plugin"], "evidence": {"registered": item["registered"], "declared": item["declared"]},
+                      "command": f"hermes plugins doctor {item['plugin']}"})
+    for hook, names in loaded.get("overlaps", {}).items():
+        found.append({"code": f"plugin_transform_overlap:{hook}", "kind": "plugin_conflict", "risk": "medium",
+                      "subject": hook, "evidence": {"plugins": names, "rule": "first_string_wins"},
+                      "command": "hermes plugins list"})
+    return found
+
+
+def scan(home: Path, conn, *, now: float, days: int = RADAR_DAYS) -> dict:
+    """All readings and their findings. The plugin snapshot of the last process that could take one is kept."""
+    reading = {"sessions": None, "context": None, "compaction": compaction(conn, now=now, days=days)}
+    source = _history(home)
+    if source is not None:
+        try:
+            reading["sessions"] = sessions(source, now=now, days=days)
+            reading["context"] = context(source, now=now, days=days)
+        except sqlite3.Error:
+            pass
+        finally:
+            source.close()
+    reading["plugins"] = plugins(home)
+    if reading["plugins"] is not None:
+        conn.execute("INSERT OR REPLACE INTO cursor VALUES ('radar_plugins', ?)", (json.dumps(reading["plugins"]),))
+    else:
+        saved = conn.execute("SELECT value FROM cursor WHERE key='radar_plugins'").fetchone()
+        try:
+            reading["plugins_snapshot"] = json.loads(saved[0]) if saved else None
+        except ValueError:
+            reading["plugins_snapshot"] = None
+    reading["findings"] = findings({**reading, "plugins": reading["plugins"] or reading.get("plugins_snapshot")})
+    return reading

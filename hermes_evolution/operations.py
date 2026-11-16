@@ -17,7 +17,7 @@ from pathlib import Path
 
 BUCKETS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 RETENTION_DAYS = 35
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 RECOVERY_SPACING_SECONDS = 300
 OBSERVER_BUSY_SECONDS = 0.035
 _OBSERVER_LOCK_SECONDS = 0.05
@@ -69,10 +69,10 @@ def _open(path: Path, timeout: float, **options) -> sqlite3.Connection:
     try:
         connection.row_factory = sqlite3.Row
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version in (0, 1, 2, 3, 4, 5, 6):
+        if version in (0, 1, 2, 3, 4, 5, 6, 7):
             if version == 0:
                 connection.execute("PRAGMA journal_mode=WAL")
-            # 4: evolution loop, 5: skill outcomes, 6: reflector, 7: frozen lesson baselines
+            # 4: evolution loop, 5: skill outcomes, 6: reflector, 7: frozen lesson baselines, 8: runtime guard
             from .experience import SCHEMA as experience_schema, ensure_columns
 
             connection.execute("BEGIN IMMEDIATE")
@@ -301,12 +301,42 @@ def _observer(home: Path) -> _Observer:
     return observer
 
 
+_BATCH = threading.local()
+
+
 def record(home: Path, job, *, now: float | None = None) -> None:
     """Run ``job(connection)`` in one write transaction of the shared observer connection.
 
-    The job may run later, on another thread. It must hold only values that are safe to store.
+    The job may run later, on another thread. It must hold only values that are safe to store. Inside
+    ``batched(home)`` on the same thread, the job is collected instead and written with the batch.
     """
+    jobs = getattr(_BATCH, "jobs", None)
+    if jobs is not None and _BATCH.home == Path(home):
+        jobs.append(job)
+        return
     _observer(home).record(job, time.time() if now is None else now)
+
+
+@contextmanager
+def batched(home: Path):
+    """Collect this thread's counter updates for `home` and write them in one transaction on a clean exit.
+
+    The backfill replays thousands of past events: one transaction per slice instead of one per event,
+    and a slice that fails half way writes nothing. Other threads (the hooks) are not affected."""
+    if getattr(_BATCH, "jobs", None) is not None:
+        raise RuntimeError("batched() does not nest")
+    jobs: list = []
+    _BATCH.jobs, _BATCH.home = jobs, Path(home)
+    try:
+        yield jobs
+    finally:
+        _BATCH.jobs = _BATCH.home = None
+    if jobs:
+        def apply(connection):
+            for item in jobs:
+                item(connection)
+
+        _observer(home).record(apply, time.time())
 
 
 def close_observers() -> None:

@@ -11,16 +11,21 @@ You inform and recommend; the owner runs the decisions in their own terminal.
 
 ## Steps
 
-1. Get the digest. Run `hermes evolution report --days 7` in the terminal (add `--lang pt` for Portuguese).
-   Run `hermes evolution learn` first if the owner wants the freshest numbers. Both commands only read and
-   measure.
+1. Check that the plugin is working here with `hermes evolution status` (add `--lang pt` for Portuguese). It
+   shows today's events, the last background pass and any busy profile that lacks the plugin; mention those
+   first. Then get the digest with `hermes evolution report --days 7`. The loop runs by itself in the
+   background, so the numbers are recent. `report` and `status` only read. `hermes evolution learn` runs a pass
+   now: it measures and, with the reflector on, may ask the model for up to 3 lesson drafts, which stay in
+   quarantine.
 2. Summarize it in the owner's language, in this order:
    - what changed versus the previous week (the verdict line);
    - the failures that repeat, most frequent first, and whether each already has a lesson;
    - skills by outcome: which skills go worse than the profile as a whole;
    - the self-improvement loop: how many background reviews ran, how many produced nothing, and which
      skills were rewritten the most;
-   - lessons with a measured effect, naming the ones that worked and the ones that did not.
+   - lessons with a measured effect, naming the ones that worked and the ones that did not;
+   - the "Hermes health" section: sessions that end as orphans, the context per call, weak compactions,
+     plugin problems and commands the runtime guard vetoed.
 3. List the open proposals with `hermes evolution proposals list`, highest risk first. For each one, read
    out the exact lesson text when there is one, the evidence behind it, and what its command does. Give your
    recommendation and the reason.

@@ -131,10 +131,13 @@ def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> li
         if row["sessions"] < 2 and row["days"] < 2:
             continue   # one bad session is not a pattern yet
         status = "active" if mode == "auto" else "candidate"
-        cursor = conn.execute("""INSERT INTO lesson(signature, tool, klass, hint, origin, status, created, updated, activated)
-            VALUES (?, ?, ?, ?, 'derived', ?, ?, ?, ?)""",
+        # OR IGNORE: another process may have derived the same lesson since the SELECT above.
+        cursor = conn.execute("""INSERT OR IGNORE INTO lesson(signature, tool, klass, hint, origin, status, created, updated,
+              activated) VALUES (?, ?, ?, ?, 'derived', ?, ?, ?, ?)""",
                               (row["signature"], row["tool"], row["klass"], row["hint"], status, now, now,
                                now if status == "active" else None))
+        if not cursor.rowcount:
+            continue
         created.append(cursor.lastrowid)
         if status == "active":
             _record_change(conn, cursor.lastrowid, now, row["tool"])
@@ -204,10 +207,15 @@ def playbook(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 8, max_
     without writing during the read)."""
     lines, used = [], len(HEADERS.get(lang, HEADERS["en"]))
     chosen = [] if chosen is None else chosen
+    written: set[str] = set()
     for row in active_lessons(conn):
         sentence = render(row, lang)
+        if sentence in written:   # one template, several failure details: the sentence is already there
+            chosen.append(row["id"])
+            continue
         if not sentence or used + len(sentence) + 3 > max_chars:
             continue
+        written.add(sentence)
         lines.append("- " + sentence)
         used += len(sentence) + 3
         chosen.append(row["id"])

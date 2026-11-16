@@ -39,7 +39,12 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
             "changes": experiments.listing(conn, limit=20),
             "proposals": proposals.listing(conn, status="open"),
             "skill_outcomes": skill_outcomes(conn, start_day=start, end_day=end, limit=10),
+            "guard": signals.guard_summary(conn, now=now, days=days),
         }
+        from . import radar
+
+        report["health"] = {key: value for key, value in radar.scan(home, conn, now=now, days=min(days, 14)).items()
+                            if key != "findings"}
         try:
             with database(home) as ops:
                 current = experiments.window_metrics(conn, ops, start, end)
@@ -102,6 +107,16 @@ _TEXT = {
         "proposals_none": "Nothing is waiting for you.", "risk": "risk", "run": "apply with", "look": "next step",
         "no_data": "not measured", "footer": "Aggregates only. No conversation text, tool output or memory content is stored.",
         "decide": "Decide with `hermes evolution proposals approve <id>` or `reject <id>`.",
+        "lessons_waiting": "{count} lessons await approval (read them with `hermes evolution lessons list`, approve with `hermes evolution lessons approve <lesson id>`)",
+        "lessons_waiting_one": "1 lesson awaits approval (read it with `hermes evolution lessons list`, approve with `hermes evolution lessons approve <lesson id>`)",
+        "health": "Hermes health", "sessions_line": "Sessions", "ended": "ended", "orphaned": "ended as orphans",
+        "orphan_note": "reaped after a disconnect or restart, so Hermes' end-of-session work did not run",
+        "context_line": "Context per agent call", "avg": "average of", "tokens": "tokens", "cached": "served from cache",
+        "calls": "calls", "compaction_line": "Compactions", "kept": "kept", "of_context": "of the context",
+        "plugins_line": "Plugins of this process", "enabled": "enabled", "load_errors": "failed to load",
+        "undeclared": "register hooks they do not declare", "overlap": "compete for", "first_wins": "only the first result counts",
+        "guard_line": "Runtime guard", "vetoed": "commands vetoed", "gateway_stop": "gateway restart or kill",
+        "runtime_removal": "removal of the running Hermes", "health_none": "Nothing measured yet.",
     },
     "pt": {
         "title": "Atlas Evolution · resumo de {days} dias ({start} a {end}, UTC)",
@@ -126,6 +141,16 @@ _TEXT = {
         "proposals_none": "Nada aguardando você.", "risk": "risco", "run": "aplique com", "look": "próximo passo",
         "no_data": "não medido", "footer": "Só agregados. Nenhum texto de conversa, saída de ferramenta ou conteúdo de memória é guardado.",
         "decide": "Decida com `hermes evolution proposals approve <id>` ou `reject <id>`.",
+        "lessons_waiting": "{count} lições aguardam aprovação (leia com `hermes evolution lessons list` e aprove com `hermes evolution lessons approve <id da lição>`)",
+        "lessons_waiting_one": "1 lição aguarda aprovação (leia com `hermes evolution lessons list` e aprove com `hermes evolution lessons approve <id da lição>`)",
+        "health": "Saúde do Hermes", "sessions_line": "Sessões", "ended": "encerradas", "orphaned": "terminaram como órfãs",
+        "orphan_note": "recolhidas após desconexão ou reinício, sem o encerramento normal do Hermes",
+        "context_line": "Contexto por chamada do agente", "avg": "média de", "tokens": "tokens", "cached": "servido do cache",
+        "calls": "chamadas", "compaction_line": "Compactações", "kept": "mantiveram", "of_context": "do contexto",
+        "plugins_line": "Plugins deste processo", "enabled": "ativos", "load_errors": "falharam ao carregar",
+        "undeclared": "registram hooks que não declaram", "overlap": "disputam", "first_wins": "só o primeiro resultado vale",
+        "guard_line": "Guarda de runtime", "vetoed": "comandos barrados", "gateway_stop": "reinício ou kill do gateway",
+        "runtime_removal": "remoção do Hermes em execução", "health_none": "Nada medido ainda.",
     },
 }
 _VERDICT = {
@@ -149,15 +174,22 @@ _KIND = {
            "skill_archive": "Archive a skill that was never used", "skill_rollback": "Roll back a skill change that made things worse",
            "review_interval": "Space out the automatic review", "investigate_failure": "Recurring failure without a lesson",
            "investigate_latency": "Many slow turns", "config_review": "Review a setting change that made things worse",
-           "skill_outcome": "Review a skill whose turns go worse than the profile"},
+           "skill_outcome": "Review a skill whose turns go worse than the profile",
+           "session_lifecycle": "Many sessions end as orphans", "context_weight": "Heavy context per call",
+           "compaction": "Compactions keep most of the context", "plugin_health": "Plugin problem",
+           "plugin_conflict": "Plugins compete for a hook where only the first counts"},
     "pt": {"lesson": "Ativar lição", "lesson_retire": "Aposentar lição que não ajudou",
            "skill_lock": "Travar skill reescrita em excesso", "skill_review": "Revisar reescritas nunca usadas",
            "skill_archive": "Arquivar skill nunca usada", "skill_rollback": "Desfazer alteração de skill que piorou",
            "review_interval": "Espaçar a revisão automática", "investigate_failure": "Falha recorrente sem lição",
            "investigate_latency": "Muitos turnos lentos", "config_review": "Revisar mudança de configuração que piorou",
-           "skill_outcome": "Revisar skill cujos turnos vão pior que o perfil"},
+           "skill_outcome": "Revisar skill cujos turnos vão pior que o perfil",
+           "session_lifecycle": "Muitas sessões terminam como órfãs", "context_weight": "Contexto pesado por chamada",
+           "compaction": "Compactações mantêm quase todo o contexto", "plugin_health": "Problema em plugin",
+           "plugin_conflict": "Plugins disputam um hook em que só o primeiro vale"},
 }
-_ADVISORY = ("skill_review", "investigate_failure", "investigate_latency", "config_review", "skill_outcome")
+_ADVISORY = ("skill_review", "investigate_failure", "investigate_latency", "config_review", "skill_outcome",
+             "session_lifecycle", "context_weight", "compaction", "plugin_health", "plugin_conflict")
 
 
 def _number(value, lang: str, digits: int = 0) -> str:
@@ -169,6 +201,62 @@ def _number(value, lang: str, digits: int = 0) -> str:
 
 def _seconds(ms, lang: str) -> str:
     return _TEXT[lang]["no_data"] if ms is None else _number(ms / 1000, lang, 0 if ms >= 10_000 else 1) + " s"
+
+
+def _health(report: dict, lang: str) -> list[str]:
+    """The "Hermes health" section: readings from Hermes' own records and this process's plugins."""
+    t, health = _TEXT[lang], report.get("health") or {}
+    lines = ["", "## " + t["health"], ""]
+    lifecycle = health.get("sessions")
+    if lifecycle and lifecycle["ended"]:
+        lines.append(f"- **{t['sessions_line']}:** {_number(lifecycle['ended'], lang)} {t['ended']} · "
+                     f"{_number(lifecycle['orphaned'], lang)} {t['orphaned']} ({_number(lifecycle['orphan_pct'], lang, 1)}%)"
+                     + (f" · _{t['orphan_note']}_" if lifecycle["orphaned"] else ""))
+    weight = health.get("context")
+    if weight and weight["calls"]:
+        lines.append(f"- **{t['context_line']}:** {t['avg']} {_number(weight['avg_prompt_tokens'], lang)} {t['tokens']} · "
+                     f"{_number(weight['cache_pct'], lang, 1)}% {t['cached']} · {_number(weight['calls'], lang)} {t['calls']}")
+    squeeze = health.get("compaction") or {}
+    if squeeze.get("compactions"):
+        lines.append(f"- **{t['compaction_line']}:** {_number(squeeze['compactions'], lang)} · {t['kept']} "
+                     f"{_number(squeeze['kept_pct'], lang, 1)}% {t['of_context']}")
+    loaded = health.get("plugins") or health.get("plugins_snapshot")
+    if loaded:
+        parts = [f"{_number(loaded['enabled'], lang)} {t['enabled']}"]
+        if loaded["errors"]:
+            parts.append(f"{t['load_errors']}: " + ", ".join(f"`{item['plugin']}`" for item in loaded["errors"][:6]))
+        if loaded["undeclared"]:
+            parts.append(f"{t['undeclared']}: " + ", ".join(f"`{item['plugin']}`" for item in loaded["undeclared"][:6]))
+        for hook, names in loaded["overlaps"].items():
+            parts.append(f"{t['overlap']} `{hook}` ({t['first_wins']}): " + " → ".join(f"`{name}`" for name in names))
+        lines.append(f"- **{t['plugins_line']}:** " + " · ".join(parts))
+    guard = report.get("guard") or {}
+    if guard:
+        detail = " · ".join(f"{t[kind]} {count}" for kind, count in sorted(guard.items()) if kind in t)
+        lines.append(f"- **{t['guard_line']}:** {_number(sum(guard.values()), lang)} {t['vetoed']} ({detail})")
+    if len(lines) == 3:
+        lines.append(t["health_none"])
+    return lines
+
+
+def _proposal_lines(report: dict, lang: str) -> list[str]:
+    """Lessons awaiting approval on one line (their text is in `lessons list`), then the other proposals."""
+    t = _TEXT[lang]
+    lines = ["", "## " + t["proposals"], ""]
+    waiting = [item for item in report["proposals"] if item["kind"] == "lesson"]
+    if waiting:
+        listed = ", ".join(f"#{item['evidence'].get('lesson_id', item['id'])} `{item['subject']}`" for item in waiting[:10])
+        heading = t["lessons_waiting_one"] if len(waiting) == 1 else t["lessons_waiting"].format(count=len(waiting))
+        lines.append(f"- {heading}: {listed}")
+    if report["proposals"]:
+        for item in [entry for entry in report["proposals"] if entry["kind"] != "lesson"][:20]:
+            step = t["look"] if item["kind"] in _ADVISORY else t["run"]
+            lines.append(f"- #{item['id']} [{t['risk']}: {_RISK[lang][item['risk']]}] {_KIND[lang].get(item['kind'], item['kind'])}"
+                         f" · `{item['subject']}` · {step}: `{item['command']}`")
+        lines += ["", t["decide"]]
+    else:
+        lines.append(t["proposals_none"])
+    return lines
 
 
 def markdown(report: dict, lang: str = "en") -> str:
@@ -263,14 +351,7 @@ def markdown(report: dict, lang: str = "en") -> str:
     else:
         lines.append(t["changes_none"])
 
-    lines += ["", "## " + t["proposals"], ""]
-    if report["proposals"]:
-        for item in report["proposals"][:12]:
-            step = t["look"] if item["kind"] in _ADVISORY else t["run"]
-            lines.append(f"- #{item['id']} [{t['risk']}: {_RISK[lang][item['risk']]}] {_KIND[lang].get(item['kind'], item['kind'])}"
-                         f" · `{item['subject']}` · {step}: `{item['command']}`")
-        lines += ["", t["decide"]]
-    else:
-        lines.append(t["proposals_none"])
+    lines += _health(report, lang)
+    lines += _proposal_lines(report, lang)
     lines += ["", "_" + t["footer"] + "_"]
     return "\n".join(lines) + "\n"

@@ -17,7 +17,8 @@ from .experience import day_offset, experience, prune, utc_day
 from .skill_health import read_usage, skill_health, skill_outcomes
 
 DEFAULTS = {"lessons": "suggest", "tool_hints": True, "feedback_signals": True, "language": "auto",
-            "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": False, "reflector_daily_limit": 6}
+            "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": True, "reflector_daily_limit": 6,
+            "autopilot_minutes": 60, "runtime_guard": True}
 
 
 def _whole(value):
@@ -56,31 +57,52 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
     daily = checked("reflector_daily_limit", _whole(raw.get("reflector_daily_limit", DEFAULTS["reflector_daily_limit"])),
                     lambda value: type(value) is int and 1 <= value <= 50,
                     "evolution.reflector_daily_limit must be an integer from 1 to 50", DEFAULTS["reflector_daily_limit"])
-    return {"lessons": mode, "tool_hints": raw.get("tool_hints", True) is not False,
-            "reflector": raw.get("reflector") is True, "reflector_daily_limit": daily,
+    # On by default; an invalid value switches it off, never on.
+    reflect = checked("reflector", raw.get("reflector", DEFAULTS["reflector"]), lambda value: type(value) is bool,
+                      "evolution.reflector must be true or false", False)
+    autopilot = checked("autopilot_minutes", _whole(raw.get("autopilot_minutes", DEFAULTS["autopilot_minutes"])),
+                        lambda value: type(value) is int and (value == 0 or 15 <= value <= 1440),
+                        "evolution.autopilot_minutes must be 0 (manual only) or an integer from 15 to 1440", 0)
+    # A protection: an invalid value keeps it on.
+    guard = checked("runtime_guard", raw.get("runtime_guard", True), lambda value: type(value) is bool,
+                    "evolution.runtime_guard must be true or false", True)
+    return {"lessons": mode, "tool_hints": raw.get("tool_hints", True) is not False, "runtime_guard": guard,
+            "reflector": reflect, "reflector_daily_limit": daily, "autopilot_minutes": autopilot,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
             "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
             "owner_sender_ids": tuple(owners)}
 
 
-def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None) -> dict:
+def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None,
+          strict: bool = True, backfill_budget_s: float = 20.0) -> dict:
     """Run one evolution pass and return what changed. `lang` overrides the configured language of the output.
 
-    `reflect(instructions, text)` asks a model for a lesson draft; it is used only when the reflector is on."""
+    `reflect(instructions, text)` asks a model for a lesson draft; it is used only when the reflector is on.
+    `strict=False` (the autopilot) lets each invalid setting fall back safely instead of failing the pass.
+    Until it is done, each pass first replays up to `backfill_budget_s` seconds of Hermes' own history."""
+    from . import backfill
     from .operations import database
 
-    opts = options(config or {}, runtime_config)
+    opts = options(config or {}, runtime_config, strict=strict)
     if lang in lessons.LANGUAGES:
         opts["language"] = lang
+    backfill.mark_observed(home, now=now)
+    history = backfill.step(home, now=now, budget_s=backfill_budget_s, owner_sender_ids=opts["owner_sender_ids"],
+                            sample=opts["reflector"] and opts["lessons"] != "off", slow_ms=opts["slow_turn_seconds"] * 1000)
     with experience(home) as conn:
+        # Short transactions: hook writers of a running gateway share this database, so no phase keeps the
+        # write lock while it reads files or waits for a model.
         prune(conn, now=now)
+        conn.commit()
         ingested = 0
         for _ in range(8):   # at most 32 MiB of log per pass
-            step = logwatch.ingest_reviews(home, conn)
+            step = logwatch.ingest_reviews(home, conn, since_day=logwatch.local_days(now, backfill.BACKFILL_DAYS)[0])
+            conn.commit()
             ingested += step["reviews"]
             if not step.get("more"):
                 break
         created = lessons.derive(conn, now=now, mode=opts["lessons"])
+        conn.commit()
         if not opts["reflector"]:
             conn.execute("DELETE FROM failure_sample")   # nothing waits for a reflector that is off
             reflection = {"status": "off"}
@@ -115,13 +137,17 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
                 conn.execute("UPDATE proposal SET status='applied', updated=? WHERE id=?", (now, row["id"]))
                 closed += 1
         outcomes = skill_outcomes(conn, start_day=day_offset(now, 13), end_day=utc_day(now))
+        from . import radar
+
+        reading = radar.scan(home, conn, now=now)
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
-                                    changes=verdicts, outcomes=outcomes, lang=opts["language"])
+                                    changes=verdicts, outcomes=outcomes, radar=reading["findings"], lang=opts["language"])
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in created]
-    return {"now": now, "lessons_mode": opts["lessons"], "new_lessons": new_lessons, "reflector": reflection,
+    return {"now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
-            "proposals_closed_as_applied": closed, "open_proposals": pending}
+            "proposals_closed_as_applied": closed, "radar": [item["code"] for item in reading["findings"]],
+            "open_proposals": pending}
 
 
 def notify_view(result: dict) -> dict | None:

@@ -78,6 +78,9 @@ CREATE TABLE IF NOT EXISTS proposal (
 );
 CREATE INDEX IF NOT EXISTS proposal_status ON proposal(status);
 CREATE TABLE IF NOT EXISTS cursor (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS guard_daily (
+    day TEXT NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, kind)
+) WITHOUT ROWID;
 """
 
 
@@ -132,7 +135,7 @@ def prune(conn: sqlite3.Connection, *, now: float) -> None:
     """Drop aggregates older than the retention window. Lessons and open proposals are kept."""
     cutoff = day_offset(now, RETENTION_DAYS)
     for table in ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "review_daily",
-                  "skill_outcome_daily"):
+                  "skill_outcome_daily", "guard_daily"):
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))
     old = now - RETENTION_DAYS * 86_400
     conn.execute("DELETE FROM failure WHERE last_seen < ? AND signature NOT IN "

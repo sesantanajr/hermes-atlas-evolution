@@ -127,6 +127,37 @@ class LogwatchTest(Base):
         with experience(self.home) as conn:
             self.assertEqual(ingest_reviews(self.home, conn)["status"], "log_unavailable")
 
+    def drain(self, **options):
+        total = 0
+        with experience(self.home) as conn:
+            for _ in range(20):
+                step = ingest_reviews(self.home, conn, **options)
+                total += step["reviews"]
+                if not step.get("more"):
+                    break
+            days = dict(conn.execute("SELECT day, SUM(reviews) FROM review_daily GROUP BY day").fetchall())
+        return total, days
+
+    def test_the_first_run_reads_the_rotated_logs_inside_the_window(self):
+        logs = self.home / "logs"
+        line = self.LINE.format(n=1, calls=1, i=1, o=1, c=1, result="skill")
+        (logs / "agent.log.2").write_text(line.replace("2026-11-15", "2026-10-20") + line.replace("2026-11-15", "2026-11-05"))
+        (logs / "agent.log.1").write_text(line.replace("2026-11-15", "2026-11-10"))
+        (logs / "agent.log").write_text(line)
+        total, days = self.drain(since_day="2026-11-02")
+        self.assertEqual((total, days), (3, {"2026-11-05": 1, "2026-11-10": 1, "2026-11-15": 1}))
+        self.assertEqual(self.drain(since_day="2026-11-02")[0], 0)   # nothing is read twice
+
+    def test_lines_written_just_before_a_rotation_are_not_lost(self):
+        log = self.home / "logs" / "agent.log"
+        log.write_text(self.LINE.format(n=1, calls=1, i=1, o=1, c=1, result="skill"))
+        self.assertEqual(self.drain()[0], 1)
+        with log.open("a") as stream:
+            stream.write(self.LINE.format(n=2, calls=1, i=1, o=1, c=1, result="memory"))
+        log.rename(log.with_name("agent.log.1"))                  # Hermes rotates by renaming
+        log.write_text(self.LINE.format(n=3, calls=1, i=1, o=1, c=1, result="none"))
+        self.assertEqual(self.drain()[0], 2)
+
 
 class ExperimentsTest(Base):
     def test_config_snapshot_keeps_only_allowlisted_scalars(self):
@@ -205,12 +236,21 @@ class ExperimentsTest(Base):
 class CycleAndReportTest(Base):
     def test_options_validate_and_default_safely(self):
         self.assertEqual(options({})["lessons"], "suggest")
+        self.assertIs(options({})["reflector"], True)                      # on unless the operator turns it off
+        self.assertIs(options({"evolution": {"reflector": False}})["reflector"], False)
+        self.assertEqual(options({})["autopilot_minutes"], 60)
+        self.assertEqual(options({"evolution": {"autopilot_minutes": 0}})["autopilot_minutes"], 0)
         self.assertEqual(options({"evolution": {"language": "pt"}})["language"], "pt")
         self.assertIn(options({"evolution": {"language": "klingon"}})["language"], ("en", "pt"))
         for bad in ({"lessons": "always"}, {"slow_turn_seconds": 1}, {"slow_turn_seconds": True},
-                    {"owner_sender_ids": "me"}, {"owner_sender_ids": [""]}):
+                    {"owner_sender_ids": "me"}, {"owner_sender_ids": [""]}, {"reflector": "yes"},
+                    {"autopilot_minutes": 5}, {"autopilot_minutes": True}):
             with self.assertRaises(ValueError):
                 options({"evolution": bad})
+        problems: list = []   # inside the gateway an invalid value switches the feature off, never on
+        lenient = options({"evolution": {"reflector": "yes", "autopilot_minutes": "often"}}, strict=False, problems=problems)
+        self.assertEqual((lenient["reflector"], lenient["autopilot_minutes"]), (False, 0))
+        self.assertEqual(sorted(problems), ["autopilot_minutes", "reflector"])
 
     def test_cycle_turns_recurring_failures_into_lessons_and_a_bilingual_digest(self):
         body = json.dumps({"error": "tool_call to 'files_search' is missing required argument(s): servico."})
