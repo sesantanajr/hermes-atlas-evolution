@@ -271,6 +271,17 @@ def setup(parser: argparse.ArgumentParser) -> None:
     custom.add_argument("--tool", default="general")
     custom.add_argument("--activate", action="store_true", help=_("Activate it now instead of leaving it for approval"))
     custom.add_argument("--yes", action="store_true", help=_("Confirm without the interactive question"))
+    exported = playbook_commands.add_parser("export", help=_("Print the active lessons as a pack another profile can import"))
+    exported.add_argument("--out", help=_("Write the pack to this file instead of printing it"))
+    imported = playbook_commands.add_parser("import", help=_("Import the lessons of a pack, or of another profile of this "
+                                                            "Hermes, after showing each one"))
+    origin = imported.add_mutually_exclusive_group(required=True)
+    origin.add_argument("file", nargs="?", help=_("A pack written by lessons export, or - for standard input"))
+    origin.add_argument("--from", dest="from_profile", metavar="PROFILE",
+                        help=_("Another profile of this Hermes (default for the root profile)"))
+    imported.add_argument("--dry-run", action="store_true", help=_("Show what would be imported and change nothing"))
+    imported.add_argument("--activate", action="store_true", help=_("Activate them now instead of leaving them for approval"))
+    imported.add_argument("--yes", action="store_true", help=_("Confirm without the interactive question"))
     skills = commands.add_parser("skills", help=_("Show skill churn, flip-flops and rewrites that were never exercised"))
     queue = commands.add_parser("proposals", help=_("Review and decide what the evolution loop proposes"))
     queue_commands = queue.add_subparsers(dest="proposals_action")
@@ -339,6 +350,9 @@ def _memory(conn, args):
 
         scope = dm_scope(*args.dm, args.namespace)
     store = MemoryStore(conn)
+    if args.memory_action in ("remember", "forget"):
+        # A note may be recalled in front of the agent (the 0.1 shared recall): only the operator writes them.
+        _operator_only()
     if args.memory_action == "remember":
         return store.remember(scope, args.category, args.text, source="operator", confidence=args.confidence,
                               tags=args.tag, promote=args.promote)
@@ -507,9 +521,13 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
         if action == "lessons":
             task = args.lessons_action or "list"
             if task == "list":
-                return {"mode": opts["lessons"],
-                        "lessons": lessons.listing(conn, lang=lang, status=getattr(args, "status", None))}
+                listed = lessons.listing(conn, lang=lang, status=getattr(args, "status", None))
+                return {"mode": opts["lessons"], "lessons": _hidden_from_agent(listed, "lesson") if _agent_shell() else listed}
             _operator_only()
+            if task == "export":
+                return _export_lessons(conn, home, now=now, out=getattr(args, "out", None))
+            if task == "import":
+                return _import_lessons(conn, home, args, now=now, mode=opts["lessons"], lang=lang)
             if task == "review":
                 return _review_lessons(conn, lang, now=now)
             if task == "add":
@@ -534,7 +552,8 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
             return outcome
         task = args.proposals_action or "list"
         if task == "list":
-            return proposals.listing(conn, status=None if getattr(args, "all", False) else "open")
+            listed = proposals.listing(conn, status=None if getattr(args, "all", False) else "open")
+            return _hidden_from_agent(listed, "evidence") if _agent_shell() else listed
         _operator_only()
         if task == "approve":
             row = conn.execute("SELECT kind, evidence, command FROM proposal WHERE id=?", (args.id,)).fetchone()
@@ -570,6 +589,9 @@ def _is_hermes(argv: list[str]) -> bool:
         return False
     if os.path.basename(argv[0]) in ("hermes", "hermes-agent"):
         return True
+    if re.fullmatch(r"python[\d.]*w?(?:\.exe)?", os.path.basename(argv[0]), re.I) and len(argv) > 1 and \
+            os.path.basename(argv[1]) in ("hermes", "hermes-agent"):
+        return True   # the launcher script of a virtual environment, run by its python
     return any("hermes-agent" in part or "hermes_cli" in part for part in argv[:8])
 
 
@@ -585,17 +607,21 @@ def _in_hermes_cgroup(*, text: str | None = ...) -> bool:
 
 
 def _under_hermes(*, start: int | None = None, read=_process, depth: int = 24) -> bool:
-    """True when a Hermes process (a gateway, a chat session) is an ancestor of this command.
+    """True when a Hermes process (a gateway, a chat session, a one-shot run) is an ancestor of this command.
 
     An agent can clear the environment markers of a shell it runs; it cannot change which process started
-    it. The command's own launcher chain (`hermes evolution ...`) is skipped."""
+    it. Only this command's own launcher chain (`hermes evolution ...`, unbroken from this process up) is
+    skipped: a Hermes ancestor further up counts even when its own words include "evolution" (a one-shot
+    `hermes -z "...evolution..."`, a profile named evolution)."""
     pid = os.getpid() if start is None else start
+    own = True
     for _ in range(depth):
         entry = read(pid)
         if entry is None:
             return False
         parent, argv = entry
-        if _is_hermes(argv) and not _OWN_COMMAND.search(" ".join(argv)):   # this command's own launcher is skipped
+        own = own and bool(_OWN_COMMAND.search(" ".join(argv)))
+        if _is_hermes(argv) and not own:
             return True
         if parent <= 1 or parent == pid:
             return False
@@ -603,10 +629,30 @@ def _under_hermes(*, start: int | None = None, read=_process, depth: int = 24) -
     return False
 
 
+def _agent_shell() -> bool:
+    """True when this command runs in a shell of an agent session: what _operator_only refuses."""
+    return any(os.environ.get(name, "").strip() for name in AGENT_MARKERS) or _under_hermes() or _in_hermes_cgroup()
+
+
+def _hidden_from_agent(rows: list[dict], field: str) -> list[dict]:
+    """The rows an agent's shell may print: written text (the operator's, a model's or the agent's) is left out,
+    because a shell of a stranger's chat is an agent shell too. The operator reads it in their own terminal."""
+    shown = []
+    for row in rows:
+        row = dict(row)
+        if field == "lesson" and row.get("origin") != "derived":
+            row["lesson"], row["text_hidden"] = None, True
+        elif field == "evidence" and isinstance(row.get("evidence"), dict) and "lesson" in row["evidence"]:
+            row["evidence"] = {**row["evidence"], "lesson": None}
+            row["text_hidden"] = True
+        shown.append(row)
+    return shown
+
+
 def _operator_only() -> None:
     """Refuse playbook decisions from a shell the agent runs. Hermes marks those shells with the session id,
     and the plugin adds ATLAS_EVOLUTION_AGENT to every subprocess of an agent session."""
-    if any(os.environ.get(name, "").strip() for name in AGENT_MARKERS) or _under_hermes() or _in_hermes_cgroup():
+    if _agent_shell():
         raise ValueError("Only the operator can decide on lessons and proposals. Run this command in your own "
                          "terminal; the agent can propose lessons, which wait for your approval.")
 
@@ -667,6 +713,65 @@ def _confirm(text: str, lang: str, *, yes: bool) -> None:
     answer = sys.stdin.readline().strip().lower()
     if answer not in ("y", "yes", "s", "sim"):
         raise ValueError("Cancelled; nothing changed")
+
+
+def _profile_name(home: Path) -> str:
+    home = Path(home).resolve()
+    return home.name if home.parent.name == "profiles" else "default"
+
+
+def _export_lessons(conn, home: Path, *, now: float, out: str | None = None) -> dict:
+    """The active lessons as a pack: printed, or written to a new file (never over an existing one)."""
+    from .packs import export
+    from .status import plugin_version
+
+    pack = export(conn, now=now, profile=_profile_name(home), plugin_version=plugin_version())
+    if not out:
+        return pack
+    try:
+        with open(out, "x", encoding="utf-8") as handle:
+            json.dump(pack, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+    except FileExistsError:
+        raise ValueError("That file already exists; choose another name or remove it first") from None
+    except OSError as error:
+        raise ValueError(f"Cannot write the lesson pack: {type(error).__name__}") from None
+    return {"written": str(Path(out).resolve()), "lessons": len(pack["lessons"])}
+
+
+_IMPORT_PROMPT = {"en": ("Import these {count} lessons? They wait for approval or for your own turns to hit their failure. [y/N] ",
+                         "Import and activate these {count} lessons for the agent? [y/N] "),
+                  "pt": ("Importar estas {count} lições? Elas esperam aprovação ou que os seus turnos encontrem a falha. [s/N] ",
+                         "Importar e ativar estas {count} lições para o agente? [s/N] ")}
+
+
+def _import_lessons(conn, home: Path, args, *, now: float, mode: str, lang: str) -> dict:
+    """Import a pack after showing every sentence it adds. Operator only (the caller checked)."""
+    import sys
+
+    from . import packs
+
+    source = getattr(args, "from_profile", None)
+    pack = packs.from_profile(home, source, now=now) if source is not None else packs.read_pack(args.file)
+    planned = packs.plan(conn, pack, lang=lang)
+    result = {"mode": mode, "source": source or planned["source"] or "file", "to_import": [
+        {"kind": item["kind"], "tool": item["tool"], "lesson": item["lesson"]} for item in planned["add"]],
+        "skipped": planned["skip"], "imported": []}
+    if getattr(args, "dry_run", False) or not planned["add"]:
+        return result
+    activate = bool(getattr(args, "activate", False))
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            raise ValueError("Confirm with --yes after reading the lessons with --dry-run")
+        prompt = _IMPORT_PROMPT.get(lang, _IMPORT_PROMPT["en"])[1 if activate else 0]
+        shown = "\n".join(f"  - [{item['tool']}] {item['lesson']}" for item in planned["add"])
+        sys.stderr.write(f"\n{shown}\n\n{prompt.format(count=len(planned['add']))}")   # stdout stays machine-readable
+        sys.stderr.flush()
+        if sys.stdin.readline().strip().lower() not in ("y", "yes", "s", "sim"):
+            raise ValueError("Cancelled; nothing changed")
+    result["imported"] = packs.apply(conn, planned, now=now, mode=mode, activate=activate,
+                                     source=source or "file")
+    return result
 
 
 def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=None, reflect=None):

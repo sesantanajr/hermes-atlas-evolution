@@ -1,0 +1,59 @@
+/* Atlas Evolution panel. Colors come from the dashboard's theme tokens, so it follows light, dark and custom themes. */
+.hae-page { display: flex; flex-direction: column; gap: 1rem; color: var(--color-foreground); }
+.hae-page.hae-loading { opacity: .7; transition: opacity .2s; }
+.hae-header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: .75rem;
+  border: 1px solid var(--color-border); padding: 1rem 1.25rem;
+  background: linear-gradient(135deg, var(--color-card), color-mix(in srgb, var(--color-primary) 9%, var(--color-card))); }
+.hae-title { margin: 0; font-size: clamp(1.4rem, 2.6vw, 2.1rem); letter-spacing: -0.03em; line-height: 1.1; }
+.hae-subtitle { margin-top: .3rem; color: var(--color-muted-foreground); font-size: .85rem; }
+.hae-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; }
+.hae-tabs { display: flex; flex-wrap: wrap; gap: .25rem; border-bottom: 1px solid var(--color-border); }
+.hae-tab { background: none; border: 0; border-bottom: 2px solid transparent; padding: .5rem .8rem; cursor: pointer;
+  color: var(--color-muted-foreground); font: inherit; font-size: .9rem; }
+.hae-tab:hover { color: var(--color-foreground); }
+.hae-tab-active { color: var(--color-foreground); border-bottom-color: var(--color-primary); font-weight: 600; }
+.hae-tab:focus-visible, .hae-button:focus-visible, .hae-copy:focus-visible, .hae-select:focus-visible {
+  outline: 2px solid var(--color-ring); outline-offset: 2px; }
+.hae-stack { display: flex; flex-direction: column; gap: .75rem; }
+.hae-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .6rem; }
+.hae-kpi { border: 1px solid var(--color-border); background: var(--color-card); padding: .75rem .9rem; }
+.hae-kpi-alert { border-color: color-mix(in srgb, #f59e0b 65%, var(--color-border)); }
+.hae-kpi-label { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--color-muted-foreground); }
+.hae-kpi-value { font-size: 1.6rem; font-weight: 650; margin-top: .2rem; font-variant-numeric: tabular-nums; }
+.hae-kpi-detail { font-size: .8rem; color: var(--color-muted-foreground); }
+.hae-card { border: 1px solid var(--color-border); }
+.hae-card-plain { padding: 1rem; background: var(--color-card); }
+.hae-waiting { border-left: 3px solid #f59e0b; padding: .35rem .75rem; }
+.hae-waiting-meta { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin-bottom: .25rem; }
+.hae-lesson { line-height: 1.45; overflow-wrap: anywhere; }
+.hae-muted { color: var(--color-muted-foreground); font-size: .875rem; margin: 0; }
+.hae-error { color: #ef4444; margin: 0; }
+.hae-p { margin: 0; line-height: 1.5; }
+.hae-page .hae-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82em;
+  color: var(--color-foreground); background: color-mix(in srgb, var(--color-foreground) 10%, transparent);
+  padding: .05rem .3rem; overflow-wrap: anywhere; opacity: 1; }
+.hae-command { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.hae-page .hae-command .hae-code { padding: .35rem .55rem; flex: 1 1 18rem; }
+.hae-copy, .hae-button, .hae-select { font: inherit; font-size: .8rem; border: 1px solid var(--color-border);
+  background: var(--color-card); color: var(--color-foreground); padding: .3rem .65rem; cursor: pointer; }
+.hae-copy:hover, .hae-button:hover { border-color: var(--color-primary); }
+.hae-button:disabled { opacity: .6; cursor: progress; }
+.hae-pill { display: inline-flex; align-items: center; font-size: .72rem; padding: .1rem .5rem; border: 1px solid var(--color-border);
+  white-space: nowrap; }
+.hae-pill-good { border-color: color-mix(in srgb, #22c55e 55%, var(--color-border)); color: color-mix(in srgb, #22c55e 80%, var(--color-foreground)); }
+.hae-pill-warn { border-color: color-mix(in srgb, #f59e0b 60%, var(--color-border)); color: color-mix(in srgb, #f59e0b 85%, var(--color-foreground)); }
+.hae-pill-bad { border-color: color-mix(in srgb, #ef4444 60%, var(--color-border)); color: color-mix(in srgb, #ef4444 85%, var(--color-foreground)); }
+.hae-pill-muted { color: var(--color-muted-foreground); }
+.hae-table-wrap { overflow-x: auto; border: 1px solid var(--color-border); }
+.hae-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+.hae-table th, .hae-table td { text-align: left; vertical-align: top; padding: .45rem .6rem; border-bottom: 1px solid var(--color-border); }
+.hae-table th { font-weight: 600; color: var(--color-muted-foreground); background: color-mix(in srgb, var(--color-foreground) 4%, transparent); }
+.hae-table tr:last-child td { border-bottom: 0; }
+.hae-row-muted td { color: var(--color-muted-foreground); }
+.hae-md { display: flex; flex-direction: column; gap: .6rem; }
+.hae-page .hae-md-h { margin: .7rem 0 0; font-weight: 650; letter-spacing: -0.01em; }
+.hae-page h3.hae-md-h { font-size: 1.3rem; }
+.hae-page h4.hae-md-h { font-size: 1.05rem; border-bottom: 1px solid var(--color-border); padding-bottom: .25rem; }
+.hae-page h5.hae-md-h, .hae-page h6.hae-md-h { font-size: .95rem; color: var(--color-muted-foreground); }
+.hae-list { margin: 0; padding-left: 1.2rem; display: flex; flex-direction: column; gap: .2rem; }
+@media (max-width: 640px) { .hae-header { padding: .8rem; } .hae-kpi-value { font-size: 1.3rem; } }

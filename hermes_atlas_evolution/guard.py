@@ -24,6 +24,9 @@ import sys
 from pathlib import Path, PurePosixPath
 
 TERMINAL_TOOLS = frozenset({"terminal", "shell", "bash", "run_command", "execute_command"})
+# Hermes' process_manage `write` and `submit` send text to a background process, often a shell (Hermes 0.23.1).
+PROCESS_TOOLS = frozenset({"process_manage", "process"})
+_PROCESS_INPUT = frozenset({"write", "submit"})
 _COMMAND_LIMIT = 20_000   # longer commands (big inline files) are let through unparsed
 _WINDOWS = os.name == "nt"   # module-level so the tests can exercise the Windows rules on any system
 # hermes-gateway, hermes-gateway-<profile>, hermes-gateway-<8 hex> (a HERMES_HOME of its own), templated @ units
@@ -35,30 +38,72 @@ _LAUNCHCTL_STOPS = frozenset({"stop", "bootout", "unload", "remove", "kill"})
 _WINDOWS_NAME = re.compile(r"hermes_gateway(?:_[\w.-]+)?\Z", re.I)
 _SERVICE_CMDLETS = frozenset({"stop-service", "restart-service", "suspend-service", "stop-scheduledtask"})
 _STOP_ACTIONS = frozenset({"restart", "stop", "kill", "try-restart", "reload-or-restart", "try-reload-or-restart",
-                           "condrestart", "force-reload"})
+                           "condrestart", "condstop", "force-reload", "freeze"})
+_STOP_WITH_NOW = frozenset({"disable", "mask"})   # with --now they stop the unit as well
+# systemctl options that take their value as the next word: that word is not the action or a unit.
+_SYSTEMCTL_VALUES = frozenset({"-s", "--signal", "-t", "--type", "-p", "--property", "-M", "--machine", "-H", "--host",
+                               "--job-mode", "--kill-whom", "--kill-value", "--state", "-o", "--output", "-n", "--lines",
+                               "--root", "--image", "--what", "--timestamp", "--preset-mode", "--message",
+                               "--boot-loader-entry", "--reboot-argument", "--drop-in", "--when"})
 _REMOVERS = frozenset({"rm", "rmdir", "unlink", "shred", "mv", "del", "erase", "rd", "remove-item", "ri", "move",
                        "move-item", "mi"})
 _MOVERS = frozenset({"mv", "move", "move-item", "mi"})   # the last word is where things go, not what goes
 _CMD_SWITCH = re.compile(r"/[A-Za-z?]{1,2}\Z")          # del /s /q: switches of cmd's own commands
 # Variables expanded at the start of a path: the homes, and on Windows the profile folders Git Bash exports.
-_ENV_PREFIX = re.compile(r"(?:\$\{(\w+)\}|\$env:(\w+)|\$(\w+)|%(\w+)%)(?=[\\/]|\Z)", re.I)
+_ENV_PREFIX = re.compile(r"(?:\$\{(\w+)(?::?[-?=+][^}]*)?\}|\$env:(\w+)|\$(\w+)|%(\w+)%)(?=[\\/]|\Z)", re.I)
 _EXPANDED = frozenset({"USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA"})
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # Wrappers that run the command after their own options: name -> options that take a separate value.
-_WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t"}, "env": {"-u", "-C"}, "nohup": set(),
+_WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T", "--user", "--group", "--host", "--prompt",
+                      "--chdir", "--close-from", "--role", "--type", "--other-user", "--command-timeout"},
+             "env": {"-u", "-C", "--unset", "--chdir"}, "nohup": set(),
              "timeout": {"-s", "-k", "--signal", "--kill-after"}, "nice": {"-n", "--adjustment"},
              "ionice": {"-c", "-n", "-p"}, "stdbuf": {"-i", "-o", "-e"}, "exec": set(), "command": set(),
              "builtin": set(), "time": set(), "chrt": set(), "doas": {"-u"}, "setsid": set(),
              "systemd-run": {"-u", "--unit", "-p", "--property", "-E", "--setenv", "-M", "--machine", "-H", "--host",
-                             "--description", "--slice", "--uid", "--gid", "-d", "--working-directory"},
-             "runuser": {"-u", "-g", "-G"}, "watch": {"-n", "--interval"}, "flock": {"-w", "--timeout", "-E"},
-             "xargs": {"-n", "-I", "-P", "-d", "-L", "-s", "-a", "-E"}}
-_TAKES_POSITIONAL = {"timeout": 1, "chrt": 1, "flock": 1}   # the duration, the priority, the lock file
+                             "--description", "--slice", "--uid", "--gid", "-d", "--working-directory", "--nice",
+                             "--service-type", "--on-active", "--on-boot", "--on-startup", "--on-unit-active",
+                             "--on-unit-inactive", "--on-calendar", "--on-clock-change", "--timer-property",
+                             "--path-property", "--socket-property", "--expand-environment"},
+             "runuser": {"-u", "-g", "-G", "--user", "--group", "--supp-group"}, "watch": {"-n", "--interval"}, "flock": {"-w", "--timeout", "-E"},
+             "xargs": {"-n", "-I", "-P", "-d", "-L", "-s", "-a", "-E"}, "uvx": {"--from", "--with", "-p", "--python"},
+             "taskset": set(), "unshare": set(), "nsenter": {"-t", "--target", "-S", "-G"}, "chroot": set(),
+             "strace": {"-o", "-e", "-p", "-s", "-u"}, "ltrace": {"-o", "-e", "-p", "-s", "-u"}, "nocache": set(),
+             "caffeinate": set(), "npx": {"-p", "--package"}}
+_TAKES_POSITIONAL = {"timeout": 1, "chrt": 1, "flock": 1, "taskset": 1, "chroot": 1}   # duration, priority, lock, mask, root
+# `uv run ...` and `pipx run ...`: the command follows the subcommand and its options.
+_RUNNERS = {("uv", "run"): {"--with", "--python", "-p", "--project", "--directory", "--env-file", "--from", "--package",
+                            "--group", "--extra", "--index", "--index-url"},
+            ("pipx", "run"): {"--spec", "--python", "--index-url", "--pip-args"}}
+# Interpreters whose inline program (-c / -e) may run a command given as string literals.
+_INLINE_CODE = {"python": ("-c",), "perl": ("-e", "-E"), "ruby": ("-e",), "node": ("-e", "--eval"), "php": ("-r",)}
+_LITERAL = re.compile(r"'([^'\\]{1,2000})'|\"([^\"\\]{1,2000})\"")
+_DBUS = frozenset({"busctl", "dbus-send", "gdbus", "qdbus"})
+_DBUS_STOP = re.compile(r"(?:Restart|Stop|Kill|TryRestart|ReloadOrRestart|TryReloadOrRestart)Unit\b")
+_LOCALHOST = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+# Hermes settings files: writing them can switch plugins off or widen whom this plugin trusts.
+_CONFIG_FILES = ("config.yaml", "config.yml")
+_PLUGIN_WORDS = re.compile(r"plugins|hermes-atlas-evolution|hermes-evolution|runtime_guard|owner_sender_ids|owner_platforms"
+                           r"|agent_advice|agent_tools", re.I)
+
 # Programs that run a command given as one string after -c (shells also accept it inside -lc, -ec, ...).
 _STRING_RUNNERS = frozenset({"su", "runuser", "script", "flock"})
 _RTK_SUBCOMMANDS = frozenset({"run", "err", "summary", "test", "bypass", "proxy"})
 _SEPARATORS = frozenset({";", "&&", "||", "|", "&", "(", ")", "\n", ";;", "|&"})
+# Shell words that open a compound command or negate one: the command that follows them is the one that runs
+# (`if ! systemctl ...; then systemctl restart ...; fi`, `for ...; do ...; done`, `{ ...; }`, `! cmd`).
+_RESERVED = frozenset({"if", "then", "elif", "else", "while", "until", "do", "!", "{", "coproc"})
+# $(...) and `...`: run when the command runs, also inside double quotes, where the shell lexer keeps them whole.
+_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+# `python -m hermes_cli.main ...` is the gateway unit's own ExecStart form: the hermes command under another name.
+_PYTHON = re.compile(r"(?:python(?:\d+(?:\.\d+)*)?w?|py)\Z")
+_PYTHON_VALUES = frozenset({"-X", "-W", "-Q"})
+_HERMES_MODULES = frozenset({"hermes_cli.main", "hermes_cli"})
+# What a pid of the gateway is looked up with, for `kill $(pgrep -f hermes)` and its forms.
+_PID_LOOKUPS = frozenset({"pgrep", "pidof", "grep", "egrep", "fgrep", "rg", "awk"})
+_PID_FILES = ("gateway.pid", "gateway.lock")
+_BRACE = re.compile(r"\{([^{}]*,[^{}]*)\}")
 
 MESSAGES = {
     "en": {
@@ -140,6 +185,40 @@ def protected_paths(*, hermes_root=None, profile_home=None) -> tuple[Path, ...]:
     return tuple(sorted(path for path in found if path.is_absolute() and len(path.parts) > 2))
 
 
+def protected_trees() -> tuple[Path, ...]:
+    """Folders whose inside the running Hermes needs as well: its virtual environment, a Python runtime of its
+    own (such as ~/.hermes/tools/python-...), the standard library, and the Python packages and environments of
+    Hermes' source. A shared prefix such as /usr/local is never one: only the standard library inside it is."""
+    import sysconfig
+
+    found = set()
+    if sys.prefix != sys.base_prefix:
+        found |= _forms(sys.prefix)
+    for value in (sys.base_prefix, sys.exec_prefix):
+        if "python" in Path(value).name.lower():   # a folder that is nothing but this Python
+            found |= _forms(value)
+    for key in ("stdlib", "platstdlib"):
+        try:
+            found |= _forms(sysconfig.get_paths()[key])
+        except (KeyError, OSError, ValueError):
+            pass
+    module = sys.modules.get("hermes_cli")
+    location = getattr(module, "__file__", None) if module is not None else None
+    if isinstance(location, str):
+        source = Path(location).resolve().parent.parent
+        try:
+            children = sorted(source.iterdir())[:400]
+        except OSError:
+            children = []
+        for child in children:
+            try:
+                if child.is_dir() and ((child / "__init__.py").is_file() or (child / "pyvenv.cfg").is_file()):
+                    found |= _forms(child)
+            except OSError:
+                continue
+    return tuple(sorted(path for path in found if path.is_absolute() and len(path.parts) > 2))
+
+
 _HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_]\w*)\2")
 
 
@@ -193,10 +272,19 @@ def _strip_prefix(tokens: list[str]) -> list[str]:
     index, xargs = 0, False
     while index < len(tokens):
         token = tokens[index]
-        if _ASSIGNMENT.match(token):
+        if _ASSIGNMENT.match(token) or token in _RESERVED:
             index += 1
             continue
         name = os.path.basename(token)
+        runner = _RUNNERS.get((name, tokens[index + 1] if index + 1 < len(tokens) else ""))
+        if runner is not None:   # uv run [options] <command>, pipx run [options] <command>
+            index += 2
+            while index < len(tokens) and tokens[index].startswith("-"):
+                if tokens[index] == "--":
+                    index += 1
+                    break
+                index += 2 if tokens[index] in runner else 1
+            continue
         if name == "rtk" and index + 1 < len(tokens) and tokens[index + 1] in _RTK_SUBCOMMANDS:
             index += 2   # rtk run|err|...: what follows is the command
             if index < len(tokens) and tokens[index] == "--":
@@ -243,7 +331,11 @@ def _command_string(verb: str, rest: list[str]) -> str | None:
             if not token.startswith("-") and not _ASSIGNMENT.match(token):
                 break
         return None
+    if verb == "eval":   # eval '<command>': its words, joined, are the command
+        return " ".join(rest) or None
     for position, token in enumerate(rest):
+        if verb in _STRING_RUNNERS and token.startswith("--command="):
+            return " ".join([token.split("=", 1)[1], *rest[position + 1:]]) or None
         if verb in _SHELLS and re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", token):
             return rest[position + 1] if position + 1 < len(rest) else None
         if verb in _STRING_RUNNERS and token in ("-c", "--command"):
@@ -273,9 +365,30 @@ def _canonical(text: str) -> PurePosixPath | None:
     return PurePosixPath(posixpath.normpath(text.lower().rstrip("/") or "/"))
 
 
-def _expand(token: str, home: Path, profile: Path | None = None) -> PurePosixPath | None:
+def _braces(word: str, limit: int = 64) -> list[str]:
+    """The words bash makes of `{a,b}` (`mv x{,.bak}` is `mv x x.bak`), at most `limit` of them."""
+    match = _BRACE.search(word)
+    if not match:
+        return [word]
+    found = []
+    for choice in match.group(1).split(","):
+        for item in _braces(word[:match.start()] + choice + word[match.end():], limit):
+            if len(found) >= limit:
+                return found
+            found.append(item)
+    return found
+
+
+def _expand(token: str, home: Path, profile: Path | None = None, cwd: PurePosixPath | None = None) -> PurePosixPath | None:
+    """An absolute, comparable path for a word of the command, or None when it cannot be known here. A relative
+    word is taken from `cwd` (the terminal tool's `workdir`, or a `cd` earlier in the command) when it is known."""
     if token == "~" or token.startswith(("~/", "~\\")):
         token = str(home) + token[1:]
+    elif token.startswith("~") and re.match(r"~([\w.-]+)(?=[\\/]|\Z)", token):
+        user = re.match(r"~([\w.-]+)", token).group(1)
+        if user != Path(home).name:
+            return None   # another user's home: unknown here
+        token = str(home) + token[1 + len(user):]
     else:
         variable = _ENV_PREFIX.match(token)
         if variable:
@@ -289,21 +402,88 @@ def _expand(token: str, home: Path, profile: Path | None = None) -> PurePosixPat
             if not value:
                 return None   # an unknown variable: let it through
             token = value + token[variable.end():]
-    return _canonical(token)
+    found = _canonical(token)
+    if found is None and cwd is not None and token and not _dynamic(token) and not token.startswith("~"):
+        relative = token.replace("\\", "/") if _WINDOWS else token
+        found = PurePosixPath(posixpath.normpath(f"{cwd}/{relative.lower() if _WINDOWS else relative}"))
+    return found
 
 
-def _hits(pattern: PurePosixPath, protected) -> bool:
-    """True when removing `pattern` would remove `protected`: the same path, an ancestor, or a glob of either."""
+def _hits(pattern: PurePosixPath, protected, *, tree: bool = False) -> bool:
+    """True when removing `pattern` would remove `protected`: the same path, an ancestor, or a glob of either.
+    With `tree`, anything inside `protected` counts too (`rm -rf venv/lib`, `rm -rf venv/*`)."""
     target = _canonical(str(protected))
     if target is None:
         return False
     chain = [target, *target.parents]
-    if any(char in str(pattern) for char in "*?["):
-        return any(fnmatch.fnmatchcase(str(item), str(pattern)) for item in chain)
-    return pattern in chain
+    globbed = any(char in str(pattern) for char in "*?[")
+    if globbed and any(fnmatch.fnmatchcase(str(item), str(pattern)) for item in chain):
+        return True
+    if not globbed and pattern in chain:
+        return True
+    if tree:   # the part of the pattern before its first glob is the folder it reaches into
+        parts = []
+        for part in pattern.parts:
+            if any(char in part for char in "*?["):
+                break
+            parts.append(part)
+        base = PurePosixPath(*parts) if parts else None
+        return base is not None and (base == target or target in base.parents)
+    return False
 
 
-def _stops_gateway(verb: str, rest: list[str], words: list[str]) -> bool:
+def _kill_targets(rest: list[str]) -> list[str]:
+    """The process ids of `kill [-SIGNAL | -s SIGNAL | -n NUMBER] [--] pid...`: `kill -9 -1` sends 9 to -1."""
+    targets, signal, skip, ended = [], False, False, False
+    for token in rest:
+        if skip:
+            skip = False
+        elif ended or not token.startswith("-") or token == "-":
+            targets.append(token)
+        elif token == "--":
+            ended = True
+        elif token in ("-s", "-n"):
+            signal = skip = True
+        elif not signal and not targets:
+            signal = True   # the first option is the signal: -9, -TERM, -1 (HUP)
+        else:
+            targets.append(token)
+    return targets
+
+
+def own_process() -> tuple[str, str]:
+    """This process as pkill and killall see it: its name (/proc/<pid>/comm, 15 characters) and its command line."""
+    name = Path(sys.executable or "python").name[:15]
+    return name, " ".join(getattr(sys, "orig_argv", None) or sys.argv)
+
+
+def _own_process_match(verb: str, rest: list[str], words: list[str], process) -> bool:
+    """Whether `pkill`/`killall` would select the gateway itself: its pattern matched against this process's name
+    (`pkill python3`, `killall python3`) or, with -f, its whole command line (`pkill -f 'gateway run'`)."""
+    if not process:
+        return False
+    name, command_line = process
+    full = any(re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", token) or token == "--full" for token in rest)
+    regex = verb == "pkill" or any(token in ("-r", "--regexp") for token in rest)
+    for word in words:
+        if not word or _dynamic(word):
+            continue
+        try:
+            if verb == "pkill" or regex:
+                if re.search(word, command_line if full else name):
+                    return True
+            elif word == name:
+                return True
+        except re.error:
+            continue
+    return False
+
+
+def _stops_gateway(verb: str, rest: list[str], words: list[str], *, mentions: bool = False, process=None) -> bool:
+    if verb in _DBUS:   # busctl/dbus-send/gdbus calling systemd's RestartUnit/StopUnit on the gateway
+        return any(_DBUS_STOP.search(token) for token in rest) and any("hermes" in token.lower() for token in rest)
+    if verb == "kill":   # the agent's shell is a child of Hermes: $PPID is Hermes; -1 is every process of the user
+        return any(target in ("$PPID", "${PPID}", "-1") for target in _kill_targets(rest))
     if verb == "launchctl":   # macOS: kickstart -k restarts the agent, the others stop or unload it
         action = words[0].lower() if words else ""
         named = any(_LAUNCHD_LABEL.match(re.split(r"[\\/]", word)[-1]) for word in words[1:])
@@ -320,13 +500,15 @@ def _stops_gateway(verb: str, rest: list[str], words: list[str]) -> bool:
     if verb in ("taskkill", "stop-process"):
         return any("hermes" in token.lower() for token in rest)
     if verb == "systemctl":
+        words = _without_values(rest, _SYSTEMCTL_VALUES)
         action = words[0] if words else ""
-        stops = action in _STOP_ACTIONS or (action == "disable" and "--now" in rest)
-        return stops and any(_UNIT.match(word) for word in words[1:])
+        stops = action in _STOP_ACTIONS or (action in _STOP_WITH_NOW and "--now" in rest) or _dynamic(action)
+        # a unit the shell fills in ($U, xargs' words) counts when the command names Hermes somewhere
+        return stops and any(_gateway_unit(word) or (mentions and _dynamic(word)) for word in words[1:])
     if verb == "service":
-        return len(words) >= 2 and bool(_UNIT.match(words[0])) and words[1] in ("restart", "stop")
+        return len(words) >= 2 and _gateway_unit(words[0]) and words[1] in ("restart", "stop")
     if verb in ("pkill", "killall"):
-        return any("hermes" in word.lower() for word in words)
+        return any("hermes" in word.lower() for word in words) or _own_process_match(verb, rest, words, process)
     if verb == "hermes":   # stop leaves Hermes down; restart is the owner's call
         words, options = _hermes_words(rest), {token.split("=", 1)[0] for token in rest if token.startswith("-")}
         for word, following in zip(words, words[1:]):
@@ -335,6 +517,29 @@ def _stops_gateway(verb: str, rest: list[str], words: list[str]) -> bool:
             if following in _GATEWAY_STOPS or _dynamic(following) or \
                     following in _GATEWAY_STOPS_WITH and _GATEWAY_STOPS_WITH[following] & options:
                 return True
+    return False
+
+
+def _without_values(rest: list[str], takes_value) -> list[str]:
+    """The words of a command line without its options and the values of the options that take one."""
+    words, skip = [], False
+    for token in rest:
+        if skip:
+            skip = False
+        elif token in takes_value:
+            skip = True
+        elif not token.startswith("-"):
+            words.append(token)
+    return words
+
+
+def _gateway_unit(word: str) -> bool:
+    """A systemd unit of a Hermes gateway, also as a glob (`'hermes-gateway*'`, `*gateway*`) or a shell word."""
+    if _UNIT.match(word):
+        return True
+    if any(char in word for char in "*?["):
+        return any(fnmatch.fnmatchcase(name, word) for name in ("hermes-gateway", "hermes-gateway.service")) or \
+            "hermes" in word.lower()
     return False
 
 
@@ -424,18 +629,36 @@ def _changes_plugin(verb: str, rest: list[str]) -> bool:
         if word == "plugins" or shell_word:
             if word == "plugins" and _dynamic(following):
                 return True
-            if following in ("disable", "remove", "rm", "uninstall") and \
+            if following in ("disable", "remove", "rm", "uninstall", "trust") and \
                     any(name in _PLUGIN_IDS or _dynamic(name) for name in words[index + 2:]):
                 return True
+            if following == "install" and any(_dynamic(name) or re.split(r"[\\/:]", name.rstrip("/"))[-1].removesuffix(".git")
+                                              in _PLUGIN_IDS for name in words[index + 2:]):
+                return True   # installing over this plugin replaces its code
     return False
 
 
 def _removed_paths(verb: str, rest: list[str], words: list[str]) -> list[str]:
-    """The paths a removing command would delete or move away."""
+    """The paths a removing command would delete or move away, after the shell's brace expansion."""
     if verb in _REMOVERS:
         if _WINDOWS:
             words = [word for word in words if not _CMD_SWITCH.fullmatch(word)]
-        return words[:-1] if verb in _MOVERS and len(words) > 1 else words
+        if verb == "mv":   # mv -t DIR SOURCE...: every other word goes
+            target, sources, skip = False, [], False
+            for token in rest:
+                if skip:
+                    skip = False
+                elif token in ("-t", "--target-directory"):
+                    target = skip = True
+                elif token.startswith("--target-directory=") or re.fullmatch(r"-[A-Za-z]*t.+", token):
+                    target = True
+                elif not token.startswith("-"):
+                    sources.append(token)
+            words = sources
+        else:
+            target = False
+        words = [item for word in words for item in _braces(word)]
+        return words[:-1] if verb in _MOVERS and not target and len(words) > 1 else words
     if verb != "find":
         return []
     if "-delete" not in rest and not ("-exec" in rest and any(os.path.basename(token) == "rm" for token in rest)):
@@ -448,60 +671,231 @@ def _removed_paths(verb: str, rest: list[str], words: list[str]) -> list[str]:
     return starts
 
 
-def _hit(paths: list[str], *, protected, home: Path, profile: Path | None = None) -> str | None:
+def _hit(paths: list[str], *, protected, home: Path, profile: Path | None = None, trees=(),
+         cwd: PurePosixPath | None = None) -> str | None:
     for token in paths:
-        pattern = _expand(token, home, profile)
+        pattern = _expand(token, home, profile, cwd)
         if pattern is None:
             continue
         for item in protected:
             if _hits(pattern, item):
                 return str(item)
+        for item in trees:
+            if _hits(pattern, item, tree=True):
+                return str(item)
     return None
 
 
-def check(tool_name, args, *, protected, home: Path, profile: Path | None = None) -> dict | None:
-    """{"kind", "path"?} when the command would take Hermes down; None otherwise. `home` expands ~ and $HOME,
-    `profile` (the profile's HERMES_HOME) expands $HERMES_HOME."""
-    if tool_name not in TERMINAL_TOOLS or not isinstance(args, dict):
+def _nested_command(verb: str, rest: list[str]) -> list[str] | None:
+    """Commands a program runs on the agent's behalf: `find ... -exec <command> ;`, `ssh localhost <command>`, and
+    for an interpreter's inline program (`python -c`, `perl -e`, ...) each string literal and all of them joined
+    (`subprocess.run(['systemctl', '--user', 'restart', 'hermes-gateway'])`)."""
+    if verb == "find":
+        for index, token in enumerate(rest):
+            if token in ("-exec", "-execdir", "-ok", "-okdir"):
+                tail = []
+                for item in rest[index + 1:]:
+                    if item in (";", "\\;", "+"):
+                        break
+                    tail.append(item)
+                return [shlex.join(tail)] if tail else None
         return None
-    command = args.get("command")
-    if not isinstance(command, str) or not command.strip() or len(command) > _COMMAND_LIMIT:
+    if verb == "ssh":
+        words = _without_values(rest, {"-p", "-l", "-i", "-o", "-F", "-J", "-L", "-R", "-D", "-W", "-b", "-c", "-E", "-m",
+                                       "-O", "-Q", "-S", "-w", "-B", "-e", "-I"})
+        host = words[0].rsplit("@", 1)[-1] if words else ""
+        return [shlex.join(words[1:])] if host in _LOCALHOST and len(words) > 1 else None
+    family = re.sub(r"[\d.]+\Z", "", verb)
+    switches = _INLINE_CODE.get(family)
+    if switches is None:
         return None
-    return _check_command(command, protected=protected, home=home, profile=profile, nested=False)
+    for index, token in enumerate(rest):
+        if token in switches and index + 1 < len(rest):
+            literals = [a or b for a, b in _LITERAL.findall(rest[index + 1])]
+            return [*literals, " ".join(literals)] if literals else None
+    return None
 
 
-def _check_command(command: str, *, protected, home: Path, profile: Path | None = None, nested: bool) -> dict | None:
+def _hermes_config(token: str, *, home: Path, profile: Path | None, cwd: PurePosixPath | None) -> bool:
+    """A word naming a Hermes config.yaml: the profile's, the root's, or one under a folder named for Hermes."""
+    for part in re.split(r"[\s'\"=,;()\[\]]", token):
+        if not part.lower().endswith(_CONFIG_FILES):
+            continue
+        found = _expand(part, home, profile, cwd)
+        if found is None:
+            if "hermes" in part.lower():
+                return True
+            continue
+        places = {_canonical(str(item)) for item in (profile, Path(home) / ".hermes") if item is not None}
+        if found.parent in places or "hermes" in str(found).lower():
+            return True
+    return False
+
+
+def _writes_plugin_config(command: str, *, home: Path, profile: Path | None, cwd: PurePosixPath | None) -> bool:
+    """A command that writes a Hermes config.yaml (`sed -i`, `yq -i`, a redirect, `cp`, `tee`, a Python one-liner
+    that dumps or writes) and names the plugins section, this plugin or one of its trust settings: it can switch
+    the plugin off or widen whom it trusts, which `hermes config set` of those keys is refused for."""
+    lowered = command.lower()
+    if not any(name in lowered for name in _CONFIG_FILES) or not _PLUGIN_WORDS.search(command):
+        return False
+    where = {"home": home, "profile": profile, "cwd": cwd}
+    for target in re.findall(r">{1,2}\s*([^\s;&|]+)", command):   # a redirect into the file
+        if _hermes_config(target, **where):
+            return True
     for segment in _segments(command) or ():
         tokens = _strip_prefix(segment)
         if not tokens:
             continue
         verb, rest = _program(tokens[0]), tokens[1:]
+        named = any(_hermes_config(token, **where) for token in rest)
+        if not named:
+            continue
+        family = re.sub(r"[\d.]+\Z", "", verb)
+        if family in ("sed", "perl", "yq", "ruby") and any(re.fullmatch(r"-[A-Za-z]*i\S*|--in-place\S*", token)
+                                                          for token in rest):
+            return True
+        if verb in ("cp", "mv", "install", "tee", "truncate", "dd", "ln", "rsync"):
+            return True
+        if family in ("python", "node", "ruby", "perl") and re.search(r"dump|write|['\"]w['\"]", " ".join(rest)):
+            return True
+    return False
+
+
+def _as_hermes(verb: str, rest: list[str]) -> tuple[str, list[str]]:
+    """`hermes-agent ...`, `python -m hermes_cli.main ...` and `python /path/to/hermes ...` are the hermes command."""
+    if verb == "hermes-agent":
+        return "hermes", rest
+    if not _PYTHON.fullmatch(verb):
+        return verb, rest
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token == "-m" or (token.startswith("-m") and len(token) > 2 and not token.startswith("--")):
+            module, tail = (rest[index + 1] if index + 1 < len(rest) else "", rest[index + 2:]) if token == "-m" \
+                else (token[2:], rest[index + 1:])
+            return ("hermes", tail) if module in _HERMES_MODULES else (verb, rest)
+        if token in _PYTHON_VALUES:
+            index += 2
+            continue
+        if token == "-c" or not token.startswith("-") or token == "-":
+            # inline code, or a script: the launcher script under a virtual environment's python
+            return ("hermes", rest[index + 1:]) if _program(token) in ("hermes", "hermes-agent") else (verb, rest)
+        index += 1
+    return verb, rest
+
+
+def _kills_by_lookup(command: str) -> bool:
+    """`kill $(pgrep -f hermes)`, `pgrep -f hermes_cli | xargs kill`, ``kill `pidof hermes` ``, `kill $(cat
+    ~/.hermes/gateway.pid)`: a kill whose process ids the shell fills in, in a command that looks up Hermes or its
+    pid file."""
+    kills = False
+    for segment in _segments(command) or ():
+        tokens = _strip_prefix(segment)
+        if tokens and _program(tokens[0]) in ("kill", "tkill") and any(_dynamic(token) for token in tokens[1:]):
+            kills = True
+    if not kills:
+        return False
+    looked_up = False
+    flat = command.replace('"', " ").replace("`", "\n").replace("$(", "\n").replace(")", "\n")
+    for segment in _segments(flat) or ():
+        tokens = _strip_prefix(segment)
+        if not tokens:
+            continue
+        verb, rest = _program(tokens[0]), tokens[1:]
+        if verb in _PID_LOOKUPS and any("hermes" in token.lower() for token in rest):
+            looked_up = True
+        elif any(name in token.lower() for token in tokens for name in _PID_FILES):
+            looked_up = True
+        elif verb == "systemctl" and "show" in rest and any(_gateway_unit(token) for token in rest):
+            looked_up = True
+    return looked_up
+
+
+def check(tool_name, args, *, protected, home: Path, profile: Path | None = None, trees=(), own=(),
+          process=None) -> dict | None:
+    """{"kind", "path"?} when the command would take Hermes down; None otherwise. `home` expands ~ and $HOME,
+    `profile` (the profile's HERMES_HOME) expands $HERMES_HOME. `trees` are folders whose inside is protected too
+    (the interpreter, the environment, Hermes' packages); removing anything in `own` (this plugin's folder) switches
+    the plugin off, which only the owner decides."""
+    if not isinstance(args, dict):
+        return None
+    if tool_name in PROCESS_TOOLS:   # text written to a background process, often a shell
+        command = args.get("data") if args.get("action") in _PROCESS_INPUT else None
+    elif tool_name in TERMINAL_TOOLS:
+        command = args.get("command")
+    else:
+        return None
+    if not isinstance(command, str) or not command.strip() or len(command) > _COMMAND_LIMIT:
+        return None
+    workdir = args.get("workdir") if tool_name in TERMINAL_TOOLS else None
+    cwd = _expand(workdir, home, profile) if isinstance(workdir, str) and workdir.strip() else None
+    return _check_command(command, protected=protected, home=home, profile=profile, nested=False, trees=trees, own=own,
+                          process=process, cwd=cwd)
+
+
+def _check_command(command: str, *, protected, home: Path, profile: Path | None = None, nested: bool, trees=(), own=(),
+                   process=None, cwd: PurePosixPath | None = None) -> dict | None:
+    options = {"protected": protected, "home": home, "profile": profile, "trees": trees, "own": own, "process": process}
+    if _kills_by_lookup(command):
+        return {"kind": "gateway_stop"}
+    if _writes_plugin_config(command, home=home, profile=profile, cwd=cwd):
+        return {"kind": "plugin_settings"}
+    mentions = "hermes" in command.lower()
+    segments = _segments(command) or []
+    fed = [token for segment in segments for token in segment]   # what xargs may be given: every word of the command
+    if not nested:   # $(...) and `...` run too, also inside double quotes
+        for groups in _SUBSTITUTION.findall(command):
+            found = _check_command(groups[0] or groups[1], nested=True, cwd=cwd, **options)
+            if found:
+                return found
+    for segment in segments:
+        tokens = _strip_prefix(segment)
+        if not tokens:
+            continue
+        verb, rest = _as_hermes(_program(tokens[0]), tokens[1:])
+        nested_command = _nested_command(verb, rest) if not nested else None
+        if nested_command is not None:   # find -exec ..., ssh localhost ..., the strings of python -c / perl -e
+            for item in nested_command:
+                found = _check_command(item, nested=True, cwd=cwd, **options)
+                if found:
+                    return found
+        if verb in ("cd", "pushd", "chdir", "set-location", "sl"):   # later relative paths start there
+            target = [token for token in rest if not token.startswith("-")]
+            cwd = _expand(target[0], home, profile, cwd) if target else _canonical(str(home)) if not rest else None
+            continue
         inner = _command_string(verb, rest)
         if inner is not None:   # one level: bash -lc '<command>', su -c '<command>', pwsh -c '<command>', cmd /c ...
-            found = None if nested else _check_command(inner, protected=protected, home=home, profile=profile,
-                                                       nested=True)
+            found = None if nested else _check_command(inner, nested=True, cwd=cwd, **options)
             if found:
                 return found
             continue
         words = [token for token in rest if not token.startswith("-")]
-        if _stops_gateway(verb, rest, words):
+        if _stops_gateway(verb, rest, words, mentions=mentions, process=process):
             return {"kind": "gateway_stop"}
         if _changes_plugin(verb, rest):
             return {"kind": "plugin_settings"}
         deleted = _deleted_profile(verb, rest)
         if deleted is not None:
             return {"kind": "runtime_removal", "path": f"`{deleted}`"}
-        path = _hit(_removed_paths(verb, rest, words), protected=protected, home=home, profile=profile)
+        removed = _removed_paths(verb, rest, words)
+        if XARGS_WORDS in removed:   # `ls -d <path> | xargs rm -rf`: the paths come from the rest of the command
+            removed = [item for item in removed if item != XARGS_WORDS] + [token for token in fed if token not in tokens]
+        path = _hit(removed, protected=protected, home=home, profile=profile, trees=trees, cwd=cwd)
         if path:
             return {"kind": "runtime_removal", "path": path}
+        if own and _hit(removed, protected=(), home=home, profile=profile, trees=own, cwd=cwd):
+            return {"kind": "plugin_settings"}
     return None
 
 
 class RuntimeGuard:
     """The `pre_tool_call` callback. Returns Hermes' block directive or None, and never raises."""
 
-    def __init__(self, *, protected, home: Path, lang: str = "en", on_block=None, profile: Path | None = None):
+    def __init__(self, *, protected, home: Path, lang: str = "en", on_block=None, profile: Path | None = None,
+                 trees=(), own=(), process=None):
         self.protected = tuple(protected)
+        self.trees, self.own, self.process = tuple(trees), tuple(own), process
         self.home = Path(home)
         self.profile = Path(profile) if profile is not None else None
         self.lang = lang if lang in MESSAGES else "en"
@@ -510,7 +904,7 @@ class RuntimeGuard:
     def __call__(self, **payload):
         try:
             found = check(payload.get("tool_name"), payload.get("args"), protected=self.protected, home=self.home,
-                          profile=self.profile)
+                          profile=self.profile, trees=self.trees, own=self.own, process=self.process)
             if not found:
                 return None
             if self.on_block is not None:

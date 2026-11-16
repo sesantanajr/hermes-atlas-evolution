@@ -167,7 +167,7 @@ The first run of the review counter also reads the rotated logs of the same 14 d
 
 ### Tool outcomes
 
-The `post_tool_call` hook counts every call that ends with status `ok`, `error` or `blocked`, per tool and UTC day: calls, errors, blocked calls and total duration. Other statuses, such as `timeout` or `cancelled`, are counted by the operations observer and do not enter the loop. Hermes wraps deferred tools in `tool_call`; a wrapper that carries a single call is attributed to the tool that ran, and an unresolved wrapper takes the tool name from Hermes' own error text.
+The `post_tool_call` hook counts every call that ends with status `ok`, `error`, `blocked` or `timeout`, per tool and UTC day: calls, errors (a timeout is one), blocked calls and total duration. `timeout` is Hermes' own deadline for a tool call (`tools.sequential_call` and `concurrent_batch`, on by default in 0.23.1); since 0.8.0 such a call is a failure of class `timeout`, so a tool that keeps hitting the deadline becomes a lesson and its time counts among the slow tools, and the history replay reads the text Hermes stores for it (`Error executing tool '<name>': timed out after ...`). A `cancelled` call (the owner interrupted the turn) is counted only by the operations observer and does not enter the loop. Hermes wraps deferred tools in `tool_call`; a wrapper that carries a single call is attributed to the tool that ran, and an unresolved wrapper takes the tool name from Hermes' own error text.
 
 A call with status `error` or `blocked` is classified (`signals.classify`). The classifier first reads the text that Hermes or the tool wrote about the error: the error message (first 2,000 characters) and, when the result is a JSON object, its `error`, `hint`, `approval` and `message` fields. Only when that text matches no rule does it read the command output: the last 1,500 characters of the `output` field, or the first 1,500 characters of a result that is not JSON. It also reads `exit_code`. Results over 262,144 characters are not parsed as JSON. The text is classified in memory and discarded.
 
@@ -314,7 +314,7 @@ Changing the mode does not change existing lessons. Candidates derived under `su
 | `candidate` | derived, waiting for approval |
 | `quarantined` | written by the operator without `--activate`, proposed by the agent or drafted by the reflector; waiting for approval |
 | `active` | shown to the agent |
-| `retired` | no longer shown; deleted 90 days after its last update |
+| `retired` | no longer shown; kept, so its id never points to another lesson and a sentence turned down stays down |
 
 | Origin | Created by | Bound to a failure | Proposal risk |
 |---|---|---|---|
@@ -323,6 +323,8 @@ Changing the mode does not change existing lessons. Candidates derived under `su
 | `reflector` | a pass with the reflector on | yes | medium |
 | `agent` | the `hermes_atlas_evolution_lessons` tool, action `propose` | no | high |
 
+A lesson brought in by `lessons import` keeps the origin of its kind: a template lesson is `derived` and bound to its failure, a written one is `operator`. Where it came from is kept apart (`lesson_import`). See [Lesson packs](#lesson-packs).
+
 ### Text rules
 
 Lesson text that is not a template, from you, the agent or the reflector, goes through `lessons.clean_text`:
@@ -330,16 +332,30 @@ Lesson text that is not a template, from you, the agent or the reflector, goes t
 - it is normalized to Unicode NFKC and its whitespace is collapsed;
 - control, format (bidirectional and zero-width), private-use and surrogate characters and line or paragraph separators are refused, not stripped, so what you read is exactly what the agent gets;
 - it has 12 to 240 characters;
-- it must not contain a value shaped like a credential (`sk-`, `ghp_`, `gho_`, `github_pat_`, `xox?-`, `AKIA`, `AIza` followed by at least 8 characters) or a URL with a user and password.
+- it must not contain a value shaped like a credential (`sk-`, `sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`, `ghp_`, `gho_`, `ghs_`, `ghr_`, `ghu_`, `github_pat_`, `glpat-`, `xox?-`, `AKIA`, `AIza`, `ya29.` followed by at least 8 characters, `npm_` followed by at least 16), a URL with a user and password, or an opaque token: a run of at least 24 token characters (`OPAQUE_RUN`) with a part of at least 8 (`OPAQUE_PART`) where letters and digits alternate at least 3 times (`OPAQUE_ALTERNATIONS`), as in a key or a password, while names such as `System32` or `--max-old-space-size=4096` pass;
+- inside Hermes, it must be text Hermes' own secret redactor leaves unchanged (with `force=True`); a redactor that fails refuses the text.
 
 A lesson names the tool it applies to, or `general`. The playbook holds at most 200 lessons that are not derived and not retired. The agent can propose at most 5 lessons per hour (`agent_tools.PROPOSALS_PER_HOUR`), counted in the database for the whole profile, across processes.
 
 ### Delivery
 
 - **Prompt section** (`hermes-atlas-evolution.playbook`). Hermes renders it at the start of each session and freezes it into that session's system prompt. It lists active lessons of any origin, those measured as effective first and then those with the most evidence, up to 8 lessons and 1,200 characters, under a one-line header. The section is registered with a limit of 1,400 characters. It only reads the database. It counts each session once (`shown`), however often Hermes renders that session's prompt again, and writes that count through the hook write queue, so a pass running in another process never leaves a new session without its lessons. A chat that may serve someone else gets template lessons only (see [Who is served](#who-is-served)).
-- **Hint on the failing result** (`transform_tool_result`, only when `tool_hints` is on). Off by default since 0.6.0: Hermes keeps only the first plugin's change to a tool result, so a hint would discard the change another plugin makes to that result. The hook stays registered while lessons are on, as the manifest declares, and returns nothing while `tool_hints` is off. When a call with status `error` or `blocked` fails with a signature that has an active lesson, the sentence is added to that result. A JSON object gains the key `hermes_atlas_evolution_lesson`; any other text gains a final line that starts with `[Atlas Evolution lesson]` (`[Lição do Atlas Evolution]` in Portuguese). Each signature is hinted once per session, with at most 6 hints per session (`hints.MAX_HINTS_PER_SESSION`), and only when the call has a session ID. Results over 262,144 characters and successful calls are left untouched, and so is a JSON result that already has a non-empty `hint` field, such as the hints Hermes' terminal and file tools write: Hermes already advised. Only lessons bound to a failure (derived lessons and reflector drafts) can be hinted, and a session that does not serve the owner gets template lessons only. The index of active lessons is reloaded at most once a minute, so a lesson approved during a session can be hinted in that session.
+- **Hint on the failing result** (`transform_tool_result`, only when `tool_hints` is on). Off by default since 0.6.0: Hermes keeps only the first plugin's change to a tool result, so a hint would discard the change another plugin makes to that result. Since 0.8.0 the hook is registered only while `tool_hints` is on: while any plugin listens to it, Hermes reads every tool result for it in a thread of its own. Restart the gateway after changing `tool_hints`. When a call with status `error` or `blocked` fails with a signature that has an active lesson, the sentence is added to that result. A JSON object gains the key `hermes_atlas_evolution_lesson`; any other text gains a final line that starts with `[Atlas Evolution lesson]` (`[Lição do Atlas Evolution]` in Portuguese). Each signature is hinted once per session, with at most 6 hints per session (`hints.MAX_HINTS_PER_SESSION`), and only when the call has a session ID. Results over 262,144 characters and successful calls are left untouched, and so is a JSON result that already has a non-empty `hint` field, such as the hints Hermes' terminal and file tools write: Hermes already advised. Only lessons bound to a failure (derived lessons and reflector drafts) can be hinted, and a session that does not serve the owner gets template lessons only. The index of active lessons is reloaded at most once a minute, so a lesson approved during a session can be hinted in that session.
 
 Because the section is fixed for the whole session and the hint is appended to a new tool result, neither path changes a prefix the provider has already cached.
+
+### Lesson packs
+
+Hermes loads plugins per profile, so each profile learns on its own: a tool that needs an argument in one profile fails three times in every other profile before the lesson exists there. Since 0.8.0 a profile can take what another one learned.
+
+- `hermes evolution lessons export [--out FILE]` prints the profile's active lessons as a pack, or writes it to a new file (never over an existing one). A lesson measured as not helping is left out. A template lesson travels as its tool, failure class and detail, and the receiving profile renders the sentence from its own fixed templates, in its own language; a written lesson travels as its sentence. Nothing else leaves the profile: no counters of conversations, session ids, excerpts or settings. A pack is JSON with `format: hermes-atlas-evolution/lessons`, `version: 1` and at most 200 lessons.
+- `hermes evolution lessons import FILE` (or `-` for standard input), or `hermes evolution lessons import --from PROFILE` to read another profile of the same Hermes directly (`default` is the root profile), read-only. `--dry-run` shows what would come in and changes nothing; without `--yes` the command shows every sentence and asks first.
+- Everything in a pack is checked as if the agent had written it: the tool must be an identifier, the class one of the templates, the detail must pass the same filter as a detail read from an error, and a written sentence must pass the [text rules](#text-rules) and must not be only advice every failure would get. Anything else is skipped with its reason.
+- A sentence already in the playbook, waiting or turned down here never comes in again.
+- An imported template lesson waits. In `auto` mode it activates by itself once the owner's own turns here hit its failure twice (`lessons.OWNER_ACTIVATION`): the pattern was already proven in the other profile, so it does not wait for three failures in two sessions first, and the queue cleaning does not withdraw it for lacking failures here. In `suggest` mode it waits for approval. An imported written lesson is quarantined, like any written lesson. `--activate` activates both at once, as `lessons add --activate` does.
+- Once active, an imported lesson is measured here like any other, against the failures here, and retired here when it does not help.
+
+Importing and exporting are the operator's: the agent's terminal is refused, as for every decision.
 
 ## The reflector
 
@@ -349,7 +365,7 @@ The reflector (`reflector`) drafts lessons for recurring failures that have no t
 
 1. the last 4 non-empty lines of the error text and output, joined, at most 1,200 characters;
 2. passed through Hermes' secret redactor when the plugin runs inside Hermes, with `force=True` so that it applies even when the profile turned redaction off;
-3. masked by the plugin: URLs become `<url>`, e-mail addresses `<email>`, paths of two or more segments `<path>`, hexadecimal strings of 16 or more characters `<hex>`, values with a credential prefix `<secret>`, runs of 5 or more digits `<n>`, and quoted strings over 40 characters `'<text>'`;
+3. masked by the plugin: URLs become `<url>`, e-mail addresses `<email>`, paths of two or more segments `<path>`, hexadecimal strings of 16 or more characters `<hex>`, values with a credential prefix `<secret>` (the prefixes of the [text rules](#text-rules) and a few more), a MySQL or MariaDB `-p<password>`, the value of `password`, `passwd`, `pwd`, `secret`, `token` or `api_key` after `=` or `:`, opaque tokens of 20 or more characters that mix letters and digits (dotted names such as `urllib3.exceptions.MaxRetryError` stay), runs of 5 or more digits `<n>`, and quoted strings over 40 characters `'<text>'`;
 4. cut to the last 300 characters (`EXCERPT_LIMIT`).
 
 When the failing call was a terminal command, the excerpt starts with the program it ran in brackets, such as `[git]`: only a bare command name called from the PATH or a system folder such as `/usr/bin`, read the way the runtime guard reads a command, never a script, another path or an argument, and never a name the redactor would touch. The prefix takes its room from the start of the excerpt, so the end, where the cause usually is, stays, and the whole stays within 300 characters. An excerpt expires after 14 days or when its failure gets a lesson, in each pass and in the daily prune of the hooks, so it does not outlive its window when no pass runs.
@@ -358,7 +374,7 @@ When the failing call was a terminal command, the excerpt starts with the progra
 
 **What is kept from the answer.** The instructions ask for advice specific to the program or condition, or `applies: false` when the only advice would be generic. A draft that only says what every failure would get (read the error, check before retrying) and names nothing in backticks is declined, like a draft that fails the lesson text rules.
 
-**How many calls.** At most 3 per pass (`PER_RUN`) and `reflector_daily_limit` per UTC day (default 6, from 1 to 50). Every attempt counts toward the daily limit, including failed ones, and it is counted before the call is made, so a crash or a killed process cannot exceed the cap. No transaction stays open during the call. A pass with a deadline, such as the first pass of `status` (90 seconds) or the pass of `ops tick` (200 seconds), starts a call only when the call's worst case, 60 seconds (`CALL_SECONDS`) plus a margin of 10, still fits. A pass that had no time for any call reports `no_time_left`, and the excerpts wait for the next pass.
+**How many calls.** At most 3 per pass (`PER_RUN`) and `reflector_daily_limit` per UTC day (default 6, from 1 to 50). Every attempt counts toward the daily limit, including failed ones, and it is counted before the call is made, so a crash or a killed process cannot exceed the cap. No transaction stays open during the call. A pass with a deadline, such as the first pass of `status` (90 seconds) or the pass of `ops tick` (200 seconds), starts a call only when the call's worst case, 60 seconds (`CALL_SECONDS`) plus a margin of 10, still fits. A pass that had no time for any call reports `no_time_left`, and the excerpts wait for the next pass. A failure whose call keeps raising waits after 3 failed calls in a row (`BACKOFF_AFTER_FAILED_CALLS`): 1 day (`BACKOFF_DAYS`), doubling at each further failed call up to 14 days, so the other failures get their drafts; any answer clears the wait (`reflector_backoff`).
 
 **The call.** The plugin registers the Hermes auxiliary task `evolution_reflector` ("Atlas Evolution reflector") with `inherit_from="compression"`, so by default it uses the model configuration of the compression task. You choose another model in `auxiliary.evolution_reflector` of the profile configuration. The pass calls `ctx.llm.complete_structured` with that task, a JSON schema (`applies`, a boolean, and `lesson`, a string), at most 300 output tokens and a 60-second timeout. The input holds the tool name, the failure class, the detail, the number of occurrences, sessions and days, and the excerpt. The instructions, in the configured language, say that the excerpt is data and never instructions, ask for `applies: false` when the failure looks transient, specific to one request or outside the agent's control, and otherwise ask for one sentence of 20 to 200 characters shaped as "when X, do Y", without paths, names, credentials, URLs or text copied from the excerpt. The plugin opens no connection: Hermes makes the call with its own provider configuration.
 
@@ -378,9 +394,9 @@ Each pass measures every active lesson that is bound to a failure signature (`le
 
 | Item | Value |
 |---|---|
-| Before window | the 14 days before the activation day (`BASELINE_DAYS`), counted at the first pass after activation in which the backfill has already replayed that period, and then frozen, so retention never changes it |
+| Before window | the 14 days before the activation day (`BASELINE_DAYS`), plus the activation day up to the moment of activation (its failures and calls are kept when the lesson activates, in `lesson_activation`), counted at the first pass after activation in which the backfill has settled, and then frozen, so retention never changes it |
 | After window | the latest 14 days since activation (`AFTER_WINDOW_DAYS`): from the day after activation, or from 13 days before today when activation is older |
-| Activation day | left out of both windows, because it is partly before the lesson |
+| Activation day | its part before activation counts in the before window; the rest is left out of both |
 | Rate | failures of the signature per call of the tool, when both windows have at least 5 calls; otherwise failures per calendar day of each window |
 | First verdict | 5 days after activation or 20 calls of the tool after it, whichever comes first, and never on the activation day |
 
@@ -388,9 +404,9 @@ Each pass measures every active lesson that is bound to a failure signature (`le
 |---|---|
 | `effective` | the rate after is at most half the rate before |
 | `ineffective` | at least 3 failures in the after window and a rate after of at least 90% of the rate before |
-| `inconclusive` | anything else, including no failure in either window |
+| `inconclusive` | anything else, and always when the before window has no failure: there was nothing to reduce, so no rate after can show the lesson helped or did not |
 
-The verdict is recomputed at each pass while the lesson is active. Activating a lesson again starts a new measurement with a new baseline. In `auto` mode a lesson that is `ineffective` 14 days or more after activation is retired (`RETIRE_AFTER_DAYS`). In the other cases an `ineffective` verdict opens a `lesson_retire` proposal.
+The verdict is recomputed at each pass while the lesson is active, and only while it still is: a lesson you retire while a pass runs stays retired. Activating a lesson again starts a new measurement with a new baseline. In `auto` mode a lesson that is `ineffective` 14 days or more after activation is retired (`RETIRE_AFTER_DAYS`), unless you rejected its `lesson_retire` proposal: that keeps it for this activation (`lesson_keep`), and its verdict is still reported. In the other cases an `ineffective` verdict opens a `lesson_retire` proposal.
 
 This is a comparison of two periods for one failure. It does not control for changes in how the tool was used.
 
@@ -438,7 +454,7 @@ A `regressed` verdict opens a high-risk `skill_rollback` proposal with the nativ
 
 Only these configuration keys are watched (`experiments.CONFIG_KEYS`): `compression.enabled`, `compression.threshold_tokens`, `compression.proactive_prune_tokens`, `model.default`, `model.model`, `model.provider`, `memory.provider`, `memory.nudge_interval`, `skills.creation_nudge_interval`, `auxiliary.background_review.enabled`, `auxiliary.background_review.model`, `auxiliary.compression.model`, `tool_budget.mcp_result_size_chars`, `curator.enabled`, `curator.consolidate`, `compression.threshold`, `compression.target_ratio`, `compression.protect_last_n`, `skills.auto_load`, and the list of enabled plugins as a count plus a short hash. A value that is a plain label is stored as it is. Any other value (a `provider/model` name, a URL, a mapping) is stored as `set:` and a 10-character fingerprint, never the value, so a change between two such values is still detected.
 
-The first pass only records the snapshot. Configuration is available to `hermes evolution` commands. The standalone runner sees it only when PyYAML is installed, and tracks no configuration change without it.
+The first pass only records the snapshot. Configuration is available to `hermes evolution` commands. The standalone runner sees it only when PyYAML is installed, and tracks no configuration change without it. A pass that cannot read the configuration (no YAML parser, a file caught mid-write) records no change and keeps the last snapshot.
 
 ### Windows and metrics
 
@@ -672,7 +688,7 @@ A final list says what needs attention, with the command for each item:
 - decisions waiting while no weekly digest is scheduled for the profile, with the command that prints the recipe;
 - values of `settings.json` that are ignored because they would widen trust (their keys, never their values), with where to set them instead.
 
-**Owner notice.** When a session ends, Hermes calls `on_session_finalize`, and the plugin may return one short notice about decisions waiting: lessons awaiting approval, reflector drafts to read, high-risk proposals, or a failed last pass. There is at most one notice per UTC day, and only on the owner's local surfaces (CLI, TUI, Desktop), never for a subagent and never in a gateway chat, where the other side may be someone else. Hermes shows the notice outside the conversation; it does not start an agent turn. Hermes 0.23.1 drops this text for the local sessions it hosts when their viewer closes or the session is reaped (`cli_close`, `tui_close`, `new_session`, `ws_orphan_reap`, `startup_orphan_reap` and similar), so for those reasons the plugin returns nothing and the day's notice is not spent; the same decisions show in `status` and in the digest.
+**Owner notice.** When a session ends, Hermes calls `on_session_finalize`, and the plugin may return one short notice about decisions waiting: lessons awaiting approval, reflector drafts to read, high-risk proposals, or a failed last pass. There is at most one notice per UTC day, and only on the owner's local surfaces (CLI, TUI, Desktop), never for a subagent and never in a gateway chat, where the other side may be someone else. Hermes shows the notice outside the conversation; it does not start an agent turn. Hermes 0.23.1 shows this text only when the classic CLI exits (`shutdown`) or starts a new session (`session_boundary`), and when the TUI or Desktop closes a session, which passes no reason; it drops it for every other reason, such as a viewer closing a session the gateway hosts, `/resume`, `/branch` or a reaped session. For those the plugin returns nothing and the day's notice is not spent; the same decisions show in `status`, in the digest and in the dashboard panel.
 
 ## Commands
 
@@ -685,11 +701,13 @@ Subcommands of `hermes evolution`. Output is JSON, except `report` and `status` 
 | `learn [--notify-only]` | One pass now: replay history while the backfill is not done, derive lessons, ask the reflector if on, measure, read the radar, refresh proposals. Waits up to 30 seconds for a pass that is already running. |
 | `report [--days 1..35] [--format md\|json]` | The digest, compared with the previous period. |
 | `report --schedule-spec [--weekday 0..6] [--hour 0..23] [--deliver TARGET]` | Prints the weekly cron recipe. Creates nothing. |
-| `lessons list [--status STATUS]` | The playbook with origin, evidence and measured effect. |
+| `lessons list [--status STATUS]` | The playbook with origin, evidence and measured effect. In an agent's terminal the sentence of a written lesson is left out (`text_hidden`), because the terminal of a stranger's chat is an agent's terminal too; template lessons stay. |
 | `lessons review` | Shows each lesson that waits for approval with its exact text and asks: `a` approves, `r` rejects (the lesson is retired), Enter skips, `x` quits. Operator only, in your own terminal. |
 | `lessons approve <id> [--yes]`, `lessons retire <id>` | Activates (after showing the text) or retires a lesson. Operator only. |
 | `lessons add "<text>" [--tool NAME] [--activate] [--yes]` | Adds your lesson, quarantined unless `--activate`. Operator only. |
-| `proposals list [--all]` | Open proposals, highest risk first. |
+| `lessons export [--out FILE]` | The active lessons as a pack, printed or written to a new file (see [Lesson packs](#lesson-packs)). Operator only. |
+| `lessons import (FILE \| - \| --from PROFILE) [--dry-run] [--activate] [--yes]` | Brings in the lessons of a pack or of another profile of this Hermes, after showing each one. Operator only. |
+| `proposals list [--all]` | Open proposals, highest risk first. In an agent's terminal a written lesson's sentence is left out, as in `lessons list`. |
 | `proposals approve <id> [--note TEXT] [--yes]`, `proposals reject <id> [--note TEXT]` | Decides a proposal. Operator only. A lesson takes effect; anything else returns the command for you to run. |
 | `skills [--days 1..35]` | Rewrites, flip-flops and unused rewrites per skill, plus skills by outcome. |
 | `experiments` | Tracked changes and their verdicts. |
@@ -777,6 +795,6 @@ The loop's tables live in `<HERMES_HOME>/evolution/evolution.sqlite3`, next to t
 | `guard_daily` | day and kind | commands the runtime guard vetoed: `gateway_stop`, `runtime_removal` or `plugin_settings`, never the command itself |
 | `cursor` | key | position in `agent.log` and the rotated files, last configuration snapshot, last ledger time, end of the last pass and its status, the autopilot lease, when observation started, the backfill position, status and totals, reflector calls of the day, the day of the last owner notice, the radar's last plugin snapshot, and the plugin version, kind and start time of each gateway or dashboard process that loaded the plugin, keyed by its process ID |
 
-Daily aggregates, changes and decided proposals are kept for 90 days (`experience.RETENTION_DAYS`). Lessons are kept, retired and withdrawn ones included, so a lesson id never points to another lesson and a sentence you turned down stays down; proposals that are open or approved are kept too. Retention is applied by each pass and by the first hook write of each UTC day in each process. It covers `guard_daily` too. The delivery IDs that stop one event from being counted twice (`seen`) are kept 2 days.
+Daily aggregates, changes and decided proposals are kept for 90 days (`experience.RETENTION_DAYS`). Lessons are kept, retired and withdrawn ones included, so a lesson id never points to another lesson and a sentence you turned down stays down; proposals that are open or approved are kept too. Retention is applied by each pass and by the first hook write of each UTC day in each process, before that write. It covers `guard_daily` too. It counts back from the system clock, but never from more than 2 days past the newest day stored (`RETENTION_STEP_DAYS`): a clock far ahead, such as a machine that booted before its time sync, cannot delete the history. A clock that stays ahead, as after a real pause, is believed once 3 days past the last prune have data (`RETENTION_CONFIRM_DAYS`). Reflector excerpts always expire by the clock itself. The delivery IDs that stop one event from being counted twice (`seen`) are kept 2 days.
 
 Hook writes share one connection per process and profile. While the database is busy an update waits in a queue of up to 512 entries; overflow is counted and reported as `dropped_events` by `hermes evolution usage`.

@@ -514,28 +514,38 @@ def _guard_state(enabled: bool) -> str:
 
 
 def pending_notice(home: Path, *, now: float, lang: str = "en") -> dict | None:
-    """At most one short notice per UTC day about decisions waiting for the owner, or None."""
-    from .experience import record
+    """At most one short notice per UTC day about decisions waiting for the owner, or None.
 
+    The day is marked in the same transaction that reads it, on the hooks' shared connection (it never waits
+    long): a session end that cannot mark it, because the database is busy, shows nothing and leaves the notice
+    to a later one, so two sessions never both show it."""
     today = utc_day(now)
-    with experience(home) as conn:
-        if (conn.execute("SELECT value FROM cursor WHERE key='notice_day'").fetchone() or [None])[0] == today:
-            return None
-        waiting = conn.execute("SELECT COUNT(*) FROM lesson WHERE status IN ('candidate','quarantined')").fetchone()[0]
-        drafts = conn.execute("SELECT COUNT(*) FROM lesson WHERE status='quarantined' AND origin='reflector'").fetchone()[0]
-        risky = conn.execute("SELECT COUNT(*) FROM proposal WHERE status='open' AND risk='high'").fetchone()[0]
-        saved = conn.execute("SELECT value FROM cursor WHERE key='loop_status'").fetchone()
-    try:
-        failing = bool(saved) and json.loads(saved[0]).get("ok") is False
-    except (ValueError, AttributeError):
-        failing = False
     t = _NOTICE[lang if lang in _NOTICE else "en"]
-    parts = [text.format(n=count) for count, text in ((waiting, t["lessons"]), (drafts, t["drafts"]), (risky, t["risky"]))
-             if count]
-    if failing:
-        parts.append(t["failing"])
-    if not parts:
+    parts: list[str] = []
+    try:
+        with experience(home, observer=True) as conn:
+            if (conn.execute("SELECT value FROM cursor WHERE key='notice_day'").fetchone() or [None])[0] == today:
+                return None
+            waiting = conn.execute("SELECT COUNT(*) FROM lesson WHERE status IN ('candidate','quarantined')").fetchone()[0]
+            drafts = conn.execute("SELECT COUNT(*) FROM lesson WHERE status='quarantined' AND origin='reflector'").fetchone()[0]
+            risky = conn.execute("SELECT COUNT(*) FROM proposal WHERE status='open' AND risk='high'").fetchone()[0]
+            saved = conn.execute("SELECT value FROM cursor WHERE key='loop_status'").fetchone()
+            try:
+                failing = bool(saved) and json.loads(saved[0]).get("ok") is False
+            except (ValueError, AttributeError):
+                failing = False
+            parts = [text.format(n=count) for count, text in ((waiting, t["lessons"]), (drafts, t["drafts"]),
+                                                              (risky, t["risky"])) if count]
+            if failing:
+                parts.append(t["failing"])
+            if not parts:
+                return None
+            # Compare and set: only the session that moves the mark to today shows the notice.
+            marked = conn.execute("""INSERT INTO cursor VALUES ('notice_day', ?) ON CONFLICT(key)
+                DO UPDATE SET value=excluded.value WHERE cursor.value IS NOT excluded.value""", (today,)).rowcount
+    except (sqlite3.Error, OSError, ValueError):   # busy or unreadable: nothing is shown, a later session tries again
         return None
-    record(home, lambda conn: conn.execute("INSERT OR REPLACE INTO cursor VALUES ('notice_day', ?)", (today,)), now=now)
+    if not marked:
+        return None
     return {"message": f"{t['lead']}: {'; '.join(parts)}. {t['tail']}"}
 

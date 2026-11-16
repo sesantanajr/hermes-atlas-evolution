@@ -267,13 +267,15 @@ class _Observer:
                 raise sqlite3.OperationalError("database is locked")
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if sweep and day > self.swept:
+                    # Before the jobs: the first prune of a database dates its retention from the newest day
+                    # stored, never from a day this write adds under a clock that may be far ahead.
+                    _prune(connection, now)
                 for item in jobs:
                     item(connection)
                 if dropped:
                     connection.execute("""INSERT INTO metric VALUES (?, 'observer', '', '', 'dropped', ?, 0, 0, 0, 0, 0, 0, 0)
                         ON CONFLICT DO UPDATE SET requests=requests+excluded.requests""", (day, dropped))
-                if sweep and day > self.swept:
-                    _prune(connection, now)
                 connection.execute("COMMIT")
             except BaseException:
                 _rollback(connection)
@@ -610,16 +612,15 @@ SEEN_DAYS = 2   # delivery ids only guard against an event delivered twice, whic
 
 
 def _prune(conn: sqlite3.Connection, now: float) -> None:
-    from .experience import utc_datetime
+    from .experience import prune, utc_datetime
 
-    today = utc_datetime(now).date()
+    # The clock the experience tables were pruned by: never far past the last prune, so a clock that is far ahead
+    # does not delete these counters either.
+    today = utc_datetime(prune(conn, now=now)).date()
     cutoff = (today - timedelta(days=RETENTION_DAYS - 1)).isoformat()
     for table in ("metric", "research_latency", "native_activity"):
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))
     conn.execute("DELETE FROM seen WHERE day < ?", ((today - timedelta(days=SEEN_DAYS - 1)).isoformat(),))
-    from .experience import prune
-
-    prune(conn, now=now)
 
 
 def run_policy(conn: sqlite3.Connection, findings: list[dict], *, now: float, recovery_ready: bool = True) -> dict:

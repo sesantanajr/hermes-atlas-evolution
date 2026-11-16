@@ -27,6 +27,8 @@ EXCERPT_LIMIT = 300
 PER_RUN = 3
 CALL_SECONDS = 60   # the timeout of one model call through Hermes
 DEFAULT_DAILY_LIMIT = 6
+BACKOFF_AFTER_FAILED_CALLS = 3   # calls in a row that raised for one failure before it waits
+BACKOFF_DAYS = 1                 # the first wait; each further failed call doubles it, up to SAMPLE_DAYS
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -58,12 +60,33 @@ INSTRUCTIONS = {
 }
 _INJECTION = re.compile(r"ignore (?:all |the )?(?:previous|prior|above)|disregard|system prompt|you are now|"
                         r"ignore (?:as |todas as )?instruç|esqueça (?:as )?instruç|<\s*/?\s*(?:system|assistant)", re.I)
+# A run of token characters that mixes letters and digits is masked as an opaque token, except a dotted name
+# such as `urllib3.exceptions.MaxRetryError`, which names the cause.
+_OPAQUE_RUN = re.compile(r"(?<![A-Za-z0-9_\-+/=.])[A-Za-z0-9_\-+/=.]{20,}")
+_DOTTED_NAME = re.compile(r"(?:[A-Za-z_]+\d{0,2}\.)+[A-Za-z_]+\d{0,2}\.?")
+
+
+def _opaque(match) -> str:
+    token = match.group(0)
+    digits = sum(char.isdigit() for char in token)
+    if not digits or not any(char.isalpha() for char in token) or digits <= 2 and _DOTTED_NAME.fullmatch(token):
+        return token
+    return "<secret>"
+
+
 _SCRUB = (
     (re.compile(r"(?:[a-z][a-z0-9+.-]*://)\S+", re.I), "<url>"),
     (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), "<email>"),
+    # A password given on the command line of a MySQL-like client: `mysql -u app -pVALUE`.
+    (re.compile(r"(\b(?i:mysql|mariadb)\w*\b[^|\n]*?\s-p)(?=[^\s'\"])[^\s'\"]+"), r"\1<secret>"),
+    # key=value assignments of credentials: password=, passwd=, pwd=, secret=, token=, api_key= (and MYSQL_PWD=).
+    (re.compile(r"(\b[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key)[\"']?\s*[=:]\s*[\"']?)[^\s,;&'\"]+", re.I),
+     r"\1<secret>"),
+    (re.compile(r"\b(?:ya29\.|glpat-|rk_live_|rk_test_|sk_live_|sk_test_|pk_live_|xox[a-z]-|ghp_|gho_|ghs_|ghr_|ghu_|"
+                r"github_pat_|sk-|hf_|AKIA|AIza)[A-Za-z0-9_\-.]{6,}|\bnpm_[A-Za-z0-9]{16,}"), "<secret>"),
     (re.compile(r"(?:[A-Za-z]:)?(?:[\\/][\w .@+-]{1,80}){2,}"), "<path>"),
     (re.compile(r"\b[0-9a-f]{16,}\b", re.I), "<hex>"),
-    (re.compile(r"\b(?:sk|ghp|gho|github_pat|xox[baprs]|AKIA|AIza|hf)[-_][A-Za-z0-9_-]{6,}"), "<secret>"),
+    (_OPAQUE_RUN, _opaque),
     (re.compile(r"\d{5,}"), "<n>"),
     (re.compile(r"(['\"])[^'\"\n]{41,}\1"), "'<text>'"),
 )
@@ -97,15 +120,27 @@ def keep_sample(conn: sqlite3.Connection, signature: str, klass: str, excerpt: s
 def prune_samples(conn: sqlite3.Connection, *, now: float) -> None:
     conn.execute("DELETE FROM failure_sample WHERE updated < ?", (now - SAMPLE_DAYS * 86_400,))
     conn.execute("DELETE FROM failure_sample WHERE signature IN (SELECT signature FROM lesson WHERE signature IS NOT NULL)")
+    conn.execute("""DELETE FROM reflector_backoff WHERE last_attempt < ?
+        OR signature IN (SELECT signature FROM lesson WHERE signature IS NOT NULL)""", (now - SAMPLE_DAYS * 86_400,))
 
 
-def candidates(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.Row]:
+def candidates(conn: sqlite3.Connection, *, limit: int, now: float | None = None) -> list[sqlite3.Row]:
+    """Failures the reflector may draft for, most frequent first. With `now`, one whose calls kept raising waits
+    until its backoff ends, so it does not take the room of the others."""
     return conn.execute("""SELECT f.signature, f.tool, f.klass, f.hint, f.total, f.sessions, s.excerpt,
-          (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=f.signature) AS days
+          (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=f.signature) AS days,
+          COALESCE((SELECT b.failures FROM reflector_backoff b WHERE b.signature=f.signature), 0) AS failed_calls
         FROM failure f JOIN failure_sample s ON s.signature=f.signature
         WHERE f.total >= ? AND (f.sessions >= 2 OR (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=f.signature) >= 2)
           AND NOT EXISTS (SELECT 1 FROM lesson l WHERE l.signature=f.signature)
-        ORDER BY f.total DESC, f.signature LIMIT ?""", (lessons.MIN_TOTAL, limit)).fetchall()
+          AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM reflector_backoff b WHERE b.signature=f.signature AND b.retry_after > ?))
+        ORDER BY f.total DESC, f.signature LIMIT ?""", (lessons.MIN_TOTAL, now, now, limit)).fetchall()
+
+
+def _backoff_seconds(failed_calls: int) -> float:
+    if failed_calls < BACKOFF_AFTER_FAILED_CALLS:
+        return 0.0
+    return min(SAMPLE_DAYS, BACKOFF_DAYS * 2 ** (failed_calls - BACKOFF_AFTER_FAILED_CALLS)) * 86_400.0
 
 
 def _used_today(conn, today: str) -> int:
@@ -127,7 +162,7 @@ def reflect(conn: sqlite3.Connection, ask, *, now: float, lang: str = "en", dail
     prune_samples(conn, now=now)
     used = _used_today(conn, today)
     room = max(0, min(PER_RUN, daily_limit - used))
-    rows = [dict(row) for row in candidates(conn, limit=room)]
+    rows = [dict(row) for row in candidates(conn, limit=room, now=now)]
     conn.commit()   # the gateway's hook writers must never wait for a model: no transaction spans a call
     drafted, declined, failed, short = [], 0, 0, False
     for row in rows:
@@ -138,14 +173,19 @@ def reflect(conn: sqlite3.Connection, ask, *, now: float, lang: str = "en", dail
                               "occurrences": row["total"], "sessions": row["sessions"], "days": row["days"],
                               "latest_error_excerpt": row["excerpt"]}, ensure_ascii=False)
         used += 1
-        # Count the call before making it, so a crash or a killed process can never exceed the daily cap.
+        # Count the call before making it, so a crash or a killed process can never exceed the daily cap. It also
+        # counts as failed until it returns: a call that raises (or never returns) adds to the failure's backoff.
+        attempts = row["failed_calls"] + 1
         conn.execute("INSERT OR REPLACE INTO cursor VALUES (?, ?)", (f"reflector:{today}", str(used)))
+        conn.execute("INSERT OR REPLACE INTO reflector_backoff VALUES (?, ?, ?, ?)",
+                     (row["signature"], attempts, now, now + _backoff_seconds(attempts)))
         conn.commit()
         try:
             answer = ask(INSTRUCTIONS.get(lang, INSTRUCTIONS["en"]), payload)
         except Exception:   # provider, trust or network failure: try again on a later run
             failed += 1
             continue
+        conn.execute("DELETE FROM reflector_backoff WHERE signature=?", (row["signature"],))
         text = answer.get("lesson") if isinstance(answer, dict) else None
         if not isinstance(answer, dict) or answer.get("applies") is not True or not isinstance(text, str):
             declined += 1

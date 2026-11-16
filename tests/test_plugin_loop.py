@@ -101,7 +101,10 @@ class PluginLoopTest(PluginBase):
     def test_registrations_match_the_manifest(self):
         context = self.plugin()
         declared = read_manifest(Path(__file__).resolve().parent.parent / "plugin.yaml")
-        self.assertEqual(sorted(context.hooks), sorted(declared["provides_hooks"]))
+        # transform_tool_result only with tool_hints on: while any plugin listens, Hermes reads every tool result
+        self.assertEqual(sorted(context.hooks), sorted(set(declared["provides_hooks"]) - {"transform_tool_result"}))
+        self.settings(evolution={"tool_hints": True})
+        self.assertEqual(sorted(self.plugin().hooks), sorted(declared["provides_hooks"]))
         self.assertEqual(sorted(context.tools), sorted(declared["provides_tools"]))
         self.assertEqual(list(context.sections), ["hermes-atlas-evolution.playbook"])
         self.assertLessEqual(context.sections["hermes-atlas-evolution.playbook"]["max_chars"], 4000)
@@ -202,16 +205,16 @@ class PluginLoopTest(PluginBase):
     def test_pending_decisions_are_announced_once_a_day_and_only_to_the_owner(self):
         self.settings(evolution={"language": "en"})
         context = self.plugin()
-        self.assertIsNone(context.fire("on_session_finalize", session_id="s", platform="cli", reason="exit"))  # nothing pending
+        self.assertIsNone(context.fire("on_session_finalize", session_id="s", platform="cli", reason="shutdown"))  # nothing pending
         with experience(self.home) as conn:
             lessons.add_custom(conn, "When the build fails, read the first error line first.", tool="terminal",
                                origin="operator", now=1.0)
-        self.assertIsNone(context.fire("on_session_finalize", session_id="s", platform="whatsapp", reason="exit"))
-        notice = context.fire("on_session_finalize", session_id="s", platform="cli", reason="exit")
+        self.assertIsNone(context.fire("on_session_finalize", session_id="s", platform="whatsapp", reason="shutdown"))
+        notice = context.fire("on_session_finalize", session_id="s", platform="cli", reason="shutdown")
         self.assertIn("hermes evolution status", notice["message"])
         self.assertIn("1 lesson", notice["message"])
         close_observers()
-        self.assertIsNone(context.fire("on_session_finalize", session_id="s2", platform="tui", reason="exit"))  # once a day
+        self.assertIsNone(context.fire("on_session_finalize", session_id="s2", platform="tui"))  # once a day
 
     def test_the_kanban_tick_only_nudges_the_autopilot(self):
         context = self.plugin()
@@ -436,13 +439,14 @@ class SurfacesTest(PluginBase):
         with experience(self.home) as conn:
             conn.execute("""INSERT INTO lesson(signature, tool, klass, hint, origin, status, created, updated)
                 VALUES ('sig', 'terminal', 'missing_dependency', 'rg', 'derived', 'candidate', 1, 1)""")
-        for reason in ("cli_close", "ws_orphan_reap", "startup_orphan_reap", "tui_close", "new_session"):
+        for reason in ("cli_close", "ws_orphan_reap", "startup_orphan_reap", "tui_close", "new_session", "resumed_other",
+                       "branched", "idle_timeout", "lru_evict"):
             self.assertIsNone(context.fire("on_session_finalize", session_id="s", platform="cli", reason=reason), reason)
         close_observers()
         with experience(self.home) as conn:
             self.assertIsNone(conn.execute("SELECT value FROM cursor WHERE key='notice_day'").fetchone())
-        notice = context.fire("on_session_finalize", session_id="s", platform="cli", reason="user_exit")
-        self.assertIn("1", notice["message"])
+        notice = context.fire("on_session_finalize", session_id="s", platform="cli", reason="session_boundary")
+        self.assertIn("1", notice["message"])   # the classic CLI's /new shows it; the TUI's close passes no reason
 
 
 

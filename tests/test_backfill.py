@@ -348,7 +348,9 @@ class BackfillTest(Base):
         self.history.tool_turn("s", NOW - DAY + 10, user=f"my key is {SECRET}", result=MISSING)
         self.history.save()
         self.run_backfill()
-        dump = "\n".join(sqlite3.connect(self.home / "evolution" / "evolution.sqlite3").iterdump())
+        stored = sqlite3.connect(self.home / "evolution" / "evolution.sqlite3")
+        self.addCleanup(stored.close)
+        dump = "\n".join(stored.iterdump())
         self.assertNotIn("SECRET", dump)
         self.assertNotIn("my key", dump)
 

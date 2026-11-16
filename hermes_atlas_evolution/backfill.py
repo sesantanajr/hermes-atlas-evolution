@@ -55,6 +55,8 @@ _REQUIRED = {"sessions": {"id", "source", "started_at"},
              "messages": {"id", "session_id", "role", "content", "tool_call_id", "tool_calls", "tool_name", "timestamp"}}
 _OPTIONAL = {"sessions": ("parent_session_id", "ended_at", "end_reason", "user_id")}
 _TEXT_ERROR = re.compile(r"(?:error|erro)\b\s*[:\-]|traceback \(most recent call last\)|blocked:", re.I)
+# The result Hermes stores for a call its own deadline ended (agent/tool_executor.py, 0.23.1).
+_TIMED_OUT = re.compile(r"Error executing tool '[^'\n]{1,96}': (?:timed out after|thread did not return)", re.I)
 _STATE_KEYS = ("observed_since", "backfill_cursor", "backfill_done", "backfill_totals", "backfill_revision",
                "backfill_until", "backfill_owner", "backfill_floor")
 
@@ -107,10 +109,12 @@ def mark_observed(home: Path, *, now: float) -> None:
 
 
 def _status(content) -> str:
-    """ok, error or blocked, read from a stored tool result the way Hermes' tools report failures."""
+    """ok, error, blocked or timeout, read from a stored tool result the way Hermes' tools report failures."""
     if not isinstance(content, str):
         return "ok"
     text = content.lstrip()
+    if _TIMED_OUT.match(text):
+        return "timeout"
     if text[:1] == "{" and len(text) <= 262_144:
         try:
             data = json.loads(text)
