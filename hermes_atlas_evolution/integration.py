@@ -217,6 +217,8 @@ class _Plugin:
         def callback(**payload):
             if hook == "subagent_start":
                 self._remember_child(payload.get("child_session_id"), payload.get("parent_session_id"))
+            elif hook == "post_compaction":   # a compaction mid-turn continues the session under a new id
+                self._renamed(payload.get("old_session_id"), payload.get("session_id"))
             try:
                 observe_native(self.home, hook, payload)
             except Exception:
@@ -228,6 +230,21 @@ class _Plugin:
             with self.recent_lock:
                 self.children[child] = parent
                 self.children.move_to_end(child)
+                while len(self.children) > 2048:
+                    self.children.popitem(last=False)
+
+    def _renamed(self, old, new) -> None:
+        """Carry what the plugin knows about a session to the id a compaction gave it: who it served, and the
+        parent of a delegated child, so its children and its own next calls are attributed as before."""
+        if not (isinstance(old, str) and isinstance(new, str) and old and new and old != new and len(new) <= 400):
+            return
+        with self.recent_lock:
+            if old in self.sessions and new not in self.sessions:
+                self.sessions[new] = self.sessions[old]
+                while len(self.sessions) > 2048:
+                    self.sessions.popitem(last=False)
+            if old in self.children and new not in self.children:
+                self.children[new] = self.children[old]
                 while len(self.children) > 2048:
                     self.children.popitem(last=False)
 

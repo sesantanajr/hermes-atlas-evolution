@@ -46,7 +46,7 @@ _EXPANDED = frozenset({"USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA"})
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # Wrappers that run the command after their own options: name -> options that take a separate value.
-_WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t"}, "env": {"-u", "-C", "-S"}, "nohup": set(),
+_WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t"}, "env": {"-u", "-C"}, "nohup": set(),
              "timeout": {"-s", "-k", "--signal", "--kill-after"}, "nice": {"-n", "--adjustment"},
              "ionice": {"-c", "-n", "-p"}, "stdbuf": {"-i", "-o", "-e"}, "exec": set(), "command": set(),
              "builtin": set(), "time": set(), "chrt": set(), "doas": {"-u"}, "setsid": set(),
@@ -182,10 +182,15 @@ def _segments(command: str) -> list[list[str]] | None:
     return segments
 
 
+# Stands for the words xargs adds from its input at the end of the command: unknown here, like a shell variable.
+XARGS_WORDS = "$XARGS"
+
+
 def _strip_prefix(tokens: list[str]) -> list[str]:
     """Drop variable assignments and wrappers such as sudo, env, nohup, timeout, setsid, systemd-run, flock,
-    watch, xargs and rtk run before the real command."""
-    index = 0
+    watch, xargs and rtk run before the real command. Under xargs, a last word XARGS_WORDS stands for the words
+    xargs adds from its input."""
+    index, xargs = 0, False
     while index < len(tokens):
         token = tokens[index]
         if _ASSIGNMENT.match(token):
@@ -199,6 +204,7 @@ def _strip_prefix(tokens: list[str]) -> list[str]:
             continue
         if name not in _WRAPPERS or _command_string(name, tokens[index + 1:]) is not None:
             break
+        xargs = xargs or name == "xargs"
         index += 1
         with_value = _WRAPPERS[name]
         while index < len(tokens) and tokens[index].startswith("-"):
@@ -207,7 +213,8 @@ def _strip_prefix(tokens: list[str]) -> list[str]:
                 break
             index += 2 if tokens[index] in with_value else 1
         index += _TAKES_POSITIONAL.get(name, 0)
-    return tokens[index:]
+    rest = tokens[index:]
+    return [*rest, XARGS_WORDS] if xargs and rest else rest
 
 
 def _program(token: str) -> str:
@@ -224,6 +231,17 @@ def _command_string(verb: str, rest: list[str]) -> str | None:
         for position, token in enumerate(rest):
             if token.lower() in switches:
                 return " ".join(rest[position + 1:]) or None   # everything after the switch is the command
+        return None
+    if verb == "env":   # env -S '<command>' splits one string into the command and its arguments
+        for position, token in enumerate(rest):
+            if token in ("-S", "--split-string"):
+                return " ".join(rest[position + 1:]) or None
+            if token.startswith("--split-string="):
+                return " ".join([token.split("=", 1)[1], *rest[position + 1:]]) or None
+            if token.startswith("-S") and len(token) > 2:
+                return " ".join([token[2:], *rest[position + 1:]])
+            if not token.startswith("-") and not _ASSIGNMENT.match(token):
+                break
         return None
     for position, token in enumerate(rest):
         if verb in _SHELLS and re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", token):
@@ -310,10 +328,33 @@ def _stops_gateway(verb: str, rest: list[str], words: list[str]) -> bool:
     if verb in ("pkill", "killall"):
         return any("hermes" in word.lower() for word in words)
     if verb == "hermes":   # stop leaves Hermes down; restart is the owner's call
-        words = _hermes_words(rest)
-        return any(word == "gateway" and (following in ("stop", "restart") or _dynamic(following))
-                   for word, following in zip(words, words[1:]))
+        words, options = _hermes_words(rest), {token.split("=", 1)[0] for token in rest if token.startswith("-")}
+        for word, following in zip(words, words[1:]):
+            if not (word == "gateway" or _dynamic(word)):
+                continue
+            if following in _GATEWAY_STOPS or _dynamic(following) or \
+                    following in _GATEWAY_STOPS_WITH and _GATEWAY_STOPS_WITH[following] & options:
+                return True
     return False
+
+
+# `hermes gateway <action>` that stops or replaces the running gateway, always or with one of these options:
+# uninstall stops and disables the service, start --all kills every gateway process first, run --replace
+# replaces the running one, install --force reinstalls the service under it.
+_GATEWAY_STOPS = frozenset({"stop", "restart", "uninstall"})
+_GATEWAY_STOPS_WITH = {"start": {"--all"}, "run": {"--replace"}, "install": {"--force"}}
+
+
+def _deleted_profile(verb: str, rest: list[str]) -> str | None:
+    """The profile `hermes profile delete <name>` would delete with everything Hermes keeps for it (stopping its
+    gateway first), or the word the shell fills in there."""
+    if verb != "hermes":
+        return None
+    words = _hermes_words(rest)
+    for index, word in enumerate(words[:-1]):
+        if (word == "profile" or _dynamic(word)) and words[index + 1] == "delete":
+            return words[index + 2] if index + 2 < len(words) else "?"
+    return None
 
 
 PLUGIN_ID = "hermes-atlas-evolution"
@@ -341,8 +382,9 @@ def _hermes_words(rest: list[str]) -> list[str]:
 
 
 def _dynamic(token: str) -> bool:
-    """A word the shell fills in when the command runs ($VAR, $'...', `...`): what it names cannot be read here."""
-    return "$" in token or "`" in token
+    """A word filled in when the command runs ($VAR, $'...', `...`, xargs' {} or its added words): what it names
+    cannot be read here."""
+    return "$" in token or "`" in token or "{}" in token
 
 
 def _key_parts(key: str) -> list[str]:
@@ -371,13 +413,16 @@ def _changes_plugin(verb: str, rest: list[str]) -> bool:
     words = _hermes_words(rest)
     for index, word in enumerate(words):
         following = words[index + 1] if index + 1 < len(words) else None
-        if word == "config" and following is not None:
-            if following == "edit" or _dynamic(following):
+        if following is None:
+            break
+        shell_word = _dynamic(word)   # `hermes $G restart`: the group itself is filled in by the shell
+        if word == "config" or shell_word:
+            if following == "edit" or (word == "config" and _dynamic(following)):
                 return True
             if following in ("set", "unset") and index + 2 < len(words) and _owner_key(words[index + 2]):
                 return True
-        if word == "plugins" and following is not None:
-            if _dynamic(following):
+        if word == "plugins" or shell_word:
+            if word == "plugins" and _dynamic(following):
                 return True
             if following in ("disable", "remove", "rm", "uninstall") and \
                     any(name in _PLUGIN_IDS or _dynamic(name) for name in words[index + 2:]):
@@ -443,6 +488,9 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
             return {"kind": "gateway_stop"}
         if _changes_plugin(verb, rest):
             return {"kind": "plugin_settings"}
+        deleted = _deleted_profile(verb, rest)
+        if deleted is not None:
+            return {"kind": "runtime_removal", "path": f"`{deleted}`"}
         path = _hit(_removed_paths(verb, rest, words), protected=protected, home=home, profile=profile)
         if path:
             return {"kind": "runtime_removal", "path": path}

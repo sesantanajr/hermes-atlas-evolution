@@ -71,6 +71,9 @@ def owner_fingerprint(owner_sender_ids=(), owner_platforms=()) -> str:
 
 
 _NO_OWNER = owner_fingerprint()   # also what a replay recorded before the fingerprint existed
+# Kept in backfill_done while this version replays: 0.5.0 and 0.6.0 leave a replay alone whenever backfill_done
+# holds anything, so a copy of theirs still running beside this one never replays slices the old way.
+_RUNNING = "running"
 _UNKNOWN_OWNER = "unknown"         # replayed where the owner settings could not be read (see step)
 
 
@@ -189,8 +192,9 @@ def _state(home: Path) -> dict:
         until = float(values["backfill_until"]) if "backfill_until" in values else since
     except ValueError:
         until = since
+    done = values.get("backfill_done")
     return {"since": since, "until": until, "cursor": (started, position[2]), "position": values.get("backfill_cursor"),
-            "done": values.get("backfill_done"), "version": values.get("backfill_revision"),
+            "done": None if done == _RUNNING else done, "version": values.get("backfill_revision"),
             "owner": values.get("backfill_owner") or _NO_OWNER, "floor": values.get("backfill_floor"),
             "totals": {key: _count(totals.get(key)) for key in _TOTALS}}
 
@@ -231,9 +235,10 @@ def _redo(home: Path, *, since: float, now: float, fingerprint: str | None = _NO
         conn.execute("""UPDATE lesson SET baseline_failures=NULL, baseline_calls=NULL
             WHERE activated IS NOT NULL AND activated < ? AND activated >= ?""",
                      (boundary + _BASELINE_DAYS * 86_400, now - (RETENTION_DAYS - _BASELINE_DAYS) * 86_400))
-        conn.execute("DELETE FROM cursor WHERE key IN ('backfill_cursor', 'backfill_done', 'backfill_totals')")
+        conn.execute("DELETE FROM cursor WHERE key IN ('backfill_cursor', 'backfill_totals')")
         conn.executemany("INSERT OR REPLACE INTO cursor VALUES (?, ?)",
-                         (("backfill_until", repr(boundary)), *_revision_keys(fingerprint, floor)))
+                         (("backfill_done", _RUNNING), ("backfill_until", repr(boundary)),
+                          *_revision_keys(fingerprint, floor)))
 
 
 class _Replay:
@@ -493,7 +498,8 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
                     summary = json.dumps(counted)
                     record(home, lambda conn, p=position, s=summary: conn.executemany(
                         "INSERT OR REPLACE INTO cursor VALUES (?, ?)",
-                        (("backfill_cursor", p), ("backfill_totals", s), *_revision_keys(fingerprint, floor))))
+                        (("backfill_cursor", p), ("backfill_totals", s), ("backfill_done", _RUNNING),
+                         *_revision_keys(fingerprint, floor))))
             except _CursorMoved:
                 return {"status": "running", **state["totals"]}
             except _Unreadable:

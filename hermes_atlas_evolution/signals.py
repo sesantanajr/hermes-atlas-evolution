@@ -363,9 +363,11 @@ def approval_setting(text: str, origin: str | None) -> str:
     match = _APPROVAL_SETTING.search(text)
     if match:
         return f"approvals.{match.group(1)}"
+    if _PERSON.search(text):   # a person answered: in a chat, through an approval transport, in a gateway child
+        return ""
     if origin == "subagent":   # Hermes denies a CLI subagent's prompt for it, unless delegation allows it
         return "delegation.subagent_auto_approve" if _CLI_DENIED.search(text) else ""
-    if _PERSON.search(text) or _CLI_DENIED.search(text):
+    if _CLI_DENIED.search(text):
         return ""
     return UNATTENDED_SETTINGS.get(origin or "", "")
 

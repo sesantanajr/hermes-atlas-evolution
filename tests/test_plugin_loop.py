@@ -484,6 +484,20 @@ class SubagentOwnerTest(PluginBase):
     def test_a_child_delegated_from_the_owners_own_session_serves_the_owner(self):
         self.assertEqual(self.delegate("cli-session", "child-2", platform="cli"), (True, True, 1, 1))
 
+    def test_a_compaction_that_renames_the_parent_keeps_its_children_the_owners(self):
+        # Hermes compresses in the middle of the owner's turn and the agent delegates under the new id at once
+        self.context.fire("pre_llm_call", session_id="cli-1", turn_id="t1", user_message="long job", platform="cli")
+        self.context.fire("post_compaction", session_id="cli-1-cont", old_session_id="cli-1", kind="auto", reason="full")
+        self.context.fire("subagent_start", parent_session_id="cli-1-cont", parent_turn_id="t1", child_session_id="kid",
+                          child_subagent_id="kid", child_role="worker", child_goal="do it")
+        prompt = self.context.sections["hermes-atlas-evolution.playbook"]["content"]({"session_id": "kid",
+                                                                                       "platform": "subagent"})
+        self.context.fire("pre_llm_call", session_id="kid", turn_id="k1", user_message="do it", platform="subagent",
+                          parent_session_id="cli-1-cont")
+        reply = json.loads(self.context.tools["hermes_atlas_evolution_lessons"]["handler"]({"action": "search"},
+                                                                                           session_id="kid"))
+        self.assertEqual(("ops/db-stage" in prompt, "lessons" in reply), (True, True))
+
     def test_a_child_whose_parent_is_unknown_serves_someone_else(self):
         render = self.context.sections["hermes-atlas-evolution.playbook"]["content"]
         self.assertNotIn("ops/db-stage", render({"session_id": "orphan", "platform": "subagent"}))

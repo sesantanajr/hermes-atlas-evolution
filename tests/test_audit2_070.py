@@ -90,6 +90,32 @@ class GuardArgvTest(unittest.TestCase):
             self.assertIsNone(self.kind(command), command)
 
 
+class GuardReachTest(unittest.TestCase):
+    """Other ways to stop the gateway, a filled-in group word, env -S and the words xargs adds."""
+
+    def kind(self, command):
+        found = check("terminal", {"command": command}, protected=(), home=Path("/home/x"))
+        return found and found["kind"]
+
+    def test_every_hermes_command_that_takes_the_gateway_down_is_vetoed(self):
+        for command in ("hermes gateway uninstall", "hermes gateway start --all", "hermes gateway run --replace",
+                        "hermes gateway install --force", "G=gateway; hermes $G restart",
+                        "env -S 'hermes gateway restart'", "env --split-string='hermes gateway restart'",
+                        "echo restart | xargs hermes gateway", "echo restart | xargs -I{} hermes gateway {}"):
+            self.assertEqual(self.kind(command), "gateway_stop", command)
+        self.assertEqual(self.kind("hermes profile delete work -y"), "runtime_removal")
+        for command in ("hermes $'config' set plugins.enabled '[]'", "P=plugins; hermes $P disable hermes-atlas-evolution",
+                        "env -S'hermes plugins disable hermes-atlas-evolution'",
+                        "echo hermes-atlas-evolution | xargs hermes plugins disable",
+                        "printf 'plugins.disabled x' | xargs hermes config set"):
+            self.assertEqual(self.kind(command), "plugin_settings", command)
+        for command in ("hermes gateway status", "hermes gateway start", "hermes gateway install", "hermes gateway run",
+                        "echo x | xargs hermes gateway status", "env FOO=1 hermes gateway status",
+                        "hermes profile list", "hermes chat -q \"$PROMPT\"", "find . -name '*.pyc' | xargs rm",
+                        "echo pt | xargs hermes config set display.language"):
+            self.assertIsNone(self.kind(command), command)
+
+
 class HistoryChildTest(Base):
     def test_a_replayed_child_serves_whoever_its_parent_served(self):
         db = self.history()
@@ -196,6 +222,33 @@ class ReplayStateTest(Base):
         state = self.state()
         self.assertEqual((state["backfill_version"], state["backfill_revision"]), ("2", backfill.VERSION))
 
+    def test_an_older_copy_never_replays_while_this_version_does(self):
+        # 0.5.0 and 0.6.0 leave a replay alone whenever backfill_done holds anything and the version reads "2".
+        db = self.history()
+        for index in range(6):
+            self.timed_out(db, f"s{index}", "cli", None, NOW - 2 * DAY - (6 - index) * 3600)   # before observation
+        db.commit()
+        db.close()
+        self.settled(owner=backfill.owner_fingerprint(), revision=None, version="2")   # what 0.6.0 left
+        # the redo itself, before any slice
+        self.assertEqual(backfill.step(self.home, now=NOW, budget_s=5, cancelled=lambda: True)["status"], "running")
+        state = self.state()
+        self.assertEqual((state["backfill_done"], state["backfill_version"]), ("running", "2"))
+        self.assertEqual(backfill.step(self.home, now=NOW, budget_s=5)["status"], "done")   # this version goes on
+        self.assertEqual(self.state()["backfill_done"], "done")
+
+    def test_a_first_replay_is_marked_as_running_from_its_first_slice(self):
+        db = self.history()
+        for index in range(6):
+            self.timed_out(db, f"s{index}", "cli", None, NOW - 2 * DAY - (6 - index) * 3600)
+        db.commit()
+        db.close()
+        with experience(self.home) as conn:
+            conn.execute("INSERT INTO cursor VALUES ('observed_since', ?)", (repr(NOW - DAY),))
+        self.assertEqual(backfill.step(self.home, now=NOW, budget_s=5, slice_sessions=2,
+                                       cancelled=iter([False, True]).__next__)["status"], "running")
+        self.assertEqual(self.state()["backfill_done"], "running")
+
     def test_a_run_that_cannot_read_the_owner_settings_never_redoes_for_them(self):
         db = self.history()
         db.commit()
@@ -247,7 +300,8 @@ class WhoAnsweredTest(unittest.TestCase):
         unattended = "BLOCKED: ... To allow it on unattended platforms, set approvals.unattended_mode: approve in config.yaml."
         transport = "BLOCKED: User denied this command through the selected approval transport."
         self.assertEqual([approval_setting(gateway_denied, "kanban"), approval_setting(transport, "tool"),
-                          approval_setting(cli_denied, "oneshot")], ["", "", ""])
+                          approval_setting(cli_denied, "oneshot"), approval_setting(transport, "subagent")],
+                         ["", "", "", ""])
         self.assertEqual([approval_setting(gateway_denied, "api_server"), approval_setting(unattended, "api_server"),
                           approval_setting(timed_out, "api_server"), approval_setting(gateway_denied, "subagent"),
                           approval_setting(cli_denied, "subagent"), approval_setting(timed_out, "kanban"),
