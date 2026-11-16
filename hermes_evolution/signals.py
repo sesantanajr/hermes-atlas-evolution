@@ -501,6 +501,21 @@ def record_skill_event(home: Path, payload: dict, *, now: float | None = None) -
         ON CONFLICT DO UPDATE SET count=count+1""", rows), now=stamp)
 
 
+def record_guard(home: Path, kind: str, *, now: float | None = None) -> None:
+    """Count a command the runtime guard vetoed. Only the kind is kept, never the command."""
+    if kind not in ("gateway_stop", "runtime_removal"):
+        return
+    stamp = time.time() if now is None else now
+    record(home, lambda conn: conn.execute("""INSERT INTO guard_daily VALUES (?, ?, 1)
+        ON CONFLICT DO UPDATE SET count=count+1""", (utc_day(stamp), kind)), now=stamp)
+
+
+def guard_summary(conn, *, now: float, days: int) -> dict:
+    start, end = _window(now, days)
+    return dict(conn.execute("SELECT kind, SUM(count) FROM guard_daily WHERE day BETWEEN ? AND ? GROUP BY kind",
+                             (start, end)).fetchall())
+
+
 # ── summaries ────────────────────────────────────────────────────────────────────────────────────
 
 def _window(now: float, days: int) -> tuple[str, str]:

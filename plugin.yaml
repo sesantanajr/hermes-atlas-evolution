@@ -17,6 +17,7 @@ provides_tools:
   - atlas_evolution_plan
   - atlas_evolution_lessons
 provides_hooks:
+  - pre_tool_call
   - post_api_request
   - api_request_error
   - post_auxiliary_call
@@ -91,3 +92,11 @@ config_schema:
     description: >-
       Run the learning pass by itself in the background, at most once per interval, from 15 to 1440 minutes.
       0 runs it only when you call hermes evolution learn.
+  runtime_guard:
+    type: bool
+    default: true
+    label: Runtime guard
+    description: >-
+      Stop the agent from taking down the Hermes it runs in. Vetoes terminal commands that restart or kill the
+      gateway (it is told to use hermes gateway restart, which waits for running turns) or that delete the running
+      Python, the Hermes code or this profile.

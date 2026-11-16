@@ -174,6 +174,20 @@ class PluginLoopTest(PluginBase):
         self.assertEqual(context.sections, {})
         self.assertIn("post_tool_call", context.hooks)   # measurement continues
 
+    def test_the_runtime_guard_vetoes_a_gateway_restart_and_counts_it(self):
+        self.settings(evolution={"language": "en"})
+        context = self.plugin()
+        directive = context.fire("pre_tool_call", tool_name="terminal",
+                                 args={"command": "systemctl --user restart hermes-gateway"})
+        self.assertEqual(directive["action"], "block")
+        self.assertIn("hermes gateway restart", directive["message"])
+        self.assertIsNone(context.fire("pre_tool_call", tool_name="terminal", args={"command": "ls -la"}))
+        close_observers()
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT kind, count FROM guard_daily").fetchall()[0][:], ("gateway_stop", 1))
+        self.settings(evolution={"runtime_guard": False})
+        self.assertNotIn("pre_tool_call", self.plugin().hooks)
+
     def test_error_excerpts_are_kept_only_when_the_reflector_could_use_them(self):
         crash = json.dumps({"output": "Traceback (most recent call last):\nKeyError: 'column'", "exit_code": 1})
         for lessons_mode, expected in (("off", 0), ("suggest", 1)):

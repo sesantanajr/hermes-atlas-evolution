@@ -350,6 +350,13 @@ def register(ctx):
                 runtime_config=config, hermes_source=source, kanban_home=get_default_hermes_root(home=home),
                 reflect=reflect)
 
+    if evolution["runtime_guard"]:
+        from .guard import RuntimeGuard, protected_paths
+        from .signals import record_guard
+
+        guard = RuntimeGuard(protected=protected_paths(hermes_root=get_default_hermes_root(home=home), profile_home=home),
+                             home=Path.home(), lang=evolution["language"], on_block=lambda kind: record_guard(home, kind))
+        ctx.register_hook("pre_tool_call", guard)
     ctx.register_hook("post_tool_call", after_tool)
     ctx.register_hook("pre_llm_call", before_turn)
     ctx.register_hook("post_llm_call", after_turn)

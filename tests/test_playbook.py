@@ -158,6 +158,13 @@ class HintsTest(Base):
             self.assertIsNone(attach(unusable, "Do Y."))
         self.assertIsNone(attach("x", ""))
 
+    def test_a_native_terminal_hint_is_not_repeated_by_a_lesson(self):
+        native = json.dumps({"output": "rg: command not found", "exit_code": 127,
+                             "hint": "Install ripgrep or use grep -r instead."})
+        self.assertIsNone(attach(native, "When rg is missing, use grep -r."))   # Hermes already said it
+        empty_hint = json.dumps({"output": "boom", "exit_code": 1, "hint": None})
+        self.assertIsNotNone(attach(empty_hint, "When boom happens, check the input."))
+
     def test_a_hint_is_given_once_per_session_and_capped(self):
         self.tool_fails(now=NOW - DAY, times=2)
         self.tool_fails(now=NOW, times=2)

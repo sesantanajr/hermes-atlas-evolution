@@ -46,7 +46,7 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
                "slow_turn_seconds": ("evolution", "slow_turn_seconds"),
                "owner_sender_ids": ("evolution", "owner_sender_ids"), "agent_tools": ("agent_advice",),
                "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit"),
-               "autopilot_minutes": ("evolution", "autopilot_minutes")}
+               "autopilot_minutes": ("evolution", "autopilot_minutes"), "runtime_guard": ("evolution", "runtime_guard")}
 
 
 def native_settings(runtime_config) -> dict:

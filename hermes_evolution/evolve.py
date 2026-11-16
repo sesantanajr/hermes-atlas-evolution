@@ -18,7 +18,7 @@ from .skill_health import read_usage, skill_health, skill_outcomes
 
 DEFAULTS = {"lessons": "suggest", "tool_hints": True, "feedback_signals": True, "language": "auto",
             "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": True, "reflector_daily_limit": 6,
-            "autopilot_minutes": 60}
+            "autopilot_minutes": 60, "runtime_guard": True}
 
 
 def _whole(value):
@@ -63,7 +63,10 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
     autopilot = checked("autopilot_minutes", _whole(raw.get("autopilot_minutes", DEFAULTS["autopilot_minutes"])),
                         lambda value: type(value) is int and (value == 0 or 15 <= value <= 1440),
                         "evolution.autopilot_minutes must be 0 (manual only) or an integer from 15 to 1440", 0)
-    return {"lessons": mode, "tool_hints": raw.get("tool_hints", True) is not False,
+    # A protection: an invalid value keeps it on.
+    guard = checked("runtime_guard", raw.get("runtime_guard", True), lambda value: type(value) is bool,
+                    "evolution.runtime_guard must be true or false", True)
+    return {"lessons": mode, "tool_hints": raw.get("tool_hints", True) is not False, "runtime_guard": guard,
             "reflector": reflect, "reflector_daily_limit": daily, "autopilot_minutes": autopilot,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
             "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
@@ -93,7 +96,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         conn.commit()
         ingested = 0
         for _ in range(8):   # at most 32 MiB of log per pass
-            step = logwatch.ingest_reviews(home, conn)
+            step = logwatch.ingest_reviews(home, conn, since_day=logwatch.local_days(now, backfill.BACKFILL_DAYS)[0])
             conn.commit()
             ingested += step["reviews"]
             if not step.get("more"):

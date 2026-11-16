@@ -17,7 +17,7 @@ from pathlib import Path
 
 BUCKETS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 RETENTION_DAYS = 35
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 RECOVERY_SPACING_SECONDS = 300
 OBSERVER_BUSY_SECONDS = 0.035
 _OBSERVER_LOCK_SECONDS = 0.05
@@ -69,10 +69,10 @@ def _open(path: Path, timeout: float, **options) -> sqlite3.Connection:
     try:
         connection.row_factory = sqlite3.Row
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version in (0, 1, 2, 3, 4, 5, 6):
+        if version in (0, 1, 2, 3, 4, 5, 6, 7):
             if version == 0:
                 connection.execute("PRAGMA journal_mode=WAL")
-            # 4: evolution loop, 5: skill outcomes, 6: reflector, 7: frozen lesson baselines
+            # 4: evolution loop, 5: skill outcomes, 6: reflector, 7: frozen lesson baselines, 8: runtime guard
             from .experience import SCHEMA as experience_schema, ensure_columns
 
             connection.execute("BEGIN IMMEDIATE")
