@@ -20,7 +20,7 @@ from .native_actions import PLAYBOOKS
 from .operations import RETENTION_DAYS, database, recommendations, run_policy, summarize
 
 RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
-EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report")
+EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report", "owner")
 CYCLE_INTERVAL_SECONDS = 3600
 
 
@@ -48,6 +48,7 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
                "tool_hints": ("evolution", "tool_hints"), "feedback_signals": ("evolution", "feedback_signals"),
                "slow_turn_seconds": ("evolution", "slow_turn_seconds"),
                "owner_sender_ids": ("evolution", "owner_sender_ids"), "agent_tools": ("agent_advice",),
+               "owner_platforms": ("evolution", "owner_platforms"),
                "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit"),
                "autopilot_minutes": ("evolution", "autopilot_minutes"), "runtime_guard": ("evolution", "runtime_guard")}
 
@@ -182,6 +183,14 @@ def setup(parser: argparse.ArgumentParser) -> None:
     state.add_argument("--format", choices=("md", "json"), default="md")
     state.add_argument("--no-learn", action="store_true",
                        help=_("Only read; do not run the first pass when this profile never had one"))
+    owner = commands.add_parser("owner", help=_("Show the chat channels and senders, and choose which ones are you"))
+    owner_commands = owner.add_subparsers(dest="owner_action")
+    owner_commands.add_parser("list", help=_("List chat channels and senders of the last 30 days"))
+    owner_commands.add_parser("add", help=_("Count a sender id as you")).add_argument("value")
+    owner_commands.add_parser("remove", help=_("Stop counting a sender id as you")).add_argument("value")
+    owner_commands.add_parser("add-platform", help=_("Count every chat of a platform as you (a private bot, your own UI)")
+                              ).add_argument("value")
+    owner_commands.add_parser("remove-platform", help=_("Stop counting every chat of a platform as you")).add_argument("value")
     learn = commands.add_parser("learn", help=_("Run one evolution pass: derive lessons, measure changes, refresh proposals"))
     learn.add_argument("--notify-only", action="store_true", help=_("Print only new lessons, regressions and high-risk proposals"))
     playbook = commands.add_parser("lessons", help=_("Review the playbook learned from recurring tool failures"))
@@ -284,6 +293,100 @@ def _memory(conn, args):
     return store.audit(scope)
 
 
+_OWNER_TEXT = {
+    "en": {"title": "Who is you in chats", "current": "Counted as you now", "senders": "sender ids", "platforms": "platforms",
+           "none": "none", "channels": "Chat channels in the last 30 days", "col_channel": "channel",
+           "col_sessions": "sessions", "col_senders": "senders (sessions)", "col_you": "counts as you",
+           "yes": "yes", "no": "no", "empty": "No chat session in 30 days: your CLI, TUI and Desktop always count as you.",
+           "add": "To count a sender as you", "platform": "To count every chat of a channel as you (a private bot, your own UI)",
+           "restart": "Then restart the gateway so the running hooks see it", "changed": "Saved in `{path}`: {key} = {value}."},
+    "pt": {"title": "Quem é você nos chats", "current": "Contam como você agora", "senders": "ids de remetente",
+           "platforms": "plataformas", "none": "nenhum", "channels": "Canais de chat dos últimos 30 dias",
+           "col_channel": "canal", "col_sessions": "sessões", "col_senders": "remetentes (sessões)",
+           "col_you": "conta como você", "yes": "sim", "no": "não",
+           "empty": "Nenhuma sessão de chat em 30 dias: o seu CLI, TUI e Desktop sempre contam como você.",
+           "add": "Para contar um remetente como você",
+           "platform": "Para contar todo chat de um canal como você (um bot privado, a sua própria interface)",
+           "restart": "Depois reinicie o gateway para os hooks em execução verem a mudança",
+           "changed": "Gravado em `{path}`: {key} = {value}."},
+}
+
+
+def _save_settings(home: Path, data: dict) -> Path:
+    """Write settings.json atomically, private to the owner."""
+    import tempfile
+
+    folder = Path(home) / "evolution"
+    folder.mkdir(mode=0o700, exist_ok=True)
+    target = folder / "settings.json"
+    handle, temporary = tempfile.mkstemp(dir=folder, prefix=".settings-", suffix=".json")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    return target
+
+
+def _owner(args, home: Path, *, now: float, runtime_config, lang: str) -> str:
+    """`hermes evolution owner`: the chat channels and senders, and who counts as the owner. Operator only:
+    it shows sender ids, and a change decides what reaches the agent."""
+    from .evolve import options
+    from .status import chat_senders
+
+    _operator_only()
+    t = _OWNER_TEXT[lang if lang in _OWNER_TEXT else "en"]
+    action = getattr(args, "owner_action", None) or "list"
+    if action != "list":
+        key = "owner_platforms" if action.endswith("platform") else "owner_sender_ids"
+        if key in native_settings(runtime_config):
+            raise ValueError("This setting is set in the Hermes settings form; change it there")
+        value = str(args.value).strip()
+        if key == "owner_platforms":
+            value = value.lower()
+            if not re.fullmatch(r"[a-z][a-z0-9_.-]{0,47}", value):
+                raise ValueError("Name a platform such as telegram or api_server")
+        elif not 0 < len(value) <= 200:
+            raise ValueError("A sender id has 1 to 200 characters")
+        stored = settings(home)
+        section = stored.get("evolution") if isinstance(stored.get("evolution"), dict) else {}
+        current = [str(item) for item in section.get(key) or [] if isinstance(item, (str, int)) and not isinstance(item, bool)]
+        current = [*current, value] if action.startswith("add") and value not in current else \
+            [item for item in current if item != value] if action.startswith("remove") else current
+        if len(current) > 20:
+            raise ValueError("Up to 20 entries are kept; remove one first")
+        stored["evolution"] = {**section, key: current}
+        path = _save_settings(home, stored)
+        return t["changed"].format(path=path, key=key, value=json.dumps(current, ensure_ascii=False)) + \
+            f"\n{t['restart']}: `hermes gateway restart`\n"
+    chosen = options(effective_settings(home, runtime_config), runtime_config, strict=False)
+    channels = chat_senders(home, since=now - 30 * 86_400, owners=chosen["owner_sender_ids"],
+                            platforms=chosen["owner_platforms"])
+    lines = [f"# {t['title']}", "",
+             f"- **{t['current']}:** {t['senders']}: {', '.join(f'`{item}`' for item in chosen['owner_sender_ids']) or t['none']}"
+             f" · {t['platforms']}: {', '.join(f'`{item}`' for item in chosen['owner_platforms']) or t['none']}", ""]
+    if not channels:
+        lines.append(t["empty"])
+    else:
+        lines += [f"## {t['channels']}", "", f"| {t['col_channel']} | {t['col_sessions']} | {t['col_senders']} | {t['col_you']} |",
+                  "|---|---:|---|---|"]
+        for channel in channels:
+            senders = ", ".join(f"`{item['id']}` ({item['sessions']})" + (" ✓" if item["owner"] else "")
+                                for item in channel["senders"][:8] if item["id"] is not None) or "—"
+            lines.append(f"| `{channel['origin']}` | {channel['sessions']} | {senders} | "
+                         f"{t['yes'] if channel['covered'] else t['no']} |")
+        lines += ["", f"{t['add']}: `hermes evolution owner add <id>`",
+                  f"{t['platform']}: `hermes evolution owner add-platform <channel>`",
+                  f"{t['restart']}: `hermes gateway restart`"]
+    return "\n".join(lines) + "\n"
+
+
 def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=None):
     """Commands of the evolution loop: lessons, skills, proposals, experiments and the digest."""
     from . import experiments, lessons, proposals
@@ -296,6 +399,8 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
     config = effective_settings(home, runtime_config)
     opts = options(config, runtime_config)
     lang = getattr(args, "lang", None) or opts["language"]
+    if action == "owner":
+        return _owner(args, home, now=now, runtime_config=runtime_config, lang=lang)
     if action == "status":
         from . import status
 

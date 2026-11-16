@@ -108,6 +108,49 @@ def _sessions(home: Path, *, since: float) -> int | None:
         return None
 
 
+def chat_senders(home: Path, *, since: float, owners=(), platforms=()) -> list[dict]:
+    """Chat channels of this profile since `since`, read-only from its state.db: per origin (telegram,
+    api_server, ...) the sessions, their distinct senders with their session counts, and whether the owner
+    settings already cover the channel. Local surfaces, automations and subagents are left out."""
+    from .signals import surface_of
+
+    path = Path(home) / "state.db"
+    if not path.is_file():
+        return []
+    try:
+        source = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=1)
+        try:
+            rows = source.execute("""SELECT source, user_id, COUNT(*) FROM sessions WHERE started_at >= ?
+                GROUP BY source, user_id ORDER BY COUNT(*) DESC LIMIT 400""", (since,)).fetchall()
+        finally:
+            source.close()
+    except sqlite3.Error:
+        return []
+    owners, platforms = {str(item) for item in owners}, set(platforms)
+    channels: dict[str, dict] = {}
+    for origin, sender, count in rows:
+        name = str(origin or "unknown").lower()[:48]
+        if surface_of(name) != "gateway":
+            continue
+        channel = channels.setdefault(name, {"origin": name, "sessions": 0, "senders": [], "covered": name in platforms})
+        channel["sessions"] += count
+        listed = sender is not None and str(sender) in owners
+        channel["covered"] = channel["covered"] or listed
+        channel["senders"].append({"id": None if sender is None else str(sender)[:200], "sessions": count, "owner": listed})
+    return sorted(channels.values(), key=lambda item: -item["sessions"])
+
+
+def _digest_scheduled(home: Path) -> bool:
+    """Whether Hermes' scheduler holds an enabled weekly digest of this plugin for the profile."""
+    from .workloads import _load_json
+
+    status, data = _load_json(Path(home) / "cron" / "jobs.json", 4 * 1024 * 1024)
+    jobs = data.get("jobs") if status == "ok" and isinstance(data, dict) else None
+    return any(isinstance(job, dict) and job.get("enabled") is not False
+               and job.get("name") in ("hermes-atlas-evolution-digest", "hermes-evolution-digest")
+               for job in jobs or ())
+
+
 LEGACY_DIRS = ("hermes-evolution",)   # the plugin id used up to 0.5.0
 
 
@@ -252,6 +295,10 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         (row for row in report["profiles"] if row["plugin"] == "missing" and row["sessions_7d"] and not row["current"]),
         key=lambda row: -row["sessions_7d"])
     report["legacy_installs"] = [row for row in report["profiles"] if row["plugin"] in ("legacy", "both")]
+    channels = chat_senders(home, since=now - 7 * 86_400, owners=opts["owner_sender_ids"], platforms=opts["owner_platforms"])
+    report["chats"] = [{key: value for key, value in channel.items() if key != "senders"} | {"senders": len(channel["senders"])}
+                       for channel in channels]   # counts only: the ids stay in `hermes evolution owner`
+    report["digest_scheduled"] = _digest_scheduled(home)
     mine = next((row for row in report["profiles"] if row["current"]), None)
     busiest = max((row for row in report["profiles"] if row["plugin"] == "installed" and not row["current"]),
                   key=lambda row: row["sessions_7d"], default=None)
@@ -276,6 +323,10 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         attention.append("busier_profile")
     if report["profiles_without_plugin"]:
         attention.append("profiles_without_plugin")
+    if any(not channel["covered"] for channel in report["chats"]):
+        attention.append("owner_unknown")
+    if (report["lessons"]["awaiting_approval"] or report["proposals_open"]) and not report["digest_scheduled"]:
+        attention.append("digest_unscheduled")
     report["attention"] = attention
     return report
 
@@ -299,6 +350,9 @@ _TEXT = {
            "autopilot_failing": "The last autopilot pass failed; it is retried in 10 minutes. See Hermes' agent.log.",
            "lessons_waiting": "Lessons are waiting for your approval: `hermes evolution lessons list`.",
            "profiles_without_plugin": "Profiles used in the last 7 days that do not have the plugin (each profile loads its own plugins):",
+           "owner_unknown": "These chat channels count as someone else's, so they get template lessons only and their failures wait for your approval. If one of them is you, run `hermes evolution owner` in your own terminal:",
+           "chat_item": "`{origin}`: {sessions} sessions in 7 days from {senders} sender(s)",
+           "digest_unscheduled": "Decisions wait for you and nothing reminds you of them (Hermes 0.23.1 drops end-of-session notices). Schedule the weekly digest to your chat with `hermes evolution report --schedule-spec --deliver <channel>` and run the command it prints.",
            "sessions": "sessions", "none": "Nothing needs attention.",
            "stale_runtime": "A running Hermes process still runs an older copy of the plugin than the one on disk (`hermes plugins update` does not reload a running gateway). Run `hermes gateway restart`; it waits for the running turns.",
            "stale_item": "pid {pid} ({kind}) loaded {version}",
@@ -330,6 +384,9 @@ _TEXT = {
            "autopilot_failing": "A última passada do autopilot falhou; ela é repetida em 10 minutos. Veja o agent.log do Hermes.",
            "lessons_waiting": "Há lições aguardando a sua aprovação: `hermes evolution lessons list`.",
            "profiles_without_plugin": "Perfis usados nos últimos 7 dias que não têm o plugin (cada perfil carrega os próprios plugins):",
+           "owner_unknown": "Estes canais de chat contam como de outra pessoa, então recebem só lições de modelo fixo e as falhas deles esperam a sua aprovação. Se um deles é você, rode `hermes evolution owner` no seu próprio terminal:",
+           "chat_item": "`{origin}`: {sessions} sessões em 7 dias de {senders} remetente(s)",
+           "digest_unscheduled": "Há decisões esperando por você e nada as lembra (o Hermes 0.23.1 descarta os avisos de fim de sessão). Agende o resumo semanal no seu chat com `hermes evolution report --schedule-spec --deliver <canal>` e rode o comando que ele imprime.",
            "sessions": "sessões", "none": "Nada precisa de atenção.",
            "stale_runtime": "Um processo do Hermes em execução ainda roda uma cópia do plugin mais antiga que a do disco (o `hermes plugins update` não recarrega um gateway em execução). Rode `hermes gateway restart`; ele espera os turnos em andamento.",
            "stale_item": "pid {pid} ({kind}) carregou a {version}",
@@ -395,6 +452,10 @@ def markdown(report: dict, lang: str = "en") -> str:
         if code == "profiles_without_plugin":
             for item in report["profiles_without_plugin"]:
                 lines.append(f"  - `{item['profile']}` ({item['sessions_7d']} {t['sessions']}): `{item['install']}`")
+        if code == "owner_unknown":
+            for item in report["chats"]:
+                if not item["covered"]:
+                    lines.append("  - " + t["chat_item"].format(**item))
     if not report["attention"]:
         lines.append(t["none"])
     shown = [row for row in report.get("profiles", []) if row["sessions_7d"] or row["plugin"] != "missing" or row["current"]]

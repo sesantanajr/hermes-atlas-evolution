@@ -170,15 +170,17 @@ class _Plugin:
         self.advice = config.get("agent_advice") is True
         self.research = ResearchTracker(home)
         self.turns = TurnTracker(home, slow_ms=evolution["slow_turn_seconds"] * 1000)
-        self.sensor = (FeedbackSensor(home, owner_sender_ids=evolution["owner_sender_ids"])
+        self.sensor = (FeedbackSensor(home, owner_sender_ids=evolution["owner_sender_ids"],
+                                      owner_platforms=evolution["owner_platforms"])
                        if evolution["feedback_signals"] else None)
         self.hints = HintIndex(home, lang=evolution["language"])
         self.recent: dict[str, dict] = {}   # tool_call_id -> failure, for the transform that follows the tool
         self.commands: dict[str, str] = {}  # tool_call_id -> hash of the command the agent wrote (memory only)
         self.counted: dict[str, None] = {}  # sessions whose playbook render was already counted
-        # session id -> whether its latest turn served the owner (see signals.owner_turn); memory only
-        self.sessions: OrderedDict[str, bool] = OrderedDict()
+        # session id -> (whether its latest turn served the owner, its origin label); memory only
+        self.sessions: OrderedDict[str, tuple[bool, str]] = OrderedDict()
         self.owners = frozenset(str(item) for item in evolution["owner_sender_ids"] if item not in (None, ""))
+        self.owner_platforms = frozenset(evolution["owner_platforms"])
         self.guard = None
         self.recent_lock = threading.Lock()
         self.failed: set[str] = set()
@@ -238,18 +240,25 @@ class _Plugin:
                     self.commands.pop(next(iter(self.commands)))
 
     def _rewritten(self, payload: dict) -> bool:
-        """True when the command that ran differs from the one the agent wrote."""
+        """True when the call that ran differs from the one the agent wrote: Hermes' middleware trace names a
+        rewrite, or the command differs from the one pre_tool_call saw (another plugin's `modify` directive)."""
         call, args = payload.get("tool_call_id"), payload.get("args")
+        trace = payload.get("middleware_trace")
+        if isinstance(trace, list) and any(isinstance(item, dict) for item in trace):
+            with self.recent_lock:
+                if isinstance(call, str):
+                    self.commands.pop(call, None)
+            return True
         with self.recent_lock:
             written = self.commands.pop(call, None) if isinstance(call, str) else None
         command = args.get("command") if isinstance(args, dict) else None
         return written is not None and isinstance(command, str) and \
             hashlib.sha256(command.encode("utf-8", "replace")).hexdigest() != written
 
-    def _remember_owner(self, session, owner: bool) -> None:
+    def _remember_owner(self, session, owner: bool, origin: str = "unknown") -> None:
         if isinstance(session, str) and 0 < len(session) <= 400:
             with self.recent_lock:
-                self.sessions[session] = owner
+                self.sessions[session] = (owner, origin)
                 self.sessions.move_to_end(session)
                 while len(self.sessions) > 2048:
                     self.sessions.popitem(last=False)
@@ -258,7 +267,13 @@ class _Plugin:
         """Whether the session's latest turn served the owner. Unknown (no turn seen since the plugin loaded)
         counts as someone else: what depends on it is held back, never given away."""
         with self.recent_lock:
-            return self.sessions.get(session) is True if isinstance(session, str) else False
+            entry = self.sessions.get(session) if isinstance(session, str) else None
+        return entry is not None and entry[0] is True
+
+    def origin_of(self, session) -> str | None:
+        with self.recent_lock:
+            entry = self.sessions.get(session) if isinstance(session, str) else None
+        return entry[1] if entry is not None else None
 
     def after_tool(self, **payload):
         from .signals import classify, reclassify, record_tool
@@ -275,7 +290,8 @@ class _Plugin:
             if self._rewritten(payload) and failure and failure["klass"] != "plugin_fault":
                 failure = reclassify(failure, "rewritten_command")   # the agent did not write what failed
             # An excerpt is kept only when the reflector could use it: on, and lessons not off.
-            record_tool(self.home, payload, failure=failure, owner=self.served_owner(payload.get("session_id")),
+            session = payload.get("session_id")
+            record_tool(self.home, payload, failure=failure, owner=self.served_owner(session), origin=self.origin_of(session),
                         sample=self.evolution["reflector"] and self.evolution["lessons"] != "off")
             call = payload.get("tool_call_id")
             if failure and isinstance(call, str) and 0 < len(call) <= 400:
@@ -287,12 +303,15 @@ class _Plugin:
             self.warn("tool_outcome")
 
     def before_turn(self, **payload):
-        from .signals import owner_turn, record_skill_correction, turn_surface
+        from .signals import origin_label, owner_turn, record_skill_correction, turn_surface
 
         try:
             surface = turn_surface(payload)
-            payload = {**payload, "surface": surface}
-            self._remember_owner(payload.get("session_id"), owner_turn(surface, payload.get("sender_id"), self.owners))
+            origin = origin_label(payload)
+            payload = {**payload, "surface": surface, "origin": origin}
+            self._remember_owner(payload.get("session_id"),
+                                 owner_turn(surface, payload.get("sender_id"), self.owners, origin=origin,
+                                            owner_platforms=self.owner_platforms), origin)
         except Exception:
             pass
         try:
@@ -382,8 +401,9 @@ class _Plugin:
             platform = info.get("platform")
             # A chat where someone else may be on the other side gets template lessons only: the prompt is built
             # before the first message, so who is writing is not known yet.
-            others = surface_of(platform, session_source(platform)) == "gateway" \
-                and not self.served_owner(info.get("session_id"))
+            origin = session_source(platform) or platform
+            others = surface_of(platform, origin) == "gateway" and not self.served_owner(info.get("session_id")) \
+                and not (isinstance(origin, str) and origin.lower() in self.owner_platforms)
             with experience(self.home) as conn:   # its own connection: WAL readers never wait for a writer
                 text = playbook.playbook(conn, lang=self.lang, chosen=shown, templates_only=others)
             session = info.get("session_id")

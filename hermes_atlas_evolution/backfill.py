@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from .experience import RETENTION_DAYS, experience, record, utc_day
+from .experience import RETENTION_DAYS, experience, label, record, utc_day
 from .operations import batched
 from .signals import (DEFAULT_SLOW_TURN_MS, FeedbackSensor, TurnTracker, owner_turn, record_skill_correction,
                       record_skill_event, record_tool, surface_of)
@@ -35,13 +35,14 @@ from .telemetry import ResearchTracker
 
 BACKFILL_DAYS = 14
 SLICE_SESSIONS = 25
-# 2: compaction copies counted once. A backfill done by an earlier version is redone (see _redo).
-VERSION = "2"
+# 2: compaction copies counted once. 3: the owner's failures per day and refused approvals per origin.
+# A backfill done by an earlier version is redone once (see _redo).
+VERSION = "3"
 SETTLED = frozenset({"done", "no_history", "unsupported_history"})
 _TOTALS = ("sessions", "turns", "tool_calls", "failures", "skipped")
 # Daily tables the replay writes. Whole UTC days before the first observed day hold nothing else.
 _REPLAYED_DAILY = ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "skill_outcome_daily",
-                   "research_latency")
+                   "research_latency", "failure_owner_daily", "approval_daily")
 _BASELINE_DAYS = 14   # lessons.BASELINE_DAYS, kept here to avoid an import cycle
 _LOOKAHEAD = 64
 _IDLE_SECONDS = 600   # a session quiet this long before observation began is not in the middle of a turn
@@ -180,8 +181,9 @@ def replay_until(home: Path) -> float | None:
 def _redo(home: Path, *, since: float, now: float) -> None:
     """Take back what an earlier version's backfill counted, so the history is replayed again.
 
-    0.5.0 counted each copy Hermes' compaction keeps of a message. Whole UTC days before the first observed
-    day hold nothing but backfilled counts: they are cleared and replayed. The first observed day is shared
+    0.5.0 counted each copy Hermes' compaction keeps of a message, and 0.6.0 did not count the owner's
+    failures per day nor refused approvals per origin. Whole UTC days before the first observed day hold
+    nothing but backfilled counts: they are cleared and replayed. The first observed day is shared
     with the hooks and keeps what it has. Failure totals lose what the cleared days added, a failure only
     those days had seen waits for the replay to find it again, and lesson baselines frozen from those days
     are counted again once the replay is done."""
@@ -200,7 +202,7 @@ def _redo(home: Path, *, since: float, now: float) -> None:
         for table in _REPLAYED_DAILY:
             conn.execute(f"DELETE FROM {table} WHERE day < ?", (day,))
         conn.execute("DELETE FROM failure_sample WHERE signature NOT IN (SELECT signature FROM failure)")
-        conn.execute("DELETE FROM failure_owner WHERE signature NOT IN (SELECT signature FROM failure)")
+        conn.execute("DELETE FROM failure_owner")   # 0.6.0's totals: 0.7.0 counts the owner's failures per day
         conn.execute("""UPDATE lesson SET baseline_failures=NULL, baseline_calls=NULL
             WHERE activated IS NOT NULL AND activated < ? AND activated >= ?""",
                      (boundary + _BASELINE_DAYS * 86_400, now - (RETENTION_DAYS - _BASELINE_DAYS) * 86_400))
@@ -212,11 +214,12 @@ def _redo(home: Path, *, since: float, now: float) -> None:
 class _Replay:
     """Replays sessions through the hooks' trackers. One instance per pass keeps correction windows intact."""
 
-    def __init__(self, home: Path, *, sample: bool, owner_sender_ids, slow_ms: int, columns=frozenset()):
+    def __init__(self, home: Path, *, sample: bool, owner_sender_ids, slow_ms: int, columns=frozenset(),
+                 owner_platforms=()):
         self.home = home
         self.sample = sample
         self.turns = TurnTracker(home, slow_ms=slow_ms)
-        self.sensor = FeedbackSensor(home, owner_sender_ids=owner_sender_ids)
+        self.sensor = FeedbackSensor(home, owner_sender_ids=owner_sender_ids, owner_platforms=owner_platforms)
         self.research = ResearchTracker(home)   # web research turns: timing, calls and errors
         self.counts = dict.fromkeys(_TOTALS, 0)
         self.uids = "message_uid" in columns
@@ -263,10 +266,14 @@ class _Replay:
         # The session's own source decides, as in the hooks: kanban and cron are automations, "subagent" is a
         # delegated child, and a child of /new, /branch or a compression stays where its source puts it.
         sid, surface = row["id"], surface_of(row.get("source") or "gateway")
-        owner = owner_turn(surface, row.get("user_id"), self.sensor.owners)
+        origin = label(str(row.get("source") or "unknown").lower()[:48], fallback="unknown")
+        owner = owner_turn(surface, row.get("user_id"), self.sensor.owners, origin=origin,
+                           owner_platforms=self.sensor.platforms)
         first = float(row.get("started_at") or 0) >= start   # its first message is in the window
         open_turn, final, last, answered = None, False, None, False
         calls: dict = {}
+        asked: dict = {}   # call id -> when the assistant asked for it
+        started = None
         seen: set = set()
         self.counts["sessions"] += 1
         if self.uids and float(row.get("started_at") or 0) < start:   # copies of messages older than the window
@@ -284,7 +291,7 @@ class _Replay:
                     self._finish(open_turn, final=final, ended=last, interrupted=True)
                 content = message["content"]
                 payload = {"session_id": sid, "surface": surface, "user_message": content if isinstance(content, str) else "",
-                           "sender_id": row.get("user_id"), "is_first_turn": first}
+                           "sender_id": row.get("user_id"), "is_first_turn": first, "origin": origin}
                 first = False
                 if {"correction", "reask"} & set(self.sensor.observe(payload, clock=stamp, now=stamp)):
                     record_skill_correction(self.home, self.turns.recent_skills(sid, clock=stamp), now=stamp)
@@ -295,10 +302,15 @@ class _Replay:
             elif role == "assistant":
                 requested = _calls(message["tool_calls"])
                 calls.update(requested)
+                asked.update(dict.fromkeys(requested, stamp))
+                started = stamp   # the next result's time runs from the request, or from the previous result
                 final, last, answered = message["finish_reason"] in _FINAL and not requested, stamp, True
             elif role == "tool":
+                # Approximate: from the request (or the previous result of the same request) to this result.
+                since = max(asked.pop(message["tool_call_id"], stamp), started if started is not None else stamp)
                 self._tool(message, calls.pop(message["tool_call_id"], (None, {})), sid=sid, turn=open_turn, stamp=stamp,
-                           owner=owner)
+                           owner=owner, origin=origin, duration_ms=int(min(max(stamp - since, 0.0), 3600.0) * 1000))
+                started = stamp
                 final, last, answered = False, stamp, True
         if open_turn:
             following = self._following(source, sid, until, seen)
@@ -310,13 +322,14 @@ class _Replay:
                 self._finish(open_turn, final=final, ended=last, interrupted=True)   # over before observation began
             # anything else is a turn cut by the start of observation: the hooks saw its end
 
-    def _tool(self, message, call, *, sid, turn, stamp, owner: bool = True) -> None:
+    def _tool(self, message, call, *, sid, turn, stamp, owner: bool = True, origin: str | None = None,
+              duration_ms: int = 0) -> None:
         name, args = call
         name = message["tool_name"] or name
         status = _status(message["content"])
         payload = {"tool_name": name, "status": status, "result": message["content"], "args": args,
-                   "session_id": sid, "turn_id": turn, "tool_call_id": message["tool_call_id"]}
-        failure = record_tool(self.home, payload, now=stamp, sample=self.sample, owner=owner)
+                   "session_id": sid, "turn_id": turn, "tool_call_id": message["tool_call_id"], "duration_ms": duration_ms}
+        failure = record_tool(self.home, payload, now=stamp, sample=self.sample, owner=owner, origin=origin)
         self.turns.tool(payload)
         self.research.tool(payload)
         self.counts["tool_calls"] += 1
@@ -344,7 +357,7 @@ def _unmoved(conn: sqlite3.Connection, expected) -> None:
 
 
 def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int = SLICE_SESSIONS, sample: bool = False,
-         owner_sender_ids=(), slow_ms: int = DEFAULT_SLOW_TURN_MS, cancelled=None) -> dict:
+         owner_sender_ids=(), slow_ms: int = DEFAULT_SLOW_TURN_MS, cancelled=None, owner_platforms=()) -> dict:
     """Replay the next slices of Hermes' history within `budget_s`. Returns the status and running totals."""
     home = Path(home)
     state = _state(home)
@@ -377,7 +390,7 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
         cursor_start, cursor_id = state["cursor"]
         totals = dict(state["totals"])
         replay = _Replay(home, sample=sample, owner_sender_ids=owner_sender_ids, slow_ms=slow_ms,
-                         columns=present["messages"])
+                         columns=present["messages"], owner_platforms=owner_platforms)
         deadline = time.monotonic() + budget_s
         expected = state["position"]
         while time.monotonic() < deadline and not (cancelled and cancelled()):

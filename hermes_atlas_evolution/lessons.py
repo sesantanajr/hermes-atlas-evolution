@@ -110,6 +110,18 @@ def valid_text(text) -> bool:
     return clean_text(text) is not None
 
 
+# Advice any failure would get: not worth an approval. A draft that names what it is about in backticks passes.
+_GENERIC = re.compile(
+    r"\b(?:read|check|review|inspect|look at) the (?:output|error|logs?|message|status)\b|\bbefore (?:retrying|repeating|trying again)\b"
+    r"|\bdiagnose the (?:cause|problem)\b|\bleia (?:a saída|o erro|os logs?|a mensagem)\b|\bverifique (?:o status|a saída|o erro|os logs?)\b"
+    r"|\bantes de (?:repetir|tentar de novo|tentar novamente)\b|\bdiagnosticar a causa\b", re.I)
+
+
+def generic_advice(text: str) -> bool:
+    """True for a sentence that only gives advice every failure would get (read the error, check before retrying)."""
+    return isinstance(text, str) and bool(_GENERIC.search(text)) and "`" not in text
+
+
 def _record_change(conn, lesson_id: int, now: float, subject: str) -> None:
     conn.execute("""INSERT OR IGNORE INTO change(ref, kind, subject, detail, at) VALUES (?, 'lesson', ?, '{}', ?)""",
                  (f"lesson:{lesson_id}:{int(now)}", subject, now))
@@ -128,16 +140,25 @@ def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> li
         return []
     rows = conn.execute("""SELECT f.signature, f.tool, f.klass, f.hint, f.total, f.sessions,
           (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=f.signature) AS days,
-          COALESCE((SELECT o.total FROM failure_owner o WHERE o.signature=f.signature), 0) AS owner_total
+          COALESCE((SELECT SUM(o.count) FROM failure_owner_daily o WHERE o.signature=f.signature), 0) AS owner_total
         FROM failure f WHERE f.total >= ? AND NOT EXISTS (SELECT 1 FROM lesson l WHERE l.signature=f.signature)
         ORDER BY f.total DESC LIMIT 200""", (MIN_TOTAL,)).fetchall()
     created = []
+    rewriters = rewriter_binaries(conn)
+    taken = {_text_key(row["tool"], row["klass"], row["hint"])
+             for row in conn.execute("SELECT tool, klass, hint FROM lesson WHERE origin='derived' AND status != 'retired'")}
     for row in rows:
         template = TEMPLATES.get(row["klass"])
         if template is None or template[0] and not row["hint"] or row["tool"] == "unknown":
             continue
         if row["sessions"] < 2 and row["days"] < 2:
             continue   # one bad session is not a pattern yet
+        if row["klass"] == "missing_dependency" and row["hint"] in rewriters:
+            continue   # another plugin rewrote the command into this binary: the agent never called it
+        key = _text_key(row["tool"], row["klass"], row["hint"])
+        if key in taken:
+            continue   # the same sentence is already in the playbook or waiting for a decision
+        taken.add(key)
         status = "active" if mode == "auto" and row["owner_total"] >= OWNER_ACTIVATION else "candidate"
         # OR IGNORE: another process may have derived the same lesson since the SELECT above.
         cursor = conn.execute("""INSERT OR IGNORE INTO lesson(signature, tool, klass, hint, origin, status, created, updated,
@@ -150,6 +171,49 @@ def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> li
         if status == "active":
             _record_change(conn, cursor.lastrowid, now, row["tool"])
     return created
+
+
+def _text_key(tool: str, klass: str, hint: str) -> str:
+    """The sentence a derived lesson renders (in English), so two failures that read the same are one lesson."""
+    template = TEMPLATES.get(klass)
+    return template[1].format(tool=tool, hint=hint) if template else f"{tool}\0{klass}\0{hint}"
+
+
+def rewriter_binaries(conn: sqlite3.Connection) -> set[str]:
+    """Binaries seen missing only after another plugin rewrote the command (`rewritten_command` failures)."""
+    return {row[0] for row in conn.execute(
+        "SELECT DISTINCT hint FROM failure WHERE klass='rewritten_command' AND hint != ''").fetchall()}
+
+
+def tidy(conn: sqlite3.Connection) -> int:
+    """Withdraw lessons nobody decided on yet that the evidence no longer supports. Returns how many.
+
+    A derived candidate or a reflector draft goes when its failure no longer meets the rule that made it
+    (seen at least MIN_TOTAL times, in 2 sessions or on 2 days; a replay that recounted the history can
+    lower it), when it would say the same sentence as another lesson, when its missing binary turned out to
+    come from another plugin's rewrite, or, for a draft, when it only gives advice every failure would get. Active, retired and operator lessons are never touched. If
+    the failure comes back, the lesson is derived again. Run it only when the history replay is settled."""
+    rewriters = rewriter_binaries(conn)
+    taken = {_text_key(row["tool"], row["klass"], row["hint"]) for row in conn.execute(
+        "SELECT tool, klass, hint FROM lesson WHERE origin='derived' AND status='active'")}
+    rows = conn.execute("""SELECT l.id, l.tool, l.klass, l.hint, l.origin, l.text,
+          COALESCE(f.total, 0) AS total, COALESCE(f.sessions, 0) AS sessions,
+          (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=l.signature) AS days
+        FROM lesson l LEFT JOIN failure f ON f.signature=l.signature
+        WHERE (l.status='candidate' AND l.origin='derived') OR (l.status='quarantined' AND l.origin='reflector')
+        ORDER BY total DESC, l.id""").fetchall()
+    withdrawn = []
+    for row in rows:
+        stale = row["total"] < MIN_TOTAL or row["sessions"] < 2 and row["days"] < 2
+        foreign = row["klass"] == "missing_dependency" and row["hint"] in rewriters
+        bland = row["origin"] == "reflector" and generic_advice(row["text"])
+        key = _text_key(row["tool"], row["klass"], row["hint"]) if row["origin"] == "derived" else None
+        if stale or foreign or bland or key in taken:
+            withdrawn.append(row["id"])
+        elif key is not None:
+            taken.add(key)
+    conn.executemany("DELETE FROM lesson WHERE id=?", [(item,) for item in withdrawn])
+    return len(withdrawn)
 
 
 def add_custom(conn: sqlite3.Connection, text: str, *, tool: str, origin: str, now: float, active: bool = False) -> int:
@@ -326,7 +390,8 @@ def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest", his
 
 def listing(conn: sqlite3.Connection, *, lang: str = "en", status: str | None = None) -> list[dict]:
     rows = conn.execute("""SELECT l.*, COALESCE(f.total, 0) AS evidence, COALESCE(f.sessions, 0) AS sessions,
-          COALESCE((SELECT o.total FROM failure_owner o WHERE o.signature=l.signature), 0) AS owner_evidence FROM lesson l
+          COALESCE((SELECT SUM(o.count) FROM failure_owner_daily o WHERE o.signature=l.signature), 0) AS owner_evidence
+        FROM lesson l
         LEFT JOIN failure f ON f.signature=l.signature WHERE (? IS NULL OR l.status=?)
         ORDER BY CASE l.status WHEN 'active' THEN 0 WHEN 'candidate' THEN 1 WHEN 'quarantined' THEN 2 ELSE 3 END,
           evidence DESC, l.id""", (status, status)).fetchall()

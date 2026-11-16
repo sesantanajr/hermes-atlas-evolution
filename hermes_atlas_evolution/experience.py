@@ -89,9 +89,16 @@ CREATE TABLE IF NOT EXISTS guard_daily (
 # adding tables keeps the database open to older builds, where a new column would break their positional
 # inserts. operations creates any that are missing when it opens the database.
 ADDITIVE_TABLES = (
-    # Failures seen in the owner's own turns (see signals.record_tool): only these let a lesson activate by itself.
+    # 0.6.0 kept the owner's failures as one total per signature; 0.7.0 keeps them per day (below), so a
+    # replay can take back exactly what it counted. Still created, so 0.6.0 keeps working after a downgrade.
     ("failure_owner", "CREATE TABLE IF NOT EXISTS failure_owner (signature TEXT PRIMARY KEY, total INTEGER NOT NULL) "
                       "WITHOUT ROWID"),
+    # Failures seen in the owner's own turns (see signals.record_tool): only these let a lesson activate by itself.
+    ("failure_owner_daily", "CREATE TABLE IF NOT EXISTS failure_owner_daily (day TEXT NOT NULL, signature TEXT NOT NULL, "
+                            "count INTEGER NOT NULL, PRIMARY KEY (day, signature)) WITHOUT ROWID"),
+    # Refused approvals per session origin and tool: the radar tells refusals nobody could answer from the rest.
+    ("approval_daily", "CREATE TABLE IF NOT EXISTS approval_daily (day TEXT NOT NULL, source TEXT NOT NULL, "
+                       "tool TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, source, tool)) WITHOUT ROWID"),
 )
 SCHEMA += "".join(f"{statement};\n" for _, statement in ADDITIVE_TABLES)
 
@@ -145,7 +152,7 @@ def prune(conn: sqlite3.Connection, *, now: float) -> None:
     """Drop aggregates older than the retention window. Lessons and open proposals are kept."""
     cutoff = day_offset(now, RETENTION_DAYS)
     for table in ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "review_daily",
-                  "skill_outcome_daily", "guard_daily"):
+                  "skill_outcome_daily", "guard_daily", "failure_owner_daily", "approval_daily"):
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))
     old = now - RETENTION_DAYS * 86_400
     conn.execute("DELETE FROM failure WHERE last_seen < ? AND signature NOT IN "
@@ -157,3 +164,4 @@ def prune(conn: sqlite3.Connection, *, now: float) -> None:
     conn.execute("DELETE FROM failure_sample WHERE updated < ? OR signature NOT IN (SELECT signature FROM failure)",
                  (now - SAMPLE_DAYS * 86_400,))
     conn.execute("DELETE FROM failure_owner WHERE signature NOT IN (SELECT signature FROM failure)")
+    conn.execute("DELETE FROM failure_owner_daily WHERE signature NOT IN (SELECT signature FROM failure)")

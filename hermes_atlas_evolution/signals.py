@@ -243,13 +243,16 @@ def _session_tag(session_id) -> str:
 
 
 def record_tool(home: Path, payload: dict, *, now: float | None = None, failure: dict | None = None,
-                sample: bool = False, owner: bool = True) -> dict | None:
+                sample: bool = False, owner: bool = True, origin: str | None = None) -> dict | None:
     """Count one finished tool call and, for a failure, its signature. Returns the classification.
 
     `owner`: the call ran in a turn of the owner's own (CLI, TUI, Desktop, cron, a subagent, or a chat with
     a sender listed in owner_sender_ids). Every failure is counted; only the owner's are counted again in
     failure_owner, which decides whether a lesson may activate by itself, and only theirs keep an excerpt
-    for the reflector: text a third party controls never reaches the model that drafts lessons."""
+    for the reflector: text a third party controls never reaches the model that drafts lessons.
+
+    `origin`: the session's real origin label. A refused approval is also counted per origin and tool, so the
+    radar can tell refusals nobody could have answered (a one-shot run, a cron job, a subagent) from the rest."""
     status = payload.get("status")
     if status not in ("ok", "error", "blocked"):
         return None
@@ -264,12 +267,16 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     row = (today, failure["tool"] if failure else tool, int(status == "error"), int(status == "blocked"), duration)
     seen = ((failure["signature"], failure["tool"], failure["klass"], failure["hint"], now, now,
              _session_tag(payload.get("session_id"))) if failure else None)
+    origin_name = label(origin, fallback="unknown") if isinstance(origin, str) else "unknown"
     excerpt = ""
     if sample and owner and failure:
         from .reflector import UNTEMPLATED, scrub
 
         if failure["klass"] in UNTEMPLATED:   # only the reflector reads it, and only when it is switched on
             excerpt = scrub(_error_text(payload.get("error_message"), payload.get("result"))[0])
+            program = command_program(payload.get("args"))
+            if excerpt and program:   # which program failed makes a draft specific; only an identifier-like name
+                excerpt = f"[{program}] {excerpt}"
 
     def write(conn):
         conn.execute("""INSERT INTO tool_daily VALUES (?, ?, 1, ?, ?, ?)
@@ -282,8 +289,11 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
             conn.execute("""INSERT INTO failure_daily VALUES (?, ?, 1)
                 ON CONFLICT DO UPDATE SET count=count+1""", (today, seen[0]))
             if owner:
-                conn.execute("""INSERT INTO failure_owner VALUES (?, 1)
-                    ON CONFLICT DO UPDATE SET total=total+1""", (seen[0],))
+                conn.execute("""INSERT INTO failure_owner_daily VALUES (?, ?, 1)
+                    ON CONFLICT DO UPDATE SET count=count+1""", (today, seen[0]))
+            if seen[2] == "approval_refused":
+                conn.execute("""INSERT INTO approval_daily VALUES (?, ?, ?, 1)
+                    ON CONFLICT DO UPDATE SET count=count+1""", (today, origin_name, seen[1]))
             if excerpt:
                 from .reflector import keep_sample
 
@@ -291,6 +301,29 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
 
     record(home, write, now=now)
     return failure
+
+
+_PROGRAM = re.compile(r"[A-Za-z_][\w.+-]{0,39}\Z")
+_SHELL_TRIVIA = frozenset({"cd", "export", "set", "unset", "source", ".", "echo", "printf", "true", "false", "test",
+                           "sleep", "pwd", "exit", "local", "read"})
+
+
+def command_program(args) -> str:
+    """The program a terminal command runs (its first word after variable assignments and wrappers such as sudo,
+    env, timeout or systemd-run, read the way the runtime guard reads them), when it looks like a program name;
+    '' otherwise. Never arguments, paths or other text of the command."""
+    from .guard import _segments, _strip_prefix
+
+    command = args.get("command") if isinstance(args, dict) else None
+    if not isinstance(command, str) or not command.strip():
+        return ""
+    found = ""
+    for segment in (_segments(command[:4000]) or [])[:16]:   # the last real program of a chain is the likeliest to fail
+        tokens = _strip_prefix(segment)
+        name = tokens[0].rsplit("/", 1)[-1] if tokens else ""
+        if name and name not in _SHELL_TRIVIA and _PROGRAM.match(name) and label(name, fallback="") == name:
+            found = name
+    return found
 
 
 def surface_of(platform, source=None) -> str:
@@ -334,12 +367,28 @@ def turn_surface(payload: dict) -> str:
     return surface_of(platform, session_source(platform))
 
 
-def owner_turn(surface: str, sender_id, owners) -> bool:
-    """True when the owner is the one being served: their own surfaces, their automations and subagents, or
-    a chat message from a sender listed in owner_sender_ids."""
+def origin_label(payload: dict) -> str:
+    """The session's real origin as a short label (telegram, api_server, oneshot, kanban, ...), for owner
+    platforms and approval counts. Never free text."""
+    platform = payload.get("platform")
+    source = payload.get("source") if isinstance(payload.get("source"), str) else session_source(platform)
+    for value in (source, platform):
+        if isinstance(value, str) and value.strip():
+            return label(value.strip().lower()[:48], fallback="unknown")
+    return "unknown"
+
+
+def owner_turn(surface: str, sender_id, owners, *, origin: str | None = None, owner_platforms=frozenset()) -> bool:
+    """True when the owner is the one being served: their own surfaces, their automations and subagents, a
+    chat message from a sender listed in owner_sender_ids, or any chat of a platform listed in owner_platforms
+    (a private bot or the owner's own UI, where nobody else writes)."""
     if surface in ("local", "cron", "subagent"):
         return True
-    return surface == "gateway" and sender_id is not None and str(sender_id) in owners
+    if surface != "gateway":
+        return False
+    if origin is not None and origin in owner_platforms:
+        return True
+    return sender_id is not None and str(sender_id) in owners
 
 
 MAX_SKILLS_PER_TURN = 16
@@ -492,10 +541,11 @@ class FeedbackSensor:
     The previous message of a session is kept in memory as a set of hashed words, never as text.
     """
 
-    def __init__(self, home: Path, *, owner_sender_ids=(), reask_seconds: int = 180):
+    def __init__(self, home: Path, *, owner_sender_ids=(), owner_platforms=(), reask_seconds: int = 180):
         self.home = home
         self.owners = frozenset(str(item) for item in owner_sender_ids
                                 if isinstance(item, str) and item or type(item) is int)
+        self.platforms = frozenset(item for item in owner_platforms if isinstance(item, str) and item)
         self.reask_seconds = reask_seconds
         self._last: OrderedDict[bytes, tuple[float, frozenset]] = OrderedDict()
         self._lock = threading.Lock()
@@ -504,7 +554,11 @@ class FeedbackSensor:
         """A message the owner wrote: on their own surfaces, or in a chat from a listed sender. Automations,
         kanban workers and subagents get prompts written by software, never feedback."""
         surface = turn_surface(payload)
-        return surface == "local" or (surface == "gateway" and owner_turn(surface, payload.get("sender_id"), self.owners))
+        if surface == "local":
+            return True
+        origin = payload.get("origin") if isinstance(payload.get("origin"), str) else origin_label(payload)
+        return surface == "gateway" and owner_turn(surface, payload.get("sender_id"), self.owners, origin=origin,
+                                                   owner_platforms=self.platforms)
 
     def observe(self, payload: dict, *, clock: float | None = None, now: float | None = None) -> list[str]:
         message = payload.get("user_message")
@@ -605,6 +659,23 @@ def tool_summary(conn, *, now: float, days: int, limit: int = 15) -> dict:
             "by_tool": [{"tool": row["tool"], "calls": row["calls"], "errors": row["errors"], "blocked": row["blocked"],
                          "error_pct": round(100 * row["errors"] / row["calls"], 1),
                          "mean_ms": row["duration_ms"] // row["calls"]} for row in rows[:limit]]}
+
+
+# Tools whose time is not latency: they wait for a person (clarify) or run a whole subagent (delegate_task).
+NOT_LATENCY = frozenset({"clarify", "delegate_task", "ask_user", "request_user_input"})
+
+
+def slow_tools(conn, *, now: float, days: int, limit: int = 3, min_calls: int = 3) -> list[dict]:
+    """The tools that took the most time in the window: calls, mean and total seconds. Durations come from the
+    hooks and, for replayed history, from the time between a tool request and its result (approximate). Tools
+    that wait for a person or run a subagent are left out: their time is not a bottleneck of the tool."""
+    start, end = _window(now, days)
+    marks = ",".join("?" * len(NOT_LATENCY))
+    rows = conn.execute(f"""SELECT tool, SUM(calls) AS calls, SUM(duration_ms) AS duration_ms FROM tool_daily
+        WHERE day BETWEEN ? AND ? AND tool NOT IN ({marks}) GROUP BY tool HAVING SUM(calls) >= ? AND SUM(duration_ms) > 0
+        ORDER BY SUM(duration_ms) DESC, tool LIMIT ?""", (start, end, *sorted(NOT_LATENCY), min_calls, limit)).fetchall()
+    return [{"tool": row["tool"], "calls": row["calls"], "mean_s": round(row["duration_ms"] / row["calls"] / 1000, 1),
+             "total_min": round(row["duration_ms"] / 60_000, 1)} for row in rows]
 
 
 def failure_summary(conn, *, now: float, days: int, limit: int = 12) -> list[dict]:

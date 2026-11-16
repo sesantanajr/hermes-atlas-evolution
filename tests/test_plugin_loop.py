@@ -370,7 +370,7 @@ class SurfacesTest(PluginBase):
         cycle(self.home, now=__import__("time").time(), config={"evolution": {"lessons": "auto", "reflector": False}})
         with experience(self.home) as conn:
             self.assertEqual(conn.execute("SELECT total FROM failure").fetchone()[0], 4)   # still measured
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_owner").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_owner_daily").fetchone()[0], 0)
             self.assertEqual([row[0] for row in conn.execute("SELECT status FROM lesson")], ["candidate"])
         for index in range(2):   # the owner hits it twice in their own terminal: now it may activate by itself
             self.turn(context, f"own-{index}", f"o{index}", platform="cli")
@@ -410,7 +410,7 @@ class SurfacesTest(PluginBase):
         self.failing_call(context, "dm", "t1", "c1")
         close_observers()
         with experience(self.home) as conn:
-            self.assertEqual(conn.execute("SELECT total FROM failure_owner").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT SUM(count) FROM failure_owner_daily").fetchone()[0], 1)
 
     def test_the_owner_notice_waits_for_a_session_end_hermes_shows(self):
         self.settings(evolution={"lessons": "suggest"})
@@ -435,6 +435,39 @@ class HostIsolationTest(PluginBase):
         self.assertNotIn("pre_tool_call", hosted.hooks)
         self.assertIn("post_tool_call", hosted.hooks)          # everything else still observes
         self.assertIn("pre_tool_call", self.plugin().hooks)
+
+
+
+class OwnerPlatformLoopTest(PluginBase):
+    def test_a_platform_listed_as_the_owners_gets_every_lesson_from_its_first_message(self):
+        self.settings(evolution={"lessons": "auto", "owner_platforms": ["api_server"]}, agent_advice=True)
+        context = self.plugin()
+        with experience(self.home) as conn:
+            lessons.add_custom(conn, "Use the staging tenant for every Atlas UI test run.", tool="terminal",
+                               origin="operator", now=1.0, active=True)
+        render = context.sections["hermes-atlas-evolution.playbook"]["content"]
+        self.assertIn("staging tenant", render({"session_id": "ui-1", "platform": "api_server"}))   # before any turn
+        self.assertNotIn("staging tenant", render({"session_id": "wa-1", "platform": "whatsapp"}))
+        context.fire("pre_llm_call", session_id="ui-1", turn_id="t1", platform="api_server", sender_id="ui",
+                     user_message="go")
+        tool = context.tools["hermes_atlas_evolution_lessons"]["handler"]
+        self.assertIn("lessons", json.loads(tool({"action": "search"}, session_id="ui-1")))
+        context.fire("post_tool_call", tool_name="terminal", status="error", args={"command": "rg x"},
+                     result=json.dumps({"output": "bash: rg: command not found", "exit_code": 127}),
+                     session_id="ui-1", turn_id="t1", tool_call_id="c1")
+        close_observers()
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT SUM(count) FROM failure_owner_daily").fetchone()[0], 1)
+
+    def test_a_call_hermes_middleware_rewrote_does_not_teach_the_agent(self):
+        context = self.plugin()
+        context.fire("post_tool_call", tool_name="terminal", status="error", args={"command": "rtk git status"},
+                     result=json.dumps({"output": "bash: rtk: command not found", "exit_code": 127}),
+                     middleware_trace=[{"source": "plugin", "name": "rtk-rewrite"}],
+                     session_id="s", turn_id="t", tool_call_id="m1")
+        close_observers()
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT klass, hint FROM failure").fetchall()[0][:], ("rewritten_command", "rtk"))
 
 
 if __name__ == "__main__":

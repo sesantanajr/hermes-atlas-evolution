@@ -113,8 +113,8 @@ _TEXT = {
         "proposals_none": "Nothing is waiting for you.", "risk": "risk", "run": "apply with", "look": "next step",
         "no_data": "not measured", "footer": "Aggregates only. No conversation text, tool output or memory content is stored.",
         "decide": "Decide with `hermes evolution proposals approve <id>` or `reject <id>`.",
-        "lessons_waiting": "{count} lessons await approval (read them with `hermes evolution lessons list`, approve with `hermes evolution lessons approve <lesson id>`)",
-        "lessons_waiting_one": "1 lesson awaits approval (read it with `hermes evolution lessons list`, approve with `hermes evolution lessons approve <lesson id>`)",
+        "lessons_waiting": "{count} lessons await approval (decide on each in your terminal with `hermes evolution lessons review`)",
+        "lessons_waiting_one": "1 lesson awaits approval (decide on it in your terminal with `hermes evolution lessons review`)",
         "health": "Hermes health", "sessions_line": "Sessions", "ended": "ended", "orphaned": "ended as orphans",
         "orphan_note": "reaped after a disconnect or restart, so Hermes' end-of-session work did not run",
         "context_line": "Context per agent call", "avg": "average of", "tokens": "tokens", "cached": "served from cache",
@@ -124,6 +124,9 @@ _TEXT = {
         "guard_line": "Runtime guard", "vetoed": "commands vetoed", "gateway_stop": "gateway restart or kill",
         "runtime_removal": "removal of the running Hermes", "health_none": "Nothing measured yet.",
         "external_line": "Failures caused by other plugins",
+        "approvals_line": "Refused approvals", "approvals_unattended": "where nobody could approve",
+        "slow_line": "Slowest tools", "slow_mean": "s on average", "slow_calls": "calls",
+        "approvals_hint": "review `hermes config get approvals` and `command_allowlist`; never approve everything",
         "external_fault": "calls blocked because a plugin's pre_tool_call hung or failed",
         "external_rewrite": "commands rewritten by a plugin that then failed (never turned into lessons)",
         "research_line": "Web research", "research_turns": "turns", "research_slow": "over {limit} s",
@@ -153,8 +156,8 @@ _TEXT = {
         "proposals_none": "Nada aguardando você.", "risk": "risco", "run": "aplique com", "look": "próximo passo",
         "no_data": "não medido", "footer": "Só agregados. Nenhum texto de conversa, saída de ferramenta ou conteúdo de memória é guardado.",
         "decide": "Decida com `hermes evolution proposals approve <id>` ou `reject <id>`.",
-        "lessons_waiting": "{count} lições aguardam aprovação (leia com `hermes evolution lessons list` e aprove com `hermes evolution lessons approve <id da lição>`)",
-        "lessons_waiting_one": "1 lição aguarda aprovação (leia com `hermes evolution lessons list` e aprove com `hermes evolution lessons approve <id da lição>`)",
+        "lessons_waiting": "{count} lições aguardam aprovação (decida cada uma no seu terminal com `hermes evolution lessons review`)",
+        "lessons_waiting_one": "1 lição aguarda aprovação (decida no seu terminal com `hermes evolution lessons review`)",
         "health": "Saúde do Hermes", "sessions_line": "Sessões", "ended": "encerradas", "orphaned": "terminaram como órfãs",
         "orphan_note": "recolhidas após desconexão ou reinício, sem o encerramento normal do Hermes",
         "context_line": "Contexto por chamada do agente", "avg": "média de", "tokens": "tokens", "cached": "servido do cache",
@@ -164,6 +167,9 @@ _TEXT = {
         "guard_line": "Guarda de runtime", "vetoed": "comandos barrados", "gateway_stop": "reinício ou kill do gateway",
         "runtime_removal": "remoção do Hermes em execução", "health_none": "Nada medido ainda.",
         "external_line": "Falhas causadas por outros plugins",
+        "approvals_line": "Aprovações recusadas", "approvals_unattended": "onde ninguém podia aprovar",
+        "slow_line": "Ferramentas mais lentas", "slow_mean": "s em média", "slow_calls": "chamadas",
+        "approvals_hint": "revise `hermes config get approvals` e o `command_allowlist`; nunca aprove tudo",
         "external_fault": "chamadas bloqueadas porque o pre_tool_call de um plugin travou ou falhou",
         "external_rewrite": "comandos reescritos por um plugin que depois falharam (nunca viram lição)",
         "research_line": "Pesquisas na web", "research_turns": "turnos", "research_slow": "acima de {limit} s",
@@ -194,7 +200,9 @@ _KIND = {
            "skill_outcome": "Review a skill whose turns go worse than the profile",
            "session_lifecycle": "Many sessions end as orphans", "context_weight": "Heavy context per call",
            "compaction": "Compactions keep most of the context", "plugin_health": "Plugin problem",
-           "plugin_conflict": "Plugins compete for a hook where only the first counts"},
+           "plugin_conflict": "Plugins compete for a hook where only the first counts",
+           "approval_policy": "Approvals refused where nobody could approve",
+           "tool_latency": "A tool that is slow call after call"},
     "pt": {"lesson": "Ativar lição", "lesson_retire": "Aposentar lição que não ajudou",
            "skill_lock": "Travar skill reescrita em excesso", "skill_review": "Revisar reescritas nunca usadas",
            "skill_archive": "Arquivar skill nunca usada", "skill_rollback": "Desfazer alteração de skill que piorou",
@@ -203,10 +211,13 @@ _KIND = {
            "skill_outcome": "Revisar skill cujos turnos vão pior que o perfil",
            "session_lifecycle": "Muitas sessões terminam como órfãs", "context_weight": "Contexto pesado por chamada",
            "compaction": "Compactações mantêm quase todo o contexto", "plugin_health": "Problema em plugin",
-           "plugin_conflict": "Plugins disputam um hook em que só o primeiro vale"},
+           "plugin_conflict": "Plugins disputam um hook em que só o primeiro vale",
+           "approval_policy": "Aprovações recusadas onde ninguém podia aprovar",
+           "tool_latency": "Ferramenta lenta chamada após chamada"},
 }
 _ADVISORY = ("skill_review", "investigate_failure", "investigate_latency", "config_review", "skill_outcome",
-             "session_lifecycle", "context_weight", "compaction", "plugin_health", "plugin_conflict")
+             "session_lifecycle", "context_weight", "compaction", "plugin_health", "plugin_conflict", "approval_policy",
+             "tool_latency")
 
 
 def _number(value, lang: str, digits: int = 0) -> str:
@@ -251,6 +262,19 @@ def _health(report: dict, lang: str) -> list[str]:
     if outside.get("plugin_fault") or outside.get("rewritten_command"):
         lines.append(f"- **{t['external_line']}:** {_number(outside.get('plugin_fault', 0), lang)} {t['external_fault']} · "
                      f"{_number(outside.get('rewritten_command', 0), lang)} {t['external_rewrite']}")
+    slowest = health.get("slow_tools") or []
+    if slowest:
+        lines.append(f"- **{t['slow_line']}:** " + " · ".join(
+            f"`{item['tool']}` {_number(item['mean_s'], lang, 1)} {t['slow_mean']} ({_number(item['calls'], lang)} "
+            f"{t['slow_calls']})" for item in slowest))
+    refusals = health.get("approvals") or {}
+    if refusals.get("refused"):
+        origins = ", ".join(f"{name} {_number(count, lang)}" for name, count in list(refusals["by_origin"].items())[:5])
+        line = (f"- **{t['approvals_line']}:** {_number(refusals['refused'], lang)} ({origins}) · "
+                f"{_number(refusals['unattended'], lang)} {t['approvals_unattended']}")
+        if refusals["unattended"]:
+            line += f" · {t['approvals_hint']}"
+        lines.append(line)
     research = report.get("research") or {}
     if research.get("turns"):
         lines.append(f"- **{t['research_line']}:** {_number(research['turns'], lang)} {t['research_turns']} · "

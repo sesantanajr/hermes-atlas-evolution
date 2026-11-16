@@ -95,12 +95,12 @@ class OwnerFailureTest(Base):
         close_observers()
         with experience(self.home) as conn:
             self.assertEqual(conn.execute("SELECT total FROM failure").fetchone()[0], 1)
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_owner").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_owner_daily").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_sample").fetchone()[0], 0)
         record_tool(self.home, payload, now=NOW, sample=True, owner=True)
         close_observers()
         with experience(self.home) as conn:
-            self.assertEqual(conn.execute("SELECT total FROM failure_owner").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT SUM(count) FROM failure_owner_daily").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_sample").fetchone()[0], 1)
 
 
@@ -152,7 +152,7 @@ class HistoryTest(Base):
         with experience(self.home) as conn:
             surfaces = dict(conn.execute("SELECT surface, SUM(turns) FROM turn_daily GROUP BY surface").fetchall())
             feedback = dict(conn.execute("SELECT kind, count FROM feedback_daily").fetchall())
-            owned = conn.execute("SELECT total FROM failure_owner").fetchone()[0]
+            owned = conn.execute("SELECT SUM(count) FROM failure_owner_daily").fetchone()[0]
             total = conn.execute("SELECT total FROM failure").fetchone()[0]
         self.assertEqual(surfaces, {"local": 3, "cron": 1, "gateway": 3, "subagent": 1})
         self.assertEqual(feedback, {"correction": 1})          # the session's first message is not a correction

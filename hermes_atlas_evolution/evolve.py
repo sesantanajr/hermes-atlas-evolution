@@ -8,6 +8,7 @@ when the operator selected a lessons mode that allows it.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from .experience import day_offset, experience, prune, utc_day
 from .skill_health import read_usage, skill_health, skill_outcomes
 
 DEFAULTS = {"lessons": "auto", "tool_hints": False, "feedback_signals": True, "language": "auto",
-            "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": True, "reflector_daily_limit": 6,
+            "slow_turn_seconds": 60, "owner_sender_ids": (), "owner_platforms": (), "reflector": True, "reflector_daily_limit": 6,
             "autopilot_minutes": 60, "runtime_guard": True}
 
 
@@ -56,6 +57,12 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
                          isinstance(item, str) and 0 < len(item) <= 200 or type(item) is int and item >= 0
                          for item in value),
                      "evolution.owner_sender_ids must list up to 20 sender ids", ())
+    # Platforms where every chat is the owner's: a private bot, the owner's own UI through the API server.
+    platforms = checked("owner_platforms", raw.get("owner_platforms", ()),
+                        lambda value: isinstance(value, (list, tuple)) and len(value) <= 20 and all(
+                            isinstance(item, str) and re.fullmatch(r"[a-z][a-z0-9_.-]{0,47}", item.strip().lower())
+                            for item in value),
+                        "evolution.owner_platforms must list up to 20 platform names such as telegram or api_server", ())
     daily = checked("reflector_daily_limit", _whole(raw.get("reflector_daily_limit", DEFAULTS["reflector_daily_limit"])),
                     lambda value: type(value) is int and 1 <= value <= 50,
                     "evolution.reflector_daily_limit must be an integer from 1 to 50", DEFAULTS["reflector_daily_limit"])
@@ -72,7 +79,8 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
             "reflector": reflect, "reflector_daily_limit": daily, "autopilot_minutes": autopilot,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
             "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
-            "owner_sender_ids": tuple(str(item) for item in owners)}
+            "owner_sender_ids": tuple(str(item) for item in owners),
+            "owner_platforms": tuple(dict.fromkeys(item.strip().lower() for item in platforms))}
 
 
 def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None,
@@ -92,7 +100,8 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
 
     backfill.mark_observed(home, now=now)
     budget = backfill_budget_s if deadline is None else max(0.0, min(backfill_budget_s, deadline - _time.monotonic() - 30))
-    history = backfill.step(home, now=now, budget_s=budget, owner_sender_ids=opts["owner_sender_ids"], cancelled=cancelled,
+    history = backfill.step(home, now=now, budget_s=budget, owner_sender_ids=opts["owner_sender_ids"],
+                            owner_platforms=opts["owner_platforms"], cancelled=cancelled,
                             sample=opts["reflector"] and opts["lessons"] != "off", slow_ms=opts["slow_turn_seconds"] * 1000)
     with experience(home) as conn:
         # Short transactions: hook writers of a running gateway share this database, so no phase keeps the
@@ -107,6 +116,8 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             if not step.get("more"):
                 break
         created = lessons.derive(conn, now=now, mode=opts["lessons"])
+        # Only once the history is replayed: while it is, failure totals are still being counted (or recounted).
+        withdrawn = lessons.tidy(conn) if history.get("status") in backfill.SETTLED else 0
         conn.commit()
         if not opts["reflector"]:
             conn.execute("DELETE FROM failure_sample")   # nothing waits for a reflector that is off
@@ -155,7 +166,8 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
                                     changes=verdicts, outcomes=outcomes, radar=reading["findings"], lang=opts["language"])
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in created]
-    return {"now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons, "reflector": reflection,
+    return {"now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons,
+            "lessons_withdrawn": withdrawn, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
             "proposals_closed_as_applied": closed, "radar": [item["code"] for item in reading["findings"]],

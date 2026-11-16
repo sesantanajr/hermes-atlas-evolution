@@ -82,7 +82,16 @@ config_schema:
     description: >-
       Your sender ids on messaging platforms (text or numbers, such as a Telegram id). Turns from these senders
       count as yours (feedback, failures that may activate a lesson, the agent tools); the local CLI, TUI and
-      Desktop always do. Anyone else in a chat gets template lessons only.
+      Desktop always do. Anyone else in a chat gets template lessons only. `hermes evolution owner` lists the
+      senders of each chat channel.
+  owner_platforms:
+    type: list
+    default: []
+    label: Owner platforms
+    description: >-
+      Platforms where every chat is yours, such as a private bot or your own interface through the API server
+      (telegram, api_server, ...). Their chats count as yours from the first message, so they get all your
+      lessons. `hermes evolution owner add-platform <name>` sets it too.
   reflector:
     type: bool
     default: true
