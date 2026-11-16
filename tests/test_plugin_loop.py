@@ -208,6 +208,15 @@ class PluginLoopTest(PluginBase):
             self.assertIsNone(context.fire("on_kanban_dispatch_tick", board="default", outcome="idle"))
         poke.assert_called_once()
 
+    def test_the_agent_proposal_cap_holds_across_calls_of_the_registered_tool(self):
+        self.settings(agent_advice=True)
+        handler = self.plugin().tools["hermes_atlas_evolution_lessons"]["handler"]
+        replies = [json.loads(handler({"action": "propose", "tool": "terminal",
+                                       "lesson": f"When the build number {index} fails, read the first error line first."}))
+                   for index in range(7)]
+        accepted = [reply for reply in replies if "error" not in reply]
+        self.assertEqual(len(accepted), 5)   # PROPOSALS_PER_HOUR, kept by the one tool instance of this load
+
     def test_error_excerpts_are_kept_only_when_the_reflector_could_use_them(self):
         crash = json.dumps({"output": "Traceback (most recent call last):\nKeyError: 'column'", "exit_code": 1})
         for lessons_mode, expected in (("off", 0), ("suggest", 1)):
