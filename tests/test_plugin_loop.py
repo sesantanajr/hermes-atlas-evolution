@@ -109,7 +109,7 @@ class PluginLoopTest(PluginBase):
             self.assertIn("error", json.loads(tool["handler"]({"action": "search", "kind": "research"})))
 
     def test_a_recurring_failure_becomes_a_lesson_the_agent_sees_when_it_fails_again(self):
-        self.settings(evolution={"lessons": "auto", "language": "en"})
+        self.settings(evolution={"lessons": "auto", "language": "en", "tool_hints": True})
         context = self.plugin()
         section = context.sections["hermes-atlas-evolution.playbook"]["content"]
         self.assertEqual(section({"session_id": "s0"}), "")   # nothing learned yet: nothing injected
@@ -186,7 +186,8 @@ class PluginLoopTest(PluginBase):
         with experience(self.home) as conn:
             self.assertEqual(conn.execute("SELECT kind, count FROM guard_daily").fetchall()[0][:], ("gateway_stop", 1))
         self.settings(evolution={"runtime_guard": False})
-        self.assertNotIn("pre_tool_call", self.plugin().hooks)
+        quiet = self.plugin()   # still remembers what the agent wrote, but vetoes nothing
+        self.assertIsNone(quiet.fire("pre_tool_call", tool_name="terminal", args={"command": "systemctl --user restart hermes-gateway"}))
 
     def test_pending_decisions_are_announced_once_a_day_and_only_to_the_owner(self):
         self.settings(evolution={"language": "en"})
@@ -216,6 +217,57 @@ class PluginLoopTest(PluginBase):
                    for index in range(7)]
         accepted = [reply for reply in replies if "error" not in reply]
         self.assertEqual(len(accepted), 5)   # PROPOSALS_PER_HOUR, kept by the one tool instance of this load
+
+    def test_failures_that_are_not_the_agents_doing_never_become_lessons(self):
+        self.settings(evolution={"lessons": "auto"})
+        context = self.plugin()
+        stuck = json.dumps({"error": "pre_tool_call plugin callback timed out or is still running"})
+        for index in range(6):   # another plugin's guard hung: Hermes blocked the tool, fail-closed
+            context.fire("post_tool_call", tool_name="read_file", status="blocked", result=stuck, error_type="plugin_block",
+                         error_message="pre_tool_call plugin callback timed out or is still running",
+                         session_id=f"s{index % 3}", turn_id=f"t{index}", tool_call_id=f"stuck-{index}")
+        for index in range(6):   # another plugin rewrote the command into a binary that is not installed
+            call = f"rw-{index}"
+            context.fire("pre_tool_call", tool_name="terminal", args={"command": "git status"}, tool_call_id=call)
+            context.fire("post_tool_call", tool_name="terminal", status="error", args={"command": "rtk git status"},
+                         result=json.dumps({"output": "bash: rtk: command not found", "exit_code": 127}),
+                         session_id=f"s{index % 3}", turn_id=f"r{index}", tool_call_id=call)
+        close_observers()
+        with experience(self.home) as conn:
+            classes = dict(conn.execute("SELECT klass, SUM(total) FROM failure GROUP BY klass").fetchall())
+        self.assertEqual(classes, {"plugin_fault": 6, "rewritten_command": 6})
+        from hermes_atlas_evolution.evolve import cycle
+
+        learned = cycle(self.home, now=__import__("time").time(), config={"evolution": {"lessons": "auto", "reflector": False}})
+        self.assertEqual(learned["new_lessons"], [])
+
+    def test_hints_on_failing_results_are_off_unless_asked_for(self):
+        with experience(self.home) as conn:
+            lessons.add_custom(conn, "Always pass servico to files_search.", tool="files_search", origin="operator",
+                               now=1.0, active=True)
+            conn.execute("UPDATE lesson SET signature=?", (__import__("hermes_atlas_evolution.signals", fromlist=["x"])
+                                                          .classify("tool_call", "error", None, ERROR, ARGS)["signature"],))
+        failing = dict(tool_name="tool_call", status="error", result=ERROR, args=ARGS, session_id="s1", tool_call_id="c1")
+        self.settings(evolution={"lessons": "auto"})
+        context = self.plugin()
+        # Registered (the manifest declares it) but silent: only the first string of all plugins counts, so a
+        # hint would discard another plugin's transform of the same result.
+        self.assertIsNone(context.fire("transform_tool_result", **failing))
+        self.settings(evolution={"lessons": "auto", "tool_hints": True})
+        self.assertIn("files_search", self.plugin().fire("transform_tool_result", **failing))
+
+    def test_a_lesson_counts_as_shown_once_per_session(self):
+        self.settings(evolution={"lessons": "auto"})
+        context = self.plugin()
+        with experience(self.home) as conn:
+            lessons.add_custom(conn, "When the build fails, read the first error line first.", tool="terminal",
+                               origin="operator", now=1.0, active=True)
+        render = context.sections["hermes-atlas-evolution.playbook"]["content"]
+        for session in ("a", "a", "a", "b"):   # re-renders of one session count once
+            self.assertIn("build fails", render({"session_id": session}))
+        close_observers()
+        with experience(self.home) as conn:
+            self.assertEqual(lessons.listing(conn)[0]["shown_in_sessions"], 2)
 
     def test_error_excerpts_are_kept_only_when_the_reflector_could_use_them(self):
         crash = json.dumps({"output": "Traceback (most recent call last):\nKeyError: 'column'", "exit_code": 1})

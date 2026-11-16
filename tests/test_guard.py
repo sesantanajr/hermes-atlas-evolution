@@ -26,6 +26,18 @@ class CheckTest(unittest.TestCase):
                         "hermes gateway stop", "hermes -p atlas-ai gateway stop",
                         "hermes gateway restart", "hermes gateway restart --yes", "hermes -p atlas-ai gateway restart -y",
                         "bash -c 'systemctl --user restart hermes-gateway'",
+                        "systemd-run --user --on-active=60 --unit=atlas-gw-otim --collect systemctl --user restart hermes-gateway",
+                        "systemd-run --user -p Nice=5 -- systemctl --user restart hermes-gateway.service",
+                        "bash -lc 'systemctl --user restart hermes-gateway'", "sh -ec \"killall hermes\"",
+                        "setsid systemctl --user restart hermes-gateway", "setsid -f pkill -f hermes",
+                        "flock /tmp/gw.lock systemctl --user restart hermes-gateway",
+                        "flock -w 5 /tmp/gw.lock -c 'systemctl --user stop hermes-gateway'",
+                        "su -c 'systemctl --user restart hermes-gateway' root",
+                        "runuser -u root -- systemctl --user restart hermes-gateway",
+                        "script -qc 'systemctl --user restart hermes-gateway' /dev/null",
+                        "rtk run systemctl --user restart hermes-gateway", "rtk err -- pkill -f hermes",
+                        "watch -n 60 systemctl --user restart hermes-gateway",
+                        "xargs -n1 systemctl --user restart hermes-gateway",
                         "sh -c \"killall hermes\"",
                         "pkill -f 'hermes gateway'", "killall hermes", "timeout 5 pkill -9 -f hermes"):
             with self.subTest(command):
@@ -44,7 +56,8 @@ class CheckTest(unittest.TestCase):
     def test_ordinary_administration_passes(self):
         for command in ("systemctl --user status hermes-gateway", "journalctl --user -u hermes-gateway -n 50",
                         "hermes gateway status", "echo 'systemctl restart hermes-gateway'",
-                        "bash -c 'ls -la'", "bash script.sh",
+                        "bash -c 'ls -la'", "bash script.sh", "systemd-run --user --on-active=60 echo ok",
+                        "rtk run git status", "flock /tmp/x make build", "watch -n 5 systemctl --user status hermes-gateway",
                         "rm -rf ~/.hermes/tools/python-3.13.2-old", "rm -rf /tmp/build", "pgrep -f hermes",
                         "ls ~/.hermes/tools", "grep -r killall ~/notes", "mv ~/.hermes/profiles/a/x.txt /tmp/",
                         "systemctl --user restart atlas-ui.service", "",

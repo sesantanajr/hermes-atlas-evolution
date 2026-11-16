@@ -28,11 +28,19 @@ _STOP_ACTIONS = frozenset({"restart", "stop", "kill", "try-restart", "reload-or-
 _REMOVERS = frozenset({"rm", "rmdir", "unlink", "shred", "mv"})
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# Wrappers that run the command after their own options: name -> options that take a separate value.
 _WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t"}, "env": {"-u", "-C", "-S"}, "nohup": set(),
              "timeout": {"-s", "-k", "--signal", "--kill-after"}, "nice": {"-n", "--adjustment"},
              "ionice": {"-c", "-n", "-p"}, "stdbuf": {"-i", "-o", "-e"}, "exec": set(), "command": set(),
-             "builtin": set(), "time": set(), "chrt": set(), "doas": {"-u"}}
-_TAKES_POSITIONAL = {"timeout": 1, "chrt": 1}
+             "builtin": set(), "time": set(), "chrt": set(), "doas": {"-u"}, "setsid": set(),
+             "systemd-run": {"-u", "--unit", "-p", "--property", "-E", "--setenv", "-M", "--machine", "-H", "--host",
+                             "--description", "--slice", "--uid", "--gid", "-d", "--working-directory"},
+             "runuser": {"-u", "-g", "-G"}, "watch": {"-n", "--interval"}, "flock": {"-w", "--timeout", "-E"},
+             "xargs": {"-n", "-I", "-P", "-d", "-L", "-s", "-a", "-E"}}
+_TAKES_POSITIONAL = {"timeout": 1, "chrt": 1, "flock": 1}   # the duration, the priority, the lock file
+# Programs that run a command given as one string after -c (shells also accept it inside -lc, -ec, ...).
+_STRING_RUNNERS = frozenset({"su", "runuser", "script", "flock"})
+_RTK_SUBCOMMANDS = frozenset({"run", "err", "summary", "test", "bypass", "proxy"})
 _SEPARATORS = frozenset({";", "&&", "||", "|", "&", "(", ")", "\n", ";;", "|&"})
 
 MESSAGES = {
@@ -119,7 +127,8 @@ def _segments(command: str) -> list[list[str]] | None:
 
 
 def _strip_prefix(tokens: list[str]) -> list[str]:
-    """Drop variable assignments and wrappers such as sudo, env, nohup and timeout before the real command."""
+    """Drop variable assignments and wrappers such as sudo, env, nohup, timeout, setsid, systemd-run, flock,
+    watch, xargs and rtk run before the real command."""
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -127,14 +136,34 @@ def _strip_prefix(tokens: list[str]) -> list[str]:
             index += 1
             continue
         name = os.path.basename(token)
-        if name not in _WRAPPERS:
+        if name == "rtk" and index + 1 < len(tokens) and tokens[index + 1] in _RTK_SUBCOMMANDS:
+            index += 2   # rtk run|err|...: what follows is the command
+            if index < len(tokens) and tokens[index] == "--":
+                index += 1
+            continue
+        if name not in _WRAPPERS or _command_string(name, tokens[index + 1:]) is not None:
             break
         index += 1
         with_value = _WRAPPERS[name]
         while index < len(tokens) and tokens[index].startswith("-"):
+            if tokens[index] == "--":
+                index += 1
+                break
             index += 2 if tokens[index] in with_value else 1
         index += _TAKES_POSITIONAL.get(name, 0)
     return tokens[index:]
+
+
+def _command_string(verb: str, rest: list[str]) -> str | None:
+    """The command a shell (-c, -lc, -ec, ...) or su, runuser, script or flock (-c, --command) gets as one string."""
+    for position, token in enumerate(rest):
+        if verb in _SHELLS and re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", token):
+            return rest[position + 1] if position + 1 < len(rest) else None
+        if verb in _STRING_RUNNERS and token in ("-c", "--command"):
+            return rest[position + 1] if position + 1 < len(rest) else None
+        if verb in _STRING_RUNNERS and re.fullmatch(r"-[A-Za-z]*c", token) and verb == "script":
+            return rest[position + 1] if position + 1 < len(rest) else None   # script -qc '<command>'
+    return None
 
 
 def _expand(token: str, home: Path) -> PurePosixPath | None:
@@ -215,9 +244,9 @@ def _check_command(command: str, *, protected, home: Path, nested: bool) -> dict
         if not tokens:
             continue
         verb, rest = os.path.basename(tokens[0]), tokens[1:]
-        if verb in _SHELLS and "-c" in rest and not nested:   # one level: `bash -c '<command>'`
-            index = rest.index("-c") + 1
-            found = _check_command(rest[index], protected=protected, home=home, nested=True) if index < len(rest) else None
+        inner = _command_string(verb, rest)
+        if inner is not None:   # one level: bash -lc '<command>', su -c '<command>', flock FILE -c '<command>'
+            found = None if nested else _check_command(inner, protected=protected, home=home, nested=True)
             if found:
                 return found
             continue

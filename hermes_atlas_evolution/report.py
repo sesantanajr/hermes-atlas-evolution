@@ -120,6 +120,9 @@ _TEXT = {
         "undeclared": "register hooks they do not declare", "overlap": "compete for", "first_wins": "only the first result counts",
         "guard_line": "Runtime guard", "vetoed": "commands vetoed", "gateway_stop": "gateway restart or kill",
         "runtime_removal": "removal of the running Hermes", "health_none": "Nothing measured yet.",
+        "external_line": "Failures caused by other plugins",
+        "external_fault": "calls blocked because a plugin's pre_tool_call hung or failed",
+        "external_rewrite": "commands rewritten by a plugin that then failed (never turned into lessons)",
         "research_line": "Web research", "research_turns": "turns", "research_slow": "over {limit} s",
         "research_errors": "errors in", "research_calls": "calls", "research_p95": "1 in 20 takes more than",
     },
@@ -156,6 +159,9 @@ _TEXT = {
         "undeclared": "registram hooks que não declaram", "overlap": "disputam", "first_wins": "só o primeiro resultado vale",
         "guard_line": "Guarda de runtime", "vetoed": "comandos barrados", "gateway_stop": "reinício ou kill do gateway",
         "runtime_removal": "remoção do Hermes em execução", "health_none": "Nada medido ainda.",
+        "external_line": "Falhas causadas por outros plugins",
+        "external_fault": "chamadas bloqueadas porque o pre_tool_call de um plugin travou ou falhou",
+        "external_rewrite": "comandos reescritos por um plugin que depois falharam (nunca viram lição)",
         "research_line": "Pesquisas na web", "research_turns": "turnos", "research_slow": "acima de {limit} s",
         "research_errors": "erros em", "research_calls": "chamadas", "research_p95": "1 em cada 20 passa de",
     },
@@ -237,6 +243,10 @@ def _health(report: dict, lang: str) -> list[str]:
         for hook, names in loaded["overlaps"].items():
             parts.append(f"{t['overlap']} `{hook}` ({t['first_wins']}): " + " → ".join(f"`{name}`" for name in names))
         lines.append(f"- **{t['plugins_line']}:** " + " · ".join(parts))
+    outside = health.get("external") or {}
+    if outside.get("plugin_fault") or outside.get("rewritten_command"):
+        lines.append(f"- **{t['external_line']}:** {_number(outside.get('plugin_fault', 0), lang)} {t['external_fault']} · "
+                     f"{_number(outside.get('rewritten_command', 0), lang)} {t['external_rewrite']}")
     research = report.get("research") or {}
     if research.get("turns"):
         lines.append(f"- **{t['research_line']}:** {_number(research['turns'], lang)} {t['research_turns']} · "

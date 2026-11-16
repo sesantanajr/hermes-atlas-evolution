@@ -53,9 +53,11 @@ config_schema:
     description: Language of lessons, messages and the digest. auto follows HERMES_LANGUAGE and display.language.
   tool_hints:
     type: bool
-    default: true
+    default: false
     label: Lesson on failure
-    description: Add the matching lesson to a failing tool result, once per session.
+    description: >-
+      Also add the matching lesson to a failing tool result, once per session. Off by default: Hermes keeps only
+      the first plugin's change to a tool result, so a hint would discard another plugin's change to that result.
   feedback_signals:
     type: bool
     default: true

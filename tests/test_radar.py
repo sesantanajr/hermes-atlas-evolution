@@ -1,5 +1,6 @@
 """The radar reads Hermes' own records for what slows it down or wastes context, and proposes inspections."""
 
+import json
 import sqlite3
 import sys
 import tempfile
@@ -89,6 +90,21 @@ class CompactionTest(Base):
         found = self.scan()
         self.assertEqual((found["compaction"]["compactions"], found["compaction"]["kept_pct"]), (8, 85.0))
         self.assertIn("compaction", [item["kind"] for item in found["findings"]])
+
+
+class ExternalFailuresTest(Base):
+    def test_calls_blocked_or_broken_by_other_plugins_are_reported_not_learned(self):
+        from hermes_atlas_evolution.signals import record_tool
+
+        stuck = json.dumps({"error": "pre_tool_call plugin callback timed out or is still running"})
+        for index in range(4):
+            record_tool(self.home, {"tool_name": "read_file", "status": "blocked", "result": stuck, "session_id": "s"},
+                        now=NOW - 60)
+        close_observers()
+        found = self.scan()
+        self.assertEqual(found["external"], {"plugin_fault": 4, "rewritten_command": 0})
+        codes = {item["code"]: item for item in found["findings"]}
+        self.assertEqual(codes["plugin_guard_faults"]["evidence"]["blocked_calls"], 4)
 
 
 class PluginHealthTest(Base):

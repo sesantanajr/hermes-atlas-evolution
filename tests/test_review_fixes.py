@@ -128,7 +128,7 @@ class HookHardeningTest(Base):
             self.failures(when, 2, session=f"s{when}")
         with experience(self.home) as conn:
             lessons.derive(conn, now=NOW, mode="auto")
-        (self.home / "evolution" / "settings.json").write_text(json.dumps({"evolution": {"lessons": "auto"}}))
+        (self.home / "evolution" / "settings.json").write_text(json.dumps({"evolution": {"lessons": "auto", "tool_hints": True}}))
 
         class Context:
             hooks, envs = {}, []

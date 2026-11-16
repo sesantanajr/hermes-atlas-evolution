@@ -6,6 +6,7 @@ once and the turn continues.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -156,6 +157,9 @@ class _Plugin:
                        if evolution["feedback_signals"] else None)
         self.hints = HintIndex(home, lang=evolution["language"])
         self.recent: dict[str, dict] = {}   # tool_call_id -> failure, for the transform that follows the tool
+        self.commands: dict[str, str] = {}  # tool_call_id -> hash of the command the agent wrote (memory only)
+        self.counted: dict[str, None] = {}  # sessions whose playbook render was already counted
+        self.guard = None
         self.recent_lock = threading.Lock()
         self.failed: set[str] = set()
         self.reflect = None
@@ -189,8 +193,41 @@ class _Plugin:
                 self.warn(hook)
         return callback
 
+    def pre_tool(self, **payload):
+        """Remember a hash of the command the agent wrote (another plugin may rewrite it before it runs), then
+        let the runtime guard decide. Hermes blocks a tool whose pre_tool_call raises, so this never raises."""
+        try:
+            self._remember_command(payload)
+        except Exception:
+            pass
+        try:
+            return self.guard(**payload) if self.guard is not None else None
+        except Exception:
+            return None
+
+    def _remember_command(self, payload: dict) -> None:
+        from .guard import TERMINAL_TOOLS
+
+        call, args = payload.get("tool_call_id"), payload.get("args")
+        command = args.get("command") if isinstance(args, dict) else None
+        if payload.get("tool_name") in TERMINAL_TOOLS and isinstance(call, str) and 0 < len(call) <= 400 \
+                and isinstance(command, str):
+            with self.recent_lock:
+                self.commands[call] = hashlib.sha256(command.encode("utf-8", "replace")).hexdigest()
+                while len(self.commands) > 512:
+                    self.commands.pop(next(iter(self.commands)))
+
+    def _rewritten(self, payload: dict) -> bool:
+        """True when the command that ran differs from the one the agent wrote."""
+        call, args = payload.get("tool_call_id"), payload.get("args")
+        with self.recent_lock:
+            written = self.commands.pop(call, None) if isinstance(call, str) else None
+        command = args.get("command") if isinstance(args, dict) else None
+        return written is not None and isinstance(command, str) and \
+            hashlib.sha256(command.encode("utf-8", "replace")).hexdigest() != written
+
     def after_tool(self, **payload):
-        from .signals import classify, record_tool
+        from .signals import classify, reclassify, record_tool
 
         try:
             self.research.tool(payload)
@@ -201,6 +238,8 @@ class _Plugin:
         try:
             failure = classify(payload.get("tool_name"), payload.get("status"), payload.get("error_message"),
                                payload.get("result"), payload.get("args"))
+            if self._rewritten(payload) and failure and failure["klass"] != "plugin_fault":
+                failure = reclassify(failure, "rewritten_command")   # the agent did not write what failed
             # An excerpt is kept only when the reflector could use it: on, and lessons not off.
             record_tool(self.home, payload, failure=failure,
                         sample=self.evolution["reflector"] and self.evolution["lessons"] != "off")
@@ -268,8 +307,8 @@ class _Plugin:
         from .signals import classify
 
         try:
-            if payload.get("status") not in ("error", "blocked"):
-                return None
+            if not self.evolution["tool_hints"] or payload.get("status") not in ("error", "blocked"):
+                return None   # off by default: the first string of all plugins wins, so a hint discards theirs
             call, session = payload.get("tool_call_id"), payload.get("session_id")
             if not isinstance(session, str) or not session.strip():
                 return None   # without a session there is no "once per session"
@@ -289,9 +328,10 @@ class _Plugin:
         except Exception:   # a transform hook must never break a tool result
             return None
 
-    def playbook_section(self, _session_info):
+    def playbook_section(self, session_info):
         """Read the playbook, then count the lessons shown through the queued writer: a busy database
-        (a `learn` run, another process) must never leave a new session without its lessons."""
+        (a `learn` run, another process) must never leave a new session without its lessons. A session counts
+        once, however often Hermes renders its prompt again (compaction, a fork, an inspection)."""
         from . import lessons as playbook
         from .experience import experience, record
 
@@ -299,6 +339,15 @@ class _Plugin:
             shown: list = []
             with experience(self.home) as conn:   # its own connection: WAL readers never wait for a writer
                 text = playbook.playbook(conn, lang=self.lang, chosen=shown)
+            session = session_info.get("session_id") if hasattr(session_info, "get") else None
+            if isinstance(session, str) and session:
+                with self.recent_lock:
+                    seen = session in self.counted
+                    self.counted[session] = None
+                    while len(self.counted) > 2048:
+                        self.counted.pop(next(iter(self.counted)))
+                if seen:
+                    shown = []
             if shown:
                 record(self.home, lambda conn: conn.executemany("UPDATE lesson SET shown=shown+1 WHERE id=?",
                                                                 [(item,) for item in shown]))
@@ -410,17 +459,17 @@ def _start(plugin: _Plugin) -> None:
 
 
 def _register_guard(ctx, plugin: _Plugin) -> None:
-    if not plugin.evolution["runtime_guard"]:
-        return
-    from hermes_constants import get_default_hermes_root
+    """pre_tool_call: remember what the agent wrote and, with runtime_guard on, veto what would take Hermes down."""
+    if plugin.evolution["runtime_guard"]:
+        from hermes_constants import get_default_hermes_root
 
-    from .guard import RuntimeGuard, protected_paths
-    from .signals import record_guard
+        from .guard import RuntimeGuard, protected_paths
+        from .signals import record_guard
 
-    home = plugin.home
-    guard = RuntimeGuard(protected=protected_paths(hermes_root=get_default_hermes_root(home=home), profile_home=home),
-                         home=Path.home(), lang=plugin.lang, on_block=lambda kind: record_guard(home, kind))
-    ctx.register_hook("pre_tool_call", guard)
+        home = plugin.home
+        plugin.guard = RuntimeGuard(protected=protected_paths(hermes_root=get_default_hermes_root(home=home), profile_home=home),
+                                    home=Path.home(), lang=plugin.lang, on_block=lambda kind: record_guard(home, kind))
+    ctx.register_hook("pre_tool_call", plugin.pre_tool)
 
 
 def _register_session_marker(ctx) -> None:
@@ -481,7 +530,7 @@ def register(ctx):
     ctx.register_hook("on_session_end", plugin.turn_ended)
     ctx.register_hook("on_skill_lifecycle", plugin.skill_event)
     lessons_on = evolution["lessons"] != "off"
-    if lessons_on and evolution["tool_hints"]:
+    if lessons_on:   # registered as the manifest declares; silent unless tool_hints is on
         ctx.register_hook("transform_tool_result", plugin.with_lesson)
     if lessons_on:
         ctx.register_system_prompt_section("hermes-atlas-evolution.playbook", plugin.playbook_section, max_chars=1400)

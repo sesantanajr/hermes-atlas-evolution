@@ -16,7 +16,7 @@ from .i18n import resolve
 from .experience import day_offset, experience, prune, utc_day
 from .skill_health import read_usage, skill_health, skill_outcomes
 
-DEFAULTS = {"lessons": "auto", "tool_hints": True, "feedback_signals": True, "language": "auto",
+DEFAULTS = {"lessons": "auto", "tool_hints": False, "feedback_signals": True, "language": "auto",
             "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": True, "reflector_daily_limit": 6,
             "autopilot_minutes": 60, "runtime_guard": True}
 
@@ -66,7 +66,7 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
     # A protection: an invalid value keeps it on.
     guard = checked("runtime_guard", raw.get("runtime_guard", True), lambda value: type(value) is bool,
                     "evolution.runtime_guard must be true or false", True)
-    return {"lessons": mode, "tool_hints": raw.get("tool_hints", True) is not False, "runtime_guard": guard,
+    return {"lessons": mode, "tool_hints": raw.get("tool_hints", False) is True, "runtime_guard": guard,
             "reflector": reflect, "reflector_daily_limit": daily, "autopilot_minutes": autopilot,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
             "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,

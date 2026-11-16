@@ -66,7 +66,17 @@ _RULES = (
 )
 _EXCEPTION = re.compile(r"^(?P<hint>[A-Za-z_][A-Za-z0-9_.]{2,47}(?:Error|Exception))\b", re.M)
 _TARGET_TOOL = re.compile(r"tool_call to '(?P<tool>[A-Za-z0-9_][\w.:-]{0,95})'")
-CLASSES = tuple(dict.fromkeys(name for name, _ in _RULES)) + ("command_failed", "other")
+# plugin_fault: Hermes blocked the call because another plugin's pre_tool_call hung or raised (fail-closed).
+# rewritten_command: the call failed after another plugin rewrote the command the agent wrote.
+# Neither is the agent's doing, so neither ever becomes a lesson.
+CLASSES = tuple(dict.fromkeys(name for name, _ in _RULES)) + ("command_failed", "other", "plugin_fault", "rewritten_command")
+_PLUGIN_FAULT = re.compile(r"^\s*pre_tool_call plugin callback\b", re.M)
+
+
+def reclassify(failure: dict, klass: str) -> dict:
+    """The same failure under another class, with its signature recomputed."""
+    signature = hashlib.sha256("\0".join((failure["tool"], klass, failure["hint"])).encode()).hexdigest()[:20]
+    return {**failure, "klass": klass, "signature": signature}
 
 _CORRECTION = re.compile(
     r"^\W{0,3}(?:n[ãa]o[,.!]|n[ãa]o era isso|n[ãa]o foi isso|n[ãa]o [ée] isso|n[ãa]o funcionou|errado|incorreto|"
@@ -186,6 +196,9 @@ def classify(tool_name, status, error_message=None, result=None, args=None) -> d
             named = _clean_hint(target.group("tool")) if len(target.group("tool")) <= 32 else label(target.group("tool"))
             tool = named or tool
     klass, hint = "", ""
+    if _PLUGIN_FAULT.search(errors):   # Hermes' own fail-closed veto after another plugin's guard hung or raised
+        signature = hashlib.sha256("\0".join((tool, "plugin_fault", "")).encode()).hexdigest()[:20]
+        return {"tool": tool, "klass": "plugin_fault", "hint": "", "signature": signature}
     for source, from_output in ((errors, False), (output, True)):
         for name, pattern in _RULES:
             match = pattern.search(source) if source else None
