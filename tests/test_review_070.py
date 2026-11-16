@@ -355,8 +355,10 @@ class SlowToolTest(Base):
 
         db = self.history([("s", "cli", None, NOW - DAY)])
         rows, clock = [], NOW - DAY
-        for index in range(6):   # web_extract: 40 s from the request to the result; terminal: 2 s
-            for name, seconds in (("web_extract", 40), ("terminal", 2)):
+        # web_extract: 40 s from the request to the result; terminal: 2 s; clarify waits for a person and
+        # delegate_task for a whole subagent, which is not a slow tool
+        for index in range(6):
+            for name, seconds in (("web_extract", 40), ("terminal", 2), ("clarify", 300), ("delegate_task", 200)):
                 call = f"{name}{index}"
                 rows += [("s", "assistant", "", None, json.dumps([{"id": call, "function": {"name": name, "arguments": "{}"}}]),
                           None, clock, "tool_calls"),
@@ -374,10 +376,12 @@ class SlowToolTest(Base):
         with experience(self.home) as conn:
             durations = dict(conn.execute("SELECT tool, duration_ms FROM tool_daily").fetchall())
             reading = radar.scan(self.home, conn, now=NOW)
-        self.assertEqual(durations, {"web_extract": 240_000, "terminal": 12_000})
+        self.assertEqual(durations, {"web_extract": 240_000, "terminal": 12_000, "clarify": 1_800_000,
+                                     "delegate_task": 1_200_000})
         codes = {item["code"]: item for item in reading["findings"]}
         self.assertEqual(codes["tool_slow:web_extract"]["evidence"]["mean_s"], 40.0)
-        self.assertNotIn("tool_slow:terminal", codes)
+        self.assertEqual(sorted(code for code in codes if code.startswith("tool_slow:")), ["tool_slow:web_extract"])
+        self.assertEqual([item["tool"] for item in reading["slow_tools"]], ["web_extract", "terminal"])
         text = markdown(build(self.home, now=NOW, days=7, lang="pt"), "pt")
         self.assertIn("**Ferramentas mais lentas:** `web_extract` 40,0 s em média (6 chamadas)", text)
 
