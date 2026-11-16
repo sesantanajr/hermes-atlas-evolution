@@ -177,6 +177,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     listing = playbook_commands.add_parser("list")
     listing.add_argument("--status", choices=("candidate", "active", "quarantined", "retired"))
     listing.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS)
+    playbook_commands.add_parser("review", help=_("Decide on each lesson that waits for approval, one by one, in your terminal"))
     for name in ("approve", "retire"):
         decided = playbook_commands.add_parser(name)
         decided.add_argument("id", type=int)
@@ -333,6 +334,8 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
                 return {"mode": opts["lessons"],
                         "lessons": lessons.listing(conn, lang=lang, status=getattr(args, "status", None))}
             _operator_only()
+            if task == "review":
+                return _review_lessons(conn, lang, now=now)
             if task == "add":
                 activate = bool(getattr(args, "activate", False))
                 if activate:
@@ -430,6 +433,39 @@ def _operator_only() -> None:
     if any(os.environ.get(name, "").strip() for name in AGENT_MARKERS) or _under_hermes() or _in_hermes_cgroup():
         raise ValueError("Only the operator can decide on lessons and proposals. Run this command in your own "
                          "terminal; the agent can propose lessons, which wait for your approval.")
+
+
+_REVIEW_PROMPT = {"en": "[a]pprove · [r]eject · Enter skips · [x] quit: ",
+                  "pt": "[a]provar · [r]ejeitar · Enter pula · [x] sair: "}
+
+
+def _review_lessons(conn, lang: str, *, now: float) -> dict:
+    """Show each lesson that waits for approval with its exact text and record the owner's decision."""
+    import sys
+
+    from . import lessons as playbook
+
+    if not sys.stdin.isatty():
+        raise ValueError("Run lessons review in your own terminal")
+    order = "CASE origin WHEN 'derived' THEN 0 WHEN 'operator' THEN 1 WHEN 'reflector' THEN 2 ELSE 3 END, id"
+    rows = conn.execute(f"SELECT * FROM lesson WHERE status IN ('candidate','quarantined') ORDER BY {order}").fetchall()
+    decided = {"approved": [], "rejected": [], "skipped": []}
+    for row in rows:
+        sys.stderr.write(f"\n#{row['id']} · {row['tool']} · {row['klass']} · {row['origin']}\n  "
+                         f"{playbook.render(row, lang)}\n{_REVIEW_PROMPT.get(lang, _REVIEW_PROMPT['en'])}")
+        sys.stderr.flush()
+        answer = sys.stdin.readline().strip().lower()[:1]
+        if answer == "x":
+            break
+        if answer in ("a", "r"):
+            approve = answer == "a"
+            playbook.set_status(conn, row["id"], "active" if approve else "retired", now=now)
+            conn.execute("UPDATE proposal SET status=?, updated=? WHERE code=? AND status IN ('open','approved')",
+                         ("applied" if approve else "rejected", now, f"lesson:{row['id']}"))
+            decided["approved" if approve else "rejected"].append(row["id"])
+        else:
+            decided["skipped"].append(row["id"])
+    return decided
 
 
 def _confirm(text: str, lang: str, *, yes: bool) -> None:

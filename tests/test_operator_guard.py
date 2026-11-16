@@ -20,7 +20,7 @@ CLEAN = {name: "" for name in AGENT_MARKERS}
 LESSON = "When a CSV import fails, check the header row before retrying."
 
 
-class GuardTest(unittest.TestCase):
+class GuardBase(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -40,6 +40,8 @@ class GuardTest(unittest.TestCase):
             execute(SimpleNamespace(lang="en", **arguments), self.home, runtime_config={})
         return json.loads(stream.getvalue())
 
+
+class GuardTest(GuardBase):
     def test_a_new_operator_lesson_waits_for_approval_unless_activated_with_confirmation(self):
         added = self.run_cli(evolution_action="lessons", lessons_action="add", text=LESSON, tool="terminal",
                              activate=False, yes=False)
@@ -105,6 +107,33 @@ class SkillTextTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewTest(GuardBase):
+    """`lessons review` walks the waiting lessons in the owner's terminal: approve, reject, skip or stop."""
+
+    def answer(self, *replies):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        return patch("sys.stdin", Terminal("".join(f"{reply}\n" for reply in replies)))
+
+    def test_each_waiting_lesson_is_shown_and_decided_in_turn(self):
+        ids = [self.run_cli(evolution_action="lessons", lessons_action="add", text=f"{LESSON} Case {index}.",
+                            tool="terminal", activate=False, yes=False)["id"] for index in range(3)]
+        errors = io.StringIO()
+        with self.answer("a", "r", "p"), contextlib.redirect_stderr(errors):
+            summary = self.run_cli(evolution_action="lessons", lessons_action="review")
+        self.assertEqual(summary, {"approved": [ids[0]], "rejected": [ids[1]], "skipped": [ids[2]]})
+        self.assertIn("Case 0", errors.getvalue())             # the exact text, before each decision
+        with experience(self.home) as conn:
+            states = dict(conn.execute("SELECT id, status FROM lesson").fetchall())
+        self.assertEqual((states[ids[0]], states[ids[1]], states[ids[2]]), ("active", "retired", "quarantined"))
+
+    def test_review_needs_the_owners_terminal(self):
+        with patch.dict(os.environ, {"ATLAS_EVOLUTION_AGENT": "1"}), self.assertRaises(SystemExit):
+            self.run_cli(evolution_action="lessons", lessons_action="review")
 
 
 class AncestryTest(unittest.TestCase):
