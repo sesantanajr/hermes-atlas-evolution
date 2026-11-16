@@ -202,7 +202,7 @@ The main options are in the manifest's `config_schema`, so Hermes Desktop shows 
 | `language` | `auto`, `en`, `pt` | `auto` | `auto` follows `HERMES_LANGUAGE`, `display.language`, the locale, then English. |
 | `tool_hints` | boolean | `true` | Adds the matching lesson to a failing result. |
 | `feedback_signals` | boolean | `true` | Counts owner corrections, repeated questions and thanks. |
-| `agent_tools` | boolean | `false` | Offers `atlas_evolution_plan` and `atlas_evolution_lessons` to the agent. |
+| `agent_tools` | boolean | `false` | Offers `hermes_evolution_plan` and `hermes_evolution_lessons` to the agent. |
 | `slow_turn_seconds` | integer, 5 to 3600 | `60` | A turn at least this long counts as slow. |
 | `owner_sender_ids` | up to 20 strings | `[]` | Gateway senders counted as the owner. Local sessions always count. |
 | `reflector` | boolean | `true` | Drafts lessons for untemplated failures through the auxiliary task `evolution_reflector`. Drafts always wait for approval. |
@@ -228,7 +228,7 @@ The hooks, the prompt section, the runtime guard, the autopilot interval and the
 
 Two paths, neither of which rewrites a cached prompt.
 
-- **Session prompt section.** Hermes renders `atlas-evolution.playbook` when a session starts and freezes it into that session: active lessons, effective ones first, at most 8 and 1,200 characters. A lesson activated mid-session appears in the next session. A pass running in another process does not leave a new session without its lessons.
+- **Session prompt section.** Hermes renders `hermes-evolution.playbook` when a session starts and freezes it into that session: active lessons, effective ones first, at most 8 and 1,200 characters. A lesson activated mid-session appears in the next session. A pass running in another process does not leave a new session without its lessons.
 - **Hint on the failing result.** When a call fails with a signature that has an active lesson, `transform_tool_result` appends the sentence to that result, as new content at the end of the conversation. Once per failure per session, at most 6 per session, never on success, and not when the result already carries a `hint` from Hermes' own tools.
 
 Nothing is injected per turn. With `lessons` set to `off`, neither surface is registered.

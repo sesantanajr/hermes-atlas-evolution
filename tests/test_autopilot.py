@@ -159,6 +159,40 @@ class AutopilotTest(Base):
         self.assertEqual(len(logged.output), 1)
         self.assertNotIn("boom", logged.output[0])             # the exception type only, never its text
 
+    def test_the_clock_nudges_an_idle_profile_and_stops_on_unload(self):
+        calls = []
+        pilot, clock = self.make(lambda: calls.append(1))
+        self.assertTrue(pilot.start_clock(first=0.05, period=0.05))
+        self.assertFalse(pilot.start_clock(first=0.05, period=0.05))   # one clock per autopilot
+        deadline = time.monotonic() + 5
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.wait(pilot)
+        self.assertEqual(len(calls), 1)                                  # no turn needed for the first pass
+        pilot.stop()
+        pilot._clock.join(2)
+        self.assertFalse(pilot._clock.is_alive())
+        clock["t"] += HOUR * 2
+        self.assertFalse(pilot.poke())                                   # after unload nothing new starts
+
+    def test_a_pass_cut_by_process_exit_frees_the_lease_for_a_retry(self):
+        started, release = threading.Event(), threading.Event()
+
+        def run():
+            started.set()
+            release.wait(5)
+
+        pilot, clock = self.make(run)
+        pilot.poke()
+        self.assertTrue(started.wait(5))
+        pilot._at_exit()                                                 # what atexit does at interpreter shutdown
+        with experience(self.home) as conn:
+            self.assertIsNone(conn.execute("SELECT value FROM cursor WHERE key='loop_lease'").fetchone())
+            status = json.loads(conn.execute("SELECT value FROM cursor WHERE key='loop_status'").fetchone()[0])
+        self.assertEqual((status["ok"], status["error"]), (False, "ProcessExit"))
+        release.set()
+        self.wait(pilot)
+
     def test_the_thread_pins_the_plugin_profile(self):
         override = contextvars.ContextVar("override", default=None)
         constants = types.ModuleType("hermes_constants")

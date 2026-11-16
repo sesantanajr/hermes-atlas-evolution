@@ -28,7 +28,7 @@ HANDOFF_RULES = ("Use verification and observation only. Report evidence, uncert
                  "Keep raw logs and secrets out of the handoff. Configuration changes and service operations require "
                  "separate approval.")
 _RUNNER_FLAGS = ("HERMES_DELEGATED_CHILD_CONTEXT", "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID")
-_JOB_NAME = "atlas-evolution-watchdog"
+_JOB_NAME = "hermes-evolution-watchdog"
 _SCRIPT_NAME = _JOB_NAME + ".py"
 
 
@@ -65,7 +65,7 @@ def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: fl
         return {"status": "unavailable", "reason": "hermes_launcher_not_found"}
     stamp = datetime.now(timezone.utc) if now is None else datetime.fromtimestamp(now, timezone.utc)
     identity = json.dumps([os.path.normcase(str(profile)), board, assignee, kind, subject, str(stamp.date())])
-    key = "atlas-evolution:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    key = "hermes-evolution:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
     from .i18n import text
 
     portuguese = lang == "pt"
@@ -77,7 +77,7 @@ def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: fl
     command = [
         str(Path(executable).resolve()), *_profile_args(profile), "kanban", "--board", board, "create", title,
         "--body", body, "--assignee", assignee, "--initial-status", "blocked",
-        "--max-retries", "1", "--max-runtime", "5m", "--created-by", "atlas-evolution",
+        "--max-retries", "1", "--max-runtime", "5m", "--created-by", "hermes-evolution",
         "--idempotency-key", key, "--json",
     ]
     environment = dict(os.environ, HERMES_HOME=str(profile))

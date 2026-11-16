@@ -202,7 +202,7 @@ As opções principais estão no `config_schema` do manifesto, então o Hermes D
 | `language` | `auto`, `en`, `pt` | `auto` | `auto` segue `HERMES_LANGUAGE`, `display.language`, o locale e, por fim, inglês. |
 | `tool_hints` | booleano | `true` | Acrescenta a lição correspondente ao resultado que falhou. |
 | `feedback_signals` | booleano | `true` | Conta correções, perguntas repetidas e agradecimentos do dono. |
-| `agent_tools` | booleano | `false` | Oferece `atlas_evolution_plan` e `atlas_evolution_lessons` ao agente. |
+| `agent_tools` | booleano | `false` | Oferece `hermes_evolution_plan` e `hermes_evolution_lessons` ao agente. |
 | `slow_turn_seconds` | inteiro, de 5 a 3600 | `60` | Turno com pelo menos essa duração conta como lento. |
 | `owner_sender_ids` | até 20 textos | `[]` | Remetentes do gateway contados como o dono. Sessões locais sempre contam. |
 | `reflector` | booleano | `true` | Rascunha lições para falhas sem modelo pela tarefa auxiliar `evolution_reflector`. Os rascunhos sempre aguardam aprovação. |
@@ -229,7 +229,7 @@ Os hooks, a seção de prompt, a guarda de runtime, o intervalo do autopilot e o
 
 Dois caminhos, e nenhum reescreve um prompt em cache.
 
-- **Seção de prompt da sessão.** O Hermes monta `atlas-evolution.playbook` quando a sessão começa e a congela naquela sessão: lições ativas, as eficazes primeiro, no máximo 8 e 1.200 caracteres. Uma lição ativada no meio da sessão aparece na próxima. Uma passada rodando em outro processo não deixa uma sessão nova sem as suas lições.
+- **Seção de prompt da sessão.** O Hermes monta `hermes-evolution.playbook` quando a sessão começa e a congela naquela sessão: lições ativas, as eficazes primeiro, no máximo 8 e 1.200 caracteres. Uma lição ativada no meio da sessão aparece na próxima. Uma passada rodando em outro processo não deixa uma sessão nova sem as suas lições.
 - **Dica no resultado que falhou.** Quando uma chamada falha com uma assinatura que tem lição ativa, o `transform_tool_result` acrescenta a frase àquele resultado, como conteúdo novo no fim da conversa. Uma vez por falha por sessão, no máximo 6 por sessão, nunca em sucesso, e não quando o resultado já traz um `hint` das ferramentas do próprio Hermes.
 
 Nada é injetado a cada turno. Com `lessons` em `off`, nenhuma das duas superfícies é registrada.

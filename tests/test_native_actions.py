@@ -87,8 +87,8 @@ class NativeActionTests(unittest.TestCase):
     def test_schedule_plan_is_local_no_agent_and_preserves_existing_files(self):
         plan = schedule_spec(self.home, every_minutes=15, upstream_tag="v0.23.1")
         self.assertEqual(plan["create_args"], [
-            "hermes", "--profile", "default", "cron", "create", "every 15m", "--name", "atlas-evolution-watchdog",
-            "--no-agent", "--script", "atlas-evolution-watchdog.py", "--deliver", "local",
+            "hermes", "--profile", "default", "cron", "create", "every 15m", "--name", "hermes-evolution-watchdog",
+            "--no-agent", "--script", "hermes-evolution-watchdog.py", "--deliver", "local",
         ])
         self.assertEqual(Path(plan["script_path"]), self.home.resolve() / "scripts" / plan["script_name"])
         self.assertIn("'ops', 'tick', '--notify-only'", plan["script_content"])

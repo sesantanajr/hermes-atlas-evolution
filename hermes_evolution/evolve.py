@@ -179,7 +179,7 @@ def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: i
         raise ValueError("deliver must be a Hermes delivery target such as local or origin")
     profile = Path(home).expanduser().resolve()
     arguments = [*_profile_args(profile), "evolution", "report", "--days", str(days), "--lang", lang]
-    script_name = "atlas-evolution-digest.py"
+    script_name = "hermes-evolution-digest.py"
     script = f'''"""Deliver the Atlas Evolution digest without an agent turn."""
 import os
 import shutil
@@ -203,7 +203,7 @@ except (OSError, subprocess.TimeoutExpired):
 print(result.stdout.rstrip())
 '''
     create_args = ["hermes", *_profile_args(profile), "cron", "create", f"0 {hour} * * {weekday}", "--name",
-                   "atlas-evolution-digest", "--no-agent", "--script", script_name, "--deliver", deliver]
+                   "hermes-evolution-digest", "--no-agent", "--script", script_name, "--deliver", deliver]
     return {"status": "planned", "profile_home": str(profile), "script_name": script_name,
             "script_path": str(profile / "scripts" / script_name), "script_content": script,
             "create_args": create_args,

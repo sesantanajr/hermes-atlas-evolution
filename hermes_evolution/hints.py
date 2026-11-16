@@ -19,7 +19,7 @@ from .experience import experience, record
 REFRESH_SECONDS = 60
 MAX_HINTS_PER_SESSION = 6
 _RESULT_LIMIT = 262_144
-KEY = "atlas_evolution_lesson"
+KEY = "hermes_evolution_lesson"
 
 
 def attach(result, sentence: str, lang: str = "en") -> str | None:

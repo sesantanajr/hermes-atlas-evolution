@@ -96,8 +96,8 @@ class PluginLoopTest(PluginBase):
         declared = read_manifest(Path(__file__).resolve().parent.parent / "plugin.yaml")
         self.assertEqual(sorted(context.hooks), sorted(declared["provides_hooks"]))
         self.assertEqual(sorted(context.tools), sorted(declared["provides_tools"]))
-        self.assertEqual(list(context.sections), ["atlas-evolution.playbook"])
-        self.assertLessEqual(context.sections["atlas-evolution.playbook"]["max_chars"], 4000)
+        self.assertEqual(list(context.sections), ["hermes-evolution.playbook"])
+        self.assertLessEqual(context.sections["hermes-evolution.playbook"]["max_chars"], 4000)
         self.assertIn("evolution", context.cli)
         self.assertEqual(list(context.skills), ["evolution-review"])
         skill = context.skills["evolution-review"].read_text(encoding="utf-8")
@@ -111,7 +111,7 @@ class PluginLoopTest(PluginBase):
     def test_a_recurring_failure_becomes_a_lesson_the_agent_sees_when_it_fails_again(self):
         self.settings(evolution={"lessons": "auto", "language": "en"})
         context = self.plugin()
-        section = context.sections["atlas-evolution.playbook"]["content"]
+        section = context.sections["hermes-evolution.playbook"]["content"]
         self.assertEqual(section({"session_id": "s0"}), "")   # nothing learned yet: nothing injected
 
         for session in ("s1", "s2"):
@@ -133,7 +133,7 @@ class PluginLoopTest(PluginBase):
             self.assertEqual((summary["turns"], summary["completed"], summary["tool_errors"]), (4, 4, 4))
 
         fresh = self.plugin()   # a new gateway process picks the lesson up
-        text = fresh.sections["atlas-evolution.playbook"]["content"]({"session_id": "s3"})
+        text = fresh.sections["hermes-evolution.playbook"]["content"]({"session_id": "s3"})
         self.assertIn("When calling `files_search`, always pass the required argument `servico`.", text)
         payload = {"tool_name": "tool_call", "args": ARGS, "result": ERROR, "status": "error", "session_id": "s3",
                    "turn_id": "turn-s3", "tool_call_id": "s3-0"}
@@ -158,7 +158,7 @@ class PluginLoopTest(PluginBase):
         writer = sqlite3.connect(self.home / "evolution" / "evolution.sqlite3", timeout=0)
         writer.execute("BEGIN IMMEDIATE")   # e.g. `hermes evolution learn` running in another process
         try:
-            text = context.sections["atlas-evolution.playbook"]["content"]({"session_id": "busy"})
+            text = context.sections["hermes-evolution.playbook"]["content"]({"session_id": "busy"})
         finally:
             writer.execute("ROLLBACK")
             writer.close()
@@ -239,9 +239,9 @@ class PluginLoopTest(PluginBase):
                 context.fire("on_skill_lifecycle", action="loaded", skill_name="deploy")
             self.assertIsNone(context.fire("transform_tool_result", tool_name="terminal", status="error",
                                            result="{}", session_id="s", tool_call_id="x"))
-            self.assertEqual(context.sections["atlas-evolution.playbook"]["content"]({}), "")
+            self.assertEqual(context.sections["hermes-evolution.playbook"]["content"]({}), "")
         self.assertEqual(len(logged.records), 3)   # tool, tool_outcome and skill
-        tool = context.tools["atlas_evolution_lessons"]
+        tool = context.tools["hermes_evolution_lessons"]
         self.assertTrue(tool["check"]())
         self.assertEqual(json.loads(tool["handler"]({"action": "search"})), {"lessons": []})
 
@@ -254,7 +254,7 @@ class PluginLoopTest(PluginBase):
         self.settings(evolution={"lessons": "off", "slow_turn_seconds": 120.5})   # another key is wrong
         self.assertEqual(self.plugin().sections, {})
         self.settings(evolution={"lessons": "auto", "slow_turn_seconds": 120.0})  # a form may store whole floats
-        self.assertIn("atlas-evolution.playbook", self.plugin().sections)
+        self.assertIn("hermes-evolution.playbook", self.plugin().sections)
         (self.home / "evolution" / "settings.json").write_text("{not json")
         self.assertEqual(self.plugin().sections, {})              # unreadable file: measure only
 
@@ -275,7 +275,7 @@ class AutopilotLoopTest(PluginBase):
                          session_id=f"s{index}", turn_id=f"t{index}", tool_call_id=f"c{index}")
         context.fire("pre_llm_call", session_id="s0", turn_id="turn", platform="cli", user_message="ok")
         context.fire("post_llm_call", session_id="s0", turn_id="turn")
-        threads = [thread for thread in __import__("threading").enumerate() if thread.name == "atlas-evolution-autopilot"]
+        threads = [thread for thread in __import__("threading").enumerate() if thread.name == "hermes-evolution-autopilot"]
         for thread in threads:
             thread.join(10)
         close_observers()
@@ -290,7 +290,7 @@ class AutopilotLoopTest(PluginBase):
         context = self.plugin()
         context.fire("post_llm_call", session_id="s0", turn_id="turn")
         self.assertEqual([thread for thread in __import__("threading").enumerate()
-                          if thread.name == "atlas-evolution-autopilot"], [])
+                          if thread.name == "hermes-evolution-autopilot"], [])
 
 
 class NativeSettingsTest(unittest.TestCase):

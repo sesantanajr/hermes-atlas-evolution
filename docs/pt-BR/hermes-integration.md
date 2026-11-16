@@ -11,8 +11,8 @@ O plugin se apoia na API publicada de plugins: usa os métodos de `ctx` abaixo e
 | Superfície | API de plugins | Registrada quando |
 |---|---|---|
 | 17 hooks, listados abaixo | `ctx.register_hook` | sempre, exceto `transform_tool_result` (lições ligadas e `tool_hints` ligado) e `pre_tool_call` (`runtime_guard` ligado) |
-| Seção de prompt `atlas-evolution.playbook`, até 1.400 caracteres | `ctx.register_system_prompt_section` | `lessons` é `suggest` ou `auto` |
-| Ferramentas `atlas_evolution_plan` e `atlas_evolution_lessons`, conjunto `atlas-evolution` | `ctx.register_tool` com `check_fn` | sempre; as duas ficam indisponíveis para o agente até `agent_tools` ser ligado |
+| Seção de prompt `hermes-evolution.playbook`, até 1.400 caracteres | `ctx.register_system_prompt_section` | `lessons` é `suggest` ou `auto` |
+| Ferramentas `hermes_evolution_plan` e `hermes_evolution_lessons`, conjunto `hermes-evolution` | `ctx.register_tool` com `check_fn` | sempre; as duas ficam indisponíveis para o agente até `agent_tools` ser ligado |
 | Skill `hermes-evolution:evolution-review` | `ctx.register_skill` | quando o host oferece o método |
 | Variável `ATLAS_EVOLUTION_AGENT=1` em todo subprocesso de uma sessão do agente | `ctx.register_session_env` | quando o host oferece o método |
 | Tarefa auxiliar `evolution_reflector`, herdando de `compression` | `ctx.register_auxiliary_task` e, depois, `ctx.llm.complete_structured` | `reflector` está ligado quando o plugin carrega e o host oferece os dois |
@@ -20,7 +20,7 @@ O plugin se apoia na API publicada de plugins: usa os métodos de `ctx` abaixo e
 | Comando de CLI `hermes evolution` | `ctx.register_cli_command` | só em plugins no mesmo processo; o Hermes o ignora com `plugins.isolation: host` |
 | Comando de chat `/evolution` para as notas da 0.1 | `ctx.register_command` | `legacy_memory_commands` é `true` |
 | Callback de descarga que grava os contadores na fila e fecha o banco | `ctx.on_unload` | quando o host oferece o método |
-| Thread em segundo plano `atlas-evolution-autopilot`, um daemon que roda a passada | nenhuma; iniciada pelos hooks `post_llm_call`, `on_session_end` e `on_kanban_dispatch_tick` | `autopilot_minutes` não é 0 |
+| Thread em segundo plano `hermes-evolution-autopilot`, um daemon que roda a passada | nenhuma; iniciada pelos hooks `post_llm_call`, `on_session_end` e `on_kanban_dispatch_tick` | `autopilot_minutes` não é 0 |
 
 Os hooks, a seção de prompt, a guarda de runtime, o intervalo do autopilot e a tarefa do refletor são definidos quando o plugin carrega, então reinicie o gateway depois de mudar essas configurações. Cada passada do autopilot e cada comando leem as configurações de novo.
 
@@ -123,7 +123,7 @@ Tudo em modo somente leitura e com limite de tamanho e de tempo.
 | Instalação padrão | Observadores com dados agregados. O autopilot roda uma passada no máximo uma vez por hora, e as primeiras passadas aprendem com 14 dias do histórico do perfil. Falhas recorrentes viram lições candidatas, que aguardam aprovação. O refletor rascunha lições que também aguardam aprovação. A guarda de runtime barra os comandos descritos acima. Os comandos de operador podem inspecionar os sinais do perfil. |
 | `lessons: auto` | As lições derivadas ficam ativas sem aprovação e chegam ao agente nas sessões novas. Os rascunhos do refletor continuam esperando. |
 | `lessons: off` | Nenhuma lição é derivada e nenhuma superfície de lição é registrada. |
-| `agent_tools` (`agent_advice` no `settings.json`) | Libera `atlas_evolution_plan` e `atlas_evolution_lessons`. A primeira devolve etapas, orçamento e critérios de verificação. A segunda consulta lições, informa o estado da fila e guarda lições propostas em quarentena. Numa lista explícita de toolsets, inclua `atlas-evolution`. |
+| `agent_tools` (`agent_advice` no `settings.json`) | Libera `hermes_evolution_plan` e `hermes_evolution_lessons`. A primeira devolve etapas, orçamento e critérios de verificação. A segunda consulta lições, informa o estado da fila e guarda lições propostas em quarentena. Numa lista explícita de toolsets, inclua `hermes-evolution`. |
 | `reflector` (ligado por padrão) | Guarda trechos limpos de falhas sem modelo e deixa uma passada pedir a um modelo, pelo Hermes, rascunhos em quarentena, dentro de `reflector_daily_limit` chamadas por dia. `false` o desliga. |
 | `autopilot_minutes` (60 por padrão) | Intervalo da passada em segundo plano. `0` deixa as passadas para o `learn`, o `ops tick` e a receita semanal. |
 | `runtime_guard` (ligado por padrão) | Registra o bloqueio no `pre_tool_call`. `false` o remove. |
@@ -155,14 +155,14 @@ Tudo em modo somente leitura e com limite de tamanho e de tempo.
 
 ## Avançado: deixar a revisão nativa propor lições
 
-O Hermes pode admitir uma ferramenta nomeada na revisão em segundo plano por meio de `auxiliary.background_review.extra_tools`. Incluir `atlas_evolution_lessons` permite que a revisão registre o que aprendeu como proposta de lição no playbook, ao lado das gravações habituais em skills e memória.
+O Hermes pode admitir uma ferramenta nomeada na revisão em segundo plano por meio de `auxiliary.background_review.extra_tools`. Incluir `hermes_evolution_lessons` permite que a revisão registre o que aprendeu como proposta de lição no playbook, ao lado das gravações habituais em skills e memória.
 
 ```yaml
 # config.yaml do perfil
 auxiliary:
   background_review:
     extra_tools:
-      - atlas_evolution_lessons
+      - hermes_evolution_lessons
 ```
 
 - Essa é uma configuração do operador no Hermes. O plugin nunca a define.

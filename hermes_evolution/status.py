@@ -8,8 +8,10 @@ many profiles, but each profile loads its own plugins.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +30,61 @@ def plugin_version() -> str:
     except OSError:
         match = None
     return match.group(1) if match else "unknown"
+
+
+def process_kind() -> str:
+    """gateway, dashboard or cli: long-running hosts are the ones that can keep old code loaded."""
+    words = [os.path.basename(str(item)) for item in sys.argv[:6]]
+    if "gateway" in words and "run" in words:
+        return "gateway"
+    if "dashboard" in words:
+        return "dashboard"
+    return "cli"
+
+
+def record_runtime(home: Path, *, now: float, version: str | None = None, pid: int | None = None) -> None:
+    """Remember which plugin version a long-running host loaded, so `status` can tell when the code on disk
+    is newer than what the gateway runs (`hermes plugins update` does not reload a running gateway)."""
+    from .experience import record
+
+    kind = process_kind() if pid is None else "gateway"
+    if kind == "cli":
+        return
+    value = json.dumps({"version": version or plugin_version(), "kind": kind, "since": now})
+    key = f"runtime:{os.getpid() if pid is None else int(pid)}"
+    record(home, lambda conn: conn.execute("INSERT OR REPLACE INTO cursor VALUES (?, ?)", (key, value)), now=now)
+
+
+def _alive(pid: int) -> bool | None:
+    """True or False on POSIX; None where a liveness probe is not safe (on Windows os.kill would end it)."""
+    if os.name != "posix":
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def _runtimes(conn, disk: str) -> tuple[list[dict], list[str]]:
+    """(live hosts that loaded another version, keys of hosts that are gone)."""
+    stale, gone = [], []
+    for key, value in conn.execute("SELECT key, value FROM cursor WHERE key LIKE 'runtime:%'").fetchall():
+        try:
+            pid, data = int(key.split(":", 1)[1]), json.loads(value)
+        except (ValueError, TypeError):
+            gone.append(key)
+            continue
+        alive = _alive(pid)
+        if alive is False:
+            gone.append(key)
+        elif alive and isinstance(data, dict) and data.get("version") != disk:
+            stale.append({"pid": pid, "kind": data.get("kind"), "version": data.get("version"), "since": _iso(data.get("since"))})
+    return stale, gone
 
 
 def _iso(stamp) -> str | None:
@@ -89,6 +146,11 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         drafts = conn.execute("SELECT COUNT(*) FROM lesson WHERE origin='reflector' AND status='quarantined'").fetchone()[0]
         proposals = conn.execute("SELECT COUNT(*) FROM proposal WHERE status='open'").fetchone()[0]
         vetoed = guard_summary(conn, now=now, days=7)
+        stale, gone = _runtimes(conn, plugin_version())
+    if gone:
+        from .experience import record
+
+        record(home, lambda conn: conn.executemany("DELETE FROM cursor WHERE key=?", [(key,) for key in gone]), now=now)
     try:
         last = json.loads(cursor["loop_status"]) if "loop_status" in cursor else None
     except ValueError:
@@ -112,8 +174,11 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         "proposals_open": proposals,
         "runtime_guard": {"enabled": opts["runtime_guard"], "vetoed_7d": sum(vetoed.values())},
         "profiles_without_plugin": _profiles(Path(home), now=now),
+        "stale_runtimes": stale,
     }
     attention = []
+    if stale:
+        attention.append("stale_runtime")
     if not (tools or turns or calls):
         attention.append("no_events_today")
     if opts["autopilot_minutes"] == 0:
@@ -146,6 +211,8 @@ _TEXT = {
            "lessons_waiting": "Lessons are waiting for your approval: `hermes evolution lessons list`.",
            "profiles_without_plugin": "Profiles used in the last 7 days that do not have the plugin (each profile loads its own plugins):",
            "sessions": "sessions", "none": "Nothing needs attention.",
+           "stale_runtime": "A running Hermes process still runs an older copy of the plugin than the one on disk (`hermes plugins update` does not reload a running gateway). Run `hermes gateway restart`; it waits for the running turns.",
+           "stale_item": "pid {pid} ({kind}) loaded {version}",
            "statuses": {"done": "read", "running": "being read", "waiting": "waiting for the first pass",
                         "no_history": "no history", "unreadable": "unreadable", "unsupported_history": "unsupported format"}},
     "pt": {"title": "Atlas Evolution {version} · perfil `{profile}`", "since": "Observando desde",
@@ -163,6 +230,8 @@ _TEXT = {
            "lessons_waiting": "Há lições aguardando a sua aprovação: `hermes evolution lessons list`.",
            "profiles_without_plugin": "Perfis usados nos últimos 7 dias que não têm o plugin (cada perfil carrega os próprios plugins):",
            "sessions": "sessões", "none": "Nada precisa de atenção.",
+           "stale_runtime": "Um processo do Hermes em execução ainda roda uma cópia do plugin mais antiga que a do disco (o `hermes plugins update` não recarrega um gateway em execução). Rode `hermes gateway restart`; ele espera os turnos em andamento.",
+           "stale_item": "pid {pid} ({kind}) carregou a {version}",
            "statuses": {"done": "lido", "running": "em leitura", "waiting": "aguardando a primeira passada",
                         "no_history": "sem histórico", "unreadable": "ilegível", "unsupported_history": "formato não suportado"}},
 }
@@ -198,6 +267,9 @@ def markdown(report: dict, lang: str = "en") -> str:
     lines += ["", f"## {t['attention']}", ""]
     for code in report["attention"]:
         lines.append(f"- {t[code]}")
+        if code == "stale_runtime":
+            for item in report["stale_runtimes"]:
+                lines.append("  - " + t["stale_item"].format(**item))
         if code == "profiles_without_plugin":
             for item in report["profiles_without_plugin"]:
                 lines.append(f"  - `{item['profile']}` ({item['sessions_7d']} {t['sessions']}): `{item['install']}`")

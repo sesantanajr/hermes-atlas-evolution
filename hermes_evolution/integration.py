@@ -328,6 +328,12 @@ def register(ctx):
     except storage_errors:
         _warn_once(failed, "start")
     autopilot = Autopilot(home, lambda: autopilot_pass(home, reflect), interval_minutes=evolution["autopilot_minutes"])
+    try:   # a long-running host records the version it loaded, so `status` can flag a stale gateway
+        from .status import record_runtime
+
+        record_runtime(home, now=_time.time())
+    except storage_errors:
+        _warn_once(failed, "runtime")
 
     def operator_cli(args):
         import hermes_cli.config as hermes_config
@@ -382,7 +388,7 @@ def register(ctx):
     if lessons_on and evolution["tool_hints"]:
         ctx.register_hook("transform_tool_result", with_lesson)
     if lessons_on:
-        ctx.register_system_prompt_section("atlas-evolution.playbook", playbook_section, max_chars=1400)
+        ctx.register_system_prompt_section("hermes-evolution.playbook", playbook_section, max_chars=1400)
     if legacy_enabled:
         ctx.register_command("evolution", command, description="Access legacy Evolution notes", args_hint="<command>")
     _register_skills(ctx)
@@ -399,6 +405,8 @@ def register(ctx):
         from .operations import close_observers
 
         on_unload(close_observers)   # write queued counters and release the shared connection
+        on_unload(autopilot.stop)    # stop the idle clock of this load before a reload starts another
+        autopilot.start_clock()      # only where it can be stopped: a host with on_unload
 
     from .i18n import localize
 
@@ -420,8 +428,8 @@ def register(ctx):
             return in_language(json.dumps({"error": "Playbook access has not been enabled for this Hermes profile."}))
         return in_language(lessons_tool.handle(args, **context))
 
-    ctx.register_tool(name=TOOL["name"], toolset="atlas-evolution", schema=TOOL, handler=advisory_tool,
+    ctx.register_tool(name=TOOL["name"], toolset="hermes-evolution", schema=TOOL, handler=advisory_tool,
                       check_fn=lambda: advice_enabled)
-    ctx.register_tool(name=LESSONS_TOOL["name"], toolset="atlas-evolution", schema=LESSONS_TOOL, handler=playbook_tool,
+    ctx.register_tool(name=LESSONS_TOOL["name"], toolset="hermes-evolution", schema=LESSONS_TOOL, handler=playbook_tool,
                       check_fn=lambda: advice_enabled)
     ctx.register_cli_command("evolution", "Review Hermes health, learning and operations", setup, operator_cli)

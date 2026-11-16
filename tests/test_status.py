@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from hermes_evolution import status
 from hermes_evolution.autopilot import claim, finish
@@ -60,6 +61,21 @@ class StatusTest(unittest.TestCase):
         text = status.markdown(report, "pt")
         self.assertIn("cron-box", text)
         self.assertIn("hermes -p cron-box plugins install sesantanajr/hermes-atlas-evolution --enable", text)
+
+    def test_a_long_running_process_that_still_runs_older_code_is_flagged(self):
+        import os
+
+        from hermes_evolution.status import record_runtime
+
+        with patch.object(status, "process_kind", return_value="gateway"):
+            record_runtime(self.home, now=NOW, version="0.4.0")         # this process loaded an older copy
+        record_runtime(self.home, now=NOW, version="9.9.9", pid=2 ** 22 + 7)   # a gateway that is gone
+        close_observers()
+        report = status.build(self.home, now=NOW, config={})
+        stale = report["stale_runtimes"]
+        self.assertEqual([(item["pid"], item["version"]) for item in stale], [(os.getpid(), "0.4.0")])
+        self.assertIn("stale_runtime", report["attention"])
+        self.assertIn("hermes gateway restart", status.markdown(report, "en"))
 
     def test_a_silent_profile_says_so(self):
         report = status.build(self.home, now=NOW, config={})
