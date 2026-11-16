@@ -122,6 +122,11 @@ ADDITIVE_TABLES = (
     # excerpt a provider keeps refusing does not take every call of every day (reflector.reflect).
     ("reflector_backoff", "CREATE TABLE IF NOT EXISTS reflector_backoff (signature TEXT PRIMARY KEY, "
                           "failures INTEGER NOT NULL, last_attempt REAL NOT NULL, retry_after REAL NOT NULL) WITHOUT ROWID"),
+    # The owner's decisions, from the terminal or the dashboard panel (decisions.py): ids, states and setting
+    # values only, so each can be listed and undone.
+    ("decision_log", "CREATE TABLE IF NOT EXISTS decision_log (id INTEGER PRIMARY KEY, at REAL NOT NULL, actor TEXT NOT NULL, "
+                     "kind TEXT NOT NULL, target TEXT NOT NULL, action TEXT NOT NULL, before TEXT NOT NULL, "
+                     "after TEXT NOT NULL, undone REAL)"),
     # Per-signature lookups (lessons, promotion, the listing) would scan these tables once per signature.
     ("failure_daily_signature", "CREATE INDEX IF NOT EXISTS failure_daily_signature ON failure_daily(signature)"),
     ("failure_owner_daily_signature",

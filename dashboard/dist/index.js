@@ -1,8 +1,9 @@
 (function () {
   "use strict";
   // Atlas Evolution panel for the Hermes dashboard. Plain JavaScript on the host's plugin SDK: no build step,
-  // no dependency. It reads /api/plugins/hermes-atlas-evolution/snapshot for the profile the dashboard shows
-  // and decides nothing: every decision is a command for the owner's own terminal, shown with a copy button.
+  // no dependency. It reads /api/plugins/hermes-atlas-evolution/snapshot for the profile the dashboard shows and,
+  // when the owner is logged in to the dashboard, sends the owner's decisions to /decide. Everything is rendered
+  // as text through React elements, never as markup.
   const SDK = window.__HERMES_PLUGIN_SDK__;
   if (!SDK || !window.__HERMES_PLUGINS__) return;
 
@@ -15,54 +16,120 @@
 
   const TEXT = {
     en: {
-      title: "Atlas Evolution", profile: "profile", loading: "Reading what this profile learned…",
-      busy: "The Evolution store is busy right now. Try again in a moment.",
-      failed: "The panel could not load:", retry: "Reload", days: "days",
-      tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", digest: "Digest", status: "Status" },
+      lang: "en", sessions: "sessions", title: "Atlas Evolution", profile: "profile", loading: "Reading what this profile learned…",
+      busy: "The Evolution store is busy right now. Try again in a moment.", failed: "The panel could not load:",
+      retry: "Reload", days: "days",
+      tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", settings: "Settings", history: "History",
+              digest: "Digest", status: "Status" },
       mode: { auto: "lessons: auto", suggest: "lessons: suggest", off: "lessons: off" },
       guardOn: "guard on", guardOff: "guard off", reflectorOn: "reflector on", reflectorOff: "reflector off",
-      kpi: { active: "Active lessons", waiting: "Waiting for you", proposals: "Open proposals", calls: "Tool calls",
-             errors: "errors", turns: "Turns", failed: "failed", vetoed: "Guard vetoes (7 d)", lastPass: "Last pass",
-             passFailed: "failed: see Status" },
+      kpi: { active: "Active lessons", waiting: "Waiting for you", calls: "Tool calls", errors: "errors", turns: "Turns",
+             failed: "failed", vetoed: "Guard vetoes (7 d)", lastPass: "Last pass", passFailed: "failed: see Status",
+             proposals: "Open proposals" },
       never: "never", none: "—",
+      readOnly: "Read-only: this dashboard has no login, so any program on this machine, the agent included, could act here as you. Turn on the dashboard login (password or OAuth) to decide from this panel. Meanwhile, the commands below do it from your terminal.",
       waitingTitle: "Waiting for your decision",
-      waitingEmpty: "Nothing waits for you. Lessons from fixed templates apply by themselves; anything written by a model or by the agent will show up here.",
-      waitingHint: "Decide in your own terminal. The agent cannot approve anything, and neither can this page.",
+      waitingEmpty: "Nothing waits for you. Lessons from fixed templates apply by themselves; anything written by a model or by the agent shows up here.",
+      approveAll: "Approve all ({n})", approve: "Approve", reject: "Reject", retire: "Retire", reactivate: "Reactivate",
+      confirmAllTitle: "Approve these {n} lessons?", confirmOneTitle: "Approve this lesson?",
+      confirmAllHint: "From the next session on, the agent reads them at the start of every session. Each one is measured, and in auto mode retired if it does not help.",
+      agentSingle: "proposed by the agent: approve it on its own",
+      cancel: "Cancel", confirm: "Approve all",
+      done: { approve: "Approved.", reject: "Rejected.", retire: "Retired.", reactivate: "Reactivated.", all: "Approved {n}.",
+              undo: "Undone.", settings: "Saved. It applies within a minute, without restarting.", proposal: "Recorded." },
+      skippedChanged: "{n} skipped: they changed since you saw them.",
       lessonsEmpty: "No lessons yet. A tool failure that comes back (3 times, in 2 sessions or on 2 days) becomes one.",
       proposalsEmpty: "No open proposals.",
       col: { status: "status", origin: "origin", tool: "tool", lesson: "lesson", effect: "measured effect", risk: "risk",
-             subject: "subject", command: "command to run" },
+             subject: "subject", command: "command to run", action: "", when: "when", who: "where", what: "decision" },
+      runAfter: "Approved. Hermes changes this with the command below; run it in your terminal:",
       verdict: { effective: "helps", ineffective: "does not help", inconclusive: "inconclusive", withdrawn: "withdrawn from the queue" },
       status: { active: "active", candidate: "waiting", quarantined: "waiting (written)", retired: "retired" },
       origin: { derived: "template", operator: "you", reflector: "reflector", agent: "agent" },
+      actor: { terminal: "terminal", dashboard: "panel" },
+      action: { approve: "approved", reject: "rejected", retire: "retired", reactivate: "reactivated", set: "changed" },
+      undo: "Undo", undone: "undone",
+      historyEmpty: "No decision yet.",
       copy: "Copy", copied: "Copied",
       share: "Share what this profile learned with another profile:",
-      readOnly: "This panel only reads. Approving, rejecting, retiring and importing stay in your terminal."
+      s: {
+        title: "Settings", save: "Save", saving: "Saving…", recommended: "Apply the recommended setup",
+        recommendedHint: "Lessons on auto, reflector on, and the channels below that are yours by construction.",
+        reloadNote: "Applies the next time the plugin loads (the gateway reloads plugins when one is enabled or updated).",
+        reloadPending: "Waiting for the next load of the plugin: {keys}.",
+        lessons: "Lessons", lessonsHint: "auto: lessons from fixed templates apply once your own turns hit the failure; suggest: every lesson waits for you; off: measure only.",
+        reflector: "Reflector (an AI model drafts lessons for failures with no template; drafts wait for you)",
+        reflector_daily_limit: "Reflector calls per day (1 to 50)", autopilot_minutes: "Learning pass every (minutes: 15 to 1440, or 0 = only by hand)",
+        language: "Language", feedback_signals: "Count your corrections and thanks (numbers only)",
+        slow_turn_seconds: "A turn is slow after (seconds)", tool_hints: "Add the lesson to the failing tool result",
+        agent_tools: "Let the agent read and propose lessons (proposals still wait for you)",
+        runtime_guard: "Runtime guard (keeps the agent from taking Hermes down)",
+        guardWarn: "Turning the guard off lets the agent restart or delete what Hermes runs on.",
+        owner: "Who is you in chats", ownerHint: "Turns from these count as yours: you get every lesson there, and your failures there teach. List only what nobody else uses.",
+        platform: "every chat of this channel is you", sender: "this sender is you", suggested: "suggested",
+        reason: { own_interface: "only clients with the API key write here, such as your own interface", hosted_owner: "Hermes marks this sender as the owner" },
+        noChannels: "No chat channel in 30 days: your CLI, TUI and Desktop always count as you.",
+        auto: "auto", en: "English", pt: "Português",
+        modes: { auto: "auto (recommended): templates apply by themselves", suggest: "suggest: everything waits for you", off: "off: measure only" }
+      }
     },
     pt: {
-      title: "Atlas Evolution", profile: "perfil", loading: "Lendo o que este perfil aprendeu…",
-      busy: "O banco do Evolution está ocupado agora. Tente de novo em instantes.",
-      failed: "O painel não carregou:", retry: "Recarregar", days: "dias",
-      tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", digest: "Resumo", status: "Status" },
+      lang: "pt", sessions: "sessões", title: "Atlas Evolution", profile: "perfil", loading: "Lendo o que este perfil aprendeu…",
+      busy: "O banco do Evolution está ocupado agora. Tente de novo em instantes.", failed: "O painel não carregou:",
+      retry: "Recarregar", days: "dias",
+      tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", settings: "Configurações", history: "Histórico",
+              digest: "Resumo", status: "Status" },
       mode: { auto: "lições: auto", suggest: "lições: suggest", off: "lições: off" },
       guardOn: "guarda ligada", guardOff: "guarda desligada", reflectorOn: "refletor ligado", reflectorOff: "refletor desligado",
-      kpi: { active: "Lições ativas", waiting: "Esperando você", proposals: "Propostas abertas", calls: "Chamadas de ferramentas",
-             errors: "erros", turns: "Turnos", failed: "falharam", vetoed: "Vetos da guarda (7 d)", lastPass: "Última passada",
-             passFailed: "falhou: veja o Status" },
+      kpi: { active: "Lições ativas", waiting: "Esperando você", calls: "Chamadas de ferramentas", errors: "erros", turns: "Turnos",
+             failed: "falharam", vetoed: "Vetos da guarda (7 d)", lastPass: "Última passada", passFailed: "falhou: veja o Status",
+             proposals: "Propostas abertas" },
       never: "nunca", none: "—",
+      readOnly: "Só leitura: este dashboard não pede login, então qualquer programa desta máquina, inclusive o agente, poderia agir aqui como você. Ative o login do dashboard (senha ou OAuth) para decidir por este painel. Enquanto isso, os comandos abaixo fazem o mesmo no seu terminal.",
       waitingTitle: "Esperando a sua decisão",
       waitingEmpty: "Nada espera por você. Lições de modelos fixos valem sozinhas; o que um modelo ou o agente escrever aparece aqui.",
-      waitingHint: "Decida no seu próprio terminal. O agente não aprova nada, e esta página também não.",
+      approveAll: "Aprovar todas ({n})", approve: "Aprovar", reject: "Rejeitar", retire: "Aposentar", reactivate: "Reativar",
+      confirmAllTitle: "Aprovar estas {n} lições?", confirmOneTitle: "Aprovar esta lição?",
+      confirmAllHint: "A partir da próxima sessão o agente lê essas lições no começo de cada sessão. Cada uma é medida e, no modo auto, aposentada se não ajudar.",
+      agentSingle: "proposta pelo agente: aprove sozinha",
+      cancel: "Cancelar", confirm: "Aprovar todas",
+      done: { approve: "Aprovada.", reject: "Rejeitada.", retire: "Aposentada.", reactivate: "Reativada.", all: "{n} aprovadas.",
+              undo: "Desfeito.", settings: "Salvo. Vale em até um minuto, sem reiniciar.", proposal: "Registrado." },
+      skippedChanged: "{n} puladas: mudaram desde que você as viu.",
       lessonsEmpty: "Ainda não há lições. Uma falha de ferramenta que volta (3 vezes, em 2 sessões ou em 2 dias) vira uma.",
       proposalsEmpty: "Nenhuma proposta aberta.",
       col: { status: "situação", origin: "origem", tool: "ferramenta", lesson: "lição", effect: "efeito medido", risk: "risco",
-             subject: "assunto", command: "comando para rodar" },
+             subject: "assunto", command: "comando para rodar", action: "", when: "quando", who: "onde", what: "decisão" },
+      runAfter: "Aprovada. Quem muda isso é o Hermes, com o comando abaixo; rode no seu terminal:",
       verdict: { effective: "ajuda", ineffective: "não ajuda", inconclusive: "inconclusivo", withdrawn: "retirada da fila" },
       status: { active: "ativa", candidate: "esperando", quarantined: "esperando (escrita)", retired: "aposentada" },
       origin: { derived: "modelo fixo", operator: "você", reflector: "refletor", agent: "agente" },
+      actor: { terminal: "terminal", dashboard: "painel" },
+      action: { approve: "aprovou", reject: "rejeitou", retire: "aposentou", reactivate: "reativou", set: "mudou" },
+      undo: "Desfazer", undone: "desfeita",
+      historyEmpty: "Nenhuma decisão ainda.",
       copy: "Copiar", copied: "Copiado",
       share: "Leve o que este perfil aprendeu para outro perfil:",
-      readOnly: "Este painel só lê. Aprovar, rejeitar, aposentar e importar continuam no seu terminal."
+      s: {
+        title: "Configurações", save: "Salvar", saving: "Salvando…", recommended: "Aplicar a configuração recomendada",
+        recommendedHint: "Lições em auto, refletor ligado e os canais abaixo que são seus por construção.",
+        reloadNote: "Vale na próxima carga do plugin (o gateway recarrega os plugins quando um é ligado ou atualizado).",
+        reloadPending: "Esperando a próxima carga do plugin: {keys}.",
+        lessons: "Lições", lessonsHint: "auto: lições de modelos fixos valem quando os seus turnos encontram a falha; suggest: toda lição espera você; off: só mede.",
+        reflector: "Refletor (um modelo de IA rascunha lições para falhas sem modelo fixo; os rascunhos esperam você)",
+        reflector_daily_limit: "Chamadas do refletor por dia (1 a 50)", autopilot_minutes: "Passada de aprendizado a cada (minutos: 15 a 1440, ou 0 = só à mão)",
+        language: "Idioma", feedback_signals: "Contar as suas correções e agradecimentos (só números)",
+        slow_turn_seconds: "Um turno é lento depois de (segundos)", tool_hints: "Juntar a lição ao resultado da ferramenta que falhou",
+        agent_tools: "Deixar o agente ler e propor lições (as propostas continuam esperando você)",
+        runtime_guard: "Guarda de runtime (impede o agente de derrubar o Hermes)",
+        guardWarn: "Desligar a guarda deixa o agente reiniciar ou apagar aquilo em que o Hermes roda.",
+        owner: "Quem é você nos chats", ownerHint: "Os turnos destes contam como seus: ali você recebe todas as lições, e as suas falhas ensinam. Marque só o que ninguém mais usa.",
+        platform: "todo chat deste canal é você", sender: "este remetente é você", suggested: "sugerido",
+        reason: { own_interface: "só clientes com a chave da API escrevem aqui, como a sua própria interface", hosted_owner: "o Hermes marca este remetente como o dono" },
+        noChannels: "Nenhum canal de chat em 30 dias: a sua CLI, TUI e Desktop sempre contam como você.",
+        auto: "automático", en: "English", pt: "Português",
+        modes: { auto: "auto (recomendado): modelos fixos valem sozinhos", suggest: "suggest: tudo espera você", off: "off: só medir" }
+      }
     }
   };
 
@@ -70,10 +137,19 @@
     return typeof locale === "string" && locale.toLowerCase().indexOf("pt") === 0 ? "pt" : "en";
   }
 
+  function fill(template, values) {
+    return String(template).replace(/\{(\w+)\}/g, function (_, key) { return values[key] === undefined ? "" : values[key]; });
+  }
+
   function fmt(value, digits) {
     if (value === null || value === undefined || Number.isNaN(value)) return "—";
     if (typeof value !== "number") return String(value);
     return digits ? value.toFixed(digits) : value.toLocaleString();
+  }
+
+  function when(stamp, lang) {
+    if (typeof stamp !== "number") return "—";
+    try { return new Date(stamp * 1000).toLocaleString(lang === "pt" ? "pt-BR" : "en-US"); } catch (e) { return "—"; }
   }
 
   // ── a small Markdown renderer for the digest and status the plugin already writes (headings, lists, tables,
@@ -162,6 +238,12 @@
     return h("span", { className: "hae-pill hae-pill-" + (props.tone || "neutral") }, props.children);
   }
 
+  function Button(props) {
+    return h("button", { type: "button", className: "hae-button" + (props.primary ? " hae-button-primary" : "") +
+                                                      (props.danger ? " hae-button-danger" : ""),
+                         onClick: props.onClick, disabled: !!props.disabled, title: props.title }, props.children);
+  }
+
   function Section(props) {
     if (C.Card && C.CardHeader && C.CardTitle && C.CardContent) {
       return h(C.Card, { className: "hae-card" },
@@ -189,6 +271,68 @@
     return status === "active" ? "good" : status === "retired" ? "muted" : "warn";
   }
 
+  // The owner's decisions: one POST, then the snapshot is read again.
+  function useActions(props) {
+    const state = hooks.useState(null);
+    const working = state[0], setWorking = state[1];
+    const send = function (body, done) {
+      if (!props.data.can_decide) return;
+      setWorking(JSON.stringify(body).slice(0, 60));
+      SDK.fetchJSON("/api/plugins/" + NAME + "/decide?lang=" + props.lang, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-Atlas-Evolution": "1" }, body: JSON.stringify(body)
+      }).then(function (result) {
+        setWorking(null);
+        props.notify(done ? done(result) : null, false, result);
+        props.reload();
+      }).catch(function (error) {
+        setWorking(null);
+        // fetchJSON throws "<status>: <body>"; the body of this route carries a translated `message`
+        let text = String(error && error.message || error);
+        const body = text.indexOf("{") >= 0 ? text.slice(text.indexOf("{")) : "";
+        try { const parsed = JSON.parse(body); text = parsed.message || parsed.error || text; } catch (e) { /* as is */ }
+        props.notify(text, true);
+      });
+    };
+    return { send: send, working: working };
+  }
+
+  function LessonActions(props) {
+    const t = props.t, row = props.row, act = props.actions;
+    if (!props.data.can_decide) return null;
+    const one = function (action) {
+      return function () {
+        act.send({ kind: "lesson", id: row.id, action: action, shown: row.fingerprint }, function (result) {
+          return result && result.decided === false ? t.skippedChanged.replace("{n}", "1") : t.done[action];
+        });
+      };
+    };
+    const buttons = [];
+    if (row.status === "candidate" || row.status === "quarantined") {
+      buttons.push(h(Button, { key: "a", primary: true, onClick: one("approve"), disabled: !!act.working }, t.approve));
+      buttons.push(h(Button, { key: "r", onClick: one("reject"), disabled: !!act.working }, t.reject));
+    } else if (row.status === "active") {
+      buttons.push(h(Button, { key: "x", onClick: one("retire"), disabled: !!act.working }, t.retire));
+    } else if (row.status === "retired" && row.verdict !== "withdrawn") {
+      buttons.push(h(Button, { key: "o", onClick: one("reactivate"), disabled: !!act.working }, t.reactivate));
+    }
+    return h("div", { className: "hae-row-actions" }, buttons);
+  }
+
+  function ConfirmAll(props) {
+    const t = props.t;
+    return h("div", { className: "hae-modal-backdrop", role: "dialog", "aria-modal": "true" },
+      h("div", { className: "hae-modal" },
+        h("h3", { className: "hae-md-h" }, props.items.length === 1 ? t.confirmOneTitle : fill(t.confirmAllTitle, { n: props.items.length })),
+        h("p", { className: "hae-muted" }, t.confirmAllHint),
+        h("ol", { className: "hae-list hae-confirm-list" }, props.items.map(function (item) {
+          return h("li", { key: item.id }, h("span", { className: "hae-muted" }, "#" + item.id + " · " + item.tool + " · "),
+            inline(item.lesson, "ca" + item.id));
+        })),
+        h("div", { className: "hae-actions" },
+          h(Button, { onClick: props.onCancel }, t.cancel),
+          h(Button, { primary: true, onClick: props.onConfirm }, t.confirm))));
+  }
+
   // ── the tabs
   function Overview(props) {
     const t = props.t, data = props.data, state = data.status || {}, digest = data.report || {};
@@ -196,15 +340,28 @@
     const guard = state.runtime_guard || {};
     const tools = digest.tools || {};
     const turns = (digest.turns || {}).interactive || {};
-    const waiting = (data.lessons || []).filter(function (row) { return row.status === "candidate" || row.status === "quarantined"; });
+    const pending = data.pending || [];
+    const bulk = pending.filter(function (item) { return item.bulk; });
+    const confirmState = hooks.useState(false);
+    const confirming = confirmState[0], setConfirming = confirmState[1];
+    const act = props.actions;
     // status.build: {at, ok, seconds, summary, error} after a pass, null before the first one
     const pass = (state.autopilot || {}).last_pass;
     const passAt = pass && typeof pass === "object" ? pass.at : pass;
     const passFailed = !!(pass && typeof pass === "object" && pass.ok === false);
+    const approveAll = function () {
+      setConfirming(false);
+      const items = {};
+      bulk.forEach(function (item) { items[item.id] = item.fingerprint; });
+      act.send({ kind: "all", items: items }, function (result) {
+        const skipped = (result.skipped || []).filter(function (item) { return item.reason === "changed"; }).length;
+        return fill(t.done.all, { n: (result.approved || []).length }) + (skipped ? " " + fill(t.skippedChanged, { n: skipped }) : "");
+      });
+    };
     return h("div", { className: "hae-stack" },
       h("div", { className: "hae-kpis" },
         h(Kpi, { label: t.kpi.active, value: fmt(lessons.active || 0) }),
-        h(Kpi, { label: t.kpi.waiting, value: fmt(waiting.length + (state.proposals_open || 0)), alert: waiting.length + (state.proposals_open || 0) > 0 }),
+        h(Kpi, { label: t.kpi.waiting, value: fmt(pending.length + (state.proposals_open || 0)), alert: pending.length + (state.proposals_open || 0) > 0 }),
         h(Kpi, { label: t.kpi.calls + " (" + data.days + " d)", value: fmt(tools.calls || 0),
                  detail: tools.error_pct === null || tools.error_pct === undefined ? null : fmt(tools.error_pct, 1) + "% " + t.kpi.errors }),
         h(Kpi, { label: t.kpi.turns + " (" + data.days + " d)", value: fmt(turns.turns || 0),
@@ -214,47 +371,62 @@
                  value: passAt ? String(passAt).replace("T", " ").replace(/:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)?$/, "") : t.never,
                  detail: passFailed ? t.kpi.passFailed : passAt ? "UTC" : null })),
       h(Section, { title: t.waitingTitle },
-        waiting.length || state.proposals_open
+        pending.length
           ? h("div", { className: "hae-stack" },
-              waiting.map(function (row) {
+              data.can_decide && bulk.length
+                ? h("div", { className: "hae-actions" }, h(Button, { primary: true, disabled: !!act.working,
+                    onClick: function () { setConfirming(true); } }, fill(t.approveAll, { n: bulk.length })))
+                : null,
+              pending.map(function (row) {
                 return h("div", { key: row.id, className: "hae-waiting" },
-                  h("div", { className: "hae-waiting-meta" }, h(Pill, { tone: "warn" }, "#" + row.id), h(Pill, null, t.origin[row.origin] || row.origin),
-                    h("code", { className: "hae-code" }, row.tool)),
-                  h("div", { className: "hae-lesson" }, inline(String(row.lesson || ""), "w" + row.id)));
+                  h("div", { className: "hae-waiting-meta" }, h(Pill, { tone: "warn" }, "#" + row.id),
+                    h(Pill, null, t.origin[row.origin] || row.origin), h("code", { className: "hae-code" }, row.tool),
+                    row.bulk ? null : h("span", { className: "hae-muted" }, t.agentSingle)),
+                  h("div", { className: "hae-lesson" }, inline(String(row.lesson || ""), "w" + row.id)),
+                  h(LessonActions, { t: t, row: row, data: data, actions: act }));
               }),
-              state.proposals_open ? h("p", { className: "hae-p" }, t.kpi.proposals + ": " + state.proposals_open) : null,
-              h("p", { className: "hae-muted" }, t.waitingHint),
-              h(CopyCommand, { t: t, command: data.commands.review }))
+              data.can_decide ? null : h(CopyCommand, { t: t, command: data.commands.review }))
           : h("p", { className: "hae-muted" }, t.waitingEmpty)),
+      confirming ? h(ConfirmAll, { t: t, items: bulk, onCancel: function () { setConfirming(false); }, onConfirm: approveAll }) : null,
       h(Section, { title: t.share },
         h("div", { className: "hae-stack" }, h(CopyCommand, { t: t, command: data.commands.export }),
-          h(CopyCommand, { t: t, command: data.commands.import }))),
-      h("p", { className: "hae-muted" }, t.readOnly));
+          h(CopyCommand, { t: t, command: data.commands.import }))));
   }
 
   function Lessons(props) {
     const t = props.t, rows = props.data.lessons || [];
+    const marks = {};
+    (props.data.pending || []).forEach(function (item) { marks[item.id] = item.fingerprint; });
     if (!rows.length) return h("p", { className: "hae-muted" }, t.lessonsEmpty);
     return h("div", { className: "hae-table-wrap" }, h("table", { className: "hae-table" },
-      h("thead", null, h("tr", null, ["#", t.col.status, t.col.origin, t.col.tool, t.col.lesson, t.col.effect].map(function (label, n) {
+      h("thead", null, h("tr", null, ["#", t.col.status, t.col.origin, t.col.tool, t.col.lesson, t.col.effect, t.col.action].map(function (label, n) {
         return h("th", { key: n }, label);
       }))),
       h("tbody", null, rows.map(function (row) {
+        const full = Object.assign({}, row, { fingerprint: marks[row.id] });
         return h("tr", { key: row.id, className: row.status === "retired" ? "hae-row-muted" : "" },
           h("td", null, row.id),
           h("td", null, h(Pill, { tone: statusTone(row.status) }, t.status[row.status] || row.status)),
           h("td", null, t.origin[row.origin] || row.origin),
           h("td", null, h("code", { className: "hae-code" }, row.tool)),
           h("td", { className: "hae-lesson" }, inline(String(row.lesson || ""), "l" + row.id)),
-          h("td", null, effect(t, row)));
+          h("td", null, effect(t, row)),
+          h("td", null, h(LessonActions, { t: t, row: full, data: props.data, actions: props.actions })));
       }))));
   }
 
   function Proposals(props) {
-    const t = props.t, rows = props.data.proposals || [];
+    const t = props.t, rows = props.data.proposals || [], act = props.actions;
     if (!rows.length) return h("p", { className: "hae-muted" }, t.proposalsEmpty);
     return h("div", { className: "hae-stack" }, rows.map(function (row) {
       const lesson = row.evidence && row.evidence.lesson;
+      const decide = function (action) {
+        return function () {
+          act.send({ kind: "proposal", id: row.id, action: action }, function (result) {
+            return result && result.run_this ? t.runAfter + " " + result.run_this : t.done.proposal;
+          });
+        };
+      };
       return h(Section, { key: row.id, title: "#" + row.id + " · " + row.kind },
         h("div", { className: "hae-stack" },
           h("div", { className: "hae-waiting-meta" },
@@ -262,11 +434,144 @@
             h("code", { className: "hae-code" }, row.subject)),
           lesson ? h("div", { className: "hae-lesson" }, inline(String(lesson), "p" + row.id)) : null,
           h("div", { className: "hae-muted" }, t.col.command),
-          h(CopyCommand, { t: t, command: row.command })));
+          h(CopyCommand, { t: t, command: row.command }),
+          props.data.can_decide ? h("div", { className: "hae-row-actions" },
+            h(Button, { primary: true, onClick: decide("approve"), disabled: !!act.working }, t.approve),
+            h(Button, { onClick: decide("reject"), disabled: !!act.working }, t.reject)) : null));
     }));
   }
 
-  const TABS = ["overview", "lessons", "proposals", "digest", "status"];
+  function Settings(props) {
+    const t = props.t, s = t.s, data = props.data, act = props.actions;
+    const current = (data.settings || {}).values || {};
+    const formState = hooks.useState(current);
+    const form = formState[0], setForm = formState[1];
+    hooks.useEffect(function () { setForm(current); }, [JSON.stringify(current)]);
+    const set = function (key, value) { setForm(Object.assign({}, form, (function () { const o = {}; o[key] = value; return o; })())); };
+    const channels = (data.owner || {}).channels || [];
+    const suggestions = (data.owner || {}).suggestions || [];
+    const reloadKeys = (data.settings || {}).reload_keys || [];
+    const pendingReload = (data.settings || {}).reload || [];
+    const disabled = !data.can_decide || !!act.working;
+    const changed = function (values) {
+      const out = {};
+      Object.keys(values).forEach(function (key) {
+        if (JSON.stringify(values[key]) !== JSON.stringify(current[key])) out[key] = values[key];
+      });
+      return out;
+    };
+    const save = function (values) {
+      const diff = changed(values);
+      if (!Object.keys(diff).length) return;
+      act.send({ kind: "settings", values: diff }, function () { return t.done.settings; });
+    };
+    const toggleList = function (key, value) {
+      const list = (form[key] || []).slice();
+      const at = list.indexOf(value);
+      if (at >= 0) list.splice(at, 1); else list.push(value);
+      set(key, list);
+    };
+    const recommended = function () {
+      const values = Object.assign({}, form, { lessons: "auto", reflector: true });
+      suggestions.forEach(function (item) {
+        const key = item.kind === "platform" ? "owner_platforms" : "owner_sender_ids";
+        if ((values[key] || []).indexOf(item.value) < 0) values[key] = (values[key] || []).concat([item.value]);
+      });
+      setForm(values);
+      save(values);
+    };
+    const suggestedFor = function (kind, value) {
+      return suggestions.find(function (item) { return item.kind === kind && item.value === value; });
+    };
+    const field = function (key, control, hint) {
+      return h("label", { key: key, className: "hae-field" },
+        h("span", { className: "hae-field-label" }, s[key] || key,
+          reloadKeys.indexOf(key) >= 0 ? h("span", { className: "hae-muted" }, " · " + s.reloadNote) : null),
+        control, hint ? h("span", { className: "hae-muted" }, hint) : null);
+    };
+    const checkbox = function (key) {
+      return h("input", { type: "checkbox", checked: !!form[key], disabled: disabled,
+                          onChange: function (event) { set(key, event.target.checked); } });
+    };
+    const number = function (key, min, max) {
+      return h("input", { type: "number", className: "hae-input", min: min, max: max, step: 1,
+                          value: form[key] === undefined || form[key] === null ? "" : form[key], disabled: disabled,
+                          onChange: function (event) {
+                            const raw = event.target.value;
+                            if (raw === "") return;   // an empty field changes nothing (it never means 0)
+                            set(key, Math.trunc(Number(raw)));
+                          } });
+    };
+    const select = function (key, options, labels) {
+      return h("select", { className: "hae-select hae-select-field", value: form[key], disabled: disabled,
+                           onChange: function (event) { set(key, event.target.value); } },
+        options.map(function (value) { return h("option", { key: value, value: value }, (labels || s)[value] || value); }));
+    };
+    return h("div", { className: "hae-stack" },
+      pendingReload.length ? h("p", { className: "hae-notice" }, fill(s.reloadPending, { keys: pendingReload.join(", ") })) : null,
+      h(Section, { title: s.title },
+        h("div", { className: "hae-stack" },
+          data.can_decide ? h("div", { className: "hae-actions hae-actions-left" },
+            h(Button, { primary: true, onClick: recommended, disabled: disabled }, s.recommended),
+            h("span", { className: "hae-muted" }, s.recommendedHint)) : null,
+          field("lessons", select("lessons", ["auto", "suggest", "off"], s.modes), s.lessonsHint),
+          field("reflector", checkbox("reflector")),
+          field("reflector_daily_limit", number("reflector_daily_limit", 1, 50)),
+          field("autopilot_minutes", number("autopilot_minutes", 0, 1440)),
+          field("language", select("language", ["auto", "en", "pt"])),
+          field("feedback_signals", checkbox("feedback_signals")),
+          field("slow_turn_seconds", number("slow_turn_seconds", 5, 3600)),
+          field("agent_tools", checkbox("agent_tools")),
+          field("tool_hints", checkbox("tool_hints")),
+          field("runtime_guard", checkbox("runtime_guard"), form.runtime_guard === false ? s.guardWarn : null))),
+      h(Section, { title: s.owner },
+        h("div", { className: "hae-stack" },
+          h("p", { className: "hae-muted" }, s.ownerHint),
+          channels.length ? channels.map(function (channel) {
+            const platform = suggestedFor("platform", channel.origin);
+            return h("div", { key: channel.origin, className: "hae-channel" },
+              h("label", { className: "hae-field-inline" },
+                h("input", { type: "checkbox", disabled: disabled, checked: (form.owner_platforms || []).indexOf(channel.origin) >= 0,
+                             onChange: function () { toggleList("owner_platforms", channel.origin); } }),
+                h("code", { className: "hae-code" }, channel.origin), " · " + channel.sessions + " " + t.sessions + " · " + s.platform,
+                platform ? h(Pill, { tone: "good" }, s.suggested) : null),
+              platform ? h("div", { className: "hae-muted hae-indent" }, s.reason[platform.reason] || "") : null,
+              h("div", { className: "hae-indent hae-stack-tight" }, (channel.senders || []).filter(function (item) { return item.id; }).map(function (sender) {
+                const hint = suggestedFor("sender", sender.id);
+                return h("label", { key: sender.id, className: "hae-field-inline" },
+                  h("input", { type: "checkbox", disabled: disabled, checked: (form.owner_sender_ids || []).indexOf(sender.id) >= 0,
+                               onChange: function () { toggleList("owner_sender_ids", sender.id); } }),
+                  h("code", { className: "hae-code" }, sender.id), " · " + sender.sessions + " " + t.sessions + " · " + s.sender,
+                  hint ? h(Pill, { tone: "good" }, s.suggested) : null);
+              })));
+          }) : h("p", { className: "hae-muted" }, s.noChannels))),
+      data.can_decide ? h("div", { className: "hae-actions hae-actions-left" },
+        h(Button, { primary: true, onClick: function () { save(form); }, disabled: disabled || !Object.keys(changed(form)).length },
+          act.working ? s.saving : s.save)) : null);
+  }
+
+  function History(props) {
+    const t = props.t, rows = props.data.history || [], act = props.actions;
+    if (!rows.length) return h("p", { className: "hae-muted" }, t.historyEmpty);
+    return h("div", { className: "hae-table-wrap" }, h("table", { className: "hae-table" },
+      h("thead", null, h("tr", null, [t.col.when, t.col.who, t.col.what, "", ""].map(function (label, n) { return h("th", { key: n }, label); }))),
+      h("tbody", null, rows.map(function (row) {
+        const what = row.kind === "lesson" ? (t.action[row.action] || row.action) + " #" + row.target
+          : row.kind === "setting" ? (t.action.set) + " " + row.target + ": " + JSON.stringify(row.before.value) + " → " + JSON.stringify(row.after.value)
+          : (t.action[row.action] || row.action) + " " + t.tabs.proposals.toLowerCase() + " #" + row.target;
+        return h("tr", { key: row.id, className: row.undone ? "hae-row-muted" : "" },
+          h("td", null, when(row.at, t.lang)),
+          h("td", null, t.actor[row.actor] || row.actor),
+          h("td", null, what),
+          h("td", { className: "hae-lesson" }, row.lesson ? inline(String(row.lesson), "h" + row.id) : ""),
+          h("td", null, row.undone ? t.undone : props.data.can_decide
+            ? h(Button, { disabled: !!act.working, onClick: function () {
+                act.send({ kind: "undo", id: row.id }, function (result) { return result && result.undone ? t.done.undo : String(result && result.reason || ""); });
+              } }, t.undo) : null));
+      }))));
+  }
+
+  const TABS = ["overview", "lessons", "proposals", "settings", "history", "digest", "status"];
 
   function EvolutionPage() {
     const i18n = useI18n() || {};
@@ -278,6 +583,8 @@
     const days = daysState[0], setDays = daysState[1];
     const dataState = hooks.useState({ loading: true });
     const view = dataState[0], setView = dataState[1];
+    const noticeState = hooks.useState(null);
+    const notice = noticeState[0], setNotice = noticeState[1];
 
     const load = hooks.useCallback(function () {
       setView(function (previous) { return { loading: true, data: previous.data }; });
@@ -290,8 +597,14 @@
     }, [days, lang]);
 
     hooks.useEffect(function () { load(); }, [load]);
+    const notify = function (message, bad) {
+      if (!message) return;
+      setNotice({ text: message, bad: !!bad });
+      setTimeout(function () { setNotice(null); }, 6000);
+    };
 
     const data = view.data;
+    const actions = useActions({ data: data || {}, lang: lang, reload: load, notify: notify });
     const header = h("div", { className: "hae-header" },
       h("div", null,
         h("h1", { className: "hae-title" }, t.title),
@@ -305,19 +618,24 @@
         h("select", { className: "hae-select", value: days, onChange: function (event) { setDays(Number(event.target.value)); },
                       "aria-label": t.days },
           [7, 14, 30].map(function (value) { return h("option", { key: value, value: value }, value + " " + t.days); })),
-        h("button", { type: "button", className: "hae-button", onClick: load, disabled: view.loading }, t.retry)));
+        h(Button, { onClick: load, disabled: view.loading }, t.retry)));
 
     let body;
+    const common = { t: t, data: data, actions: actions };
     if (view.error) body = h("p", { className: "hae-error" }, view.error);
     else if (!data) body = h("p", { className: "hae-muted" }, t.loading);
-    else if (tab === "overview") body = h(Overview, { t: t, data: data });
-    else if (tab === "lessons") body = h(Lessons, { t: t, data: data });
-    else if (tab === "proposals") body = h(Proposals, { t: t, data: data });
+    else if (tab === "overview") body = h(Overview, common);
+    else if (tab === "lessons") body = h(Lessons, common);
+    else if (tab === "proposals") body = h(Proposals, common);
+    else if (tab === "settings") body = h(Settings, common);
+    else if (tab === "history") body = h(History, common);
     else if (tab === "digest") body = h(Markdown, { text: data.report_md });
     else body = h(Markdown, { text: data.status_md });
 
     return h("div", { className: "hae-page" + (view.loading && data ? " hae-loading" : "") },
       header,
+      data && !data.can_decide ? h("p", { className: "hae-notice" }, t.readOnly) : null,
+      notice ? h("p", { className: "hae-notice" + (notice.bad ? " hae-notice-bad" : " hae-notice-good"), role: "status" }, notice.text) : null,
       h("div", { className: "hae-tabs", role: "tablist" }, TABS.map(function (name) {
         return h("button", { key: name, type: "button", role: "tab", "aria-selected": tab === name,
                              className: "hae-tab" + (tab === name ? " hae-tab-active" : ""), onClick: function () { setTab(name); } },

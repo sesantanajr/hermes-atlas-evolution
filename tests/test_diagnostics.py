@@ -24,6 +24,14 @@ class DiagnosticsTest(unittest.TestCase):
         calm = patch("os.getloadavg", return_value=(0.1, 0.1, 0.1), create=True)   # a busy CI runner is not the host
         calm.start()
         self.addCleanup(calm.stop)
+        # Nor is a full temporary volume (a tmpfs /tmp on the machine running the tests): plenty of room, unless a
+        # test sets otherwise.
+        from collections import namedtuple
+
+        usage = namedtuple("usage", "total used free")(500 * 2**30, 100 * 2**30, 400 * 2**30)
+        roomy = patch("hermes_atlas_evolution.diagnostics.shutil.disk_usage", return_value=usage)
+        roomy.start()
+        self.addCleanup(roomy.stop)
 
     def test_reports_aggregates_and_ignores_stale_logs_and_duplicate_sink_lines(self):
         (self.home / "logs").mkdir()

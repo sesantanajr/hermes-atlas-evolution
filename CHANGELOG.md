@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.8.1
+
+Atlas Evolution can now be run from the Hermes dashboard. The Evolution tab, read-only in 0.8.0, lets the owner decide there when the dashboard asks for a login: approve or reject each lesson, approve every waiting lesson at once after reading each sentence, decide proposals, change every setting, pick who is the owner in chats from suggestions, and undo any decision. Settings now apply to the running gateway within a minute, without a restart. The terminal and the panel decide through the same code and share one history. A dashboard without a login stays read-only, because Hermes hands its session token to any program on the machine there. An independent review of the new decision route found six defects before release, the worst a way for the open dashboard's token to decide when sent as `Authorization: Bearer`; all are fixed with tests. The panel was exercised end to end in a real Hermes 0.23.1 dashboard with a password login, for the dashboard's own profile and for a second profile.
+
+### Added
+
+- **Decisions in the dashboard panel.** Approve, reject, retire or reactivate a lesson; **Approve all**, which first lists every sentence it approves and leaves out lessons the agent proposed (those are approved one by one); approve or reject a proposal; and **Undo** in a new History tab. Only a logged-in owner decides there: a request is accepted only with the session cookie of a dashboard login (password or OAuth) or Hermes Desktop's grant, without the dashboard's session token in any form (header, `?token=` or `Authorization: Bearer`), and with the header `X-Atlas-Evolution: 1`, which another site's page cannot send unasked. Values the plugin would not use as given are refused before they are written, and a broken `settings.json` never takes the panel down. Without a login the panel stays read-only, says why, shows the terminal commands, and leaves the sender ids of chat channels out of what it reads.
+- **Settings in the panel.** Every option of the settings form, **Apply the recommended setup** (lessons on `auto`, reflector on, and the channels that are yours by construction), and **Who is you in chats**, with each channel of the last 30 days, its senders and suggestions: the API server (only clients holding its key write there, such as your own interface) and senders a Hermes host marks as the owner (`hosted-owner:`). Phone numbers and messaging ids are listed for you to pick, never guessed. Settings are written through Hermes' own plugin-settings writer, the one the settings form uses.
+- **Settings apply without a restart.** Every hook and the plugin's clock compare the modification times of `config.yaml` and `settings.json` at most every 30 seconds and apply a change at once: who counts as the owner, the lessons mode, the reflector and its limit, the language, owner signals, the slow-turn threshold and the autopilot interval. `runtime_guard` and `tool_hints` decide which hooks Hermes calls, and a profile that loaded with lessons off has no prompt section, so those wait for the next load of the plugin; `status` and the panel list them (`settings_reload`).
+- **`hermes evolution lessons approve --all`** approves every waiting lesson except the agent's proposals, after showing each sentence, and **`hermes evolution decisions`** lists the decisions from the terminal and the panel, with **`decisions undo <id>`**.
+- **One history of decisions** (`decision_log`): ids, states and setting values, never lesson text. An undo applies only while what the decision changed is still as it left it; undoing an approval also drops the measurement it started.
+
+### Changed
+
+- Lesson decisions in the terminal (`approve`, `retire`, `review`) go through the same code as the panel and are recorded in the history.
+- The runtime guard vetoes the agent's commands that call the panel's decision route, however the address is spelled.
+- A setting changed while the gateway runs is read with Hermes' own loader, so an administrator's managed values still win, and a change of the managed configuration is noticed too.
+- `hermes evolution decisions` in an agent's terminal, and the panel without a login, show the owner's chat accounts as counts and leave written lesson text out.
+- Undoing a setting applies only while it still has the value the decision set, and is recorded only once Hermes took the old value back.
+- `lessons approve <id>` of a lesson the queue cleaning withdrew activates it again, as in 0.8.0.
+
+### Upgrade notes
+
+- `hermes -p <profile> plugins update hermes-atlas-evolution` in each profile, then let the gateway reload the plugin (`hermes gateway restart` from your terminal, or disable and enable the plugin). Restart the dashboard once so it mounts the new decision route.
+- To decide from the panel, the dashboard needs a login (`dashboard.basic_auth` or OAuth, which Hermes turns on when `dashboard.public_url` is a public address).
+- The database gains one table, `decision_log`; 0.5.0 to 0.8.0 still open it.
+
 ## 0.8.0
 
 This release gives Atlas Evolution a face inside Hermes and lets what one profile learned help the others, and it closes what three independent reviews of 0.7.0 found. An **Evolution** tab in the Hermes dashboard and in Hermes Desktop shows what the profile learned, what waits for the owner's decision with the exact command to run, the digest and the status; it only reads. **Lesson packs** carry lessons from one profile to another, or to another machine, after the owner has seen every sentence. The reviews looked at security (the runtime guard, who may decide, what reaches the agent), at compatibility with Hermes 0.23.1 and at the learning loop; every defect they found is fixed here with a test that fails without its fix. The runtime guard was rebuilt around how a shell actually runs a command and was checked against about 350 commands written to get around it; none that it vetoed before passes now. The suite has 430 tests, run under the system Python and Hermes' own with no `ResourceWarning`, and CI now also runs Python 3.14 and a lint job. The panel was checked in a real Hermes 0.23.1 dashboard, in English and Portuguese; it has not been used on macOS or Windows yet, and lesson verdicts have still not been watched over weeks of real use.

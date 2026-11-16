@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -99,6 +100,65 @@ def shared_context(home, payload: dict, config: dict):
     if notes:
         return {"context": header + json.dumps(notes, ensure_ascii=False)}
     return None
+
+
+SETTINGS_CHECK_SECONDS = 30   # how often a hook or the clock may look for a change of the settings
+RELOAD_KEYS = ("runtime_guard", "tool_hints")   # these decide which hooks are registered: next load of the plugin
+
+
+def _managed_files() -> list:
+    """The administrator's managed configuration files, when Hermes has a managed scope (read-only lookup)."""
+    module = sys.modules.get("hermes_cli.managed_scope")
+    try:
+        folder = module.get_managed_dir() if module is not None else None
+    except Exception:
+        return []
+    if folder is None:
+        return []
+    try:
+        return sorted(Path(folder).glob("*.yaml"))[:8] + sorted(Path(folder).glob("*.env"))[:4]
+    except OSError:
+        return []
+
+
+def _settings_stamp(home: Path) -> tuple:
+    """Modification times of the files the settings come from: Hermes' config.yaml, the administrator's managed
+    configuration and the plugin's settings.json."""
+    stamp = []
+    for path in (Path(home) / "config.yaml", Path(home) / "evolution" / "settings.json", *_managed_files()):
+        try:
+            info = path.stat()
+            stamp.append((info.st_mtime_ns, info.st_size))
+        except OSError:
+            stamp.append(None)
+    return tuple(stamp)
+
+
+def _read_hermes_config(home: Path) -> dict | None:
+    """The profile's configuration as Hermes loads it at start (its own loader, under this profile: the managed
+    overlay of an administrator and `${VAR}` expansion included), or None when it cannot be read now. Outside
+    Hermes, config.yaml as written, when a YAML parser is available."""
+    module = sys.modules.get("hermes_cli.config")
+    loader = getattr(module, "load_config_readonly", None) if module is not None else None
+    if callable(loader):
+        from .autopilot import pinned_profile
+
+        try:
+            with pinned_profile(home):
+                data = loader()
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+    try:
+        import yaml
+    except ImportError:
+        return None
+    try:
+        body = (Path(home) / "config.yaml").read_text(encoding="utf-8", errors="replace")[:8_000_000]
+        data = yaml.safe_load(body) if body.strip() else {}
+    except (OSError, ValueError, RecursionError, yaml.YAMLError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _warn_once(seen: set, event: str) -> None:
@@ -196,6 +256,11 @@ class _Plugin:
         from .agent_tools import LessonsTool
 
         self.lessons_tool = LessonsTool(home, lang=evolution["language"])   # one instance: it holds the hourly cap
+        self.clock_allowed = False   # the host can stop the autopilot's clock (on_unload): it may be started later
+        self.section_registered = False   # the playbook section exists only when lessons were on at load
+        self._settings_checked = float("-inf")   # never: the monotonic clock may be under 30 s on a fresh machine
+        self._settings_stamp = _settings_stamp(home)
+        self._settings_lock = threading.Lock()
 
     @property
     def lang(self) -> str:
@@ -392,13 +457,92 @@ class _Plugin:
             self.warn("skill")
 
     def poke(self, **_payload):
-        """Nudge the autopilot: O(1) unless a check is due. Also the kanban tick of the gateway's own profile."""
+        """Nudge the autopilot: O(1) unless a check is due. Also the kanban tick of the gateway's own profile.
+        A change of the settings (the dashboard panel, the settings form, `hermes config set`) is picked up here."""
+        try:
+            self.refresh_settings()
+        except Exception:
+            pass
         try:
             if self.autopilot is not None:
                 self.autopilot.poke()
         except Exception:
             pass
         return None
+
+    # ── settings that apply while Hermes runs ────────────────────────────────────────────────────────────
+
+    def refresh_settings(self, *, force: bool = False, read=None) -> bool:
+        """Apply a change of the settings without restarting the gateway. At most every SETTINGS_CHECK_SECONDS it
+        compares the modification times of config.yaml and settings.json (two stat calls); only a change reads
+        them again. Returns True when new settings were applied.
+
+        Who counts as the owner, the lessons mode, the reflector and its limit, the language, owner signals, the
+        slow-turn threshold and the autopilot interval apply at once. The runtime guard and tool hints decide
+        which hooks Hermes calls, so a change of those waits for the next load of the plugin: it is recorded
+        (`settings_reload`) for `status` and the panel to say so."""
+        import time
+
+        clock = time.monotonic()
+        if not force and clock - self._settings_checked < SETTINGS_CHECK_SECONDS:
+            return False
+        if not self._settings_lock.acquire(blocking=False):
+            return False
+        try:
+            self._settings_checked = clock
+            stamp = _settings_stamp(self.home)
+            if not force and stamp == self._settings_stamp:
+                return False
+            runtime = (read or _read_hermes_config)(self.home)
+            if runtime is None:   # unreadable right now (or no YAML parser): try again at the next change
+                return False
+            self._settings_stamp = stamp
+            from .evolve import options
+
+            config, problems = safe_settings(self.home, runtime)
+            evolution = options(config, runtime, strict=False, problems=problems)
+            self.apply_settings(config, evolution)
+            return True
+        finally:
+            self._settings_lock.release()
+
+    def apply_settings(self, config: dict, evolution: dict) -> None:
+        from .signals import FeedbackSensor
+
+        previous = self.evolution
+        with self.recent_lock:
+            self.config, self.evolution = config, evolution
+            self.legacy = config.get("legacy_memory_commands") is True
+            self.advice = config.get("agent_advice") is True
+            self.owners = frozenset(str(item) for item in evolution["owner_sender_ids"] if item not in (None, ""))
+            self.owner_platforms = frozenset(evolution["owner_platforms"])
+        self.turns.slow_ms = evolution["slow_turn_seconds"] * 1000
+        if not evolution["feedback_signals"]:
+            self.sensor = None
+        elif self.sensor is None:
+            self.sensor = FeedbackSensor(self.home, owner_sender_ids=evolution["owner_sender_ids"],
+                                         owner_platforms=evolution["owner_platforms"])
+        else:
+            self.sensor.owners = frozenset(evolution["owner_sender_ids"])
+            self.sensor.platforms = frozenset(evolution["owner_platforms"])
+        self.hints.lang = self.lessons_tool.lang = evolution["language"]
+        if self.guard is not None:
+            self.guard.lang = evolution["language"] if evolution["language"] in ("en", "pt") else "en"
+        if self.autopilot is not None:
+            self.autopilot.interval_s = evolution["autopilot_minutes"] * 60
+            if self.autopilot.interval_s and self.clock_allowed:
+                self.autopilot.start_clock()   # turned on while running: a no-op when the clock already runs
+        waiting = sorted(key for key in RELOAD_KEYS if previous.get(key) != evolution.get(key))
+        if evolution["lessons"] != "off" and not self.section_registered:
+            waiting.append("lessons")   # loaded with lessons off: their prompt section appears at the next load
+        try:
+            from .experience import record
+
+            body = json.dumps(waiting)
+            record(self.home, lambda conn: conn.execute("INSERT OR REPLACE INTO cursor VALUES ('settings_reload', ?)",
+                                                        (body,)))
+        except Exception:
+            self.warn("settings")
 
     # ── what reaches the agent and the owner ─────────────────────────────────────────────────────────
 
@@ -408,7 +552,8 @@ class _Plugin:
         from .signals import classify
 
         try:
-            if not self.evolution["tool_hints"] or payload.get("status") not in ("error", "blocked"):
+            if not self.evolution["tool_hints"] or self.evolution["lessons"] == "off" or \
+                    payload.get("status") not in ("error", "blocked"):
                 return None   # off by default: the first string of all plugins wins, so a hint discards theirs
             call, session = payload.get("tool_call_id"), payload.get("session_id")
             if not isinstance(session, str) or not session.strip():
@@ -438,6 +583,8 @@ class _Plugin:
         from .signals import session_source, surface_of
 
         try:
+            if self.evolution["lessons"] == "off":
+                return ""   # switched off while running: the section stays registered, empty
             shown: list = []
             info = session_info if hasattr(session_info, "get") else {}
             platform = info.get("platform")
@@ -672,8 +819,9 @@ def register(ctx):
         # Only with tool_hints on: while any plugin listens, Hermes reads every tool result for this hook and runs
         # it in a thread of its own. (`hermes plugins validate` notes it as declared but not registered.)
         ctx.register_hook("transform_tool_result", plugin.with_lesson)
-    if lessons_on:
+    if lessons_on:   # with lessons off at load there is no surface at all; switching them off later empties it
         ctx.register_system_prompt_section("hermes-atlas-evolution.playbook", plugin.playbook_section, max_chars=1400)
+        plugin.section_registered = True
     if plugin.legacy:
         ctx.register_command("evolution", plugin.command, description="Access legacy Evolution notes", args_hint="<command>")
     _register_skills(ctx)
@@ -684,6 +832,8 @@ def register(ctx):
 
         on_unload(close_observers)            # write queued counters and release the shared connection
         on_unload(plugin.autopilot.stop)      # stop the idle clock of this load before a reload starts another
+        plugin.clock_allowed = True
+        plugin.autopilot.on_tick = plugin.refresh_settings
         plugin.autopilot.start_clock()        # only where it can be stopped: a host with on_unload
     ctx.register_tool(name=TOOL["name"], toolset="hermes-atlas-evolution", schema=TOOL, handler=plugin.advisory_tool,
                       check_fn=lambda: plugin.advice)

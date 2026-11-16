@@ -104,6 +104,27 @@ _HERMES_MODULES = frozenset({"hermes_cli.main", "hermes_cli"})
 _PID_LOOKUPS = frozenset({"pgrep", "pidof", "grep", "egrep", "fgrep", "rg", "awk"})
 _PID_FILES = ("gateway.pid", "gateway.lock")
 _BRACE = re.compile(r"\{([^{}]*,[^{}]*)\}")
+# The dashboard panel's decision route (0.8.1): only the owner, logged in to the dashboard, decides there.
+_PANEL_DECISIONS = re.compile(r"hermes-(?:atlas-)?evolution/decide")
+_ANY_PLUGIN_DECIDE = re.compile(r"api/plugins/[^\s]*/decide")
+
+
+def _calls_panel_decisions(command: str) -> bool:
+    """A command that calls the panel's decision route, however the URL is spelled: %-escapes (also twice), quotes
+    or backslashes inside words, `/./`, `//` and `/x/../`, or the plugin's name filled in by the shell."""
+    from urllib.parse import unquote
+
+    text = command
+    for _ in range(3):
+        text = unquote(text)
+    text = re.sub(r"[\"'\\]", "", text).lower()
+    text = re.sub(r"/(?:\./)+", "/", re.sub(r"/{2,}", "/", text))
+    previous = None
+    while previous != text:
+        previous, text = text, re.sub(r"/[^/\s]+/\.\.(?=/)", "", text)
+    if _PANEL_DECISIONS.search(text):
+        return True
+    return bool(_ANY_PLUGIN_DECIDE.search(text)) and ("evolution" in text or "$" in text or "`" in text)
 
 MESSAGES = {
     "en": {
@@ -839,7 +860,7 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
     options = {"protected": protected, "home": home, "profile": profile, "trees": trees, "own": own, "process": process}
     if _kills_by_lookup(command):
         return {"kind": "gateway_stop"}
-    if _writes_plugin_config(command, home=home, profile=profile, cwd=cwd):
+    if _writes_plugin_config(command, home=home, profile=profile, cwd=cwd) or _calls_panel_decisions(command):
         return {"kind": "plugin_settings"}
     mentions = "hermes" in command.lower()
     segments = _segments(command) or []

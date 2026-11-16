@@ -641,3 +641,69 @@ class NativeSettingsTest(unittest.TestCase):
         declared = {line.strip()[:-1] for line in schema.splitlines() if line.startswith("  ") and not line.startswith("   ")
                     and line.strip().endswith(":")}
         self.assertEqual(declared, set(NATIVE_KEYS))
+
+
+class LiveSettingsTest(PluginBase):
+    """0.8.1: a change made in the panel, the settings form or `hermes config set` applies without a restart."""
+
+    def test_owner_mode_and_reload_needs_apply_while_running(self):
+        context = self.plugin()
+        plugin = context.hooks["on_kanban_dispatch_tick"][0].__self__
+        turn = {"session_id": "chat", "turn_id": "t1", "platform": "api_server", "sender_id": "api", "user_message": "oi"}
+        context.fire("pre_llm_call", **turn)
+        self.assertFalse(plugin.served_owner("chat"))
+        self.assertFalse(plugin.refresh_settings())   # nothing changed on disk: two stat calls, nothing read
+        settings = {"owner_platforms": ["api_server"], "lessons": "off", "runtime_guard": False, "language": "pt",
+                    "autopilot_minutes": 30}
+        read = lambda home: {"plugins": {"entries": {"hermes-atlas-evolution": {"settings": settings}}}}   # noqa: E731
+        self.assertTrue(plugin.refresh_settings(force=True, read=read))
+        context.fire("pre_llm_call", **{**turn, "turn_id": "t2"})
+        self.assertTrue(plugin.served_owner("chat"))   # the owner's own interface, from the next turn on
+        self.assertEqual(plugin.playbook_section({"session_id": "new", "platform": "cli"}), "")   # lessons off: empty
+        self.assertEqual((plugin.lang, plugin.autopilot.interval_s), ("pt", 1800))
+        close_observers()
+        with experience(self.home) as conn:
+            waiting = json.loads(conn.execute("SELECT value FROM cursor WHERE key='settings_reload'").fetchone()[0])
+        self.assertEqual(waiting, ["runtime_guard"])   # decides which hooks Hermes calls: the next load applies it
+
+    def test_an_unreadable_configuration_changes_nothing(self):
+        context = self.plugin()
+        plugin = context.hooks["on_kanban_dispatch_tick"][0].__self__
+        before = plugin.evolution
+        self.assertFalse(plugin.refresh_settings(force=True, read=lambda home: None))
+        self.assertIs(plugin.evolution, before)
+
+    def test_lessons_switched_on_after_loading_off_wait_for_the_next_load(self):
+        self.settings(evolution={"lessons": "off"})
+        context = self.plugin()
+        plugin = context.hooks["on_kanban_dispatch_tick"][0].__self__
+        self.assertEqual(context.sections, {})   # no surface at all while lessons are off at load
+        plugin.refresh_settings(force=True, read=lambda home: {"plugins": {"entries": {
+            "hermes-atlas-evolution": {"settings": {"lessons": "auto"}}}}})
+        close_observers()
+        with experience(self.home) as conn:
+            waiting = json.loads(conn.execute("SELECT value FROM cursor WHERE key='settings_reload'").fetchone()[0])
+        self.assertIn("lessons", waiting)
+
+    def test_the_refresh_reads_settings_the_way_hermes_loads_them(self):
+        """0.8.1 review: an administrator's managed values (Hermes' loader) must win on a refresh as at load."""
+        self.hermes_settings(agent_tools=False, owner_platforms=[])   # what load_config_readonly gives (managed overlay)
+        context = self.plugin()
+        plugin = context.hooks["on_kanban_dispatch_tick"][0].__self__
+        (self.home / "config.yaml").write_text("plugins: {entries: {hermes-atlas-evolution: {settings: "
+                                               "{agent_tools: true, owner_platforms: [telegram]}}}}\n")
+        self.assertTrue(plugin.refresh_settings(force=True))
+        self.assertFalse(plugin.advice)   # the user's config.yaml says true; Hermes' loader, with the overlay, says no
+        self.assertEqual(plugin.owner_platforms, frozenset())
+        managed = self.home / "managed"
+        managed.mkdir()
+        scope = types.ModuleType("hermes_cli.managed_scope")
+        scope.get_managed_dir = lambda: managed
+        sys.modules["hermes_cli.managed_scope"] = scope
+        before = plugin._settings_stamp
+        (managed / "config.yaml").write_text("x: 1\n")
+        plugin._settings_checked = float("-inf")
+        self.hermes_settings(agent_tools=False, owner_platforms=["api_server"])
+        self.assertTrue(plugin.refresh_settings())   # a change of the managed file alone is noticed
+        self.assertNotEqual(plugin._settings_stamp, before)
+        self.assertEqual(plugin.owner_platforms, frozenset({"api_server"}))

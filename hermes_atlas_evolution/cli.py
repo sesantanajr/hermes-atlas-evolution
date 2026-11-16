@@ -20,7 +20,8 @@ from .native_actions import PLAYBOOKS
 from .operations import RETENTION_DAYS, database, recommendations, run_policy, summarize
 
 RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
-EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report", "owner")
+EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report", "owner",
+                     "decisions")
 CYCLE_INTERVAL_SECONDS = 3600
 
 
@@ -264,7 +265,13 @@ def setup(parser: argparse.ArgumentParser) -> None:
     playbook_commands.add_parser("review", help=_("Decide on each lesson that waits for approval, one by one, in your terminal"))
     for name in ("approve", "retire"):
         decided = playbook_commands.add_parser(name)
-        decided.add_argument("id", type=int)
+        if name == "approve":   # one lesson, or --all: every lesson waiting except the agent's, after showing each
+            chosen = decided.add_mutually_exclusive_group(required=True)
+            chosen.add_argument("id", type=int, nargs="?")
+            chosen.add_argument("--all", action="store_true", help=_("Approve every lesson that waits, after showing "
+                                                                     "each one; the agent's own proposals are left out"))
+        else:
+            decided.add_argument("id", type=int)
         decided.add_argument("--yes", action="store_true", help=_("Confirm without the interactive question"))
     custom = playbook_commands.add_parser("add", help=_("Add an operator lesson"))
     custom.add_argument("text")
@@ -282,6 +289,12 @@ def setup(parser: argparse.ArgumentParser) -> None:
     imported.add_argument("--dry-run", action="store_true", help=_("Show what would be imported and change nothing"))
     imported.add_argument("--activate", action="store_true", help=_("Activate them now instead of leaving them for approval"))
     imported.add_argument("--yes", action="store_true", help=_("Confirm without the interactive question"))
+    history = commands.add_parser("decisions", help=_("List your decisions on lessons, proposals and settings, "
+                                                       "from the terminal and the dashboard, and undo one"))
+    history_commands = history.add_subparsers(dest="decisions_action")
+    history_commands.add_parser("list").add_argument("--limit", type=int, default=50)
+    history_commands.add_parser("undo", help=_("Undo one decision while what it changed is still as it left it")) \
+        .add_argument("id", type=int)
     skills = commands.add_parser("skills", help=_("Show skill churn, flip-flops and rewrites that were never exercised"))
     queue = commands.add_parser("proposals", help=_("Review and decide what the evolution loop proposes"))
     queue_commands = queue.add_subparsers(dest="proposals_action")
@@ -302,7 +315,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     digest.add_argument("--deliver", default="local", help=_("Hermes delivery target for the scheduled digest"))
     for command in (skills, digest):
         command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
-    for command in (playbook, digest, learn, state):
+    for command in (playbook, digest, learn, state, history):
         command.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS,
                              help=_("Language of lessons, messages and the digest"))
 
@@ -460,7 +473,7 @@ def _owner(args, home: Path, *, now: float, runtime_config, lang: str) -> str:
 
 def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=None):
     """Commands of the evolution loop: lessons, skills, proposals, experiments and the digest."""
-    from . import experiments, lessons, proposals
+    from . import decisions, experiments, lessons, proposals
     from .evolve import cycle, notify_view, options
     from .experience import experience
     from .report import build, markdown
@@ -472,6 +485,8 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
     lang = getattr(args, "lang", None) or opts["language"]
     if action == "owner":
         return _owner(args, home, now=now, runtime_config=runtime_config, lang=lang)
+    if action == "decisions":
+        return _decisions(args, home, now=now, lang=lang, runtime_config=runtime_config)
     if action == "status":
         from . import status
 
@@ -537,19 +552,22 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
                     _confirm(text or "", lang, yes=getattr(args, "yes", False))
                 lesson_id = lessons.add_custom(conn, args.text, tool=args.tool, origin="operator", now=now, active=activate)
                 return {"id": lesson_id, "status": "active" if activate else "quarantined"}
+            if task == "approve" and getattr(args, "all", False):
+                return _approve_all(conn, lang, now=now, yes=getattr(args, "yes", False))
+            row = conn.execute("SELECT * FROM lesson WHERE id=?", (args.id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown lesson id {args.id}")
             if task == "approve":
-                row = conn.execute("SELECT * FROM lesson WHERE id=?", (args.id,)).fetchone()
-                if row is None:
-                    raise ValueError(f"Unknown lesson id {args.id}")
                 _confirm(lessons.render(row, lang), lang, yes=getattr(args, "yes", False))
-            outcome = lessons.set_status(conn, args.id, "active" if task == "approve" else "retired", now=now)
-            # A direct decision also settles the matching proposal, so it does not linger in the queue.
-            conn.execute("UPDATE proposal SET status=?, updated=? WHERE code=? AND status IN ('open','approved')",
-                         ("applied" if task == "approve" else "rejected", now, f"lesson:{args.id}"))
-            if task == "retire":
-                conn.execute("UPDATE proposal SET status='applied', updated=? WHERE code=? AND status IN ('open','approved')",
-                             (now, f"lesson_retire:{args.id}"))
-            return outcome
+                withdrawn = row["status"] == "retired" and row["verdict"] == lessons.WITHDRAWN
+                action = "approve" if row["status"] in decisions.WAITING or withdrawn else "reactivate"
+            else:
+                action = "retire" if row["status"] == "active" else "reject"
+            outcome = decisions.decide_lesson(conn, args.id, action, now=now, actor="terminal", lang=lang)
+            if not outcome["decided"]:   # already where the command would put it
+                return {"id": args.id, "status": outcome["status"], "previous": outcome["status"]}
+            return {"id": args.id, "status": outcome["status"], "previous": outcome["previous"],
+                    "decision": outcome["decision"]}
         task = args.proposals_action or "list"
         if task == "list":
             listed = proposals.listing(conn, status=None if getattr(args, "all", False) else "open")
@@ -561,7 +579,7 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
                 raise ValueError(f"Unknown proposal id {args.id}")
             evidence = json.loads(row["evidence"])
             _confirm(evidence.get("lesson") or row["command"], lang, yes=getattr(args, "yes", False))
-        return proposals.decide(conn, args.id, task, now=now, note=args.note)
+        return decisions.decide_proposal(conn, args.id, task, now=now, actor="terminal", lang=lang, note=args.note)
 
 
 AGENT_MARKERS = ("ATLAS_EVOLUTION_AGENT", "HERMES_SESSION_ID", "HERMES_KANBAN_TASK", "HERMES_DELEGATED_CHILD_CONTEXT")
@@ -665,6 +683,7 @@ def _review_lessons(conn, lang: str, *, now: float) -> dict:
     """Show each lesson that waits for approval with its exact text and record the owner's decision."""
     import sys
 
+    from . import decisions
     from . import lessons as playbook
 
     if not sys.stdin.isatty():
@@ -689,9 +708,8 @@ def _review_lessons(conn, lang: str, *, now: float) -> dict:
                     playbook.render(now_row, lang) != shown:
                 decided["skipped"].append(row["id"])
                 continue
-            playbook.set_status(conn, row["id"], "active" if approve else "retired", now=now)
-            conn.execute("UPDATE proposal SET status=?, updated=? WHERE code=? AND status IN ('open','approved')",
-                         ("applied" if approve else "rejected", now, f"lesson:{row['id']}"))
+            decisions.decide_lesson(conn, row["id"], "approve" if approve else "reject", now=now, actor="terminal",
+                                    lang=lang, shown=decisions.fingerprint(shown))
             conn.commit()   # each decision is saved at once, and the write lock is released before the next question
             decided["approved" if approve else "rejected"].append(row["id"])
         else:
@@ -772,6 +790,74 @@ def _import_lessons(conn, home: Path, args, *, now: float, mode: str, lang: str)
     result["imported"] = packs.apply(conn, planned, now=now, mode=mode, activate=activate,
                                      source=source or "file")
     return result
+
+
+_APPROVE_ALL_PROMPT = {"en": "Approve these {count} lessons for the agent? [y/N] ",
+                       "pt": "Aprovar estas {count} lições para o agente? [s/N] "}
+
+
+def _approve_all(conn, lang: str, *, now: float, yes: bool) -> dict:
+    """Approve every lesson that waits, after showing each sentence; the agent's own proposals stay for a decision
+    of their own. Operator only (the caller checked)."""
+    import sys
+
+    from . import decisions
+
+    waiting = decisions.waiting(conn, lang=lang)
+    chosen = [item for item in waiting if item["bulk"]]
+    result = {"approved": [], "skipped": [], "left_for_one_by_one": [item["id"] for item in waiting if not item["bulk"]]}
+    if not chosen:
+        return result
+    if not yes:
+        if not sys.stdin.isatty():
+            raise ValueError("Confirm with --yes after reading the lessons with 'lessons list'")
+        shown = "\n".join(f"  #{item['id']} [{item['tool']}] {item['lesson']}" for item in chosen)
+        sys.stderr.write(f"\n{shown}\n\n{_APPROVE_ALL_PROMPT.get(lang, _APPROVE_ALL_PROMPT['en']).format(count=len(chosen))}")
+        sys.stderr.flush()
+        if sys.stdin.readline().strip().lower() not in ("y", "yes", "s", "sim"):
+            raise ValueError("Cancelled; nothing changed")
+    outcome = decisions.approve_all(conn, {item["id"]: item["fingerprint"] for item in chosen}, now=now,
+                                    actor="terminal", lang=lang)
+    return {**result, **outcome}
+
+
+def setting_values(home: Path, runtime_config: dict) -> dict:
+    """The value of each option of the settings form as the plugin uses it now, by its key in the form. A broken
+    settings.json falls back as in the gateway (safe_settings)."""
+    from .evolve import options
+
+    config, _problems = safe_settings(home, runtime_config)
+    opts = options(config, runtime_config, strict=False)
+    raw = config.get("evolution") if isinstance(config.get("evolution"), dict) else {}
+    values = {key: opts.get(key) for key in NATIVE_KEYS if key in opts}
+    values["agent_tools"] = config.get("agent_advice") is True
+    values["owner_sender_ids"] = list(opts["owner_sender_ids"])
+    values["owner_platforms"] = list(opts["owner_platforms"])
+    values["language"] = raw.get("language") if raw.get("language") in ("auto", "en", "pt") else "auto"
+    return values
+
+
+def _decisions(args, home: Path, *, now: float, lang: str, runtime_config=None):
+    """`hermes evolution decisions [list | undo <id>]`: the owner's decisions from the terminal and the panel."""
+    from . import decisions
+    from .experience import experience
+
+    task = getattr(args, "decisions_action", None) or "list"
+    with experience(home) as conn:
+        if task == "list":
+            history = decisions.history(conn, lang=lang, limit=getattr(args, "limit", 50) or 50)
+            return decisions.masked(history) if _agent_shell() else history
+        _operator_only()
+        row = conn.execute("SELECT kind, target FROM decision_log WHERE id=?", (args.id,)).fetchone()
+        current = ...
+        if row is not None and row["kind"] == "setting":
+            current = setting_values(home, runtime_config or {}).get(row["target"])
+        result = decisions.undo(conn, args.id, now=now, actor="terminal", current=current)
+        if result.pop("restorable", False):
+            # Hermes' configuration is the owner's to set: the command is printed, and the decision stays as it is until
+            # a change is made through the panel (which writes it) or this command is run.
+            result["run_this"] = settings_command(home, result["key"], result["restore"])
+        return result
 
 
 def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=None, reflect=None):

@@ -562,6 +562,21 @@ PAIRS = (
     ("A lesson pack holds a list of at most 200 lessons", "Um pacote de lições traz uma lista de no máximo 200 lições"),
     ("Name a profile of this Hermes, such as default or work", "Informe um perfil deste Hermes, como default ou work"),
     ("That is this profile; name another one", "Este é o próprio perfil; informe outro"),
+    # 0.8.1: decisions from the terminal and the panel
+    ("Undo one decision while what it changed is still as it left it",
+     "Desfaz uma decisão enquanto o que ela mudou continua como ela deixou"),
+    ("List your decisions on lessons, proposals and settings, from the terminal and the dashboard, and undo one",
+     "Lista as suas decisões sobre lições, propostas e configurações, do terminal e do dashboard, e desfaz uma"),
+    ("Approve every lesson that waits, after showing each one; the agent's own proposals are left out",
+     "Aprova todas as lições que esperam, depois de mostrar cada uma; as propostas do próprio agente ficam de fora"),
+    ("Confirm with --yes after reading the lessons with 'lessons list'",
+     "Confirme com --yes depois de ler as lições com 'lessons list'"),
+    ("Decide with approve, reject, retire or reactivate", "Decida com approve, reject, retire ou reactivate"),
+    ("Unknown setting", "Configuração desconhecida"),
+    ("Invalid decision", "Decisão inválida"),
+    ("Hermes command not found", "Comando do Hermes não encontrado"),
+    ("Hermes refused the setting", "O Hermes recusou a configuração"),
+    ("language must be auto, en or pt", "language deve ser auto, en ou pt"),
 )
 
 # Sentences with variable parts. Each entry: (English regex, English format, Portuguese regex, Portuguese format).
@@ -588,6 +603,9 @@ PATTERNS = (
     (r"Saved #(\d+) \(([\w-]+)\)\.", "Saved #{0} ({1}).", r"Salva #(\d+) \(([\w-]+)\)\.", "Salva #{0} ({1})."),
     (r"Active trial recovery: (\w+)", "Active trial recovery: {0}", r"Recuperação do teste ativo: (\w+)",
      "Recuperação do teste ativo: {0}"),
+    (r"(\w+) must be true or false", "{0} must be true or false", r"(\w+) deve ser true ou false", "{0} deve ser true ou false"),
+    (r"Unknown decision id (\d+)", "Unknown decision id {0}", r"Id de decisão desconhecido: (\d+)",
+     "Id de decisão desconhecido: {0}"),
     (r"Cannot write the lesson pack: (\w+)", "Cannot write the lesson pack: {0}",
      r"Não foi possível gravar o pacote de lições: (\w+)", "Não foi possível gravar o pacote de lições: {0}"),
     (r"Cannot read the lesson pack: (\w+)", "Cannot read the lesson pack: {0}",

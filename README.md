@@ -72,7 +72,7 @@ The command-line `plugins update` only replaces the files: it does not reload a 
 
 ## What it does
 
-- **Shows it all in the Hermes dashboard.** An **Evolution** tab in the dashboard and in Hermes Desktop shows what the profile learned, what waits for your decision with the exact command to run, the digest and the status. It only reads: decisions stay in your terminal ([details](docs/hermes-integration.md#the-dashboard-panel)).
+- **Run it from the Hermes dashboard.** An **Evolution** tab in the dashboard and in Hermes Desktop shows what the profile learned and what waits for you, and, when your dashboard asks for a login, lets you decide there: approve or reject each lesson, **approve all** after reading every sentence, decide proposals, change the settings, pick who is you in chats from suggestions, and **undo** any decision. A dashboard without a login stays read-only, because any program on the machine could act there ([details](docs/hermes-integration.md#the-dashboard-panel)).
 - **Carries lessons between profiles.** `lessons export` and `lessons import --from <profile>` bring what one profile learned to another, or to another machine, after showing you each sentence. Imported lessons wait until your own turns hit their failure there, and are measured there like any other ([details](docs/evolution-loop.md#lesson-packs)).
 - **Learns from the history Hermes already keeps.** The first passes replay the last 14 days of the profile's sessions, so a failure that recurred last week can become a lesson on the first day.
 - **Turns repeated tool failures into lessons.** A failure seen at least 3 times, in 2 sessions or on 2 days, becomes one sentence such as "When calling `example_search`, always pass the required argument `query`." Calls that Hermes ends at its own deadline count too. The agent reads the active lessons at the start of each session.
@@ -98,7 +98,8 @@ Subcommands of `hermes evolution`. `--lang en|pt` works with any of them.
 | `report [--days N]` | The digest of the last N days (7 by default), compared with the period before. |
 | `lessons list` | The lessons, with origin, evidence and measured effect. |
 | `lessons review` | Goes through every lesson that waits for approval, with its exact text: `a` approves, `r` rejects, Enter skips. |
-| `lessons approve <id>` | Activates one waiting lesson after showing its exact text. |
+| `lessons approve <id>`, `lessons approve --all` | Activates one waiting lesson, or every one (except the agent's own proposals), after showing the exact text. |
+| `decisions`, `decisions undo <id>` | Your decisions from the terminal and the dashboard, newest first, and the undo of one. |
 | `proposals list`, `proposals approve <id>`, `proposals reject <id>` | The queue of proposals, and your decision on one. |
 | `lessons export [--out FILE]` | The active lessons as a pack another profile or machine can import. |
 | `lessons import FILE` or `lessons import --from <profile>` | Brings in the lessons of a pack or of another profile, after showing each one (`--dry-run` changes nothing). |
@@ -109,7 +110,7 @@ Every command and option: [Commands](docs/evolution-loop.md#commands).
 
 ## Settings
 
-Set them in Hermes Desktop under Settings → Plugins, or in the profile's `config.yaml` under `plugins.entries.hermes-atlas-evolution.settings`. Restart the gateway after a change. `owner_sender_ids`, `owner_platforms`, `agent_tools: true` and `runtime_guard: false` count only from there, never from the plugin's own `settings.json`, which the agent's file tools can write.
+Set them in the **Evolution** tab of the dashboard, in Hermes Desktop under Settings → Plugins, or in the profile's `config.yaml` under `plugins.entries.hermes-atlas-evolution.settings`. A change applies within a minute, without restarting the gateway; only `runtime_guard`, `tool_hints` and turning lessons on in a profile that loaded with them off wait for the next load of the plugin, and the panel says so. `owner_sender_ids`, `owner_platforms`, `agent_tools: true` and `runtime_guard: false` count only from there, never from the plugin's own `settings.json`, which the agent's file tools can write.
 
 | Option | Default | What it does |
 |---|---|---|
