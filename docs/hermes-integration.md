@@ -57,7 +57,7 @@ With `runtime_guard` on (the default), the plugin registers a `pre_tool_call` ca
 
 | Kind | Vetoed | What the agent is told |
 |---|---|---|
-| `gateway_stop` | `systemctl` with `restart`, `stop`, `kill`, `try-restart`, `reload-or-restart`, `try-reload-or-restart`, `condrestart`, `force-reload`, or `disable --now`, on a `hermes-gateway` unit (an instance or the `.service` suffix included); `service` with `restart` or `stop` on that unit; `pkill` or `killall` with an argument that contains hermes | the command would cut off the turns in progress, this one included; run `hermes gateway restart`, which waits for the running turns to finish; a forced restart is for the owner to run from their own terminal |
+| `gateway_stop` | `systemctl` with `restart`, `stop`, `kill`, `try-restart`, `reload-or-restart`, `try-reload-or-restart`, `condrestart`, `force-reload`, or `disable --now`, on a `hermes-gateway` unit (an instance or the `.service` suffix included); `service` with `restart` or `stop` on that unit; `pkill` or `killall` with an argument that contains hermes; `hermes gateway stop`, which would leave Hermes down | the command would cut off the turns in progress, this one included; run `hermes gateway restart`, which waits for the running turns to finish; a forced restart is for the owner to run from their own terminal |
 | `runtime_removal` | `rm`, `rmdir`, `unlink`, `shred`, `mv` (its sources) or `find` with `-delete` or with `-exec` running `rm`, aimed at a protected path, at a folder that contains one, or with a glob that matches one | the command would delete or move that path, and Hermes would stop working until someone repairs it by hand; removing it is for the owner, from their own terminal, with Hermes stopped |
 
 The protected paths are those the running Hermes needs: the prefixes of the running Python interpreter and its environment, the Hermes source (the folder that holds the `hermes_cli` package), the Hermes root and this profile. A path with fewer than three components, such as `/usr`, is never added to the list, so a system interpreter whose prefix is `/usr` is not covered. Files inside a protected path are not covered either; only the path itself and the folders above it are.
@@ -65,7 +65,7 @@ The protected paths are those the running Hermes needs: the prefixes of the runn
 How a command is read:
 
 - It is split at `;`, `&&`, `||`, `|`, `&`, parentheses and line breaks, and in each part only the command word counts, after variable assignments and wrappers such as `sudo`, `env`, `nohup`, `timeout`, `nice`, `ionice`, `stdbuf`, `exec`, `command`, `builtin`, `time`, `chrt` and `doas`. A command named inside another command's arguments, such as in `echo`, is not a command.
-- A command run through another program, such as `bash -c` or `ssh`, or from a script file, is not looked into.
+- A command passed to a shell with `-c` (`bash`, `sh`, `zsh`, `dash`, `ksh`) is read one level deep. A command run through another program, such as `ssh`, or from a script file, is not looked into.
 - Here-document bodies are data written somewhere, not commands run now, so they are ignored.
 - A home-relative path is expanded with the home folder. A path relative to the working folder is not checked.
 - Any doubt lets the command through: a quote without its pair, a command over 20,000 characters, a tool that is not terminal-like.

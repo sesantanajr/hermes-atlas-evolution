@@ -274,7 +274,7 @@ Requires Hermes Agent 0.23.1 or later and Python 3.11 or later.
 
 **Verified on the development machine** (measurements, not guarantees):
 
-- 253 tests, unit and end-to-end against a simulated Hermes, also under Hermes' Python with its native redactor; CI runs Python 3.11 to 3.13.
+- 257 tests, unit and end-to-end against a simulated Hermes, also under Hermes' Python with its native redactor; CI runs Python 3.11 to 3.13.
 - `hermes plugins validate` of Hermes 0.23.1: no warnings (2 tools, 17 hooks), security scan safe, ready for `plugins.isolation: host`.
 - The backfill, on a copy of a real profile: 275 sessions, 436 turns and 6,731 tool calls replayed in 1.2 s and 29 MB, producing 7 lessons on the first pass.
 - The autopilot (one claim per profile, expiring lease, retry, profile pinning, a manual `learn` waiting for a running pass): verified in tests and in the CLI.
@@ -293,7 +293,7 @@ Requires Hermes Agent 0.23.1 or later and Python 3.11 or later.
 - The backfill reads Hermes' history only before the plugin started observing the profile, at most 14 days back. It does not replay model calls and tokens.
 - Under `plugins.isolation: host` there is no `hermes evolution`: use `python -m hermes_evolution --home <profile> ...` (it reads `config.yaml` only with PyYAML). The cron recipes need the Hermes CLI; a standalone pass drafts nothing and keeps waiting excerpts for a pass run inside Hermes.
 - Review counts depend on a line Hermes 0.23.1 writes to `agent.log`. Owner signals are heuristics over the first words of a message.
-- The runtime guard looks only at the command word of each part of a terminal command. A command nested inside another one, such as `bash -c` or a script, a command it cannot parse, and a path relative to the working folder all pass; it is a safety net, not a sandbox.
+- The runtime guard looks only at the command word of each part of a terminal command. It looks one level into `bash -c` and `sh -c`; a command nested deeper, one run over `ssh` or from a script, a command it cannot parse, and a path relative to the working folder all pass. It is a safety net, not a sandbox.
 
 Hooks, surfaces and reads are in [Hermes integration](docs/hermes-integration.md).
 

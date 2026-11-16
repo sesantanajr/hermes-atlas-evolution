@@ -23,6 +23,9 @@ class CheckTest(unittest.TestCase):
                         "sudo systemctl stop hermes-gateway",
                         "XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart hermes-gateway.service",
                         "cd /tmp; systemctl --user kill hermes-gateway",
+                        "hermes gateway stop", "hermes -p atlas-ai gateway stop",
+                        "bash -c 'systemctl --user restart hermes-gateway'",
+                        "sh -c \"killall hermes\"",
                         "pkill -f 'hermes gateway'", "killall hermes", "timeout 5 pkill -9 -f hermes"):
             with self.subTest(command):
                 self.assertEqual(verdict(command), "gateway_stop")
@@ -32,6 +35,7 @@ class CheckTest(unittest.TestCase):
                         "rm -rf $HOME/.hermes",
                         "sudo rm -r -f /usr/local/lib/hermes-agent/",
                         "find ~/.hermes/tools -name 'python*' -delete", "cd / && rm -rf ~/.hermes/tools",
+                        "bash -c 'rm -rf ~/.hermes/tools'",
                         "cat > a.txt <<EOF\nhello\nEOF\nrm -rf ~/.hermes"):
             with self.subTest(command):
                 self.assertEqual(verdict(command), "runtime_removal")
@@ -39,6 +43,7 @@ class CheckTest(unittest.TestCase):
     def test_ordinary_administration_passes(self):
         for command in ("systemctl --user status hermes-gateway", "journalctl --user -u hermes-gateway -n 50",
                         "hermes gateway restart", "hermes gateway status", "echo 'systemctl restart hermes-gateway'",
+                        "hermes -p atlas-ai gateway restart", "bash -c 'ls -la'", "bash script.sh",
                         "rm -rf ~/.hermes/tools/python-3.13.2-old", "rm -rf /tmp/build", "pgrep -f hermes",
                         "ls ~/.hermes/tools", "grep -r killall ~/notes", "mv ~/.hermes/profiles/a/x.txt /tmp/",
                         "systemctl --user restart atlas-ui.service", "",

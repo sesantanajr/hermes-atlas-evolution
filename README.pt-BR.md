@@ -275,7 +275,7 @@ Exige Hermes Agent 0.23.1 ou superior e Python 3.11 ou superior.
 
 **Verificado na máquina de desenvolvimento** (medições, não garantias):
 
-- 253 testes, unitários e de ponta a ponta contra um Hermes simulado, também com o Python do Hermes e o redator nativo dele; a integração contínua roda Python 3.11 a 3.13.
+- 257 testes, unitários e de ponta a ponta contra um Hermes simulado, também com o Python do Hermes e o redator nativo dele; a integração contínua roda Python 3.11 a 3.13.
 - `hermes plugins validate` do Hermes 0.23.1: sem avisos (2 ferramentas, 17 hooks), varredura de segurança `safe`, pronto para `plugins.isolation: host`.
 - A leitura do histórico, numa cópia de um perfil real: 275 sessões, 436 turnos e 6.731 chamadas de ferramentas reprocessados em 1,2 s e 29 MB, gerando 7 lições na primeira passada.
 - O autopilot (uma reserva por perfil, reserva que expira, nova tentativa, fixação do perfil, um `learn` manual esperando a passada em andamento): verificado nos testes e na CLI.
@@ -294,7 +294,7 @@ Exige Hermes Agent 0.23.1 ou superior e Python 3.11 ou superior.
 - A leitura do histórico só pega o que o Hermes registrou antes de o plugin começar a observar o perfil, até 14 dias para trás. Ela não reprocessa chamadas ao modelo nem tokens.
 - Com `plugins.isolation: host` não existe `hermes evolution`: use `python -m hermes_evolution --home <perfil> ...` (que só lê o `config.yaml` com o PyYAML). As receitas de cron dependem da CLI do Hermes; uma passada pelo executor independente não rascunha nada e mantém os trechos em espera para uma passada feita dentro do Hermes.
 - A contagem de revisões depende de uma linha que o Hermes 0.23.1 grava no `agent.log`. Os sinais do dono são heurísticas sobre as primeiras palavras da mensagem.
-- A guarda de runtime só olha a palavra do comando em cada parte de um comando de terminal. Um comando aninhado dentro de outro, como num `bash -c` ou num script, um comando que ela não consegue interpretar e um caminho relativo à pasta de trabalho passam; ela é uma rede de proteção, não uma sandbox.
+- A guarda de runtime só olha a palavra do comando em cada parte de um comando de terminal. Ela olha um nível dentro de `bash -c` e `sh -c`; um comando aninhado mais fundo, um executado via `ssh` ou a partir de um script, um comando que ela não consegue interpretar e um caminho relativo à pasta de trabalho passam. Ela é uma rede de proteção, não uma sandbox.
 
 Hooks, superfícies e leituras estão em [Integração com o Hermes](docs/pt-BR/hermes-integration.md).
 

@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 
 from .advisory import TOOL, tool_handler
-from .cli import effective_settings, execute, settings, setup
+from .cli import execute, safe_settings, settings, setup
 from .memory import GLOBAL_SCOPE, MemoryStore, make_scope
 from .native_signals import HOOKS, observe_native
 from .operations import database, observe
@@ -112,10 +112,7 @@ def autopilot_pass(home: Path, reflect) -> dict:
         runtime = load_config_readonly() or {}
     except Exception:   # the pass still runs with the plugin's own settings
         runtime = {}
-    try:
-        current = effective_settings(home, runtime)
-    except (OSError, ValueError, RecursionError):
-        current = {"evolution": {"lessons": "off"}}
+    current, _problems = safe_settings(home, runtime)
     result = cycle(home, now=time.time(), runtime_config=runtime, config=current, reflect=reflect, strict=False)
     reflection = result["reflector"]
     return {"new_lessons": len(result["new_lessons"]), "open_proposals": len(result["open_proposals"]),
@@ -163,13 +160,9 @@ def register(ctx):
         runtime_config = {}
     from logging import getLogger
 
-    problems: list = []
-    try:
-        config = effective_settings(home, runtime_config)
-    except (OSError, ValueError, RecursionError):
-        # Unreadable settings: keep measuring, but show nothing to the agent until the file is fixed.
-        config = {"evolution": {"lessons": "off"}}
-        problems.append("settings.json")
+    # Unreadable settings.json: keep measuring with the values from Hermes' form, but show nothing to the
+    # agent until the file is fixed.
+    config, problems = safe_settings(home, runtime_config)
     evolution = options(config, runtime_config, strict=False, problems=problems)
     if problems:
         getLogger(__name__).warning("Atlas Evolution ignored invalid settings (%s); lessons=%s until they are fixed",

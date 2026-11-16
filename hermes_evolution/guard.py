@@ -26,6 +26,7 @@ _UNIT = re.compile(r"hermes-gateway(?:@[\w.-]+)?(?:\.service)?\Z", re.I)
 _STOP_ACTIONS = frozenset({"restart", "stop", "kill", "try-restart", "reload-or-restart", "try-reload-or-restart",
                            "condrestart", "force-reload"})
 _REMOVERS = frozenset({"rm", "rmdir", "unlink", "shred", "mv"})
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t"}, "env": {"-u", "-C", "-S"}, "nohup": set(),
              "timeout": {"-s", "-k", "--signal", "--kill-after"}, "nice": {"-n", "--adjustment"},
@@ -165,6 +166,9 @@ def _stops_gateway(verb: str, rest: list[str], words: list[str]) -> bool:
         return len(words) >= 2 and bool(_UNIT.match(words[0])) and words[1] in ("restart", "stop")
     if verb in ("pkill", "killall"):
         return any("hermes" in word.lower() for word in words)
+    if verb == "hermes" and "gateway" in words:   # `hermes gateway stop` leaves Hermes down; restart is fine
+        position = words.index("gateway") + 1
+        return position < len(words) and words[position] == "stop"
     return False
 
 
@@ -202,11 +206,21 @@ def check(tool_name, args, *, protected, home: Path) -> dict | None:
     command = args.get("command")
     if not isinstance(command, str) or not command.strip() or len(command) > _COMMAND_LIMIT:
         return None
+    return _check_command(command, protected=protected, home=home, nested=False)
+
+
+def _check_command(command: str, *, protected, home: Path, nested: bool) -> dict | None:
     for segment in _segments(command) or ():
         tokens = _strip_prefix(segment)
         if not tokens:
             continue
         verb, rest = os.path.basename(tokens[0]), tokens[1:]
+        if verb in _SHELLS and "-c" in rest and not nested:   # one level: `bash -c '<command>'`
+            index = rest.index("-c") + 1
+            found = _check_command(rest[index], protected=protected, home=home, nested=True) if index < len(rest) else None
+            if found:
+                return found
+            continue
         words = [token for token in rest if not token.startswith("-")]
         if _stops_gateway(verb, rest, words):
             return {"kind": "gateway_stop"}

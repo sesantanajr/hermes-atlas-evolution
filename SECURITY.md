@@ -81,7 +81,7 @@ Text that is stored as written, because someone wrote it on purpose:
 - Paths, URLs or credential-shaped values. A failure detail is kept only when it is a short name of at most 32 characters that passes `signals._clean_hint`, including Hermes' redactor with `force=True`. Tool, skill, provider and model names pass an allowlist, and a name that fails it is stored as `unknown` or dropped.
 - Configuration values that are not plain labels. They are stored as a short fingerprint.
 
-Retention is 35 days for observer metrics and 90 days for the evolution loop's aggregates, incidents and closed trials. The guard's daily counts (`guard_daily`, at most two rows a day) are not pruned in this version.
+Retention is 35 days for observer metrics and 90 days for the evolution loop's aggregates, incidents and closed trials. The guard's daily counts (`guard_daily`) follow the 90-day retention.
 
 ## What the plugin reads
 
@@ -113,4 +113,4 @@ A lesson is text placed in the system prompt of new sessions and in the result o
 
 ## Verification status
 
-The plugin is covered by 253 unit and end-to-end tests against a simulated Hermes context, including tests that assert sensitive-looking input is absent from the stored rows, also for history replayed from `state.db`, that decisions refuse to run with agent markers, that every approval refusal text of Hermes 0.23.1 is classified as `approval_refused`, and that the runtime guard vetoes the known commands, lets ordinary administration through and never raises. It passes `hermes plugins validate` on Hermes Agent 0.23.1, with the security scan reporting it safe. In production, three real reflector calls through Hermes produced three drafts. The autopilot is verified in tests and in the CLI; Windows was only simulated. The loop went through an independent review before the 0.4.0 release. It has not been audited by a third party, and lesson verdicts have not been observed over weeks of real use yet.
+The plugin is covered by 257 unit and end-to-end tests against a simulated Hermes context, including tests that assert sensitive-looking input is absent from the stored rows, also for history replayed from `state.db`, that decisions refuse to run with agent markers, that every approval refusal text of Hermes 0.23.1 is classified as `approval_refused`, and that the runtime guard vetoes the known commands, lets ordinary administration through and never raises. It passes `hermes plugins validate` on Hermes Agent 0.23.1, with the security scan reporting it safe. In production, three real reflector calls through Hermes produced three drafts. The autopilot is verified in tests and in the CLI; Windows was only simulated. The loop went through an independent review before the 0.4.0 release. It has not been audited by a third party, and lesson verdicts have not been observed over weeks of real use yet.

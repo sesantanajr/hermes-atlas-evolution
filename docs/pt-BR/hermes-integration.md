@@ -57,7 +57,7 @@ Com `runtime_guard` ligado (o padrão), o plugin registra um callback de `pre_to
 
 | Tipo | Barrado | O que o agente recebe |
 |---|---|---|
-| `gateway_stop` | `systemctl` com `restart`, `stop`, `kill`, `try-restart`, `reload-or-restart`, `try-reload-or-restart`, `condrestart`, `force-reload` ou `disable --now` numa unidade `hermes-gateway` (inclusive uma instância ou o sufixo `.service`); `service` com `restart` ou `stop` nessa unidade; `pkill` ou `killall` com um argumento que contenha hermes | o comando cortaria os turnos em andamento, inclusive este; use `hermes gateway restart`, que espera os turnos em andamento terminarem; um reinício forçado fica para o dono rodar no próprio terminal |
+| `gateway_stop` | `systemctl` com `restart`, `stop`, `kill`, `try-restart`, `reload-or-restart`, `try-reload-or-restart`, `condrestart`, `force-reload` ou `disable --now` numa unidade `hermes-gateway` (inclusive uma instância ou o sufixo `.service`); `service` com `restart` ou `stop` nessa unidade; `pkill` ou `killall` com um argumento que contenha hermes; `hermes gateway stop`, que deixaria o Hermes parado | o comando cortaria os turnos em andamento, inclusive este; use `hermes gateway restart`, que espera os turnos em andamento terminarem; um reinício forçado fica para o dono rodar no próprio terminal |
 | `runtime_removal` | `rm`, `rmdir`, `unlink`, `shred`, `mv` (as origens) ou `find` com `-delete` ou com `-exec` rodando `rm`, apontados para um caminho protegido, para uma pasta que contenha um deles ou com um glob que case com um deles | o comando apagaria ou moveria esse caminho, e o Hermes pararia de funcionar até alguém consertar à mão; remover isso fica para o dono, no próprio terminal, com o Hermes parado |
 
 Os caminhos protegidos são aqueles de que o Hermes em execução precisa: os prefixos do interpretador Python em execução e do ambiente dele, o código do Hermes (a pasta que contém o pacote `hermes_cli`), a raiz do Hermes e este perfil. Um caminho com menos de três componentes, como `/usr`, nunca entra na lista, então um interpretador do sistema cujo prefixo é `/usr` não fica coberto. Arquivos dentro de um caminho protegido também não ficam cobertos; só o próprio caminho e as pastas acima dele.
@@ -65,7 +65,7 @@ Os caminhos protegidos são aqueles de que o Hermes em execução precisa: os pr
 Como um comando é lido:
 
 - Ele é dividido em `;`, `&&`, `||`, `|`, `&`, parênteses e quebras de linha, e em cada parte só conta a palavra do comando, depois de atribuições de variáveis e de invólucros como `sudo`, `env`, `nohup`, `timeout`, `nice`, `ionice`, `stdbuf`, `exec`, `command`, `builtin`, `time`, `chrt` e `doas`. Um comando citado nos argumentos de outro, como num `echo`, não é um comando.
-- Um comando executado por outro programa, como `bash -c` ou `ssh`, ou a partir de um arquivo de script, não é examinado.
+- Um comando passado a um shell com `-c` (`bash`, `sh`, `zsh`, `dash`, `ksh`) é lido um nível adentro. Um comando executado por outro programa, como `ssh`, ou a partir de um arquivo de script, não é examinado.
 - O corpo de um here-document é dado gravado em algum lugar, não um comando que roda agora, então é ignorado.
 - Um caminho relativo à pasta pessoal é expandido com a pasta pessoal. Um caminho relativo à pasta de trabalho não é checado.
 - Qualquer dúvida deixa o comando passar: uma aspa sem par, um comando com mais de 20.000 caracteres, uma ferramenta que não é do tipo terminal.

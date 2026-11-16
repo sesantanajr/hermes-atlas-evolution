@@ -58,9 +58,9 @@ def native_settings(runtime_config) -> dict:
     return values if isinstance(values, dict) else {}
 
 
-def effective_settings(home: Path, runtime_config=None) -> dict:
-    """settings.json with the values set through Hermes' plugin settings on top (Hermes wins per key)."""
-    result = settings(home)
+def effective_settings(home: Path, runtime_config=None, *, base: dict | None = None) -> dict:
+    """settings.json (or `base`) with the values set through Hermes' plugin settings on top (Hermes wins per key)."""
+    result = settings(home) if base is None else base
     for key, path in NATIVE_KEYS.items():
         value = native_settings(runtime_config).get(key)
         if value is None:
@@ -72,6 +72,18 @@ def effective_settings(home: Path, runtime_config=None) -> dict:
             target = nested
         target[path[-1]] = value
     return result
+
+
+def safe_settings(home: Path, runtime_config=None) -> tuple[dict, list]:
+    """effective_settings, or, when settings.json cannot be read, the values from Hermes' settings form with
+    lessons forced off until the file is fixed. Returns (settings, problems)."""
+    try:
+        return effective_settings(home, runtime_config), []
+    except (OSError, ValueError, RecursionError):
+        result = effective_settings(home, runtime_config, base={})
+        evolution = result.get("evolution")
+        result["evolution"] = {**(evolution if isinstance(evolution, dict) else {}), "lessons": "off"}
+        return result, ["settings.json"]
 
 
 def _accept_lang_everywhere(parser: argparse.ArgumentParser, help_text: str) -> None:

@@ -108,6 +108,7 @@ _TEXT = {
         "no_data": "not measured", "footer": "Aggregates only. No conversation text, tool output or memory content is stored.",
         "decide": "Decide with `hermes evolution proposals approve <id>` or `reject <id>`.",
         "lessons_waiting": "{count} lessons await approval (read them with `hermes evolution lessons list`, approve with `hermes evolution lessons approve <lesson id>`)",
+        "lessons_waiting_one": "1 lesson awaits approval (read it with `hermes evolution lessons list`, approve with `hermes evolution lessons approve <lesson id>`)",
         "health": "Hermes health", "sessions_line": "Sessions", "ended": "ended", "orphaned": "ended as orphans",
         "orphan_note": "reaped after a disconnect or restart, so Hermes' end-of-session work did not run",
         "context_line": "Context per agent call", "avg": "average of", "tokens": "tokens", "cached": "served from cache",
@@ -141,6 +142,7 @@ _TEXT = {
         "no_data": "não medido", "footer": "Só agregados. Nenhum texto de conversa, saída de ferramenta ou conteúdo de memória é guardado.",
         "decide": "Decida com `hermes evolution proposals approve <id>` ou `reject <id>`.",
         "lessons_waiting": "{count} lições aguardam aprovação (leia com `hermes evolution lessons list` e aprove com `hermes evolution lessons approve <id da lição>`)",
+        "lessons_waiting_one": "1 lição aguarda aprovação (leia com `hermes evolution lessons list` e aprove com `hermes evolution lessons approve <id da lição>`)",
         "health": "Saúde do Hermes", "sessions_line": "Sessões", "ended": "encerradas", "orphaned": "terminaram como órfãs",
         "orphan_note": "recolhidas após desconexão ou reinício, sem o encerramento normal do Hermes",
         "context_line": "Contexto por chamada do agente", "avg": "média de", "tokens": "tokens", "cached": "servido do cache",
@@ -237,6 +239,26 @@ def _health(report: dict, lang: str) -> list[str]:
     return lines
 
 
+def _proposal_lines(report: dict, lang: str) -> list[str]:
+    """Lessons awaiting approval on one line (their text is in `lessons list`), then the other proposals."""
+    t = _TEXT[lang]
+    lines = ["", "## " + t["proposals"], ""]
+    waiting = [item for item in report["proposals"] if item["kind"] == "lesson"]
+    if waiting:
+        listed = ", ".join(f"#{item['evidence'].get('lesson_id', item['id'])} `{item['subject']}`" for item in waiting[:10])
+        heading = t["lessons_waiting_one"] if len(waiting) == 1 else t["lessons_waiting"].format(count=len(waiting))
+        lines.append(f"- {heading}: {listed}")
+    if report["proposals"]:
+        for item in [entry for entry in report["proposals"] if entry["kind"] != "lesson"][:20]:
+            step = t["look"] if item["kind"] in _ADVISORY else t["run"]
+            lines.append(f"- #{item['id']} [{t['risk']}: {_RISK[lang][item['risk']]}] {_KIND[lang].get(item['kind'], item['kind'])}"
+                         f" · `{item['subject']}` · {step}: `{item['command']}`")
+        lines += ["", t["decide"]]
+    else:
+        lines.append(t["proposals_none"])
+    return lines
+
+
 def markdown(report: dict, lang: str = "en") -> str:
     """Render the digest for a person."""
     lang = lang if lang in _TEXT else "en"
@@ -330,18 +352,6 @@ def markdown(report: dict, lang: str = "en") -> str:
         lines.append(t["changes_none"])
 
     lines += _health(report, lang)
-    lines += ["", "## " + t["proposals"], ""]
-    waiting = [item for item in report["proposals"] if item["kind"] == "lesson"]
-    if waiting:   # one line for the lessons: their text is in `lessons list`, where they are approved
-        listed = ", ".join(f"#{item['evidence'].get('lesson_id', item['id'])} `{item['subject']}`" for item in waiting[:10])
-        lines.append(f"- {t['lessons_waiting'].format(count=len(waiting))}: {listed}")
-    if report["proposals"]:
-        for item in [entry for entry in report["proposals"] if entry["kind"] != "lesson"][:20]:
-            step = t["look"] if item["kind"] in _ADVISORY else t["run"]
-            lines.append(f"- #{item['id']} [{t['risk']}: {_RISK[lang][item['risk']]}] {_KIND[lang].get(item['kind'], item['kind'])}"
-                         f" · `{item['subject']}` · {step}: `{item['command']}`")
-        lines += ["", t["decide"]]
-    else:
-        lines.append(t["proposals_none"])
+    lines += _proposal_lines(report, lang)
     lines += ["", "_" + t["footer"] + "_"]
     return "\n".join(lines) + "\n"

@@ -57,7 +57,13 @@ def sessions(source, *, now: float, days: int = RADAR_DAYS) -> dict | None:
     parent = "AND (parent_session_id IS NULL OR parent_session_id = '')" if "parent_session_id" in columns else ""
     rows = source.execute(f"""SELECT end_reason, COUNT(*) FROM sessions WHERE started_at >= ? {parent}
         GROUP BY end_reason""", (now - days * 86_400,)).fetchall()
-    by_reason = {str(reason)[:40]: count for reason, count in rows if reason}
+    from .experience import label
+
+    by_reason: dict = {}
+    for reason, count in rows:
+        if reason:   # Hermes' own reason codes; anything unexpected is stored as a safe label
+            key = label(str(reason)[:96], fallback="other")
+            by_reason[key] = by_reason.get(key, 0) + count
     ended = sum(by_reason.values())
     orphaned = sum(by_reason.get(reason, 0) for reason in ORPHAN_ENDS)
     return {"ended": ended, "orphaned": orphaned, "open": sum(count for reason, count in rows if not reason),
@@ -135,13 +141,15 @@ def plugins(home: Path) -> dict | None:
     except Exception:
         bundled = None
     declared = _declared_hooks([bundled, Path(home) / "plugins"])
+    from .experience import label
+
     enabled = sorted((row for row in rows if row.get("enabled") is True), key=lambda row: str(row.get("key") or ""))
     errors, undeclared, overlaps = [], [], {}
     for row in enabled:
-        key = str(row.get("key") or row.get("name") or "")[:80]
+        key = label(str(row.get("key") or row.get("name") or "")[:96], fallback="plugin")
         if row.get("error"):
             match = _ERROR_NAME.match(str(row["error"]))
-            errors.append({"plugin": key, "error": match.group(0) if match else "error"})
+            errors.append({"plugin": key, "error": label(match.group(0), fallback="error") if match else "error"})
         hooks = declared.get(str(row.get("name") or key))
         registered = row.get("hooks")
         if hooks is not None and type(registered) is int and registered > len(hooks):
