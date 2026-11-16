@@ -1,22 +1,25 @@
 """Keep the operating system up to date without breaking it or Hermes (0.8.4). Linux with apt (Ubuntu, Debian).
 
 Three steps, each safe on its own:
-- `check` reads, never changes: the updates waiting (security ones apart), a reboot Hermes or the system is waiting
-  for, a package manager left half-way (`dpkg --audit`), a package manager busy right now, held packages, room on
-  /, /boot and /var, whether automatic security updates are on, and whether Hermes comes back after a reboot (its
-  systemd units enabled; a user unit, like the gateway's, needs the user's linger). The learning pass runs it at most
-  once a day and the menu shows what it found.
-- `plan` refreshes the package lists (`apt-get update`) and simulates the upgrade (`apt-get -s`): what would be
-  installed, upgraded or removed, and the packages that need attention: one that restarts the containers (docker,
-  containerd), one that needs a reboot (libc6, systemd, the kernel), one that Hermes' own tools rely on.
-- `upgrade` is the owner's, in their own terminal (never the agent, never by itself), and only when `check` finds
-  nothing in the way. Before: the list of every installed package with its version and a copy of /etc, owner-only,
-  in `<profile>/evolution/system/<time>/`. Then `apt-get --with-new-pkgs upgrade` (never removes a package; `full`
-  is apt's full-upgrade, which may) runs in its own systemd unit, so a closed terminal or a restarted gateway never
-  leaves dpkg half-way; it keeps every configuration file the owner changed, restarts no service by itself
-  (needrestart only lists them) and may skip packages for this run (held, and released at the end). After: dpkg and
-  apt are checked again, every service that was running is checked again, Hermes is asked for its version, and the
-  report lists what changed, with the versions to go back to.
+- `check` reads, never changes and never takes a lock: the updates waiting (security ones apart), a reboot the
+  system waits for, a package manager left half-way (`dpkg --audit`), apt's own consistency check (without its lock),
+  a package manager working right now (a dpkg or apt lock held, read from /proc/locks, or an apt, dpkg or
+  unattended-upgrade run), packages held (and the ones a run of this plugin held and could not release), room on
+  /, /boot and /var, automatic security updates, and whether Hermes comes back after a reboot. While a package
+  manager works, what it leaves half-way for a moment is not reported. The learning pass runs it once a day.
+- `plan` refreshes the package lists (`apt-get update`) and simulates the upgrade (`apt-get -s`), flagging packages
+  that restart the containers, need a reboot, touch remote access, the boot loader or the package manager.
+- `upgrade` and `repair` are the owner's, as root in their own terminal: never the agent, never by themselves, and
+  only for a Hermes that belongs to root (a profile or plugin another user can write would let that user, the
+  agent included, steer what root runs: there the owner runs apt themselves). Their files (the list of every
+  package with its version, a copy of /etc, the script, its log and report) live in a root-only folder outside every
+  Hermes profile, `/var/lib/hermes-atlas-evolution/system/<time>-<random>/` (never in a profile's backups; the latest
+  5 runs are kept), each file created new (never through a link). The run happens in its own systemd unit, so a
+  closed terminal, a dropped SSH connection or a restarted gateway never leaves dpkg half-way; it keeps every
+  configuration file the owner changed, restarts no service by itself, and holds the packages the owner left out
+  only for that run (released on exit and on SIGTERM, SIGINT or SIGHUP; a run killed outright is found by `check`
+  and its holds released by `repair`). After: dpkg, apt, every service that was running (a service that ended
+  normally is not a failure) and Hermes are checked again, and the report lists what changed and how to go back.
 Nothing here reboots the machine: the report says when a reboot is due.
 """
 
@@ -25,6 +28,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -32,6 +37,8 @@ import time
 from pathlib import Path
 
 CHECK_EVERY_SECONDS = 86_400
+STATE_DIR = "/var/lib/hermes-atlas-evolution/system"
+RUNS_KEPT = 5
 # Packages worth a word before an upgrade: (what happens, the packages, as prefixes)
 ATTENTION = (
     ("restarts_containers", ("docker.io", "docker-ce", "containerd", "containerd.io", "runc", "podman")),
@@ -41,8 +48,13 @@ ATTENTION = (
     ("boot", ("grub", "initramfs-tools", "shim-signed")),
     ("package_manager", ("apt", "dpkg", "libapt-pkg")),
 )
-BUSY_PROCESSES = ("apt", "apt-get", "aptitude", "dpkg", "unattended-upgr", "packagekitd")
+# A run of these is a package manager at work (packagekitd idles for minutes after each `apt-get update` and holds
+# nothing: only the locks it takes count, and /proc/locks shows them).
+BUSY_PROCESSES = ("apt", "apt-get", "aptitude", "dpkg")
+LOCK_FILES = ("/var/lib/dpkg/lock-frontend", "/var/lib/dpkg/lock", "/var/lib/apt/lists/lock",
+              "/var/cache/apt/archives/lock")
 MIN_FREE = {"/": 1_500_000_000, "/boot": 150_000_000, "/var": 1_000_000_000}
+PACKAGE_NAME = re.compile(r"[a-z0-9][a-z0-9.+-]{0,99}(?::[a-z0-9][a-z0-9-]{0,31})?")
 _ENV = {"LC_ALL": "C", "LANG": "C", "DEBIAN_FRONTEND": "noninteractive"}
 
 
@@ -87,6 +99,19 @@ class Host:
             return self.run(["id", "-u"])[1].strip() == "0"
         return hasattr(os, "geteuid") and os.geteuid() == 0
 
+    def root_owned(self, path: Path) -> bool:
+        """`path` and every folder above it belong to root and no one else can write them."""
+        if self.runner is not None:
+            return self.run(["root-owned", str(path)])[0] == 0
+        try:
+            for part in [Path(path), *Path(path).parents]:
+                info = os.lstat(part)
+                if info.st_uid != 0 or (info.st_mode & 0o022 and not (part == Path("/tmp") or info.st_mode & 0o1000)):
+                    return False
+        except OSError:
+            return False
+        return True
+
     def free(self, mount: str) -> int | None:
         try:
             return shutil.disk_usage(self.path(mount)).free
@@ -116,6 +141,29 @@ class Host:
                 except (OSError, IndexError):
                     continue
         return names
+
+    def held_locks(self) -> list[str]:
+        """The package manager's lock files someone holds now, from /proc/locks (nothing is taken to find out)."""
+        wanted = {}
+        for name in LOCK_FILES:
+            try:
+                info = os.stat(self.path(name))
+            except OSError:
+                continue
+            wanted[(os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)] = name
+        held = []
+        for line in (self.read("/proc/locks", 1_000_000) or "").splitlines():
+            parts = line.split()
+            if len(parts) < 6 or parts[1] in ("->",):
+                continue
+            try:
+                major, minor, inode = parts[5].split(":")
+                key = (int(major, 16), int(minor, 16), int(inode))
+            except ValueError:
+                continue
+            if key in wanted:
+                held.append(wanted[key])
+        return sorted(set(held))
 
 
 def os_release(host: Host) -> dict:
@@ -166,12 +214,13 @@ def _user_units(host: Host) -> list[dict]:
             continue
         for line in out.splitlines():
             parts = line.split()
-            if len(parts) < 2 or not parts[0].endswith(".service") or "@" in parts[0]:
-                continue
+            if len(parts) < 2 or not parts[0].endswith(".service") or "@" in parts[0] \
+                    or parts[0].startswith("hermes-evolution-os-") or parts[1] in ("transient", "generated"):
+                continue   # this plugin's own runs and units systemd made up are not Hermes' services
             unit, state = parts[0], parts[1]
-            code_active, active, _err = host.run(["systemctl", *prefix, "is-active", unit], timeout=10)
+            _code, active, _err = host.run(["systemctl", *prefix, "is-active", unit], timeout=10)
             units.append({"unit": unit, "scope": scope, "enabled": state in ("enabled", "enabled-runtime", "static",
-                                                                             "alias", "generated"),
+                                                                             "alias"),
                           "state": state, "active": active.strip() == "active"})
     return units
 
@@ -187,8 +236,24 @@ def running_services(host: Host) -> list[str]:
     return sorted(set(found))
 
 
-def _linger(host: Host) -> bool | None:
-    user = os.environ.get("USER") or os.environ.get("LOGNAME") or ("root" if os.geteuid() == 0 else None)
+def failed_services(host: Host) -> list[str]:
+    code, out, _err = host.run(["systemctl", "list-units", "--type=service", "--state=failed", "--no-legend", "--plain"],
+                               timeout=20)
+    return sorted({line.split()[0] for line in out.splitlines() if line.split()}) if code == 0 else []
+
+
+def owner_of(home: Path) -> str | None:
+    """The user a Hermes profile belongs to (whose linger a user unit needs)."""
+    try:
+        import pwd
+
+        return pwd.getpwuid(os.stat(home).st_uid).pw_name
+    except (ImportError, KeyError, OSError):
+        return None
+
+
+def _linger(host: Host, user: str | None = None) -> bool | None:
+    user = user or os.environ.get("SUDO_USER") or os.environ.get("USER") or ("root" if host.root_user() else None)
     if not user:
         return None
     if host.path(f"/var/lib/systemd/linger/{user}").exists():
@@ -221,8 +286,26 @@ def _last_refresh(host: Host) -> float | None:
     return None
 
 
-def check(host: Host | None = None, *, now: float | None = None) -> dict:
-    """What stands between this machine and a safe upgrade, and what is waiting. Reads only."""
+def plugin_holds(host: Host) -> list[str]:
+    """Packages a run of this plugin held and did not release (it was killed outright)."""
+    found = []
+    base = host.path(STATE_DIR)
+    try:
+        runs = sorted(base.iterdir())
+    except OSError:
+        return []
+    for run in runs:
+        holds = run / "holds"
+        if holds.is_file() and not holds.is_symlink():
+            try:
+                found += [name for name in holds.read_text(encoding="utf-8").split() if PACKAGE_NAME.fullmatch(name)]
+            except OSError:
+                continue
+    return sorted(set(found))
+
+
+def check(host: Host | None = None, *, now: float | None = None, home: Path | None = None) -> dict:
+    """What stands between this machine and a safe upgrade, and what is waiting. Reads only; takes no lock."""
     host = host or Host()
     now = time.time() if now is None else now
     report: dict = {"at": now, "supported": supported(host), "os": os_release(host)}
@@ -238,6 +321,9 @@ def check(host: Host | None = None, *, now: float | None = None) -> dict:
     reboot = host.read("/var/run/reboot-required") is not None or host.path("/run/reboot-required").exists()
     report["reboot_required"] = reboot
     report["reboot_packages"] = sorted(set((host.read("/var/run/reboot-required.pkgs") or "").split()))[:20] if reboot else []
+    locks = host.held_locks()
+    busy = sorted({name for name in host.processes() if name in BUSY_PROCESSES} | {f"lock:{name}" for name in locks})
+    report["busy"] = busy
     code, audit, _err = host.run(["dpkg", "--audit"], timeout=60)
     report["dpkg_audit"] = audit.strip().splitlines()[:20]
     report["dpkg_ok"] = code == 0 and not audit.strip()
@@ -246,23 +332,27 @@ def check(host: Host | None = None, *, now: float | None = None) -> dict:
     code, out, err = host.run(["apt-get", "-o", "Debug::NoLocking=1", "check"], timeout=120)
     report["apt_ok"] = code == 0
     report["apt_error"] = None if code == 0 else " ".join((err or out).split())[:200]
-    busy = sorted({name for name in host.processes() if name in BUSY_PROCESSES})
-    report["busy"] = busy
     code, held, _err = host.run(["apt-mark", "showhold"], timeout=30)
     report["held"] = held.split() if code == 0 else []
+    report["plugin_holds"] = [name for name in plugin_holds(host) if name in report["held"]]
     report["disk"] = {mount: host.free(mount) for mount in MIN_FREE}
     report["unattended"] = _unattended(host)
     report["last_refresh"] = _last_refresh(host)
     report["units"] = _user_units(host)
     report["running"] = running_services(host)
-    report["linger"] = _linger(host)
+    report["failed"] = failed_services(host)
+    report["owner"] = owner_of(home) if home is not None else None
+    report["linger"] = _linger(host, report["owner"])
     findings = []
-    if not report["dpkg_ok"]:
-        findings.append("dpkg_interrupted")
-    if report["apt_ok"] is False:
-        findings.append("apt_broken")
     if busy:
-        findings.append("package_manager_busy")
+        findings.append("package_manager_busy")   # what it leaves half-way for a moment is not a finding
+    else:
+        if not report["dpkg_ok"]:
+            findings.append("dpkg_interrupted")
+        if report["apt_ok"] is False:
+            findings.append("apt_broken")
+    if report["plugin_holds"]:
+        findings.append("held_by_plugin")
     low = [mount for mount, free in report["disk"].items() if free is not None and free < MIN_FREE[mount]]
     if low:
         findings.append("disk_low")
@@ -327,73 +417,132 @@ def plan(host: Host | None = None, *, refresh: bool = True, full: bool = False) 
     return result
 
 
-def _snapshot(host: Host, folder: Path) -> dict:
-    """Every installed package with its version, and a copy of /etc, owner-only."""
-    folder.mkdir(parents=True, exist_ok=True)
-    os.chmod(folder, 0o700)
+# ── the runs: a root-only folder outside every profile ────────────────────────────────────────────────
+def _new_file(path: Path, mode: int = 0o600):
+    """A file created new (never an existing one, never through a link)."""
+    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+
+
+def _write(path: Path, text: str, mode: int = 0o600) -> None:
+    with os.fdopen(_new_file(path, mode), "w", encoding="utf-8") as stream:
+        stream.write(text)
+
+
+def _state_dir(host: Host) -> Path:
+    """The runs' root-only folder, made (0700) where missing and refused when anyone else could write it."""
+    base = host.path(STATE_DIR)
+    for part in reversed([base, *list(base.parents)[:3]]):   # /var/lib/hermes-atlas-evolution/system and its parent
+        if not part.exists():
+            part.mkdir(mode=0o700)
+    if base.is_symlink() or base.parent.is_symlink() or not host.root_owned(base):
+        raise ValueError("The plugin's system folder is not root's alone; nothing was run")
+    return base
+
+
+def _new_run(host: Host, now: float) -> Path:
+    base = _state_dir(host)
+    folder = base / (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now)) + "-" + secrets.token_hex(4))
+    folder.mkdir(mode=0o700)
+    runs = sorted(item for item in base.iterdir() if item.is_dir() and not item.is_symlink())
+    for old in runs[:-RUNS_KEPT]:
+        if not (old / "holds").exists() or (old / "status").exists():   # never a run that may still hold packages
+            shutil.rmtree(old, ignore_errors=True)
+    return folder
+
+
+def _guard(host: Host, home: Path, *, repair: bool = False) -> None:
+    """Only root, only for a Hermes that belongs to root: otherwise whoever can write the profile or the plugin,
+    the agent included, could steer what root runs."""
+    if not host.root_user():
+        raise ValueError("Repairing the package manager needs root: run this menu as root (sudo)" if repair
+                         else "Upgrading the system needs root: run this menu as root (sudo)")
+    for path in (Path(home), Path(__file__).resolve().parent):
+        if not host.root_owned(path):
+            raise ValueError("This Hermes is not root's: another user can change what root would run. Update the "
+                             "system with apt yourself (the plan shows what would change)")
+
+
+def _snapshot(host: Host, folder: Path, name: str) -> int:
     code, out, _err = host.run(["dpkg-query", "-W", "-f=${Package}\\t${Version}\\t${db:Status-Abbrev}\\n"], timeout=120)
-    packages = folder / "packages-before.tsv"
-    fd = os.open(packages, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write(out if code == 0 else "")
-    archive = folder / "etc-before.tar.gz"
-    fd = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
+    _write(folder / name, out if code == 0 else "")
+    return len(out.splitlines()) if code == 0 else 0
+
+
+def _copy_etc(host: Host, folder: Path) -> None:
+    with os.fdopen(_new_file(folder / "etc-before.tar.gz"), "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
         def keep(info):
             return info if (info.isfile() or info.isdir() or info.issym()) else None
         try:
             tar.add(str(host.path("/etc")), arcname="etc", filter=keep)
         except OSError:
             pass
-    return {"packages": packages.name, "etc": archive.name, "count": len(out.splitlines()) if code == 0 else 0}
 
 
-def script(folder: Path, *, full: bool, skip: list[str]) -> str:
-    """The shell script the upgrade unit runs. Only package names that apt itself would accept reach it."""
-    names = [name for name in skip if re.fullmatch(r"[a-z0-9][a-z0-9.+-]{0,99}", name)]
-    action = "full-upgrade" if full else "--with-new-pkgs upgrade"
-    log, status = folder / "upgrade.log", folder / "status"
+def clean_skip(skip) -> list[str]:
+    """The package names to leave out, as apt names them (`name` or `name:arch`). Anything else is refused, never
+    dropped in silence."""
+    names = [str(item).strip() for item in skip or () if str(item).strip()]
+    wrong = [name for name in names if not PACKAGE_NAME.fullmatch(name)]
+    if wrong:
+        raise ValueError("Not a package name apt knows: " + ", ".join(wrong[:5]))
+    return names
+
+
+def script(folder: Path, *, full: bool = False, skip: list[str] = (), repair: bool = False) -> str:
+    """The shell script a run executes. Paths are quoted; package names are checked by clean_skip."""
+    names = clean_skip(skip)
+    q = shlex.quote
+    log, status, holds = q(str(folder / "run.log")), q(str(folder / "status")), q(str(folder / "holds"))
+    if repair:
+        body = ("dpkg --force-confdef --force-confold --configure -a && apt-get -y -o Dpkg::Lock::Timeout=600 "
+                "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -f install")
+    else:
+        action = "full-upgrade" if full else "--with-new-pkgs upgrade"
+        body = ("apt-get -y -o Dpkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef "
+                f"-o Dpkg::Options::=--force-confold {action}")
     return f"""#!/bin/sh
-# Atlas Evolution: operating system upgrade, started by the owner. Log: {log}
+# Atlas Evolution: {'repair of the package manager' if repair else 'operating system upgrade'}, started by the owner.
 set -u
 umask 077
-exec >>"{log}" 2>&1
+exec >>{log} 2>&1
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 APT_LISTCHANGES_FRONTEND=none LC_ALL=C
-SKIP="{' '.join(names)}"
+SKIP={q(' '.join(names))}
 HELD=""
-for p in $SKIP; do
-  if dpkg-query -W "$p" >/dev/null 2>&1 && ! apt-mark showhold | grep -qx "$p"; then apt-mark hold "$p" && HELD="$HELD $p"; fi
-done
-release() {{ for p in $HELD; do apt-mark unhold "$p"; done; }}
+release() {{ for p in $HELD; do apt-mark unhold "$p"; done; HELD=""; rm -f {holds}; }}
 trap release EXIT
-echo "== $(date -u +%FT%TZ) apt-get {action}"
-apt-get -y -o Dpkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold {action}
+trap 'release; exit 130' INT TERM HUP
+for p in $SKIP; do
+  if dpkg-query -W "$p" >/dev/null 2>&1 && ! apt-mark showhold | grep -qx "$p"; then
+    echo "$p" >> {holds}
+    apt-mark hold "$p" && HELD="$HELD $p"
+  fi
+done
+echo "== $(date -u +%FT%TZ) start"
+{body}
 code=$?
 echo "== $(date -u +%FT%TZ) exit $code"
-printf '%s\\n' "$code" > "{status}"
+printf '%s\\n' "$code" > {status}
 exit "$code"
 """
 
 
-def start(host: Host, folder: Path, *, full: bool = False, skip: list[str] = (), unit: str | None = None) -> dict:
-    """Start the upgrade in its own systemd unit (or, without systemd, as a process of its own session)."""
-    body = script(folder, full=full, skip=list(skip))
-    path = folder / "upgrade.sh"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write(body)
-    unit = unit or f"hermes-evolution-os-upgrade-{int(time.time())}"
+def start(host: Host, folder: Path, *, full: bool = False, skip: list[str] = (), repair: bool = False) -> dict:
+    """Start a run in its own systemd unit (without systemd, as a process of its own session)."""
+    _write(folder / "run.sh", script(folder, full=full, skip=skip, repair=repair), 0o700)
+    unit = f"hermes-evolution-os-{'repair' if repair else 'upgrade'}-{folder.name}"
     if host.path("/run/systemd/system").is_dir() and host.which("systemd-run"):
         code, out, err = host.run(["systemd-run", f"--unit={unit}", "--collect", "--quiet",
-                                   "--property=TimeoutStartSec=3h", "/bin/sh", str(path)], timeout=60)
+                                   "--property=TimeoutStartSec=3h", "/bin/sh", str(folder / "run.sh")], timeout=60)
         if code != 0:
             raise ValueError(" ".join((err or out).split())[:200] or "systemd-run refused the upgrade")
+        _write(folder / "unit", unit)
         return {"mode": "systemd", "unit": unit}
     if host.runner is not None:
-        code, _out, err = host.run(["/bin/sh", str(path)], timeout=7200)
+        code, _out, _err = host.run(["/bin/sh", str(folder / "run.sh")], timeout=7200)
         return {"mode": "direct", "code": code}
-    process = subprocess.Popen(["/bin/sh", str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+    process = subprocess.Popen(["/bin/sh", str(folder / "run.sh")], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, start_new_session=True, env={**os.environ, **_ENV})
+    _write(folder / "pid", str(process.pid))
     return {"mode": "process", "pid": process.pid}
 
 
@@ -404,86 +553,164 @@ def finished(folder: Path) -> int | None:
         return None
 
 
-def after(host: Host, folder: Path, before: dict, *, now: float | None = None) -> dict:
-    """What the upgrade left: package manager, services that were running, Hermes, and what changed."""
-    report = check(host, now=now)
-    code, out, _err = host.run(["dpkg-query", "-W", "-f=${Package}\\t${Version}\\t${db:Status-Abbrev}\\n"], timeout=120)
-    fd = os.open(folder / "packages-after.tsv", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write(out if code == 0 else "")
+def progress(host: Host, folder: Path) -> str:
+    """"done", "running", or "lost" (its unit or process is gone without an exit code: killed, or the machine went
+    down)."""
+    if finished(folder) is not None:
+        return "done"
+    try:
+        unit = (folder / "unit").read_text(encoding="utf-8").strip()
+    except OSError:
+        unit = ""
+    if unit:
+        _code, out, _err = host.run(["systemctl", "is-active", unit], timeout=10)
+        return "running" if out.strip() in ("active", "activating", "reloading") else "lost"
+    try:
+        pid = int((folder / "pid").read_text(encoding="utf-8").strip())
+        os.kill(pid, 0)
+        return "running"
+    except (OSError, ValueError):
+        return "lost" if (folder / "run.sh").exists() else "running"
 
-    def table(text: str) -> dict:
+
+def _hermes_version(host: Host) -> tuple[bool | None, str | None]:
+    if host.runner is not None:
+        code, out, _err = host.run(["hermes", "--version"], timeout=120)
+    else:
+        from .admin import hermes_executable
+
+        executable = hermes_executable()
+        if executable is None:
+            return None, None   # unknown, not a failure: this root's PATH does not reach Hermes
+        code, out, _err = host.run([executable, "--version"], timeout=120)
+    return code == 0, (out.strip().splitlines()[0][:120] if code == 0 and out.strip() else None)
+
+
+def after(host: Host, folder: Path, before: dict, *, now: float | None = None) -> dict:
+    """What a run left: package manager, services, Hermes, what changed. Written as the run's report."""
+    report = check(host, now=now)
+    if not (folder / "packages-after.tsv").exists():
+        _snapshot(host, folder, "packages-after.tsv")
+
+    def table(path: Path) -> dict:
         rows = {}
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return rows
         for line in text.splitlines():
             parts = line.split("\t")
             if len(parts) >= 2:
                 rows[parts[0]] = parts[1]
         return rows
 
-    old = table((folder / "packages-before.tsv").read_text(encoding="utf-8", errors="replace")
-                if (folder / "packages-before.tsv").exists() else "")
-    new = table(out if code == 0 else "")
+    old, new = table(folder / "packages-before.tsv"), table(folder / "packages-after.tsv")
     changed = [{"name": name, "from": old.get(name), "to": new.get(name)} for name in sorted(set(old) | set(new))
                if old.get(name) != new.get(name)]
-    stopped = sorted(set(before.get("running") or ()) - set(report.get("running") or ()))
-    code, version, _err = host.run(["hermes", "--version"], timeout=120)
-    result = {"exit": finished(folder), "changed": changed, "stopped_units": stopped,
-              "hermes_ok": code == 0, "hermes_version": version.strip().splitlines()[0][:120] if code == 0 and version.strip() else None,
+    gone = sorted(set(before.get("running") or ()) - set(report.get("running") or ()))
+    stopped = []
+    for unit in gone:   # a service that ended normally (idle exit) is not a failure
+        user = unit.startswith("user:")
+        name = unit.split(":", 1)[1] if user else unit
+        _code, out, _err = host.run(["systemctl", *(["--user"] if user else []), "show", name, "-p", "ActiveState",
+                                     "-p", "Result"], timeout=10)
+        values = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        if values.get("ActiveState") == "failed" or values.get("Result", "success") != "success":
+            stopped.append(unit)
+    newly_failed = sorted(set(report.get("failed") or ()) - set(before.get("failed") or ()))
+    hermes_ok, version = _hermes_version(host)
+    state = progress(host, folder)
+    result = {"exit": finished(folder), "state": state, "changed": changed,
+              "stopped_units": sorted(set(stopped) | set(newly_failed)), "hermes_ok": hermes_ok, "hermes_version": version,
               "dpkg_ok": report.get("dpkg_ok"), "apt_ok": report.get("apt_ok"),
               "reboot_required": report.get("reboot_required"), "reboot_packages": report.get("reboot_packages", []),
+              "plugin_holds": report.get("plugin_holds", []),
               "go_back": [f"apt-get install {item['name']}={item['from']}" for item in changed if item["from"] and item["to"]][:200]}
-    result["ok"] = bool(result["exit"] == 0 and result["dpkg_ok"] and result["apt_ok"] and result["hermes_ok"] and not stopped)
-    fd = os.open(folder / "report.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        json.dump(result, stream, ensure_ascii=False, indent=2)
+    result["ok"] = bool(result["exit"] == 0 and result["dpkg_ok"] and result["apt_ok"] is not False
+                        and result["hermes_ok"] is not False and not result["stopped_units"])
+    path = folder / "report.json"
+    if path.exists() and not path.is_symlink():
+        path.unlink()
+    _write(path, json.dumps(result, ensure_ascii=False, indent=2))
     return result
 
 
-def repair(host: Host | None = None) -> dict:
-    """Finish what an interrupted dpkg or apt left half-way (a power cut, a killed terminal): `dpkg --configure -a`,
-    then `apt-get -f install`, keeping every configuration file the owner changed. The owner's, in their terminal;
-    refused while another package manager runs."""
+def runs(host: Host | None = None) -> list[Path]:
     host = host or Host()
-    if not host.root_user():
-        raise ValueError("Repairing the package manager needs root: run this menu as root (sudo)")
-    busy = sorted({name for name in host.processes() if name in BUSY_PROCESSES})
-    if busy:
-        raise ValueError("Another package manager is running now: " + ", ".join(busy))
-    steps = []
-    for argv in (["dpkg", "--force-confdef", "--force-confold", "--configure", "-a"],
-                 ["apt-get", "-y", "-o", "Dpkg::Lock::Timeout=300", "-o", "Dpkg::Options::=--force-confdef",
-                  "-o", "Dpkg::Options::=--force-confold", "-f", "install"]):
-        code, out, err = host.run(argv, timeout=3600)
-        steps.append({"command": " ".join(argv), "exit": code, "tail": (err or out).strip().splitlines()[-3:]})
-        if code != 0:
-            break
-    report = check(host)
-    return {"steps": steps, "dpkg_ok": report.get("dpkg_ok"), "apt_ok": report.get("apt_ok"),
-            "ok": bool(report.get("dpkg_ok") and report.get("apt_ok") is not False), "findings": report.get("findings")}
+    try:
+        return sorted(item for item in host.path(STATE_DIR).iterdir() if item.is_dir() and not item.is_symlink())
+    except OSError:
+        return []
 
 
-def folder_for(home: Path, now: float) -> Path:
-    return Path(home) / "evolution" / "system" / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+def last_report(host: Host | None = None) -> tuple[Path | None, dict | None]:
+    """The latest run and its report, written now when the run ended while nobody waited for it."""
+    host = host or Host()
+    found = runs(host)
+    if not found:
+        return None, None
+    folder = found[-1]
+    try:
+        return folder, json.loads((folder / "report.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    if progress(host, folder) == "running":
+        return folder, {"state": "running"}
+    try:
+        before = json.loads((folder / "check-before.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        before = {}
+    return folder, after(host, folder, before)
 
 
 def prepare(home: Path, host: Host | None = None, *, now: float | None = None) -> tuple[Path, dict, dict]:
-    """The check that must pass and the snapshot taken before an upgrade. Raises ValueError when something is in the
-    way (the check's findings say what)."""
+    """The check that must pass and the copies kept before an upgrade. ValueError says what is in the way."""
     host = host or Host()
     now = time.time() if now is None else now
-    before = check(host, now=now)
+    before = check(host, now=now, home=home)
     if not before["supported"]:
         raise ValueError("This system is not one the plugin upgrades (Linux with apt only)")
-    if not before.get("root"):
-        raise ValueError("Upgrading the system needs root: run this menu as root (sudo)")
+    _guard(host, home)
     if not before["ready"]:
         raise ValueError("The system is not ready for an upgrade: " + ", ".join(before["findings"]))
-    folder = folder_for(home, now)
-    snapshot = _snapshot(host, folder)
-    with open(os.open(folder / "check-before.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w",
-              encoding="utf-8") as stream:
-        json.dump(before, stream, ensure_ascii=False, indent=2)
-    return folder, before, snapshot
+    folder = _new_run(host, now)
+    count = _snapshot(host, folder, "packages-before.tsv")
+    _copy_etc(host, folder)
+    _write(folder / "check-before.json", json.dumps(before, ensure_ascii=False, indent=2))
+    return folder, before, {"packages": "packages-before.tsv", "etc": "etc-before.tar.gz", "count": count,
+                            "folder": str(folder)}
+
+
+def repair(home: Path, host: Host | None = None, *, now: float | None = None, wait: bool = True) -> dict:
+    """Finish what an interrupted dpkg or apt left half-way, and release the packages a killed run of this plugin
+    held: `dpkg --configure -a`, then `apt-get -f install`, keeping every configuration file the owner changed, in
+    its own systemd unit like an upgrade. Refused while another package manager works."""
+    host = host or Host()
+    now = time.time() if now is None else now
+    _guard(host, home, repair=True)
+    found = check(host, now=now, home=home)
+    if found.get("busy"):
+        raise ValueError("Another package manager is running now: " + ", ".join(found["busy"]))
+    released = []
+    for name in found.get("plugin_holds") or ():
+        if host.run(["apt-mark", "unhold", name], timeout=60)[0] == 0:
+            released.append(name)
+    for run in runs(host):
+        holds = run / "holds"
+        if holds.is_file() and not holds.is_symlink():
+            holds.unlink()
+    folder = _new_run(host, now)
+    _write(folder / "check-before.json", json.dumps(found, ensure_ascii=False, indent=2))
+    _snapshot(host, folder, "packages-before.tsv")
+    started = start(host, folder, repair=True)
+    if wait:
+        while progress(host, folder) == "running":
+            time.sleep(2)
+    report = check(host, now=time.time(), home=home)
+    return {"started": started, "released": released, "exit": finished(folder), "state": progress(host, folder),
+            "dpkg_ok": report.get("dpkg_ok"), "apt_ok": report.get("apt_ok"), "findings": report.get("findings"),
+            "ok": bool(finished(folder) == 0 and report.get("dpkg_ok") and report.get("apt_ok") is not False),
+            "folder": str(folder)}
 
 
 def cached(conn, home: Path, *, now: float, host: Host | None = None, force: bool = False) -> dict | None:
@@ -497,10 +724,11 @@ def cached(conn, home: Path, *, now: float, host: Host | None = None, force: boo
         return last
     if os.name != "posix" or not Path("/etc/os-release").exists() and host is None:
         return None
-    found = check(host, now=now)
+    found = check(host, now=now, home=home)
     keep = {key: found.get(key) for key in ("at", "supported", "os", "kernel", "security", "reboot_required",
-                                             "reboot_packages", "dpkg_ok", "apt_ok", "busy", "held", "disk_low",
-                                             "unattended", "last_refresh", "linger", "findings", "ready")}
+                                             "reboot_packages", "dpkg_ok", "apt_ok", "busy", "held", "plugin_holds",
+                                             "disk_low", "unattended", "last_refresh", "linger", "owner", "findings",
+                                             "ready")}
     keep["upgradable"] = len(found.get("upgradable") or [])
     keep["units"] = [{key: unit[key] for key in ("unit", "scope", "enabled", "active")} for unit in found.get("units") or ()]
     conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('system_check', ?)", (json.dumps(keep),))

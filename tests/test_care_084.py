@@ -54,6 +54,9 @@ class FakeMachine:
                         "systemctl is-active": (0, "active\n", ""), "systemctl --user is-active": (0, "active\n", ""),
                         "systemctl list-units": (0, "hermes-dashboard.service loaded active running x\nnginx.service loaded active running x\n", ""),
                         "systemctl --user list-units": (0, "hermes-gateway.service loaded active running x\n", ""),
+                        "systemctl list-units --type=service --state=failed": (0, "", ""),
+                        "systemctl show nginx.service": (0, "ActiveState=failed\nResult=exit-code\n", ""),
+                        "root-owned": (0, "", ""),
                         **answers}
         (root / "etc").mkdir(parents=True, exist_ok=True)
         (root / "etc" / "os-release").write_text('PRETTY_NAME="Ubuntu 26.04.1 LTS"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID="26.04"\n')
@@ -75,8 +78,9 @@ class FakeMachine:
         line = " ".join(argv)
         if argv[:1] == ["/bin/sh"]:   # the upgrade script: what it would leave behind
             folder = Path(argv[1]).parent
-            (folder / "upgrade.log").write_text("Unpacking libc6\nSetting up libc6\n")
+            (folder / "run.log").write_text("Unpacking libc6\nSetting up libc6\n")
             (folder / "status").write_text("0\n")
+            self.ran = (folder / "run.sh").read_text()
             self.answers["dpkg-query"] = (0, "libc6\t2.42-0ubuntu3.1\tii \n", "")
             return 0, "", ""
         for prefix in sorted(self.answers, key=len, reverse=True):
@@ -101,6 +105,7 @@ class SystemUpdateTest(unittest.TestCase):
         (self.root / "var" / "run" / "reboot-required.pkgs").write_text("libc6\n")
         self.machine.process(900, "unattended-upgr", cmdline="/usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal")
         self.machine.process(901, "apt-get", state="Z")   # a dead process nobody reaped
+        self.machine.process(902, "packagekitd")          # idles for minutes after an apt-get update, holds nothing
         with patch.object(system_update.Host, "free", return_value=50 * 2**30):
             report = system_update.check(self.host, now=NOW)
         self.assertTrue(report["supported"])
@@ -120,8 +125,13 @@ class SystemUpdateTest(unittest.TestCase):
         machine.process(950, "dpkg")
         host = system_update.Host(root=self.root, runner=machine)
         with patch.object(system_update.Host, "free", side_effect=lambda mount: 10 * 2**20 if mount == "/boot" else 50 * 2**30):
+            busy = system_update.check(host, now=NOW)
+            # while a package manager works, what it leaves half-way for a moment is not reported
+            self.assertIn("package_manager_busy", busy["findings"])
+            self.assertNotIn("dpkg_interrupted", busy["findings"])
+            (self.root / "proc" / "950" / "stat").write_text("950 (dpkg) Z 1 1\n")
             report = system_update.check(host, now=NOW)
-        for code in ("dpkg_interrupted", "package_manager_busy", "disk_low", "user_units_without_linger"):
+        for code in ("dpkg_interrupted", "disk_low", "user_units_without_linger"):
             self.assertIn(code, report["findings"])
         self.assertFalse(report["ready"])
         with patch.object(system_update.Host, "free", return_value=50 * 2**30), self.assertRaises(ValueError) as stop:
@@ -147,9 +157,12 @@ class SystemUpdateTest(unittest.TestCase):
         self.assertIn("full-upgrade", [call for call in self.machine.calls if "-s" in call][-1])
 
     def test_the_script_keeps_configuration_and_names_only_packages(self):
-        body = system_update.script(self.home, full=False, skip=["docker.io", "a; rm -rf /", "$(id)", "nginx"])
-        self.assertIn('SKIP="docker.io nginx"', body)
-        self.assertNotIn("rm -rf", body)
+        with self.assertRaises(ValueError):   # refused, never dropped in silence
+            system_update.script(self.home, full=False, skip=["docker.io", "a; rm -rf /"])
+        body = system_update.script(Path("/srv/hermes$(touch /tmp/x)/run"), skip=["docker.io", "libc6:amd64", "nginx"])
+        self.assertIn("SKIP='docker.io libc6:amd64 nginx'", body)
+        self.assertIn("exec >>'/srv/hermes$(touch /tmp/x)/run/run.log'", body)   # quoted: never run
+        self.assertIn("trap 'release; exit 130' INT TERM HUP", body)
         self.assertIn("--force-confold", body)
         self.assertIn("NEEDRESTART_MODE=l", body)
         self.assertIn("--with-new-pkgs upgrade", body)
@@ -161,6 +174,8 @@ class SystemUpdateTest(unittest.TestCase):
             folder, before, snapshot = system_update.prepare(self.home, self.host, now=NOW)
             self.assertEqual(snapshot["count"], 1)
             self.assertEqual(oct(folder.stat().st_mode & 0o777), "0o700")
+            self.assertEqual(folder.parent, self.root / "var/lib/hermes-atlas-evolution/system")   # outside the profile
+            self.assertFalse((self.home / "evolution" / "system").exists())
             started = system_update.start(self.host, folder, skip=["docker.io"])
             self.assertEqual(started["mode"], "direct")
             self.machine.answers["systemctl list-units"] = (0, "hermes-dashboard.service loaded active running x\n", "")
@@ -170,6 +185,7 @@ class SystemUpdateTest(unittest.TestCase):
         self.assertEqual(report["go_back"], ["apt-get install libc6=2.42-0ubuntu3"])
         self.assertEqual(report["stopped_units"], ["nginx.service"])   # it ran before and not after
         self.assertFalse(report["ok"])
+        self.assertEqual(system_update.last_report(self.host)[1]["exit"], 0)
         for name in ("packages-before.tsv", "packages-after.tsv", "etc-before.tar.gz", "report.json", "check-before.json"):
             self.assertEqual(oct((folder / name).stat().st_mode & 0o777), "0o600", name)
 
@@ -180,17 +196,64 @@ class SystemUpdateTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 system_update.prepare(self.home, host, now=NOW)
             with self.assertRaises(ValueError):
-                system_update.repair(host)
+                system_update.repair(self.home, host)
 
     def test_repair_finishes_what_was_left_and_refuses_while_apt_runs(self):
         self.machine.process(960, "apt-get")
         with self.assertRaises(ValueError):
-            system_update.repair(self.host)
+            system_update.repair(self.home, self.host)
         (self.root / "proc" / "960" / "stat").write_text("960 (apt-get) Z 1 1\n")
-        result = system_update.repair(self.host)
+        result = system_update.repair(self.home, self.host)
         self.assertTrue(result["ok"])
-        self.assertEqual([step["command"].split()[0] for step in result["steps"]], ["dpkg", "apt-get"])
-        self.assertIn("--force-confold", result["steps"][0]["command"])
+        self.assertIn("dpkg --force-confdef --force-confold --configure -a", self.machine.ran)
+        self.assertIn("NEEDRESTART_MODE=l", self.machine.ran)
+
+    def test_a_hermes_another_user_can_write_is_never_run_as_root(self):
+        machine = FakeMachine(self.root, **{"root-owned": (1, "", "")})
+        host = system_update.Host(root=self.root, runner=machine)
+        with patch.object(system_update.Host, "free", return_value=50 * 2**30):
+            for call in (lambda: system_update.prepare(self.home, host, now=NOW), lambda: system_update.repair(self.home, host)):
+                with self.assertRaises(ValueError) as stop:
+                    call()
+                self.assertIn("not root's", str(stop.exception))
+        self.assertFalse((self.root / "var/lib/hermes-atlas-evolution").exists())
+
+    def test_a_held_lock_is_busy_and_a_killed_runs_holds_are_found_and_released(self):
+        lock = self.root / "var/lib/dpkg/lock-frontend"
+        lock.parent.mkdir(parents=True)
+        lock.write_text("")
+        info = os.stat(lock)
+        (self.root / "proc" / "locks").write_text(
+            f"1: POSIX  ADVISORY  WRITE 4242 {os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino} 0 EOF\n")
+        with patch.object(system_update.Host, "free", return_value=50 * 2**30):
+            report = system_update.check(self.host, now=NOW)
+        self.assertEqual(report["busy"], ["lock:/var/lib/dpkg/lock-frontend"])
+        self.assertFalse(report["ready"])
+        (self.root / "proc" / "locks").write_text("")
+        run = self.root / "var/lib/hermes-atlas-evolution/system/20261116T000000Z-dead"
+        run.mkdir(parents=True)
+        (run / "holds").write_text("zlib1g\n")
+        machine = FakeMachine(self.root, **{"apt-mark showhold": (0, "zlib1g\n", "")})
+        host = system_update.Host(root=self.root, runner=machine)
+        with patch.object(system_update.Host, "free", return_value=50 * 2**30):
+            report = system_update.check(host, now=NOW)
+            self.assertIn("held_by_plugin", report["findings"])
+            result = system_update.repair(self.home, host)
+        self.assertEqual(result["released"], ["zlib1g"])
+        self.assertIn(["apt-mark", "unhold", "zlib1g"], machine.calls)
+        self.assertFalse((run / "holds").exists())
+
+    def test_a_run_whose_unit_is_gone_without_an_exit_is_lost(self):
+        folder = self.root / "var/lib/hermes-atlas-evolution/system/20261116T000000Z-abcd"
+        folder.mkdir(parents=True)
+        (folder / "run.sh").write_text("#")
+        (folder / "unit").write_text("hermes-evolution-os-upgrade-x")
+        (folder / "check-before.json").write_text(json.dumps({"running": []}))
+        machine = FakeMachine(self.root, **{"systemctl is-active hermes-evolution-os-upgrade-x": (3, "inactive\n", "")})
+        host = system_update.Host(root=self.root, runner=machine)
+        self.assertEqual(system_update.progress(host, folder), "lost")
+        found, report = system_update.last_report(host)
+        self.assertEqual((found, report["state"], report["ok"]), (folder, "lost", False))
 
     def test_the_daily_check_is_kept_a_day(self):
         with experience(self.home) as conn, patch.object(system_update.Host, "free", return_value=50 * 2**30):
@@ -260,6 +323,14 @@ class HermesCareTest(unittest.TestCase):
         self.assertEqual(report["growth"][0]["folder"], "sessions")
         self.assertEqual(report["days_to_full"], 4.0)
 
+    def test_a_state_file_that_outlived_its_gateway_is_a_crash(self):
+        gateway_files(self.home)
+        state = json.loads((self.home / "gateway_state.json").read_text())
+        (self.home / "gateway_state.json").write_text(json.dumps({**state, "pid": 2**22 - 7}))
+        report = hermes_care.check(self.home, now=NOW, root=self.root)
+        self.assertFalse(report["gateway"]["running"])
+        self.assertIn("gateway_crashed", report["findings"])
+
     def test_the_check_is_kept_six_hours_with_a_daily_history(self):
         gateway_files(self.home)
         with experience(self.home) as conn:
@@ -316,12 +387,23 @@ class DigestTest(Base):
             self.assertTrue(undone["undone"])
             self.assertEqual(calls[-1], ["cron", "remove", "a1b2c3"])
             (self.home / "cron").mkdir()
-            (self.home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [{"name": "hermes-atlas-evolution-digest"}]}))
+            (self.home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [{"name": "hermes-atlas-evolution-digest",
+                                                                                 "enabled": False}]}))   # paused
             self.assertEqual(admin.decide(self.home, {}, {"kind": "schedule_digest"}, now=NOW, runner=hermes)["reason"],
                              "already")
             with self.assertRaises(ValueError):
                 (self.home / "cron" / "jobs.json").unlink()
                 admin.decide(self.home, {}, {"kind": "schedule_digest", "deliver": "a b; rm"}, now=NOW, runner=hermes)
+
+
+class CronUndoTest(Base):
+    def test_a_job_removed_by_hand_is_undone_anyway(self):
+        with experience(self.home) as conn:
+            decision = decisions.record_cron(conn, "abc123", name="hermes-atlas-evolution-digest", schedule="0 8 * * 1",
+                                             deliver="local", now=NOW)
+        gone = lambda command, **kwargs: SimpleNamespace(returncode=1, stdout="Job not found: abc123\n", stderr="")  # noqa: E731
+        with patch.object(admin, "hermes_executable", return_value="/usr/local/bin/hermes"):
+            self.assertTrue(admin.decide(self.home, {}, {"kind": "undo", "id": decision}, now=NOW, runner=gone)["undone"])
 
 
 class StatusAndMenuTest(Base):

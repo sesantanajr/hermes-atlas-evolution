@@ -916,16 +916,17 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
         return hermes_care.run_action(home, key)
     host, task = system_update.Host(), args.system_action
     if task == "check":
-        return system_update.check(host, now=now)
+        return system_update.check(host, now=now, home=home)
     if task == "report":
-        reports = sorted((Path(home) / "evolution" / "system").glob("*/report.json"))
-        return json.loads(reports[-1].read_text(encoding="utf-8")) if reports else {"report": None}
+        folder, found = system_update.last_report(host)
+        return {"folder": str(folder) if folder else None, "report": found}
     _operator_only()
     if task == "plan":
         return system_update.plan(host, refresh=True, full=args.full)
     if task == "repair":
         _confirm("dpkg --configure -a && apt-get -f install", lang, yes=args.yes, apply=True)
-        return system_update.repair(host)
+        return system_update.repair(home, host)
+    skip = system_update.clean_skip(args.skip)   # refused, never dropped in silence
     planned = system_update.plan(host, refresh=True, full=args.full)
     if planned.get("error"):
         raise ValueError(planned["error"])
@@ -935,10 +936,13 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
     _confirm(f"apt-get {'full-upgrade' if args.full else '--with-new-pkgs upgrade'}: {count} "
              + ("pacote(s)" if lang == "pt" else "package(s)"), lang, yes=args.yes, apply=True)
     folder, before, _snapshot = system_update.prepare(home, host, now=now)
-    started = system_update.start(host, folder, full=args.full, skip=list(args.skip or ()))
-    while system_update.finished(folder) is None:
+    started = system_update.start(host, folder, full=args.full, skip=skip)
+    while system_update.progress(host, folder) == "running":
         time.sleep(3)
-    return {"started": started, "report": system_update.after(host, folder, before)}
+    report = system_update.after(host, folder, before)
+    with experience(home) as conn:
+        system_update.cached(conn, home, now=time.time(), host=host, force=True)
+    return {"started": started, "folder": str(folder), "report": report}
 
 
 def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=None, reflect=None):

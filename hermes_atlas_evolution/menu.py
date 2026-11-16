@@ -78,7 +78,9 @@ TEXT = {
         "os_report": "Exit {exit} · {changed} package(s) changed · dpkg {dpkg} · apt {apt} · Hermes {hermes} · reboot waiting: {reboot}",
         "os_stopped": "Services that were running and stopped: {units}", "os_folder": "Report and copies: {folder}",
         "os_repair_q": "Finish the interrupted update now (dpkg --configure -a, then apt-get -f install)?",
-        "os_no_report": "No update yet.", "yes_word": "yes", "no_word": "no", "unknown": "unknown",
+        "os_no_report": "No update yet.", "os_still_running": "The update is still running; come back in a moment.",
+        "os_lost": "The update stopped without finishing (it was killed, or the machine went down): repair it with this screen's repair option.",
+        "yes_word": "yes", "no_word": "no", "unknown": "unknown",
         "auto_line": "Automatic actions: {mode} · {count} in 7 days",
         "attention_title": "Needs attention:", "suggest_title": "Suggestions:",
         "suggest_waiting": "Decide {n} lesson(s) waiting for you",
@@ -226,7 +228,9 @@ TEXT = {
         "os_report": "Saída {exit} · {changed} pacote(s) mudaram · dpkg {dpkg} · apt {apt} · Hermes {hermes} · reinício pendente: {reboot}",
         "os_stopped": "Serviços que rodavam e pararam: {units}", "os_folder": "Relatório e cópias: {folder}",
         "os_repair_q": "Terminar a atualização interrompida agora (dpkg --configure -a e depois apt-get -f install)?",
-        "os_no_report": "Nenhuma atualização ainda.", "yes_word": "sim", "no_word": "não", "unknown": "desconhecido",
+        "os_no_report": "Nenhuma atualização ainda.", "os_still_running": "A atualização ainda está rodando; volte daqui a pouco.",
+        "os_lost": "A atualização parou sem terminar (foi morta, ou a máquina caiu): repare-a pela opção de reparo desta tela.",
+        "yes_word": "sim", "no_word": "não", "unknown": "desconhecido",
         "auto_line": "Ações automáticas: {mode} · {count} em 7 dias",
         "attention_title": "Pede atenção:", "suggest_title": "Sugestões:",
         "suggest_waiting": "Decidir {n} lição(ões) esperando você",
@@ -534,7 +538,7 @@ class Menu:
         if repeats:
             found.append((self.t["suggest_memory"].format(n=repeats), self.memory))
         system = state.get("system") or {}
-        if "dpkg_interrupted" in (system.get("findings") or ()):
+        if {"dpkg_interrupted", "held_by_plugin"} & set(system.get("findings") or ()):
             found.insert(0, (self.t["suggest_os_repair"], self.operating_system))
         elif system.get("security"):
             found.append((self.t["suggest_os_security"].format(n=system["security"]), self.operating_system))
@@ -1161,8 +1165,6 @@ class Menu:
 
     # ── operating system ───────────────────────────────────────────────────────────────────────────
     def operating_system(self) -> None:
-        import json as _json
-
         from . import system_update
         from .experience import experience
 
@@ -1220,21 +1222,24 @@ class Menu:
                 skip = [name for name in self.io.ask(self.t["os_skip"]).split() if name]
                 if not self.confirm(self.t["os_upgrade_q"].format(n=count)):
                     continue
-                self.guarded(lambda: self.run_upgrade(host, skip))
+                self.guarded(lambda: self.run_upgrade(host, system_update.clean_skip(skip)))
                 planned = None
             elif chosen == 3:
                 if self.confirm(self.t["os_repair_q"]):
                     def repair():
-                        result = system_update.repair(host)
+                        result = system_update.repair(self.home, host)
                         self.io.say(self.t["care_ok"].format(code=0) if result["ok"] else self.t["care_failed"].format(
                             code=next((step["exit"] for step in result["steps"] if step["exit"]), "?")))
                     self.guarded(repair)
             elif chosen == 4:
-                folders = sorted((self.home / "evolution" / "system").glob("*/report.json"))
-                if not folders:
+                folder, report = system_update.last_report(host)
+                if folder is None:
                     self.io.say(self.t["os_no_report"])
                     continue
-                self.show_upgrade(_json.loads(folders[-1].read_text(encoding="utf-8")), folders[-1].parent)
+                if report.get("state") == "running":
+                    self.io.say(self.t["os_still_running"])
+                    continue
+                self.show_upgrade(report, folder)
 
     def run_upgrade(self, host, skip: list) -> None:
         import time as _time
@@ -1246,10 +1251,10 @@ class Menu:
         self.io.say(self.t["os_running"].format(unit=started.get("unit") or started.get("pid") or "process"))
         last = -1
         try:
-            while system_update.finished(folder) is None:
+            while system_update.progress(host, folder) == "running":
                 _time.sleep(2)
                 try:
-                    done = sum(1 for line in (folder / "upgrade.log").read_text(encoding="utf-8", errors="replace").splitlines()
+                    done = sum(1 for line in (folder / "run.log").read_text(encoding="utf-8", errors="replace").splitlines()
                                if line.startswith(("Unpacking", "Setting up")))
                 except OSError:
                     done = 0
@@ -1263,10 +1268,12 @@ class Menu:
 
     def show_upgrade(self, report: dict, folder) -> None:
         yes, no = self.t["yes_word"], self.t["no_word"]
+        if report.get("state") == "lost":
+            self.io.say(self.t["os_lost"])
         self.io.say(self.t["os_report"].format(exit=report.get("exit"), changed=len(report.get("changed") or ()),
                                                dpkg="ok" if report.get("dpkg_ok") else "⚠",
                                                apt="ok" if report.get("apt_ok") else "⚠",
-                                               hermes="ok" if report.get("hermes_ok") else "⚠",
+                                               hermes={True: "ok", False: "⚠", None: "?"}[report.get("hermes_ok")],
                                                reboot=yes if report.get("reboot_required") else no))
         if report.get("stopped_units"):
             self.io.say(self.t["os_stopped"].format(units=", ".join(report["stopped_units"])))

@@ -165,13 +165,14 @@ def owner_suggestions(channels: list[dict], *, owners=(), platforms=()) -> list[
     return found
 
 
-def _digest_scheduled(home: Path) -> bool:
-    """Whether Hermes' scheduler holds an enabled weekly digest of this plugin for the profile."""
+def _digest_scheduled(home: Path, *, paused_too: bool = True) -> bool:
+    """Whether Hermes' scheduler holds the weekly digest of this plugin for the profile (a job the owner paused
+    counts: it is theirs to resume, and a second one would deliver twice)."""
     from .workloads import _load_json
 
     status, data = _load_json(Path(home) / "cron" / "jobs.json", 4 * 1024 * 1024)
     jobs = data.get("jobs") if status == "ok" and isinstance(data, dict) else None
-    return any(isinstance(job, dict) and job.get("enabled") is not False
+    return any(isinstance(job, dict) and (paused_too or job.get("enabled") is not False)
                and job.get("name") in ("hermes-atlas-evolution-digest", "hermes-evolution-digest")
                for job in jobs or ())
 
@@ -268,7 +269,7 @@ def never_ran(home: Path) -> bool:
 
 
 # Findings of hermes_care and system_update that `status` and the menu show, as attention codes.
-CARE_ATTENTION = ("hermes_gateway_heartbeat_stale", "hermes_gateway_memory_growth", "hermes_state_db_unreadable",
+CARE_ATTENTION = ("hermes_gateway_crashed", "os_held_by_plugin", "hermes_gateway_heartbeat_stale", "hermes_gateway_memory_growth", "hermes_state_db_unreadable",
                   "hermes_state_db_damaged", "hermes_state_db_wal_large", "hermes_disk_critical", "hermes_disk_low",
                   "hermes_disk_filling", "hermes_storage_growth", "hermes_memory_low", "hermes_swap_full",
                   "hermes_cpu_saturated", "hermes_unused_tools", "hermes_gateway_not_at_boot",
@@ -433,6 +434,8 @@ _TEXT = {
            "profiles_without_plugin": "Profiles used in the last 7 days that do not have the plugin (each profile loads its own plugins):",
            "owner_unknown": "These chat channels count as someone else's, so they get template lessons only and their failures wait for your approval. If one of them is you, run `hermes evolution owner` in your own terminal:",
            "chat_item": "`{origin}`: {sessions} sessions in 7 days from {senders} sender(s)",
+           "hermes_gateway_crashed": "The gateway's state file says it runs, but its process is gone: it crashed. Start it again (`hermes gateway restart`, from your terminal) and look at its log.",
+           "os_held_by_plugin": "A system update of this plugin was stopped before it released the packages it left out ({held}): they get no update, not even security ones, until you repair (menu → Operating system → repair).",
            "hermes_gateway_heartbeat_stale": "The gateway says it is running but has not written its heartbeat for {age} s: it may be stuck. Look at `hermes gateway status`.",
            "hermes_gateway_memory_growth": "The gateway uses {rss} of memory, more than twice its usual: a restart frees it (`hermes gateway restart`, from your terminal).",
            "hermes_state_db_unreadable": "Hermes' session database could not be read. Run Hermes' check: menu → Hermes health → `hermes doctor`.",
@@ -498,6 +501,8 @@ _TEXT = {
            "profiles_without_plugin": "Perfis usados nos últimos 7 dias que não têm o plugin (cada perfil carrega os próprios plugins):",
            "owner_unknown": "Estes canais de chat contam como de outra pessoa, então recebem só lições de modelo fixo e as falhas deles esperam a sua aprovação. Se um deles é você, rode `hermes evolution owner` no seu próprio terminal:",
            "chat_item": "`{origin}`: {sessions} sessões em 7 dias de {senders} remetente(s)",
+           "hermes_gateway_crashed": "O arquivo de estado do gateway diz que ele roda, mas o processo sumiu: ele caiu. Suba-o de novo (`hermes gateway restart`, no seu terminal) e veja o log dele.",
+           "os_held_by_plugin": "Uma atualização do sistema feita por este plugin parou antes de liberar os pacotes que deixou de fora ({held}): eles não recebem atualização, nem de segurança, até você reparar (menu → Sistema operacional → reparar).",
            "hermes_gateway_heartbeat_stale": "O gateway diz que está rodando, mas não grava o sinal de vida há {age} s: pode estar travado. Veja `hermes gateway status`.",
            "hermes_gateway_memory_growth": "O gateway usa {rss} de memória, mais que o dobro do normal: reiniciar libera (`hermes gateway restart`, no seu terminal).",
            "hermes_state_db_unreadable": "Não foi possível ler o banco de sessões do Hermes. Rode a checagem do Hermes: menu → Saúde do Hermes → `hermes doctor`.",
@@ -547,13 +552,14 @@ def _care_values(report: dict) -> dict:
     load = care.get("load") or {}
     grown = ", ".join(f"`{item['folder']}` {_gb(item['before'])} → {_gb(item['now'])}" for item in care.get("growth") or ())
     units = ", ".join(f"`{unit['unit']}`" for unit in system.get("units") or () if not unit.get("enabled"))
-    return {"age": gate.get("heartbeat_age"), "rss": _gb(gate.get("rss")), "wal": _gb((care.get("database") or {}).get("wal")),
+    return {"age": gate.get("heartbeat_age") if gate.get("heartbeat_age") is not None else "?", "rss": _gb(gate.get("rss")), "wal": _gb((care.get("database") or {}).get("wal")),
             "free": _gb(care.get("free")), "days": care.get("days_to_full"), "grown": grown or "?",
             "available": _gb(memory.get("available")), "total": _gb(memory.get("total")),
             "used": _gb(memory.get("swap_used")), "swap": _gb(memory.get("swap_total")),
             "load": load.get("15m"), "cpus": load.get("cpus"), "size": _gb(care.get("reclaimable")),
-            "user": os.environ.get("USER") or "root", "packages": ", ".join(system.get("reboot_packages") or ()) or "?",
-            "count": system.get("security") or 0, "units": units or "?"}
+            "user": care.get("owner") or system.get("owner") or "root", "packages": ", ".join(system.get("reboot_packages") or ()) or "?",
+            "count": system.get("security") or 0, "units": units or "?",
+            "held": ", ".join(system.get("plugin_holds") or ()) or "?"}
 
 
 def _health_lines(report: dict, t: dict) -> list[str]:

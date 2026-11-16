@@ -107,11 +107,23 @@ def gateway(home: Path, *, now: float) -> dict:
         pass
     mem = beat.get("mem") if isinstance(beat.get("mem"), dict) else {}
     running = state.get("gateway_state") == "running"
+    crashed = False
+    if running and isinstance(state.get("pid"), int) and state["pid"] > 0:
+        try:
+            os.kill(state["pid"], 0)
+        except ProcessLookupError:   # the state file outlived its process (a crash)
+            running, crashed = False, True
+        except OSError:
+            pass
     return {"state": state.get("gateway_state"), "version": state.get("code_version"), "running": running,
+            "crashed": crashed,
             "active_agents": state.get("active_agents"),
             "heartbeat_age": None if updated is None else round(now - updated),
             "stale": bool(running and (updated is None or now - updated > HEARTBEAT_STALE_SECONDS)),
             "rss": mem.get("rss_kib") * 1024 if isinstance(mem.get("rss_kib"), int) else None}
+
+
+QUICK_CHECK_SECONDS = 5.0
 
 
 def database(home: Path, *, quick: bool) -> dict:
@@ -127,8 +139,17 @@ def database(home: Path, *, quick: bool) -> dict:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
         try:
             report["journal"] = conn.execute("PRAGMA journal_mode").fetchone()[0]
-            if quick:
-                report["quick_check"] = conn.execute("PRAGMA quick_check(3)").fetchone()[0]
+            if quick:   # read-only and bounded: a large database is checked for at most QUICK_CHECK_SECONDS
+                limit = time.monotonic() + QUICK_CHECK_SECONDS
+                conn.set_progress_handler(lambda: 1 if time.monotonic() > limit else 0, 10_000)
+                try:
+                    report["quick_check"] = conn.execute("PRAGMA quick_check(3)").fetchone()[0]
+                except sqlite3.OperationalError as error:
+                    if "interrupt" not in str(error).lower():
+                        raise
+                    report["quick_check"] = None   # not finished in time: unknown, never "damaged"
+                finally:
+                    conn.set_progress_handler(None, 0)
         finally:
             conn.close()
     except sqlite3.Error as error:
@@ -220,6 +241,8 @@ def check(home: Path, *, now: float | None = None, history: list[dict] | None = 
     gate = report["gateway"]
     if gate["stale"]:
         findings.append("gateway_heartbeat_stale")
+    if gate.get("crashed"):
+        findings.append("gateway_crashed")
     if gate["rss"] and rss_old and gate["rss"] > 2 * sorted(rss_old)[len(rss_old) // 2] and gate["rss"] > 512 * 2**20:
         findings.append("gateway_memory_growth")
     db = report["database"]
@@ -247,10 +270,14 @@ def check(home: Path, *, now: float | None = None, history: list[dict] | None = 
         findings.append("cpu_saturated")
     if report["reclaimable"] >= 300 * 2**20:
         findings.append("unused_tools")
+    from .system_update import owner_of
+
+    report["owner"] = owner_of(home)
     if os.name == "posix" and Path("/run/systemd/system").is_dir():
         host = Host(root=root)
         units = _user_units(host)
-        if any(unit["scope"] == "user" and "gateway" in unit["unit"] for unit in units) and _linger(host) is False:
+        if any(unit["scope"] == "user" and "gateway" in unit["unit"] for unit in units) \
+                and _linger(host, report["owner"]) is False:
             findings.append("gateway_not_at_boot")
     report["findings"] = findings
     return report
@@ -272,7 +299,7 @@ def cached(conn, home: Path, *, now: float, force: bool = False) -> dict | None:
         history = []
     history = [item for item in history if isinstance(item, dict)]
     quick_row = conn.execute("SELECT value FROM cursor WHERE key='care_quick_check'").fetchone()
-    quick = force or quick_row is None or now - float(quick_row[0] or 0) >= QUICK_CHECK_EVERY_SECONDS
+    quick = quick_row is None or now - float(quick_row[0] or 0) >= QUICK_CHECK_EVERY_SECONDS   # weekly, even when asked
     found = check(home, now=now, history=history, quick=quick)
     if quick:
         conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('care_quick_check', ?)", (str(now),))

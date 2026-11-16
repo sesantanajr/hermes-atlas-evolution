@@ -246,8 +246,10 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
         result["undone"] = True
     elif result.get("kind") == "cron_create" and result.get("restorable"):
         result.pop("restorable")
-        run_hermes(home, ["cron", "remove", result["job"]], runner=runner, timeout=120, what="command")
-        with experience(home) as conn:
+        code, out = hermes_output(home, ["cron", "remove", result["job"]], runner=runner, timeout=120)
+        if code != 0 and not re.search(r"not found|no (such )?job|unknown job", out, re.I):
+            raise ValueError(" ".join(out.split())[-200:] or "Hermes refused the command")
+        with experience(home) as conn:   # removed now, or already gone (removed by hand)
             decisions.mark_undone(conn, result["id"], now=now)
         result["undone"] = True
     elif result.get("kind") == "proposal_apply" and result.get("restorable"):
