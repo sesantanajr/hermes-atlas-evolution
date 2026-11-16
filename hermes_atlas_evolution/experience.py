@@ -16,6 +16,7 @@ from pathlib import Path
 from . import operations as _operations   # bound at import: a thread of an unloaded copy keeps its own module
 
 RETENTION_DAYS = 90
+SAMPLE_DAYS = 14   # redacted failure excerpts the reflector reads: kept only while they can still become a lesson
 _LABEL = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.:+-]{0,95}\Z")
 _CREDENTIAL = ("sk-", "ghp_", "gho_", "ghs_", "ghr_", "ghu_", "github_pat_", "xox", "akia", "aiza", "hf_")
 
@@ -143,3 +144,6 @@ def prune(conn: sqlite3.Connection, *, now: float) -> None:
     conn.execute("DELETE FROM change WHERE at < ?", (old,))
     conn.execute("DELETE FROM proposal WHERE status NOT IN ('open','approved') AND updated < ?", (old,))
     conn.execute("DELETE FROM lesson WHERE status='retired' AND updated < ?", (old,))
+    # Excerpts expire here too, so they do not outlive their window when no learning pass runs.
+    conn.execute("DELETE FROM failure_sample WHERE updated < ? OR signature NOT IN (SELECT signature FROM failure)",
+                 (now - SAMPLE_DAYS * 86_400,))

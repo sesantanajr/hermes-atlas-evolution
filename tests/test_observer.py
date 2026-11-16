@@ -121,7 +121,7 @@ class ObserverTests(unittest.TestCase):
         observe(self.home, "tool", tool("new"), now=NOW)
         with database(self.home) as conn:
             days = [row[0] for row in conn.execute("SELECT day FROM metric ORDER BY day")]
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0], 1)   # delivery ids: 2 days
         self.assertEqual(days, ["2026-10-12", "2026-11-15"])
 
     def test_replaced_database_and_forked_process_get_a_new_connection(self):

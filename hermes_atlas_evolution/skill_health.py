@@ -65,7 +65,7 @@ def read_usage(home: Path) -> dict[str, dict]:
     body = _read_bounded(Path(home) / "skills" / ".usage.json", _USAGE_LIMIT)
     try:
         data = json.loads(body) if body else {}
-    except ValueError:
+    except (ValueError, RecursionError):
         return {}
     result = {}
     for name, record in (data.items() if isinstance(data, dict) else ()):
@@ -100,7 +100,7 @@ def read_ledger(home: Path, *, since: float = 0.0) -> list[dict]:
     for line in body.splitlines()[-_LEDGER_LINES:]:
         try:
             raw = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if not isinstance(raw, dict):
             continue

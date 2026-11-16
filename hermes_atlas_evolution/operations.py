@@ -87,8 +87,10 @@ def _open(path: Path, timeout: float, **options) -> sqlite3.Connection:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
-        elif version != SCHEMA_VERSION:
+        elif version < 0:
             raise ValueError(f"Unsupported Evolution database schema {version}")
+        # A newer version of the plugin only ever adds tables and columns, so a database it upgraded still
+        # works here after a downgrade: what this version reads and writes is all still there.
         connection.execute("PRAGMA foreign_keys=ON")
     except BaseException:
         connection.close()
@@ -318,11 +320,15 @@ def record(home: Path, job, *, now: float | None = None) -> None:
 
 
 @contextmanager
-def batched(home: Path):
+def batched(home: Path, *, check=None, timeout: float = 10.0):
     """Collect this thread's counter updates for `home` and write them in one transaction on a clean exit.
 
     The backfill replays thousands of past events: one transaction per slice instead of one per event,
-    and a slice that fails half way writes nothing. Other threads (the hooks) are not affected."""
+    and a slice that fails half way writes nothing. The write is synchronous, on a connection of its own,
+    never through the hooks' queue: `check(connection)` runs first inside the same write transaction and
+    raises to drop the batch (another pass moved on meanwhile). A database that stays busy for `timeout`
+    seconds raises sqlite3.OperationalError and nothing is written. Other threads (the hooks) are not
+    affected. The yielded list is the batch: a caller may drop what it appended since a mark."""
     if getattr(_BATCH, "jobs", None) is not None:
         raise RuntimeError("batched() does not nest")
     jobs: list = []
@@ -331,12 +337,22 @@ def batched(home: Path):
         yield jobs
     finally:
         _BATCH.jobs = _BATCH.home = None
-    if jobs:
-        def apply(connection):
+    if not jobs and check is None:
+        return
+    connection = _open(_database_path(Path(home)), timeout)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            if check is not None:
+                check(connection)
             for item in jobs:
                 item(connection)
-
-        _observer(home).record(apply, time.time())
+            connection.execute("COMMIT")
+        except BaseException:
+            _rollback(connection)
+            raise
+    finally:
+        connection.close()
 
 
 def close_observers() -> None:
@@ -556,10 +572,15 @@ def recommendations(usage: dict) -> list[dict]:
     return proposals
 
 
+SEEN_DAYS = 2   # delivery ids only guard against an event delivered twice, which happens within seconds
+
+
 def _prune(conn: sqlite3.Connection, now: float) -> None:
-    cutoff = (datetime.fromtimestamp(now, timezone.utc).date() - timedelta(days=RETENTION_DAYS - 1)).isoformat()
-    for table in ("seen", "metric", "research_latency", "native_activity"):
+    today = datetime.fromtimestamp(now, timezone.utc).date()
+    cutoff = (today - timedelta(days=RETENTION_DAYS - 1)).isoformat()
+    for table in ("metric", "research_latency", "native_activity"):
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))
+    conn.execute("DELETE FROM seen WHERE day < ?", ((today - timedelta(days=SEEN_DAYS - 1)).isoformat(),))
     from .experience import prune
 
     prune(conn, now=now)

@@ -121,7 +121,9 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             reflection = reflector.reflect(conn, reflect, now=now, lang=opts["language"],
                                            daily_limit=opts["reflector_daily_limit"], deadline=deadline)
         conn.commit()
-        effects = lessons.evaluate(conn, now=now, mode=opts["lessons"])
+        # Baselines wait for history the backfill is still replaying ("running"; "waiting" before the mark).
+        pending = backfill.replay_until(home) if history.get("status") in ("running", "waiting") else None
+        effects = lessons.evaluate(conn, now=now, mode=opts["lessons"], history_until=pending)
         conn.commit()   # the skill files and the Curator ledger are read with no write lock held
         skills = skill_health(home, now=now, days=7)
         detected = experiments.detect_changes(conn, home, runtime_config, now=now)

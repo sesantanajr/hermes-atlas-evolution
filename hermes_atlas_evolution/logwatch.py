@@ -58,12 +58,31 @@ def _read(path: Path, inode: int, offset: int) -> tuple[bytes, int] | None:
         os.close(fd)
 
 
+def _usable(data: bytes, *, skipping: bool, final: bool) -> tuple[int, bytes, bool]:
+    """(bytes consumed, the complete lines in them, still skipping) for one read.
+
+    `final`: the read ends a file that no longer grows, so its last line counts without a newline. A read
+    that is full and holds no newline is in the middle of a line longer than any review line: it is
+    consumed and the rest of that line is skipped up to the next newline, so the cursor never sticks."""
+    start = 0
+    if skipping:
+        newline = data.find(b"\n")
+        if newline < 0:
+            return len(data), b"", True
+        start = newline + 1
+    end = len(data) if final else data.rfind(b"\n") + 1
+    if end == 0 and len(data) >= _READ_LIMIT:
+        return len(data), b"", True
+    end = max(end, start)
+    return end, data[start:end], False
+
+
 def ingest_reviews(home: Path, conn, *, since_day: str | None = None) -> dict:
     """Count background reviews logged since the last run. Returns what this run added.
 
     The first run also reads the rotated files, oldest first, counting lines from `since_day` on (each line
-    carries its own date). After a rotation, the rest of the old file is read before the new one, so lines
-    written just before Hermes renamed the log are not lost."""
+    carries its own date). After a rotation, the rest of the old file is read before the new one, and so is
+    every file rotated after it, so lines written around one or several renames are not lost."""
     files = _files(home)
     current = next(((path, info) for path, info in files if path.name == "agent.log"), None)
     if current is None:
@@ -71,31 +90,37 @@ def ingest_reviews(home: Path, conn, *, since_day: str | None = None) -> dict:
     saved = conn.execute("SELECT value FROM cursor WHERE key='agent_log'").fetchone()
     try:
         state = json.loads(saved[0]) if saved else None
-    except ValueError:
+    except (ValueError, RecursionError):
         state = None
     by_inode = {info.st_ino: path for path, info in files}
+    rotated = [info.st_ino for path, info in files if path.name != "agent.log"]   # newest first
     if not isinstance(state, dict):   # first run: the rotated history inside the window, then the current file
-        queue = [[info.st_ino, 0] for path, info in reversed(files) if path.name != "agent.log"]
+        queue = [[inode, 0] for inode in reversed(rotated)]
         state = {"queue": queue, "inode": current[1].st_ino, "offset": 0, "since": since_day}
     elif state.get("inode") != current[1].st_ino:   # rotated since the last run: finish the old file first
         queue = list(state.get("queue") or [])
-        if isinstance(state.get("inode"), int) and type(state.get("offset")) is int:
-            queue.append([state["inode"], state["offset"]])
+        tracked = state.get("inode")
+        if isinstance(tracked, int) and type(state.get("offset")) is int:
+            queue.append([tracked, state["offset"]])
+        newer = rotated[:rotated.index(tracked)] if tracked in rotated else rotated   # renamed after it, unread
+        queued = {item[0] for item in queue if isinstance(item, list) and item}
+        queue += [[inode, 0] for inode in reversed(newer) if inode not in queued]
         state = {"queue": queue, "inode": current[1].st_ino, "offset": 0, "since": None}
     queue = [item for item in state.get("queue") or []
              if isinstance(item, list) and len(item) == 2 and item[0] in by_inode]
+    skipping = state.get("skip") is True
     if queue:   # a rotated file is complete: its last line is consumed even without a newline
         inode, offset = queue[0]
         chunk = _read(by_inode[inode], inode, offset) if type(offset) is int else None
         if chunk is None:
             queue.pop(0)
-            data, complete, done = b"", 0, True
+            complete, lines, skipping = 0, b"", False
         else:
             data, size = chunk
-            complete = len(data) if offset + len(data) >= size else data.rfind(b"\n") + 1
-            done = offset + complete >= size
-            if done:
+            complete, lines, skipping = _usable(data, skipping=skipping, final=offset + len(data) >= size)
+            if offset + complete >= size:
                 queue.pop(0)
+                skipping = False   # a skipped line ends with its file
             else:
                 queue[0] = [inode, offset + complete]
         more = True
@@ -104,13 +129,15 @@ def ingest_reviews(home: Path, conn, *, since_day: str | None = None) -> dict:
         chunk = _read(current[0], current[1].st_ino, offset if type(offset) is int else 0)
         if chunk is None:   # truncated or replaced in place: start over
             chunk = _read(current[0], current[1].st_ino, 0) or (b"", 0)
-            offset = 0
+            offset, skipping = 0, False
         data, size = chunk
-        complete = data.rfind(b"\n") + 1   # never consume a line that is still being written
+        # never consume a line that is still being written, unless it is longer than one read
+        complete, lines, skipping = _usable(data, skipping=skipping, final=False)
         state["offset"] = offset + complete
         more = state["offset"] < size
-    added = _count(conn, data[:complete], since=state.get("since"))
+    added = _count(conn, lines, since=state.get("since"))
     state["queue"] = queue
+    state["skip"] = skipping
     if not queue and not more:
         state["since"] = None
     conn.execute("INSERT OR REPLACE INTO cursor VALUES ('agent_log', ?)", (json.dumps(state),))

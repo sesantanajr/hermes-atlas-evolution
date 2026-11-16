@@ -20,11 +20,10 @@ import re
 import sqlite3
 
 from . import lessons
-from .experience import utc_day
+from .experience import SAMPLE_DAYS, utc_day
 
 UNTEMPLATED = frozenset({"code_exception", "command_failed", "other", "network", "auth"})
 EXCERPT_LIMIT = 300
-SAMPLE_DAYS = 14
 PER_RUN = 3
 CALL_SECONDS = 60   # the timeout of one model call through Hermes
 DEFAULT_DAILY_LIMIT = 6

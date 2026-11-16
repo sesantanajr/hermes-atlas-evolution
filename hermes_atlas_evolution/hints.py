@@ -29,7 +29,7 @@ def attach(result, sentence: str, lang: str = "en") -> str | None:
     if result.lstrip()[:1] == "{":
         try:
             data = json.loads(result)
-        except ValueError:
+        except (ValueError, RecursionError):
             data = None
         if isinstance(data, dict):
             hint = data.get("hint")

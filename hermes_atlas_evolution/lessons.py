@@ -254,10 +254,12 @@ def _calendar_days(start: str, end: str) -> int:
     return max(0, (date.fromisoformat(end) - date.fromisoformat(start)).days + 1)
 
 
-def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> list[dict]:
+def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest", history_until: float | None = None) -> list[dict]:
     """Measure each active lesson bound to a failure against that failure before and after activation.
 
     The baseline is the 14 days before activation, counted once and frozen, so retention never erases it.
+    While the backfill is still replaying Hermes' history up to `history_until`, a baseline that reaches
+    into that history waits: frozen now, it would hold only part of it.
     The after window is the latest 14 days since activation (the mixed activation day is left out of both).
     Rates are per call when both sides have call volume, otherwise per calendar day of each window."""
     results = []
@@ -266,6 +268,8 @@ def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> 
         activated_day = utc_day(row["activated"])
         base_failures, base_calls = row["baseline_failures"], row["baseline_calls"]
         if base_failures is None or base_calls is None:
+            if history_until is not None and row["activated"] - BASELINE_DAYS * 86_400 < history_until:
+                continue
             base_failures, base_calls = _counts(conn, row["signature"], row["tool"], day_offset(row["activated"], BASELINE_DAYS),
                                                 day_offset(row["activated"], 1))
             conn.execute("UPDATE lesson SET baseline_failures=?, baseline_calls=? WHERE id=?",

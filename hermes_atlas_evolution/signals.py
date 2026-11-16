@@ -133,7 +133,7 @@ def _error_parts(error_message, result) -> tuple[str, str, int | None]:
     if isinstance(result, str) and len(result) <= _RESULT_LIMIT and result.lstrip()[:1] == "{":
         try:
             data = json.loads(result)
-        except ValueError:
+        except (ValueError, RecursionError):   # nested thousands deep: still a result, never a hook crash
             data = None
         if isinstance(data, dict):
             for key in ("error", "hint", "approval", "message"):
@@ -174,7 +174,7 @@ def effective_tool(tool_name, args=None) -> str:
         if isinstance(calls, str) and len(calls) <= 65_536:
             try:
                 calls = json.loads(calls)
-            except ValueError:
+            except (ValueError, RecursionError):
                 calls = None
         if calls is None and args.get("name"):
             calls = [args]

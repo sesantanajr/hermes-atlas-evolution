@@ -244,7 +244,7 @@ class StoreTest(unittest.TestCase):
             prune(conn, now=NOW)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM tool_daily").fetchone()[0], 0)
 
-    def test_store_is_private_and_rejects_an_unknown_schema(self):
+    def test_store_is_private_opens_a_newer_schema_and_rejects_an_invalid_one(self):
         with experience(self.home):
             pass
         path = self.home / "evolution" / "evolution.sqlite3"   # one database for operations and experience
@@ -252,7 +252,12 @@ class StoreTest(unittest.TestCase):
         self.assertFalse((self.home / "evolution" / "experience.sqlite3").exists())
         import sqlite3
         raw = sqlite3.connect(path)
-        raw.execute("PRAGMA user_version=99")
+        raw.execute("PRAGMA user_version=99")   # a newer plugin version only adds tables and columns
+        raw.close()
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM lesson").fetchone()[0], 0)
+        raw = sqlite3.connect(path)
+        raw.execute("PRAGMA user_version=-1")
         raw.close()
         with self.assertRaises(ValueError):
             with experience(self.home):
