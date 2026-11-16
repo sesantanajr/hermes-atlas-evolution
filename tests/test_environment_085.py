@@ -109,13 +109,15 @@ class Fleet(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
-        self.root = Path(folder.name) / "hermes"
+        # resolved: macOS keeps temporary folders behind /var -> /private/var, Windows behind short names
+        self.root = Path(folder.name).resolve() / "hermes"
         self.configs = {}
-        self.bundled = Path(folder.name) / "bundled"
+        self.bundled = Path(folder.name).resolve() / "bundled"
         self.bundled.mkdir()
         self.profile("default", enabled=["hermes-atlas-evolution"])
         plugin(self.root, "hermes-atlas-evolution")
-        reader = patch.object(environment, "_read_config", side_effect=lambda home: self.configs.get(str(Path(home))))
+        reader = patch.object(environment, "_read_config",
+                              side_effect=lambda home: self.configs.get(str(Path(home).resolve())))
         reader.start()
         self.addCleanup(reader.stop)
 
@@ -126,7 +128,7 @@ class Fleet(unittest.TestCase):
         config = {"plugins": {"enabled": list(enabled), "disabled": list(disabled)}}
         if tool_hints:
             config["plugins"]["entries"] = {"hermes-atlas-evolution": {"settings": {"tool_hints": True}}}
-        self.configs[str(home)] = config
+        self.configs[str(home.resolve())] = config
         return home
 
     def scan(self, sessions=lambda home, since: 5):
@@ -301,7 +303,7 @@ class LeadAndRefreshTest(Fleet):
         self.assertEqual(scanned.call_count, 1)   # kept for six hours
         self.assertEqual(first["at"], again["at"])
         self.assertEqual(first["summary"]["profiles"], 2)
-        self.configs[str(self.root)] = {"plugins": {"enabled": []}}
+        self.configs[str(self.root.resolve())] = {"plugins": {"enabled": []}}
         self.assertEqual(environment.lead(self.root), "work")
 
 
