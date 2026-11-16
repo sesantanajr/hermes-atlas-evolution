@@ -206,7 +206,16 @@ _KIND = {
            "compaction": "Compactions keep most of the context", "plugin_health": "Plugin problem",
            "plugin_conflict": "Plugins compete for a hook where only the first counts",
            "approval_policy": "Approvals refused where nobody could approve",
-           "tool_latency": "A tool that is slow call after call"},
+           "tool_latency": "A tool that is slow call after call",
+           "plugin_removed": "Plugin removed from the Hermes catalog still on",
+           "plugin_removed_off": "Plugin removed from the Hermes catalog still installed",
+           "plugin_transform_overlap": "Two plugins change the same tool's result",
+           "plugin_duplicate": "Two plugins do the same job", "plugin_unused": "Plugins installed and never loaded",
+           "plugin_leftover": "Folder left by a failed plugin install", "plugin_update": "Newer reviewed plugin version",
+           "self_missing": "Profile in use without Atlas Evolution", "profile_idle": "Profile unused for 30 days",
+           "skills_unused": "Skills unused for 30 days", "skills_duplicate": "The same skill under two names",
+           "skills_similar": "Skills that look like the same job", "skills_shared": "Skills copied into many profiles",
+           "plugin_obsolete": "Archived or unmaintained plugin"},
     "pt": {"lesson": "Ativar lição", "lesson_retire": "Aposentar lição que não ajudou",
            "skill_lock": "Travar skill reescrita em excesso", "skill_review": "Revisar reescritas nunca usadas",
            "skill_archive": "Arquivar skill nunca usada", "skill_rollback": "Desfazer alteração de skill que piorou",
@@ -217,11 +226,20 @@ _KIND = {
            "compaction": "Compactações mantêm quase todo o contexto", "plugin_health": "Problema em plugin",
            "plugin_conflict": "Plugins disputam um hook em que só o primeiro vale",
            "approval_policy": "Aprovações recusadas onde ninguém podia aprovar",
-           "tool_latency": "Ferramenta lenta chamada após chamada"},
+           "tool_latency": "Ferramenta lenta chamada após chamada",
+           "plugin_removed": "Plugin removido do catálogo do Hermes ainda ligado",
+           "plugin_removed_off": "Plugin removido do catálogo do Hermes ainda instalado",
+           "plugin_transform_overlap": "Dois plugins mudam o resultado da mesma ferramenta",
+           "plugin_duplicate": "Dois plugins fazem o mesmo trabalho", "plugin_unused": "Plugins instalados que nunca carregam",
+           "plugin_leftover": "Pasta deixada por instalação de plugin que falhou",
+           "plugin_update": "Versão revisada mais nova de plugin", "self_missing": "Perfil em uso sem o Atlas Evolution",
+           "profile_idle": "Perfil sem uso há 30 dias", "skills_unused": "Skills sem uso há 30 dias",
+           "skills_duplicate": "A mesma skill com dois nomes", "skills_similar": "Skills que parecem fazer o mesmo trabalho",
+           "skills_shared": "Skills copiadas em vários perfis", "plugin_obsolete": "Plugin arquivado ou sem manutenção"},
 }
 _ADVISORY = ("skill_review", "investigate_failure", "investigate_latency", "config_review", "skill_outcome",
              "session_lifecycle", "context_weight", "compaction", "plugin_health", "plugin_conflict", "approval_policy",
-             "tool_latency")
+             "tool_latency", "profile_idle", "skills_similar", "skills_shared")
 
 
 def _number(value, lang: str, digits: int = 0) -> str:

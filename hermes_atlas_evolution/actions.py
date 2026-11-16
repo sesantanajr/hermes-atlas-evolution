@@ -29,9 +29,52 @@ COMMAND_MIN_SECONDS = 30           # a pass this close to its deadline runs no H
 
 
 def _hermes(home: Path, args: list, *, runner=None) -> None:
+    """Run a plan's arguments. ["@<profile>", ...] runs in that profile of the same Hermes (`hermes --profile`), and
+    ["@<profile>", "__trash__" | "__restore__", <folder>] moves a failed install's folder to the plugin's trash or back."""
     from .admin import run_hermes
 
+    if args and str(args[0]).startswith("@"):
+        target = _profile_home(home, str(args[0])[1:])
+        if len(args) == 3 and args[1] in ("__trash__", "__restore__"):
+            _trash(home, target, str(args[0])[1:], str(args[2]), back=args[1] == "__restore__")
+            return
+        run_hermes(target, list(args[1:]), runner=runner, timeout=COMMAND_SECONDS, what="command")
+        return
     run_hermes(home, args, runner=runner, timeout=COMMAND_SECONDS, what="command")
+
+
+def _profile_home(home: Path, name: str) -> Path:
+    """The home of profile `name` of the same Hermes as `home`; ValueError for anything that is not one."""
+    from .environment import profiles, root_of
+
+    for profile, folder in profiles(root_of(home)):
+        if profile == name:
+            return Path(folder)
+    raise ValueError("Unknown profile")
+
+
+def _trash(home: Path, target: Path, profile: str, folder: str, *, back: bool) -> None:
+    """Move a failed install's folder (`.install-*`) to `<root>/evolution/trash/<profile>/`, or back. Only such
+    folders, never a link, never over something that is already there."""
+    import os
+    import re as _re
+    import shutil
+
+    from .environment import root_of
+
+    if not _re.fullmatch(r"\.install-[A-Za-z0-9_-]{1,64}", folder):
+        raise ValueError("Only a failed install's folder is moved")
+    live = Path(target) / "plugins" / folder
+    kept = root_of(home) / "evolution" / "trash" / profile / folder
+    source, destination = (kept, live) if back else (live, kept)
+    if source.is_symlink() or not source.is_dir():
+        raise ValueError("Nothing to move")
+    if destination.exists():
+        raise ValueError("Something is already there")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        os.chmod(destination.parent, 0o700)
+    shutil.move(str(source), str(destination))
 
 
 def recover(conn) -> None:
@@ -120,7 +163,7 @@ def apply_proposal(home: Path, proposal_id: int, *, now: float, actor: str = "te
             return {"id": row["id"], "applied": False, "reason": "not_open"}
         decision = decisions.record_applied(conn, row["id"], code=row["code"], before=previous, apply=found[0],
                                             undo=found[1], now=now, actor=actor)
-    return {"id": row["id"], "applied": True, "decision": decision, "undo": "hermes " + " ".join(found[1])}
+    return {"id": row["id"], "applied": True, "decision": decision, "undo": explain.command_text(found[1])}
 
 
 def apply_many(home: Path, ids: list, *, now: float, actor: str = "terminal", runner=None) -> dict:
@@ -219,8 +262,9 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
             break
         if deadline is not None and deadline - time.monotonic() < COMMAND_MIN_SECONDS:
             break
-        if row["code"] != f"{row['kind']}:{row['subject']}" or f"auto_skip:{row['code']}" in held \
-                or explain.plan(dict(row)) is None:
+        expected = (f"env:{row['kind']}:{str(row['subject']).replace('/', ':', 1)}" if row["kind"] in explain.FLEET
+                    else f"{row['kind']}:{row['subject']}")
+        if row["code"] != expected or f"auto_skip:{row['code']}" in held or explain.plan(dict(row)) is None:
             continue   # only the proposals the loop writes itself, with a plain name, and never one the owner undid
         try:
             failed_at = float(held.get(f"auto_fail:{row['code']}") or 0)
@@ -238,7 +282,40 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
         if result.get("applied"):
             done["applied"].append({"proposal": row["id"], "kind": row["kind"], "subject": row["subject"],
                                     "decision": result["decision"]})
+    if deadline is None or deadline - time.monotonic() >= COMMAND_MIN_SECONDS:
+        try:
+            done["maintenance"] = reclaim(home, now=now, runner=runner)
+        except (OSError, ValueError) as error:
+            done["failed"].append({"what": "pm_gc", "error": str(error)[:120]})
     return done
+
+
+RECLAIM_EVERY_SECONDS = 7 * 86_400
+
+
+def reclaim(home: Path, *, now: float, runner=None) -> dict | None:
+    """Free old tool versions nothing references with Hermes' own `hermes pm gc`, when the health check found 300 MB
+    or more of them, at most once a week. Recorded in the history (nothing to undo: Hermes fetches a version again if
+    something asks for it)."""
+    from . import decisions, hermes_care
+    from .experience import experience
+
+    with experience(home) as conn:
+        row = conn.execute("SELECT value FROM cursor WHERE key='care_check'").fetchone()
+        last = conn.execute("SELECT value FROM cursor WHERE key='auto_gc'").fetchone()
+    try:
+        care = json.loads(row[0]) if row else {}
+        ran = float(last[0]) if last else 0.0
+    except (ValueError, TypeError):
+        care, ran = {}, 0.0
+    if "unused_tools" not in (care.get("findings") or ()) or now - ran < RECLAIM_EVERY_SECONDS:
+        return None
+    result = hermes_care.run_action(home, "pm_gc", runner=runner)
+    with experience(home) as conn:
+        conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('auto_gc', ?)", (str(now),))
+        decision = decisions.record_maintenance(conn, "pm_gc", reclaimable=care.get("reclaimable"),
+                                                ok=bool(result.get("ok")), now=now, actor="automatic")
+    return {"action": "pm_gc", "ok": bool(result.get("ok")), "decision": decision}
 
 
 def schedule_digest(home: Path, *, deliver: str = "local", lang: str = "en", now: float, actor: str = "terminal",

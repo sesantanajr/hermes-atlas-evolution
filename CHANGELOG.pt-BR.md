@@ -2,6 +2,32 @@
 
 *In English: [CHANGELOG.md](CHANGELOG.md), with every version.*
 
+## 0.8.5
+
+O Atlas Evolution passa a cuidar de todos os perfis de um Hermes de uma vez, num Modo Auto ligado por padrão, e conhece o ecossistema de plugins do Hermes.
+
+### Novidades
+
+- **O modo** (`mode`: `auto` por padrão, `assist`, `manual`; tela 5 do menu, as configurações do painel). Substitui o `auto_actions`, que continua sendo lido quando `mode` não está definido (`off` → manual, `safe` → assist, `full` → auto), então quem o escolheu mantém a escolha. No auto, o plugin aplica sozinho só ações reversíveis, em todos os perfis: cópias idênticas da memória, travar skills que o curador reescreve sem parar, desligar um plugin que o catálogo do Hermes removeu, se instalar nos perfis em uso, mover pastas de instalações que falharam para a lixeira dele e `hermes pm gc` no máximo uma vez por semana; no máximo 3 mudanças por passada; uma ação que o dono desfaz nunca se repete.
+- **O ambiente** (`environment.py`; tela 14 do menu, a aba **Ambiente** do painel, `hermes evolution environment [show | scan | catalog]`). Um perfil cuida do Hermes inteiro (o padrão quando o plugin está ligado nele, senão o primeiro que o tem), no máximo a cada 6 horas, lendo o config.yaml, os plugins (manifesto, checkout git e código Python, analisado com `ast` e nunca executado), as skills e o uso de cada perfil. Achados: `plugin_transform_overlap` (dois plugins mudam o resultado da mesma ferramenta por um hook de transformação: o Hermes roda os plugins em ordem alfabética do nome no manifesto e fica com o primeiro resultado de cada chamada; plugins em ferramentas diferentes não são apontados; um plugin de segurança nunca é o sugerido para desligar), `plugin_duplicate` (dois plugins reescrevendo comandos do terminal, ou um papel que só um deveria cumprir), `plugin_removed` (na lista de removidos do Hermes), `plugin_obsolete` (arquivado, retirado, inexistente ou sem manutenção, conferido em 16/11/2026), `plugin_unused` (instalado e nunca carregado), `plugin_leftover` (pastas `.install-*`), `plugin_update` (versão mais nova no catálogo do Hermes, agrupada por plugin), `self_missing`, `profile_idle`, `skills_unused` (30 dias, o padrão do próprio curador do Hermes), `skills_duplicate`, `skills_similar`, `skills_shared` (cópias em 3 ou mais perfis: `skills.external_dirs`).
+- **A base de conhecimento** (`ecosystem.py`, `knowledge/*.json`), copiada para as tabelas `catalog_plugin`, `catalog_removed`, `knowledge_plugin` e `playbook` do `evolution.sqlite3` do perfil líder: o catálogo de plugins do próprio Hermes, lido da cópia que o Hermes guarda em cache (senão do código dele), o que o plugin sabe de plugins conhecidos, os plugins obsoletos do ecossistema e o playbook de cada situação (nível, risco, ação, desfazer, título e recomendação em inglês e português).
+- Cada proposta tem uma linha **O que fazer** no menu, no painel e na página de status; mudanças em outros perfis aparecem e rodam como `hermes -p <perfil> ...`.
+
+### Mudanças
+
+- O radar não aponta mais plugins que compartilham um hook de transformação: era confuso e, para plugins em ferramentas diferentes, errado. O ambiente aponta só uma sobreposição real, dizendo quem vale.
+- Comandos do Hermes só rodam para um perfil de verdade (com `config.yaml`), então uma pasta de rascunho nunca faz o Hermes preparar uma casa nova; a suíte de testes nunca alcança o Hermes da própria máquina (`ATLAS_EVOLUTION_NO_HERMES=1`).
+- O README diz o que o plugin faz na prática e deixa de fora a saída de versões antigas.
+
+### Atualizar a partir da 0.8.4
+
+```bash
+hermes -p <perfil> plugins update hermes-atlas-evolution   # cada perfil que o tem; sem -p para o padrão
+hermes gateway restart
+sudo systemctl restart hermes-dashboard
+hermes evolution                                           # tela 14
+```
+
 ## 0.8.4
 
 O Atlas Evolution agora cuida do próprio Hermes e do servidor em que ele roda, sem agente e sem tokens, e mostra para que serve no topo do README, com telas do painel no dashboard e do terminal.

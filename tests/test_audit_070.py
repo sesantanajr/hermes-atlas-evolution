@@ -1,6 +1,7 @@
 """0.7.0, after an independent review: who may widen trust, sentences and decisions, the history replay, latency,
 the reflector excerpt, generic drafts, lesson ids, unattended approvals, indexes and the review loop."""
 
+import os
 import hashlib
 import io
 import json
@@ -15,6 +16,8 @@ from hermes_atlas_evolution import backfill, lessons, operations, proposals, rad
 from hermes_atlas_evolution.experience import experience, prune, utc_day
 from hermes_atlas_evolution.operations import close_observers
 from hermes_atlas_evolution.signals import approval_setting, classify, command_program, record_tool
+
+os.environ.setdefault("ATLAS_EVOLUTION_NO_HERMES", "1")   # never the real Hermes of this machine
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400

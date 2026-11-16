@@ -1,5 +1,6 @@
 """Regression tests for the learning-loop review of 0.8.0: lesson measurement, retention, the reflector and the notice."""
 
+import os
 import json
 import sqlite3
 import tempfile
@@ -14,6 +15,8 @@ from hermes_atlas_evolution.experience import RETENTION_CONFIRM_DAYS, experience
 from hermes_atlas_evolution.operations import close_observers
 from hermes_atlas_evolution.signals import record_tool
 from hermes_atlas_evolution.status import pending_notice
+
+os.environ.setdefault("ATLAS_EVOLUTION_NO_HERMES", "1")   # never the real Hermes of this machine
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400

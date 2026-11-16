@@ -1,5 +1,5 @@
 name: hermes-atlas-evolution
-version: "0.8.4"
+version: "0.8.5"
 requires_hermes: ">=0.23.1"
 description: >-
   A measured self-improvement loop for Hermes Agent. Learns from Hermes' own history on the first pass,
@@ -119,16 +119,17 @@ config_schema:
       Run the learning pass by itself in the background, at most once per interval, from 15 to 1440 minutes.
       0 turns the background pass off; passes then run only from hermes evolution learn, ops tick, the weekly
       digest recipe and the first status.
-  auto_actions:
+  mode:
     type: str
-    choices: ["off", safe, full]
-    default: safe
-    label: Automatic actions
+    choices: [auto, assist, manual]
+    default: auto
+    label: Mode
     description: >-
-      What the plugin does by itself at the end of each learning pass, each action recorded in the history with its
-      undo. safe (default): takes out copies of a memory entry that are the very same text (a copy of the file is kept). full: also locks
-      skills the curator keeps rewriting, with hermes curator lock, at most 3 per pass; an action you undo is never
-      repeated. off: everything waits for you.
+      auto (default): Atlas Evolution looks at every profile of this Hermes (plugins, skills, memory, health) and does
+      by itself what is safe and can be undone (identical memory copies, locking skills the curator keeps rewriting,
+      turning off a plugin the Hermes catalog removed, cleaning failed installs, freeing old tool versions); the rest
+      waits for you as a proposal with its reason. assist: only identical memory copies by itself. manual: it only
+      measures and proposes. Every action is in the history with its undo.
   runtime_guard:
     type: bool
     default: true

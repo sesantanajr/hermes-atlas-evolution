@@ -175,6 +175,13 @@ def record_applied(conn: sqlite3.Connection, proposal_id: int, *, code: str, bef
                                                   "undo": list(undo)})
 
 
+def record_maintenance(conn: sqlite3.Connection, action: str, *, reclaimable, ok: bool, now: float,
+                       actor: str = "automatic") -> int:
+    """Log Hermes' own maintenance the plugin ran (today `hermes pm gc`). Nothing to undo."""
+    return _log(conn, now=now, actor=actor, kind="maintenance", target=action, action="run",
+                before={"reclaimable": reclaimable if isinstance(reclaimable, int) else None}, after={"ok": ok})
+
+
 def record_cron(conn: sqlite3.Connection, job: str, *, name: str, schedule: str, deliver: str, now: float,
                 actor: str = "terminal") -> int:
     """Log a no-agent job the plugin created with `hermes cron create` (undone with `hermes cron remove <job>`)."""
@@ -201,6 +208,10 @@ def history(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 50) -> l
         item = {"id": row["id"], "at": row["at"], "actor": row["actor"], "kind": row["kind"], "target": row["target"],
                 "action": row["action"], "before": json.loads(row["before"]), "after": json.loads(row["after"]),
                 "undone": row["undone"]}
+        if row["kind"] == "proposal" and isinstance(item["after"].get("applied"), list):
+            from .explain import command_text
+
+            item["command"] = command_text(item["after"]["applied"])   # as the owner would type it
         if row["kind"] == "lesson":
             lesson = conn.execute("SELECT * FROM lesson WHERE id=?", (int(row["target"]),)).fetchone()
             item["lesson"] = playbook.render(lesson, lang) if lesson is not None else None
@@ -253,6 +264,8 @@ def undo(conn: sqlite3.Connection, decision_id: int, *, now: float, actor: str =
                     "reason": "changed_since" if current is not ... else "unknown_current"}
         return {"id": decision_id, "undone": False, "restorable": True, "kind": "setting", "key": row["target"],
                 "restore": before.get("value")}
+    if row["kind"] == "maintenance":
+        return {"id": decision_id, "undone": False, "reason": "nothing_to_undo"}
     if row["kind"] == "cron":   # a job the plugin created with Hermes' cron: removed with `hermes cron remove`
         job = str(after.get("job") or "")
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", job):

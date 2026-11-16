@@ -1,3 +1,4 @@
+import os
 import json
 import tempfile
 import unittest
@@ -11,6 +12,8 @@ from hermes_atlas_evolution.hints import KEY, MAX_HINTS_PER_SESSION, HintIndex, 
 from hermes_atlas_evolution.signals import classify, record_tool
 
 from hermes_atlas_evolution.operations import close_observers  # noqa: E402
+
+os.environ.setdefault("ATLAS_EVOLUTION_NO_HERMES", "1")   # never the real Hermes of this machine
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400

@@ -1,0 +1,350 @@
+{
+ "_about": "Plugins of the Hermes ecosystem that are archived, delisted, removed, missing or unmaintained (no commit for over 180 days), as verified on 2026-11-16 from the Hermes catalog, its git history and the GitHub API. superseded_by: what replaced it, when known.",
+ "checked": "2026-11-16",
+ "plugins": {
+  "tirith (Nous prototype)": {
+   "repo": "https://github.com/NousResearch/hermes-plugin-tirith",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "tirith"
+   ]
+  },
+  "Hermes-Bot-Mode": {
+   "repo": "https://github.com/NousResearch/Hermes-Bot-Mode",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "desktop:hermes-bots"
+   ]
+  },
+  "hermes-plugin-byterover": {
+   "repo": "https://github.com/NousResearch/hermes-plugin-byterover",
+   "state": "unmaintained",
+   "basis": "repository description says so",
+   "superseded_by": [
+    "memory/byterover"
+   ]
+  },
+  "hermes-plugin-retaindb": {
+   "repo": "https://github.com/NousResearch/hermes-plugin-retaindb",
+   "state": "unmaintained",
+   "basis": "repository description says so",
+   "superseded_by": [
+    "memory/retaindb"
+   ]
+  },
+  "hermes-desktop-accent-picker": {
+   "repo": "https://github.com/NousResearch/hermes-desktop-accent-picker",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "accent-picker"
+   ]
+  },
+  "hermes-plugin-touchdesigner": {
+   "repo": "https://github.com/NousResearch/hermes-plugin-touchdesigner",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "touchdesigner"
+   ]
+  },
+  "hermes-plugin-snyk": {
+   "repo": "https://github.com/NousResearch/hermes-plugin-snyk",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "snyk"
+   ]
+  },
+  "hermes-memory-wiki": {
+   "repo": "https://github.com/NousResearch/hermes-memory-wiki",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "hermes-memory-wiki"
+   ]
+  },
+  "hermes-plugin-claude-subscription-directsdk": {
+   "repo": "https://github.com/NousResearch/hermes-plugin-claude-subscription-directsdk",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "claude-subscription-directsdk"
+   ]
+  },
+  "hermes-plugin-blender": {
+   "repo": "https://github.com/NousResearch/hermes-plugin-blender",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "blender"
+   ]
+  },
+  "hermes-homeassistant": {
+   "repo": "https://github.com/NousResearch/hermes-homeassistant",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "homeassistant"
+   ]
+  },
+  "hermes-spotify": {
+   "repo": "https://github.com/NousResearch/hermes-spotify",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "spotify"
+   ]
+  },
+  "hermes-telegram-business": {
+   "repo": "https://github.com/NousResearch/hermes-telegram-business",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "hermes-telegram-business"
+   ]
+  },
+  "hermes-plugin-holographic": {
+   "repo": "https://github.com/NousResearch/hermes-plugin-holographic",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": [
+    "holographic"
+   ]
+  },
+  "1guy": {
+   "repo": "https://github.com/jrezmo/1guy-plugin",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": []
+  },
+  "antigravity-agy": {
+   "repo": "https://github.com/Realtyxxx/hermes-plugin-antigravity-agy",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": []
+  },
+  "brave-search": {
+   "repo": "https://github.com/rabilrbl/hermes-brave-search-plugin",
+   "state": "unmaintained",
+   "basis": "no commit on the default branch for 194 days (> 180)",
+   "superseded_by": []
+  },
+  "hermes-market": {
+   "repo": "https://github.com/snuff12/hermes-market",
+   "state": "missing",
+   "basis": "GitHub API returned no repository on 2026-11-16 (deleted, private, or renamed without redirect)",
+   "superseded_by": []
+  },
+  "icarus": {
+   "repo": "https://github.com/esaradev/icarus-plugin",
+   "state": "unmaintained",
+   "basis": "no commit on the default branch for 229 days (> 180)",
+   "superseded_by": []
+  },
+  "neuralmind": {
+   "repo": "https://github.com/dfrostar/neuralmind",
+   "state": "archived",
+   "basis": "GitHub repository is archived; dates are for the whole repository, not only the plugin subdirectory",
+   "superseded_by": []
+  },
+  "prompt-optimizer": {
+   "repo": "https://github.com/Sahil-SS9/hermes-multichannel-prompt-optimizer",
+   "state": "archived",
+   "basis": "GitHub repository is archived",
+   "superseded_by": []
+  },
+  "scope-recall": {
+   "repo": "https://github.com/410979729/scope-recall-hermes",
+   "state": "missing",
+   "basis": "GitHub API returned no repository on 2026-11-16 (deleted, private, or renamed without redirect)",
+   "superseded_by": []
+  },
+  "sendblue": {
+   "repo": "https://github.com/duoi/hermes-sendblue-plugin",
+   "state": "unmaintained",
+   "basis": "no commit on the default branch for 192 days (> 180)",
+   "superseded_by": []
+  },
+  "tokenwatch": {
+   "repo": "https://github.com/0xBernard/tokenwatch",
+   "state": "unmaintained",
+   "basis": "no commit on the default branch for 188 days (> 180)",
+   "superseded_by": []
+  },
+  "weather": {
+   "repo": "https://github.com/FahrenheitResearch/hermes-weather-plugin",
+   "state": "unmaintained",
+   "basis": "no commit on the default branch for 225 days (> 180)",
+   "superseded_by": []
+  },
+  "agent-janitor": {
+   "repo": "https://github.com/ZidoCode/agent-janitor",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 305735a6657c (2026-11-12): chore(catalog): delist 8 entries whose repo or pinned commit is gone",
+   "superseded_by": []
+  },
+  "agent-ledger": {
+   "repo": "https://github.com/ZidoCode/agent-ledger",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 305735a6657c (2026-11-12): chore(catalog): delist 8 entries whose repo or pinned commit is gone",
+   "superseded_by": []
+  },
+  "antigravity-duet": {
+   "repo": "https://github.com/benfirad/hermes-plugin-antigravity-duet",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 242fabe08b7d (2026-11-10): plugin-catalog: rename antigravity-duet to daak-duffy",
+   "superseded_by": [
+    "daak-duffy"
+   ]
+  },
+  "card-grader": {
+   "repo": "https://github.com/Agenziamaia/card-grader",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit de9a2f307c9a (2026-11-14): catalog: remove card-grader (author withdrew plugin)",
+   "superseded_by": []
+  },
+  "context-audit": {
+   "repo": "https://github.com/ZidoCode/context-audit",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 305735a6657c (2026-11-12): chore(catalog): delist 8 entries whose repo or pinned commit is gone",
+   "superseded_by": []
+  },
+  "dxmt": {
+   "repo": "https://github.com/dxmt/dxmt",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 2d76c5010051 (2026-11-14): chore(plugin-catalog): delist four entries whose pinned source is gone",
+   "superseded_by": []
+  },
+  "eyes": {
+   "repo": "https://github.com/Agenziamaia/eyes",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit e96ae5523f77 (2026-11-14): catalog: remove eyes (author withdrew plugin)",
+   "superseded_by": []
+  },
+  "follow-through": {
+   "repo": "https://github.com/Agenziamaia/follow-through",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit cd9229889875 (2026-11-14): catalog: remove follow-through (author withdrew plugin)",
+   "superseded_by": []
+  },
+  "gemini-live-bridge": {
+   "repo": "https://github.com/cruzlxyz/gemini-live-bridge",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 4436eb78c961 (2026-11-14): rebrand: gemini-live-bridge becomes livetalk (pin v2.0.0)",
+   "superseded_by": [
+    "livetalk"
+   ]
+  },
+  "kiwi": {
+   "repo": "https://github.com/harrylabsj/hermes-plugin-kiwi",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 426426493101 (2026-11-14): chore(plugin-catalog): rename kiwi to kiwi-shopping and bump to v1.3.0 (kiwi@0.12.28)",
+   "superseded_by": [
+    "kiwi-shopping"
+   ]
+  },
+  "machine-library": {
+   "repo": "https://github.com/SpaceFrontiers/hermes-machine-library",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 305735a6657c (2026-11-12): chore(catalog): delist 8 entries whose repo or pinned commit is gone",
+   "superseded_by": []
+  },
+  "pidgeon": {
+   "repo": "https://github.com/pidgeon-ai/pidgeon-python",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 2d76c5010051 (2026-11-14): chore(plugin-catalog): delist four entries whose pinned source is gone",
+   "superseded_by": []
+  },
+  "scribase": {
+   "repo": "https://github.com/caelum0x/scribase-hermes-plugin",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 2d76c5010051 (2026-11-14): chore(plugin-catalog): delist four entries whose pinned source is gone",
+   "superseded_by": []
+  },
+  "skill-integrity": {
+   "repo": "https://github.com/ZidoCode/skill-integrity",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 305735a6657c (2026-11-12): chore(catalog): delist 8 entries whose repo or pinned commit is gone",
+   "superseded_by": []
+  },
+  "web-oxylabs": {
+   "repo": "https://github.com/oxylabs/hermes-web-oxylabs",
+   "state": "delisted",
+   "basis": "removed from the catalog in upstream commit 305735a6657c (2026-11-12): chore(catalog): delist 8 entries whose repo or pinned commit is gone",
+   "superseded_by": []
+  },
+  "or-picker": {
+   "repo": "",
+   "state": "removed",
+   "basis": "on the catalog kill list (removed.yaml) since 2026-09-28: Folded into openrouter-picker. Installing the provider alone left the picker broken. Install openrouter-picker.",
+   "superseded_by": [
+    "openrouter-picker"
+   ]
+  },
+  "hermes-dashboard": {
+   "repo": "https://github.com/Kori-x/hermes-dashboard",
+   "state": "unmaintained",
+   "basis": "no commit on the default branch for 222 days (> 180); dates are for the whole repository, not only the plugin subdirectory",
+   "superseded_by": []
+  },
+  "hermes-context-manager": {
+   "repo": "https://github.com/eas4ai/hermes-context-manager",
+   "state": "unmaintained",
+   "basis": "no commit on the default branch for 216 days (> 180)",
+   "superseded_by": []
+  },
+  "model-router": {
+   "repo": "https://github.com/open-world-project/model-router",
+   "state": "unmaintained",
+   "basis": "no commit on the default branch for 190 days (> 180)",
+   "superseded_by": [
+    "model-router"
+   ]
+  },
+  "hook-monitor": {
+   "repo": "https://github.com/weizhoublue/hermes-plugins",
+   "state": "unmaintained",
+   "basis": "no commit on the default branch for 203 days (> 180)",
+   "superseded_by": []
+  },
+  "wxtrain": {
+   "repo": "https://github.com/FahrenheitResearch/hermes-wxtrain-plugin",
+   "state": "unmaintained",
+   "basis": "no commit on the default branch for 239 days (> 180)",
+   "superseded_by": []
+  },
+  "hermes-payguard": {
+   "repo": "https://github.com/nativ3ai/hermes-payguard",
+   "state": "unmaintained",
+   "basis": "no commit on the default branch for 241 days (> 180)",
+   "superseded_by": []
+  },
+  "hermes-gate-spend-gate": {
+   "repo": "https://github.com/observer-protocol/hermes-gate",
+   "state": "archived",
+   "basis": "GitHub repository is archived; dates are for the whole repository, not only the plugin subdirectory",
+   "superseded_by": []
+  },
+  "hermes-cloudflare": {
+   "repo": "https://github.com/raulvidis/hermes-cloudflare",
+   "state": "missing",
+   "basis": "listed in awesome-hermes-agent but the GitHub API returned 404 for the repository tree on 2026-11-16",
+   "superseded_by": []
+  },
+  "hermes-eval": {
+   "repo": "https://github.com/saurav0989/hermes-eval",
+   "state": "missing",
+   "basis": "listed in awesome-hermes-agent but the GitHub API returned 404 for the repository tree on 2026-11-16",
+   "superseded_by": []
+  },
+  "hermes-motif": {
+   "repo": "https://github.com/saurav0989/hermes-motif",
+   "state": "missing",
+   "basis": "listed in awesome-hermes-agent but the GitHub API returned 404 for the repository tree on 2026-11-16",
+   "superseded_by": []
+  }
+ }
+}

@@ -45,7 +45,7 @@ _LOCK = threading.Lock()
 # Settings the panel may change: those of the plugin's settings form (plugin.yaml config_schema); admin.SETTINGS.
 SETTINGS = ("lessons", "language", "tool_hints", "feedback_signals", "agent_tools", "slow_turn_seconds",
             "owner_sender_ids", "owner_platforms", "reflector", "reflector_daily_limit", "autopilot_minutes",
-            "runtime_guard", "auto_actions")
+            "runtime_guard", "mode")
 
 
 def _module(name: str):
@@ -166,12 +166,13 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
     return {
         "lang": lang, "days": days, "generated": now, "profile": state["profile"], "version": state["plugin_version"],
         "mode": opts["lessons"], "status": state, "report": digest, "lessons": playbook, "proposals": queue,
-        "automatic": {"mode": opts["auto_actions"], "recent": recent},
+        "automatic": {"mode": opts["mode"], "recent": recent},
         "pending": pending, "history": history, "can_decide": can_decide, "decide_reason": decide_reason,
         "settings": {"values": values, "reload": reload_keys, "recommended": recommended,
                      "reload_keys": ["runtime_guard", "tool_hints"], "problems": sorted(set(settings_problems))},
         "owner": {"channels": channels, "suggestions": suggestions},
         "status_md": status.markdown(state, lang), "report_md": report.markdown(digest, lang), "health_md": health_md,
+        "environment_md": status.environment_markdown(home, lang, mode=opts["mode"]),
         "commands": {"menu": f"{hermes} evolution", "review": f"{hermes} evolution lessons review",
                      "learn": f"{hermes} evolution learn",
                      "approve_lesson": f"{hermes} evolution lessons approve {{id}}",

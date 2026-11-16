@@ -1,5 +1,6 @@
 """Learning from what Hermes recorded before the plugin was installed (state.db), with the hooks' semantics."""
 
+import os
 import json
 import sqlite3
 import tempfile
@@ -11,6 +12,8 @@ from hermes_atlas_evolution import backfill
 from hermes_atlas_evolution.evolve import cycle
 from hermes_atlas_evolution.experience import experience, utc_day
 from hermes_atlas_evolution.operations import close_observers
+
+os.environ.setdefault("ATLAS_EVOLUTION_NO_HERMES", "1")   # never the real Hermes of this machine
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400

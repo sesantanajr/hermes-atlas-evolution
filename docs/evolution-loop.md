@@ -732,7 +732,7 @@ Subcommands of `hermes evolution`. Output is JSON, except `report` and `status` 
 | 2 Open proposals | Grouped as changes the plugin applies, lessons, changes you apply and observations, each with its title, risk, what was seen (with the numbers), what applying it does and how to undo it. `a` applies a change now with Hermes' own command, `t` applies all of them, `d` dismisses an observation, `e` writes the lesson for a failure no template covers |
 | 3 Active lessons | With the measured effect; retire one |
 | 4 Decision history and undo | Your latest 20 decisions and the automatic actions, from the terminal, the panel and the autopilot; undo one while what it changed is still as it left it |
-| 5 Automatic actions | The mode and what each mode does, the automatic actions of the last 7 days with their undo, and `m` to change the mode (see [Automatic actions](#automatic-actions)) |
+| 5 Mode and automatic actions | The mode (Auto, Assisted, Manual) and what each does, the automatic actions of the last 7 days with their undo, and `m` to change the mode (see [The mode and automatic actions](#the-mode-and-automatic-actions)) |
 | 6 Settings | Every option of the settings form with its current value; change one, or apply the recommended setup (lessons on `auto`, the reflector on, complete automatic actions, and the chat channels that are yours by construction) after seeing what changes. Written with `hermes --profile <name> config set ...`, checked first with the plugin's own rules |
 | 7 Who is you in chats | Each channel of the last 30 days with its senders, the suggested ones marked; mark or unmark a whole channel or a sender as you |
 | 8 Hermes memory | See [Hermes memory](#hermes-memory) |
@@ -740,22 +740,41 @@ Subcommands of `hermes evolution`. Output is JSON, except `report` and `status` 
 | 11 | A learning pass now |
 | 12 Hermes health | Read from Hermes' own files, with no agent, network or token: the gateway, the session database, disk and folder growth, memory, swap, CPU, old tool versions; and Hermes' own `pm doctor`, `doctor`, `doctor --fix` (after a backup) and `pm gc` (see [Maintenance](maintenance.md)) |
 | 13 Operating system | The system's check, plan, update, repair and last report (Linux with apt; see [Maintenance](maintenance.md)) |
+| 14 Environment | Every profile of this Hermes (sessions, plugins on and never loaded, skills), Hermes' plugin catalog, and what to fix across them, each with what was seen, what to do, the command and its undo; `v` looks again now (see [The environment](#the-environment)) |
 
 A decision is made with the same code as the dashboard panel (`admin.py`) and recorded in the same history, with `terminal` as the place. The menu opens only in the operator's terminal: never where the commands that decide refuse to run (an agent's shell, see [SECURITY.md](../SECURITY.md)), and never without a terminal on both ends.
 
-## Automatic actions
+## The mode and automatic actions
 
-`auto_actions` says what the plugin does by itself at the end of each learning pass (the autopilot's, `learn`'s or the menu's). It counts only from Hermes' configuration (the settings form, the panel, the menu or `hermes config set`), never from the plugin's `settings.json`, which the agent's file tools can write.
+`mode` says what the plugin does by itself at the end of each learning pass (the autopilot's, `learn`'s or the menu's). `auto` (default) is set over a narrower choice only from Hermes' configuration (the settings form, the panel, the menu or `hermes config set`), never from the plugin's `settings.json`, which the agent's file tools can write. The 0.8.3 setting `auto_actions` is still read when `mode` is not set: `off` is manual, `safe` assist, `full` auto.
 
 | Mode | What runs by itself |
 |---|---|
-| `off` | Nothing. Every change waits for you. |
-| `safe` (default) | Copies of a memory entry that are the very same text, character for character, are taken out, in one file or across both (the copy in `USER.md` stays). An entry that differs in anything, case and spacing included (a path, a password, an indented block), and similar entries are never touched by themselves: they wait for you in the menu. An entry you put back is never taken out by itself again. |
-| `full` | Also the reversible changes to Hermes a proposal asks for, today **locking a skill** the curator keeps rewriting (`hermes --profile <name> curator lock <skill>`), at most 3 per pass. |
+| `manual` | Nothing. Every change waits for you. |
+| `assist` | Copies of a memory entry that are the very same text, character for character, are taken out, in one file or across both (the copy in `USER.md` stays). An entry that differs in anything, case and spacing included, and similar entries are never touched by themselves. An entry you put back is never taken out by itself again. |
+| `auto` (default) | Also, in **every profile** of this Hermes ([the environment](#the-environment)): locking a skill the curator keeps rewriting (`hermes curator lock`), turning off a plugin Hermes' catalog removed (`hermes -p <profile> plugins disable`), installing the plugin in a profile used in the last 7 days without it (`plugins install sesantanajr/hermes-atlas-evolution --enable`, or `plugins enable`), moving a failed install's folder (`plugins/.install-*`) to `<root>/evolution/trash/`, and `hermes pm gc` when 300 MB or more of old tool versions are unused, at most once a week. At most 3 changes per pass. |
 
-Each action is recorded in the decision history with `automatic` as the actor, shows up in the menu's summary and in the panel's header, and can be undone from the menu (screen 5 or 4), the panel's History or `hermes evolution decisions undo <id>`: a lock is undone with `hermes curator unlock`, a memory entry is put back from the copy kept. An automatic change you undo is never applied by itself again. A skill already locked or pinned is left as it is. A failure (Hermes refusing, a timeout) is reported in the pass's result and never stops the pass.
+Each action is recorded in the decision history with `automatic` as the actor, shows up in the menu's summary and in the panel's header, and can be undone from the menu (screen 5 or 4), the panel's History or `hermes evolution decisions undo <id>`: a lock with `hermes curator unlock`, a plugin turned off with `plugins enable`, an install with `plugins remove`, a folder moved back from the trash, a memory entry put back from the copy kept (`hermes pm gc` has nothing to undo). An automatic change you undo is never applied by itself again. A skill already locked or pinned is left as it is. A failure (Hermes refusing, a timeout) is reported in the pass's result and never stops the pass.
 
-The same changes can be applied one at a time, or all at once, from the menu (**Apply now**, `t`) and the panel, in any mode; a skill you had locked yourself is left as it is, so an undo never unlocks it. A proposal is claimed before Hermes runs, so a decision made meanwhile or a second click finds it taken. Archiving a skill nobody used, a rollback or a change to a Hermes setting is never applied by the plugin: it shows the command (Hermes 0.23.1's `curator restore` does not put an archived skill back where it was). An automatic change Hermes refuses is tried again a day later; a pass stops trying at the first refusal and leaves the commands out when the pass is near its time limit.
+The same changes, and turning off one of two plugins that do the same job or change the same tool's result, can be applied one at a time, or all at once, from the menu (**Apply now**, `t`, or screen 14) and the panel, in any mode. Removing a plugin, updating one, archiving a skill, a rollback or a change to a Hermes setting is never applied by the plugin: it shows the command, because its undo is not certain (Hermes 0.23.1's `curator restore` does not put an archived skill back where it was). An automatic change Hermes refuses is tried again a day later; a pass stops trying at the first refusal and leaves the commands out when the pass is near its time limit.
+
+## The environment
+
+One profile looks after the whole Hermes: the default one when the plugin is on there, else the first profile (in name order) that has it on. At most every 6 hours, in its learning pass, or at once from the menu (screen 14, `v`) or `hermes evolution environment scan`, it reads every profile, read-only: its `config.yaml` (which plugins it enables or disables), each plugin's `plugin.yaml`, git checkout (`.git/config`, `HEAD`) and Python source, parsed with Python's `ast` and never imported or run, its skills (`SKILL.md`) and Hermes' skill records (`skills/.usage.json`), its sessions in the last 7 and 30 days, and Hermes' plugin catalog (the copy Hermes caches in `cache/plugin-catalog.json`, else the one in its source). What it found becomes proposals of that profile, each with what was seen, what to do, the command and its undo:
+
+| Situation | When | What the plugin does |
+|---|---|---|
+| Two plugins change the same tool's result | Two enabled plugins of a profile register the same transform hook (`transform_tool_result`, `transform_terminal_output`, `transform_llm_output`) and their code acts on a common tool, or one of them on any tool. Hermes runs plugins in alphabetical order of their manifest name and keeps only the first result of each call: the later one's change is lost. Plugins on different tools are not reported. | Proposes turning the later one off in that profile (`plugins disable`), or the first one when the later one is a security plugin. |
+| Two plugins do the same job | Two enabled plugins rewrite the terminal's commands in `pre_tool_call`, or fill a role the knowledge base says only one should. | Proposes turning the second off. |
+| Removed from the Hermes catalog | A plugin is on Hermes' kill list. | Mode auto turns it off; removing it is yours. |
+| Archived or unmaintained | The knowledge base (checked against GitHub on 2026-11-16) says its repository is archived, delisted, gone, or has had no commit for 180 days. | Shows the command that removes it, and its replacement when one is known. |
+| Installed and never loaded | A plugin folder of a profile is not enabled there. | Shows the command that removes it, with the room it takes. |
+| A failed install left a folder | `plugins/.install-*`, older than a day. | Mode auto moves it to the trash. |
+| A newer reviewed version | Hermes' catalog has a newer version of an installed plugin (one finding per plugin, every profile listed). | Shows the update command for each profile. |
+| A profile in use without this plugin | Sessions in the last 7 days. | Mode auto installs it there (Hermes downloads it). |
+| Skills unused, duplicated, alike, shared | Not used for 30 days (Hermes' own `curator.archive_after_days` default); the same text under two names; nearly the same description; the same file in 3 or more profiles. | Shows the archive command, or the curator's consolidation (`curator run --consolidate --dry-run`, which uses a model), or `skills.external_dirs` for one shared copy. |
+
+The catalog, the knowledge base and the playbook are kept in that profile's `evolution.sqlite3` (tables `catalog_plugin`, `catalog_removed`, `knowledge_plugin`, `playbook`), so `hermes evolution environment catalog` and any sqlite reader see them.
 
 ## Hermes memory
 

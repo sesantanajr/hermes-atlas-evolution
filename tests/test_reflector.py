@@ -1,3 +1,4 @@
+import os
 import json
 import sqlite3
 import tempfile
@@ -11,6 +12,8 @@ from hermes_atlas_evolution.experience import experience
 from hermes_atlas_evolution.operations import close_observers
 from hermes_atlas_evolution.reflector import EXCERPT_LIMIT, SCHEMA, host_caller, reflect, scrub
 from hermes_atlas_evolution.signals import record_tool
+
+os.environ.setdefault("ATLAS_EVOLUTION_NO_HERMES", "1")   # never the real Hermes of this machine
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400

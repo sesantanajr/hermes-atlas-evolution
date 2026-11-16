@@ -21,6 +21,8 @@ from hermes_atlas_evolution.menu import Console, Menu
 from test_menu_082 import Script
 from test_panel_decisions import Base
 
+os.environ.setdefault("ATLAS_EVOLUTION_NO_HERMES", "1")   # never the real Hermes of this machine
+
 NOW = time.time()
 UPGRADABLE = """Listing...
 libc6/resolute-updates 2.42-0ubuntu3.1 amd64 [upgradable from: 2.42-0ubuntu3]
@@ -675,7 +677,7 @@ class PanelHealthTest(Base):
         snap = load_api().snapshot(self.home, now=NOW, runtime_config={}, lang="pt", can_decide=True)
         self.assertIn("libc6", snap["health_md"])
         self.assertNotIn("{", snap["health_md"])
-        self.assertIn("auto_actions", snap["settings"]["values"])
+        self.assertIn("mode", snap["settings"]["values"])
         self.assertEqual(snap["status"]["system"]["security"], 2)
 
 

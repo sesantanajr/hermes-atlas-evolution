@@ -19,6 +19,8 @@ from hermes_atlas_evolution.menu import Console, Menu
 from test_menu_082 import Script, write_memory
 from test_panel_decisions import Base, load_api
 
+os.environ.setdefault("ATLAS_EVOLUTION_NO_HERMES", "1")   # never the real Hermes of this machine
+
 NOW = time.time()
 
 
@@ -122,6 +124,7 @@ class ApplyTest(Base):
 
     def test_terminal_approve_applies_a_change(self):
         proposal = propose(self.home, "skill_lock", "hermes-admin", LOCK, "hermes curator lock hermes-admin")
+        (self.home / "config.yaml").write_text("model: test\n")   # Hermes runs only for a real profile
         hermes = Hermes()
         stream = io.StringIO()
         with patch.object(admin, "hermes_executable", return_value="/usr/local/bin/hermes"), \
@@ -177,15 +180,18 @@ class AutomaticTest(Base):
         self.assertEqual(done["applied"], [])
         self.assertEqual(len(done["failed"]), 1)
 
-    def test_the_setting_defaults_to_safe_and_the_agent_cannot_widen_it(self):
-        self.assertEqual(options({}, {})["auto_actions"], "safe")
-        self.assertEqual(options({"evolution": {"auto_actions": False}}, {})["auto_actions"], "off")
-        self.assertEqual(options({"evolution": {"auto_actions": "maybe"}}, {}, strict=False)["auto_actions"], "off")
+    def test_the_mode_defaults_to_auto_and_the_agent_cannot_widen_it(self):
+        self.assertEqual((options({}, {})["mode"], options({}, {})["auto_actions"]), ("auto", "full"))
+        # an owner who chose the 0.8.3 setting keeps that choice
+        self.assertEqual(options({"evolution": {"auto_actions": False}}, {})["mode"], "manual")
+        self.assertEqual(options({"evolution": {"auto_actions": "safe"}}, {})["mode"], "assist")
+        self.assertEqual(options({"evolution": {"auto_actions": "safe", "mode": "auto"}}, {})["mode"], "auto")
+        self.assertEqual(options({"evolution": {"mode": "maybe"}}, {}, strict=False)["auto_actions"], "off")
         with self.assertRaises(ValueError):
-            options({"evolution": {"auto_actions": "maybe"}}, {}, strict=True)
+            options({"evolution": {"mode": "maybe"}}, {}, strict=True)
+        self.assertNotIn("mode", _trusted({"evolution": {"mode": "auto"}})["evolution"])
         self.assertNotIn("auto_actions", _trusted({"evolution": {"auto_actions": "full"}})["evolution"])
-        self.assertEqual(_trusted({"evolution": {"auto_actions": "off"}})["evolution"]["auto_actions"], "off")
-
+        self.assertEqual(_trusted({"evolution": {"mode": "manual"}})["evolution"]["mode"], "manual")
 
 class MenuActionsTest(Base):
     def menu(self, *answers, lang="en"):
@@ -199,6 +205,7 @@ class MenuActionsTest(Base):
     def setUp(self):
         super().setUp()
         self.hermes = Hermes()
+        (self.home / "config.yaml").write_text("model: test\n")   # Hermes runs only for a real profile
         environment = patch.dict(os.environ, {"NO_COLOR": "1"})
         environment.start()
         self.addCleanup(environment.stop)
@@ -245,12 +252,12 @@ class MenuActionsTest(Base):
             written.append(values)
             return list(values)
 
-        script = Script("5", "1", "y", "m", "3", "", "0")
+        script = Script("5", "1", "y", "m", "2", "", "0")
         Menu(self.home, {}, lang="en", console=Console(read=script.read, write=script.write, width=110, color=False),
              clock=lambda: NOW, writer=writer).run()
         self.assertIn("took a repeated entry out of MEMORY.md", script.text)
         self.assertIn("Undone.", script.text)
-        self.assertEqual(written, [{"auto_actions": "full"}])
+        self.assertEqual(written, [{"mode": "assist"}])
         self.assertEqual(memory_care.parse((self.home / "memories" / "MEMORY.md").read_text(encoding="utf-8")),
                          ["Same.", "Same."])
         self.assertEqual(actions.automatic(self.home, now=NOW, mode="safe")["memory"], [])   # put back: never again
@@ -266,10 +273,10 @@ class PanelTest(Base):
         told = snap["proposals"][0]["explain"]
         self.assertEqual((told["title"], told["category"], told["can_apply"]),
                          ("Travar skill reescrita em excesso", "change", True))
-        self.assertEqual(snap["automatic"]["mode"], "safe")
+        self.assertEqual(snap["automatic"]["mode"], "auto")
         self.assertEqual(snap["automatic"]["recent"][0]["kind"], "memory")
-        self.assertEqual(snap["settings"]["values"]["auto_actions"], "safe")
-        self.assertIn("auto_actions", snap["settings"]["recommended"])
+        self.assertEqual(snap["settings"]["values"]["mode"], "auto")
+        self.assertNotIn("mode", snap["settings"]["recommended"])   # already auto by default
         with experience(self.home) as conn:
             self.assertEqual(decisions.history(conn)[0]["actor"], "automatic")
 
@@ -301,7 +308,9 @@ class Review083Test(Base):
         applied = actions.apply_proposal(self.home, proposal, now=NOW, runner=hermes, usage={})["decision"]
         for decision in (removed, applied):
             stream = io.StringIO()
-            with patch("hermes_atlas_evolution.admin.subprocess.run", hermes), contextlib.redirect_stdout(stream):
+            (self.home / "config.yaml").write_text("model: test\n")
+            with patch("hermes_atlas_evolution.admin.subprocess.run", hermes), contextlib.redirect_stdout(stream), \
+                    patch.object(admin, "hermes_executable", return_value="/usr/local/bin/hermes"):
                 execute(SimpleNamespace(lang="en", evolution_action="decisions", decisions_action="undo", id=decision),
                         self.home, runtime_config={})
             self.assertTrue(json.loads(stream.getvalue())["undone"], decision)

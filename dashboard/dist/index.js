@@ -25,7 +25,7 @@
                 tools: "Old tools", os: "System updates", security: "{n} security", reboot: "Reboot waiting",
                 yes: "yes", no: "no", attention: "Needs attention", nothing: "Nothing needs attention.",
                 how: "Checks and repairs", hint: "Hermes' checks and repairs (hermes doctor, pm doctor, pm gc) and the system's update run from the menu in your terminal, with a backup first, never by the agent:" },
-      tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", health: "Health", settings: "Settings", history: "History",
+      tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", health: "Health", environment: "Environment", settings: "Settings", history: "History",
               digest: "Digest", status: "Status" },
       mode: { auto: "lessons: auto", suggest: "lessons: suggest", off: "lessons: off" },
       guardOn: "guard on", guardOff: "guard off", reflectorOn: "reflector on", reflectorOff: "reflector off",
@@ -82,9 +82,10 @@
         slow_turn_seconds: "A turn is slow after (seconds)", tool_hints: "Add the lesson to the failing tool result",
         agent_tools: "Let the agent read and propose lessons (proposals still wait for you)",
         runtime_guard: "Runtime guard (keeps the agent from taking Hermes down)",
-        auto_actions: "Automatic actions (what the plugin does by itself)",
-        autoModes: { off: "off: everything waits for you", safe: "safe: takes out copies of a memory entry that are the very same text",
-                     full: "full: also locks skills the curator keeps rewriting" },
+        mode: "Mode (what the plugin does by itself)",
+        autoModes: { auto: "Auto (default): thinks and acts for you in every profile, only what is safe and can be undone",
+                     assist: "Assisted: only identical memory copies by itself; the rest waits for you",
+                     manual: "Manual: measures and proposes; nothing changes by itself" },
         autoHint: "Each action is recorded in the History with its undo; an automatic change you undo is never repeated.",
         guardWarn: "Turning the guard off lets the agent restart or delete what Hermes runs on.",
         owner: "Who is you in chats", ownerHint: "Turns from these count as yours: you get every lesson there, and your failures there teach. List only what nobody else uses.",
@@ -105,7 +106,7 @@
                 tools: "Ferramentas antigas", os: "Atualizações do sistema", security: "{n} de segurança", reboot: "Reinício pendente",
                 yes: "sim", no: "não", attention: "Pede atenção", nothing: "Nada pede atenção.",
                 how: "Checagens e reparos", hint: "As checagens e os reparos do Hermes (hermes doctor, pm doctor, pm gc) e a atualização do sistema rodam pelo menu no seu terminal, com backup antes, nunca pelo agente:" },
-      tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", health: "Saúde", settings: "Configurações", history: "Histórico",
+      tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", health: "Saúde", environment: "Ambiente", settings: "Configurações", history: "Histórico",
               digest: "Resumo", status: "Status" },
       mode: { auto: "lições: auto", suggest: "lições: suggest", off: "lições: off" },
       guardOn: "guarda ligada", guardOff: "guarda desligada", reflectorOn: "refletor ligado", reflectorOff: "refletor desligado",
@@ -162,9 +163,10 @@
         slow_turn_seconds: "Um turno é lento depois de (segundos)", tool_hints: "Juntar a lição ao resultado da ferramenta que falhou",
         agent_tools: "Deixar o agente ler e propor lições (as propostas continuam esperando você)",
         runtime_guard: "Guarda de runtime (impede o agente de derrubar o Hermes)",
-        auto_actions: "Ações automáticas (o que o plugin faz sozinho)",
-        autoModes: { off: "desligadas: tudo espera você", safe: "seguras: tira cópias de uma entrada da memória que são exatamente o mesmo texto",
-                     full: "completas: também trava skills que o curador reescreve sem parar" },
+        mode: "Modo (o que o plugin faz sozinho)",
+        autoModes: { auto: "Auto (padrão): pensa e age por você em todos os perfis, só o que é seguro e pode ser desfeito",
+                     assist: "Assistido: só as cópias idênticas da memória sozinho; o resto espera você",
+                     manual: "Manual: mede e propõe; nada muda sozinho" },
         autoHint: "Cada ação fica no Histórico com o desfazer; uma mudança automática que você desfaz nunca se repete.",
         guardWarn: "Desligar a guarda deixa o agente reiniciar ou apagar aquilo em que o Hermes roda.",
         owner: "Quem é você nos chats", ownerHint: "Os turnos destes contam como seus: ali você recebe todas as lições, e as suas falhas ensinam. Marque só o que ninguém mais usa.",
@@ -628,7 +630,7 @@
       set(key, list);
     };
     const recommended = function () {
-      const values = Object.assign({}, form, { lessons: "auto", reflector: true, auto_actions: "full" });
+      const values = Object.assign({}, form, { lessons: "auto", reflector: true, mode: "auto" });
       suggestions.forEach(function (item) {
         const key = item.kind === "platform" ? "owner_platforms" : "owner_sender_ids";
         if ((values[key] || []).indexOf(item.value) < 0) values[key] = (values[key] || []).concat([item.value]);
@@ -671,7 +673,7 @@
             h(Button, { primary: true, onClick: recommended, disabled: disabled }, s.recommended),
             h("span", { className: "hae-muted" }, s.recommendedHint)) : null,
           field("lessons", select("lessons", ["auto", "suggest", "off"], s.modes), s.lessonsHint),
-          field("auto_actions", select("auto_actions", ["off", "safe", "full"], s.autoModes), s.autoHint),
+          field("mode", select("mode", ["auto", "assist", "manual"], s.autoModes), s.autoHint),
           field("reflector", checkbox("reflector")),
           field("reflector_daily_limit", number("reflector_daily_limit", 1, 50)),
           field("autopilot_minutes", number("autopilot_minutes", 0, 1440)),
@@ -716,7 +718,7 @@
         const what = row.kind === "lesson" ? (t.action[row.action] || row.action) + " #" + row.target
           : row.kind === "setting" ? (t.action.set) + " " + row.target + ": " + JSON.stringify(row.before.value) + " → " + JSON.stringify(row.after.value)
           : row.kind === "memory" ? t.memoryRemoved + " " + row.target
-          : row.kind === "proposal" && row.after && row.after.applied ? t.action.apply + " hermes " + row.after.applied.join(" ")
+          : row.kind === "proposal" && row.after && row.after.applied ? t.action.apply + " " + (row.command || "hermes " + row.after.applied.join(" "))
           : (t.action[row.action] || row.action) + " " + t.tabs.proposals.toLowerCase() + " #" + row.target;
         return h("tr", { key: row.id, className: row.undone ? "hae-row-muted" : "" },
           h("td", null, when(row.at, t.lang)),
@@ -730,7 +732,7 @@
       }))));
   }
 
-  const TABS = ["overview", "lessons", "proposals", "health", "settings", "history", "digest", "status"];
+  const TABS = ["overview", "lessons", "proposals", "health", "environment", "settings", "history", "digest", "status"];
 
   function EvolutionPage() {
     const i18n = useI18n() || {};
@@ -799,6 +801,7 @@
     else if (tab === "settings") body = h(Settings, common);
     else if (tab === "history") body = h(History, common);
     else if (tab === "health") body = h(Health, common);
+    else if (tab === "environment") body = h("div", { className: "hae-stack" }, h(Markdown, { text: data.environment_md || "" }));
     else if (tab === "digest") body = h(Markdown, { text: data.report_md });
     else body = h(Markdown, { text: data.status_md });
 
