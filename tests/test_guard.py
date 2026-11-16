@@ -151,15 +151,15 @@ class PlatformTest(unittest.TestCase):
                 found = check("terminal", {"command": command}, protected=(profile, "S:/hermes/runtime"), home=home)
                 return found["kind"] if found else None
 
-            for command in ("rm -rf 'C:\\Users\\owner\\AppData\\Local\\hermes'", "rm -rf C:/Users/owner/AppData/Local/hermes",
-                            "rm -rf /c/Users/owner/AppData/Local/hermes", "rm -rf /C/users/OWNER/appdata/local/HERMES/",
-                            "rm -rf ~/AppData/Local/hermes", "rm -rf $LOCALAPPDATA/hermes",
+            for command in ("rm -r -f 'C:\\Users\\owner\\AppData\\Local\\hermes'", "rm -r -f C:/Users/owner/AppData/Local/hermes",
+                            "rm -r -f /c/Users/owner/AppData/Local/hermes", "rm -r -f /C/users/OWNER/appdata/local/HERMES/",
+                            "rm -r -f ~/AppData/Local/hermes", "rm -r -f $LOCALAPPDATA/hermes",
                             "Remove-Item -Recurse -Force $env:LOCALAPPDATA/hermes", "del /s /q 'C:\\Users\\owner\\AppData'",
-                            "rm -rf 'S:\\hermes'"):
+                            "rm -r -f 'S:\\hermes'"):
                 with self.subTest(command):
                     self.assertEqual(windows(command), "runtime_removal")
-            for command in ("rm -rf C:/Users/owner/AppData/Local/hermes-backup", "del /s /q 'S:\\tmp\\build'",
-                            "rm -rf $UNSET_VARIABLE/hermes", "rm -rf ./hermes", "Remove-Item C:/Users/owner/Downloads/x.zip"):
+            for command in ("rm -r -f C:/Users/owner/AppData/Local/hermes-backup", "del /s /q 'S:\\tmp\\build'",
+                            "rm -r -f $UNSET_VARIABLE/hermes", "rm -r -f ./hermes", "Remove-Item C:/Users/owner/Downloads/x.zip"):
                 with self.subTest(command):
                     self.assertIsNone(windows(command))
 

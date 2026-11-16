@@ -11,21 +11,22 @@ Este documento descreve o ciclo que o Atlas Evolution acrescenta ao Hermes Agent
 3. [O autopilot](#o-autopilot)
 4. [Aprender com o histórico do Hermes](#aprender-com-o-histórico-do-hermes)
 5. [Sinais](#sinais)
-6. [Lições](#lições)
-7. [O refletor](#o-refletor)
-8. [Como uma lição é medida](#como-uma-lição-é-medida)
-9. [Skills pelo resultado](#skills-pelo-resultado)
-10. [Mudanças e experimentos](#mudanças-e-experimentos)
-11. [Saúde das skills](#saúde-das-skills)
-12. [Rendimento do aprendizado](#rendimento-do-aprendizado)
-13. [Radar de saúde](#radar-de-saúde)
-14. [Propostas](#propostas)
-15. [Resumo](#resumo)
-16. [Status e aviso ao dono](#status-e-aviso-ao-dono)
-17. [Comandos](#comandos)
-18. [Configuração e idioma](#configuração-e-idioma)
-19. [Ferramentas do agente e a skill distribuída](#ferramentas-do-agente-e-a-skill-distribuída)
-20. [Armazenamento](#armazenamento)
+6. [Quem é atendido](#quem-é-atendido)
+7. [Lições](#lições)
+8. [O refletor](#o-refletor)
+9. [Como uma lição é medida](#como-uma-lição-é-medida)
+10. [Skills pelo resultado](#skills-pelo-resultado)
+11. [Mudanças e experimentos](#mudanças-e-experimentos)
+12. [Saúde das skills](#saúde-das-skills)
+13. [Rendimento do aprendizado](#rendimento-do-aprendizado)
+14. [Radar de saúde](#radar-de-saúde)
+15. [Propostas](#propostas)
+16. [Resumo](#resumo)
+17. [Status e aviso ao dono](#status-e-aviso-ao-dono)
+18. [Comandos](#comandos)
+19. [Configuração e idioma](#configuração-e-idioma)
+20. [Ferramentas do agente e a skill distribuída](#ferramentas-do-agente-e-a-skill-distribuída)
+21. [Armazenamento](#armazenamento)
 
 ## Visão geral
 
@@ -123,13 +124,13 @@ O autopilot (`autopilot`) roda a passada sozinho, numa thread daemon em segundo 
 - **O que o aciona.** Três empurrões, nenhum deles no caminho do turno:
   - os hooks `post_llm_call` e `on_session_end`, depois de cada turno;
   - um relógio: uma thread daemon por perfil carregado (`hermes-atlas-evolution-clock`) que empurra a passada 2 minutos depois de o plugin carregar (`CLOCK_FIRST_SECONDS`) e depois a cada 10 minutos (`CLOCK_PERIOD_SECONDS`). Um gateway que atende vários perfis entrega o tick do Kanban só ao próprio perfil, então, sem o relógio, um perfil sem turnos nunca faria uma passada. O relógio só começa quando `autopilot_minutes` não é 0 e o host oferece `on_unload` (o Hermes 0.23.1 oferece), e para quando o plugin é descarregado, então uma recarga nunca deixa dois relógios;
-  - o `on_kanban_dispatch_tick`, que o Hermes dispara uma vez por tick do despachante do Kanban (a cada 60 segundos no padrão), para o perfil do próprio gateway, e só onde o despachante roda dentro do gateway (`kanban.dispatch_in_gateway`).
+  - o `on_kanban_dispatch_tick`, que o Hermes dispara uma vez por tick do despachante do Kanban (a cada 60 segundos, por padrão), para o perfil do próprio gateway, e só onde o despachante roda dentro do gateway (`kanban.dispatch_in_gateway`).
 
   Um empurrão só compara dois relógios: uma checagem começa no máximo uma vez a cada 60 segundos por processo (`CHECK_SECONDS`), numa thread em segundo plano (`hermes-atlas-evolution-autopilot`).
 - **Uma passada por perfil.** Todo processo do perfil, seja um gateway, uma sessão da CLI ou o `ops tick`, reserva a passada com um compare-and-set no banco do plugin: numa única transação de escrita, ele lê quando a última passada terminou e quem detém a reserva, e toma a reserva. Uma reserva dura 15 minutos (`LEASE_SECONDS`), então um processo que morre no meio de uma passada deixa uma reserva que expira, e a passada é tentada de novo. Uma passada que falha é tentada de novo depois de 10 minutos (`RETRY_SECONDS`), em vez de um intervalo inteiro, e a primeira falha num processo é registrada no log uma vez.
 - **Um processo que sai no meio de uma passada.** Quando o interpretador encerra com a passada ainda rodando, como pode acontecer com um comando de vida curta, o processo libera a reserva na saída e registra a passada como falha (`ProcessExit`), então outro processo tenta de novo 10 minutos depois, em vez de esperar a reserva expirar.
 - **O perfil certo.** O Hermes guarda o perfil ativo, e o escopo dos segredos dele, em variáveis de contexto que threads novas não herdam. A thread fixa a pasta e o escopo de segredos do perfil do próprio plugin antes de qualquer leitura da configuração do Hermes, então, num gateway que atende vários perfis, uma chamada do refletor usa as chaves de provedor daquele perfil, e não as do gateway.
-- **Descarga.** Quando o plugin é descarregado, o relógio para, uma checagem já a caminho devolve a passada que reservou, e uma passada em andamento interrompe a leitura do histórico na fatia seguinte.
+- **Descarregamento.** Quando o plugin é descarregado, o relógio para, uma checagem já a caminho devolve a passada que reservou, e uma passada em andamento interrompe a leitura do histórico na fatia seguinte.
 - **Configurações.** Cada passada lê as configurações de novo, e um valor inválido volta por conta própria a um valor seguro, em vez de fazer a passada falhar (veja [Configuração e idioma](#configuração-e-idioma)). O próprio intervalo é definido quando o plugin carrega.
 - **Passadas manuais.** O `hermes evolution learn` espera até 30 segundos por uma passada em andamento, em vez de rodar junto com ela, e depois conta como a passada mais recente, para que o autopilot não a repita logo em seguida. Uma passada manual que falha deixa o agendamento como estava. O `ops tick` usa a mesma reserva, com o próprio intervalo de uma hora.
 
@@ -141,17 +142,18 @@ O Hermes guarda todas as sessões de um perfil em `<HERMES_HOME>/state.db`. Enqu
 
 - **O que é lido.** As sessões que se sobrepõem aos últimos 14 dias (`BACKFILL_DAYS`) antes de o plugin começar a observar o perfil, de 25 em 25 (`SLICE_SESSIONS`), das mais antigas para as mais novas, e as mensagens delas dentro dessa janela. O banco é aberto somente para leitura e nunca é alterado.
 - **No que se transforma.** As mensagens são reprocessadas pelo mesmo código que os hooks usam:
-  - resultados de ferramentas viram contagens de ferramentas e assinaturas de falha e, com o refletor ligado e `lessons` fora de `off`, o trecho limpo de uma falha sem modelo. Um resultado gravado conta como falha do jeito que as ferramentas do Hermes informam: um campo `error`, um `exit_code` diferente de zero, `success: false` ou um texto que começa como um erro;
+  - resultados de ferramentas viram contagens de ferramentas e assinaturas de falha e, com o refletor ligado e `lessons` fora de `off`, o trecho mascarado de uma falha sem modelo fixo. Um resultado gravado conta como falha do jeito que as ferramentas do Hermes informam: um campo `error`, um `exit_code` diferente de zero, `success: false` ou um texto que começa como um erro;
   - mensagens do usuário abrem turnos, cronometrados por superfície, e, quando vêm do dono, contam como correções, perguntas repetidas ou agradecimentos;
-  - uma skill carregada com `skill_view` é cobrada pelo desfecho do turno dela;
+  - uma skill carregada com `skill_view` recebe o desfecho do turno dela;
   - um turno que chamou uma ferramenta de pesquisa na web (`web_search`, `web_extract`, `web_fetch`, `web_deep_research` ou `deep_research`) é cronometrado com as chamadas e os erros de pesquisa, como os hooks fazem, para a linha "Pesquisas na web" do resumo.
-- **Turnos.** Uma mensagem enviada antes de o agente responder entra no mesmo turno, como o Hermes faz, e não conta como pergunta repetida. Um turno termina concluído quando a última mensagem do assistente acabou sem pedir ferramentas. Fora isso, ele termina interrompido quando uma nova mensagem do usuário veio em seguida ou a sessão foi recolhida ou reiniciada, e falho nos demais casos. Um turno cortado pelo início da observação fica para os hooks.
-- **Nada é contado duas vezes.** Só é lido o histórico anterior ao momento em que o plugin começou a observar o perfil (`observed_since`). Esse momento é quando o plugin carregou pela primeira vez no perfil; numa atualização, cujo banco já tem dados ao vivo, é o início do dia mais antigo com dados ao vivo. Cada fatia é gravada numa única transação junto com o seu cursor, então uma passada interrompida no meio não deixa nada contado pela metade, e a passada seguinte continua depois da última sessão gravada.
+- **Turnos.** Uma mensagem enviada antes de o agente responder entra no mesmo turno, como o Hermes faz, e não conta como pergunta repetida. Um turno termina concluído quando a última mensagem do assistente acabou sem pedir ferramentas. Fora isso, ele termina interrompido quando uma nova mensagem do usuário veio em seguida ou a sessão foi recolhida ou reiniciada, e com falha nos demais casos. Um turno que já tinha terminado quando a observação começou conta, mesmo que a sessão tenha continuado depois; um turno cortado pelo início da observação fica para os hooks.
+- **Nada é contado duas vezes.** Só é lido o histórico anterior ao momento em que o plugin começou a observar o perfil (`observed_since`). Esse momento é quando o plugin carregou pela primeira vez no perfil; numa atualização, cujo banco já tem dados ao vivo, é o início do dia mais antigo com dados ao vivo. A compactação do Hermes arquiva as linhas de uma sessão e insere cópias delas, com o mesmo `message_uid` e às vezes com horário posterior ou corpo encurtado, mais uma linha de resumo: a leitura pula os resumos e reprocessa cada mensagem uma vez por sessão (pelo `message_uid` ou, em históricos sem ele, por uma identidade byte a byte). Cada fatia é gravada de forma síncrona numa única transação junto com o seu cursor, depois de conferir que nenhuma outra passada moveu o cursor, então uma passada interrompida no meio não deixa nada contado pela metade, e a passada seguinte continua depois da última sessão gravada. Uma sessão que não pode ser reprocessada é pulada e contada em `skipped`, nunca a leitura inteira.
+- **Refeita uma vez depois da 0.5.0.** Uma leitura do histórico que a 0.5.0 concluiu contou cada cópia da compactação, então a 0.6.0 a refaz uma vez: os dias UTC inteiros anteriores ao primeiro dia observado são limpos e reprocessados, os totais de falha devolvem o que esses dias somaram, e as linhas de base de lições congeladas com eles são contadas de novo. O primeiro dia observado e os seguintes não são tocados.
 - **Orçamento.** 20 segundos por passada no autopilot e no `ops tick`, 60 segundos na primeira passada feita pelo `status`, 120 segundos no `learn`. A passada seguinte continua de onde a anterior parou.
-- **Status.** `waiting` (nenhuma fatia lida ainda), `running`, `done`, `no_history` (não existe `state.db`), `unreadable` (tentado de novo na passada seguinte) e `unsupported_history` (um `state.db` sem as tabelas ou colunas esperadas). `done`, `no_history` e `unsupported_history` são definitivos.
+- **Status.** `waiting` (nenhuma fatia lida ainda), `running`, `done`, `no_history` (não existe `state.db`), `unreadable` (tentado de novo na passada seguinte) e `unsupported_history` (um `state.db` sem as tabelas ou colunas esperadas). `done`, `no_history` e `unsupported_history` são definitivos, exceto que uma leitura concluída pela 0.5.0 é refeita uma vez.
 - **Privacidade.** O texto é classificado em memória e descartado, como nos hooks. Chamadas ao modelo e tokens não são reprocessados, então a contagem de uso começa quando o plugin carrega.
 
-Numa cópia de um perfil real, a primeira passada reprocessou 275 sessões, 436 turnos e 6.731 chamadas de ferramentas em 1,2 s e 29 MB, e gerou 7 lições. É uma medição numa única máquina.
+Numa cópia de um perfil real com 276 sessões, a 0.6.0 reprocessa 373 turnos e 3.566 chamadas de ferramentas, exatamente uma por mensagem lógica da janela, em menos de um segundo. A 0.5.0 contava 6.731 chamadas no mesmo histórico, cada cópia que a compactação guarda, e 86 turnos interrompidos em vez de 23. É uma medição numa única máquina.
 
 A primeira execução do contador de revisões também lê os logs rotacionados dos mesmos 14 dias (veja [Rendimento do aprendizado](#rendimento-do-aprendizado)).
 
@@ -194,10 +196,10 @@ As regras são testadas na ordem da tabela, e a primeira que casa dá nome à cl
 | `plugin_fault` | a recusa do próprio Hermes depois que o `pre_tool_call` de outro plugin travou ou deu erro, verificada antes de todas as regras | nenhum | nunca |
 | `rewritten_command` | uma chamada de terminal que falhou depois que outro plugin reescreveu o comando dela (veja abaixo) | o detalhe da classe que ela teria | nunca |
 
-Catorze classes têm modelo (`lessons.TEMPLATES`).
+Catorze classes têm modelo fixo (`lessons.TEMPLATES`).
 
 - **`approval_refused`** cobre a barreira de aprovação do Hermes: o usuário negou, ninguém respondeu, nenhum aprovador pôde ser alcançado ou o contexto não permite aprovar. O Hermes já diz ao agente para não chegar ao mesmo resultado por outro caminho, então essa classe nunca vira lição de tipo algum: não tem modelo, não recebe rascunho do refletor nem proposta `investigate_failure`. O resumo a marca como "nunca vira lição: quem decide é a aprovação do usuário".
-- **`auth`, `code_exception`, `network`, `command_failed` e `other`** não têm modelo porque nenhuma frase fixa é um conselho seguro para elas. Quando uma delas se repete, o refletor pode rascunhar uma lição (se estiver ligado), e a fila ganha uma proposta `investigate_failure`.
+- **`auth`, `code_exception`, `network`, `command_failed` e `other`** não têm modelo fixo porque nenhuma frase fixa é um conselho seguro para elas. Quando uma delas se repete, o refletor pode rascunhar uma lição (se estiver ligado), e a fila ganha uma proposta `investigate_failure`.
 - **`blocked_by_policy`** tem um modelo que diz ao agente para não repetir, não procurar outro caminho para o mesmo resultado e dizer ao usuário do que precisava.
 - **`plugin_fault` e `rewritten_command`** são falhas que o agente não causou. O Hermes bloqueia uma chamada de ferramenta quando o `pre_tool_call` de outro plugin trava ou dá erro, e um comando que outro plugin reescreveu não é o comando que o agente escreveu. O hook `pre_tool_call` guarda, só em memória, um hash de cada comando de terminal que vê (até 512), e o `post_tool_call` o compara com o comando que rodou; uma falha depois de uma mudança é gravada como `rewritten_command`. Nenhuma das duas classes vira lição de tipo algum: não tem modelo, não recebe rascunho do refletor nem proposta `investigate_failure`. O [radar de saúde](#radar-de-saúde) conta essas falhas. O reprocessamento do histórico não consegue reconhecer um comando reescrito, então classifica as falhas reprocessadas como sempre.
 
@@ -209,7 +211,7 @@ O detalhe é o único valor livre tirado de uma mensagem de erro, então passa p
 - tem no máximo 4 dígitos e pelo menos uma letra;
 - quando passa de 8 caracteres, no máximo 60% das letras são maiúsculas;
 - não é URL nem começa com um prefixo conhecido de credencial;
-- dentro do Hermes, sai inalterado do redator de segredos do próprio Hermes, que roda com `force=True` para valer mesmo quando o perfil desligou a redação.
+- dentro do Hermes, sai inalterado do mascaramento de segredos do próprio Hermes (`redact`), que roda com `force=True` para valer mesmo quando o perfil desligou o mascaramento.
 
 Um detalhe lido da saída de um comando, que qualquer um pode escrever, também precisa ser um nome de comando em minúsculas (`[a-z_][a-z0-9_+-]*`) ou, para um módulo ausente, um nome de módulo em minúsculas com pontos. Todo o resto é descartado, e a falha é gravada sem detalhe. Nomes de ferramentas e skills passam por uma lista de permissão parecida (`experience.label`); o nome que não passa é gravado como `unknown`.
 
@@ -219,10 +221,12 @@ Um turno é medido do `pre_llm_call` ao `on_session_end`, que o Hermes dispara a
 
 | Superfície | Quando |
 |---|---|
-| `subagent` | o payload tem uma sessão pai |
-| `local` | plataforma `cli`, `tui`, `desktop`, `gui`, `acp` ou `local` |
-| `cron` | plataforma `cron` |
-| `gateway` | qualquer outra plataforma |
+| `subagent` | um filho delegado: plataforma `subagent` (uma sessão continuada depois de `/new`, `/branch` ou de uma compactação também tem pai, e mantém a própria superfície) |
+| `local` | plataforma `cli`, `tui`, `desktop`, `gui`, `acp`, `local` ou uma execução avulsa (`oneshot`) |
+| `cron` | trabalho agendado e automatizado: `cron`, um worker do Kanban (`kanban`), o processo do Curator em segundo plano (`curator`) ou `batch` |
+| `gateway` | qualquer outra plataforma ou origem: chats de mensagens, integrações `--source tool`, pares A2A, salas de bots, o servidor de API |
+
+A superfície vem da origem real da sessão quando o Hermes a conhece (`agent.session_source`: um worker do Kanban ou uma integração `hermes chat --source tool` rodam com plataforma `cli`) e, fora isso, da plataforma.
 
 O registro guarda só contadores: turnos, concluídos, falhos, interrompidos, lentos, turnos com ferramentas, erros de ferramenta, duração total e máxima, e seis faixas de latência (até 15 s, 30 s, 60 s, 120 s, 300 s e acima). Um turno é lento quando dura pelo menos `slow_turn_seconds` (padrão 60). O p50 e o p95 do resumo são o limite superior da faixa onde o percentil cai, não valores exatos. O rastreador mantém no máximo 512 turnos abertos em memória, esquece um turno aberto há mais de 6 horas e limita a duração a 4 horas.
 
@@ -230,16 +234,31 @@ O registro guarda só contadores: turnos, concluídos, falhos, interrompidos, le
 
 Com `feedback_signals` ligado, o plugin olha a mensagem do usuário no início de um turno e grava um contador por dia e tipo. A mensagem em si não é gravada.
 
-- **Quem conta.** Sessões locais, sempre. Mensagens do gateway, só quando o ID do remetente está em `owner_sender_ids`. Subagentes, nunca.
+- **Quem conta.** Mensagens que uma pessoa escreveu depois de um turno anterior: sessões locais, sempre; mensagens do gateway, só quando o ID do remetente está em `owner_sender_ids`. Nunca a primeira mensagem de uma sessão (não há turno anterior a corrigir), uma continuação de `/goal` que o Hermes escreve (`[Continuing toward your standing goal]`) nem o prompt de uma automação, de um worker do Kanban ou de um subagente.
 - **Correção.** A mensagem começa com um marcador de correção em português ou inglês, como "não," ou "não." (com pontuação), "não era isso", "errado", "wrong" ou "try again".
 - **Agradecimento.** A mensagem começa com um marcador de agradecimento, como "obrigado", "thanks" ou "perfect".
-- **Pergunta repetida.** A mensagem chega até 180 segundos depois da anterior na mesma sessão, tem pelo menos 4 palavras distintas e compartilha pelo menos 60% delas com a anterior. A mensagem anterior fica em memória como um conjunto de palavras em hash, para até 256 sessões.
+- **Pergunta repetida.** A mensagem chega até 180 segundos depois da anterior na mesma sessão, tem pelo menos 4 palavras distintas e compartilha pelo menos 60% delas com a anterior, sem ser o mesmo texto de novo (um tick do `/loop` ou uma repetição de propósito). A mensagem anterior fica em memória como um conjunto de palavras em hash e um hash do texto, para até 256 sessões.
 
-Uma correção ou pergunta repetida também é cobrada das skills do turno corrigido (veja [Skills pelo resultado](#skills-pelo-resultado)). São heurísticas sobre as primeiras palavras de uma mensagem. Leia as contagens como indicadores.
+Uma correção ou pergunta repetida também é atribuída às skills do turno corrigido (veja [Skills pelo resultado](#skills-pelo-resultado)). São heurísticas sobre as primeiras palavras de uma mensagem. Leia as contagens como indicadores.
 
 ### Eventos de skills
 
 O hook `on_skill_lifecycle` conta, por skill e dia, as ações `loaded`, `patched`, `edited`, `created`, `installed`, `archived`, `stale` e `restored`, além de `reused_after_patch` quando o Hermes informa que uma skill alterada voltou a ser carregada. Um evento `loaded` também é ligado ao turno aberto da mesma sessão ou tarefa, para as skills pelo resultado.
+
+## Quem é atendido
+
+Um turno atende o dono quando roda nas superfícies do próprio dono (`local`), nas automações dele (`cron`) ou nos subagentes dele, ou num chat (`gateway`) com um remetente listado em `owner_sender_ids` (os ids são comparados como texto, então um id do Telegram digitado como número funciona). Todo o resto, um chat de mensagens com outra pessoa, uma integração ou um par A2A, atende outra pessoa. O plugin guarda, só em memória, qual dos dois foi o último turno de cada sessão.
+
+| O quê | Turno do dono | Turno de outra pessoa |
+|---|---|---|
+| Uma falha | contada e contada de novo em `failure_owner` | contada |
+| Uma lição derivada no modo `auto` | entra em vigor sozinha quando os turnos do dono encontram a falha pelo menos duas vezes (`lessons.OWNER_ACTIVATION`) | espera aprovação quando só outras pessoas encontraram a falha |
+| O refletor | pode guardar um trecho e rascunhar a partir dele | não guarda trecho: um texto que outra pessoa controla nunca chega ao modelo que rascunha lições |
+| A seção de prompt e as dicas | todas as lições ativas | só lições de modelo fixo: lições do operador, do refletor e do agente são texto livre, nunca pensado para terceiros |
+| As ferramentas do agente | respondem | recusam |
+| Sinais do dono | contados | não contados |
+
+A seção de prompt é montada quando uma sessão começa, antes de alguém escrever, então uma sessão de chat recebe só lições de modelo fixo mesmo quando quem escreve é o dono, a menos que a sessão já tenha tido um turno do dono. Uma sessão da qual o plugin não viu nenhum turno desde que carregou conta como de outra pessoa. Com `owner_sender_ids` vazio, todo chat de mensagens atende outra pessoa.
 
 ## Lições
 
@@ -256,9 +275,11 @@ Uma passada cria uma lição para uma assinatura de falha quando tudo o que segu
 - o nome da ferramenta é conhecido;
 - ainda não existe lição para aquela assinatura.
 
+No modo `auto`, a lição nasce ativa só quando os turnos do próprio dono encontraram a falha pelo menos duas vezes (veja [Quem é atendido](#quem-é-atendido)); fora isso, ela nasce candidata e espera aprovação, como no modo `suggest`.
+
 As sessões são contadas quando a sessão que falhou é diferente da sessão da falha anterior com a mesma assinatura. O ID da sessão só é gravado como hash truncado.
 
-A frase vem de um modelo fixo em inglês e português (`lessons.TEMPLATES`), preenchido com o nome da ferramenta e o detalhe, e montado no idioma configurado a cada leitura. Nenhum modelo de linguagem é chamado. Exemplo para `missing_argument`: "Ao chamar `example_search`, informe sempre o argumento obrigatório `query`."
+A frase vem de um modelo fixo em inglês e português (`lessons.TEMPLATES`), preenchido com o nome da ferramenta e o detalhe, e montado no idioma configurado a cada leitura. Nenhum modelo de IA é chamado. Exemplo para `missing_argument`: "Ao chamar `example_search`, informe sempre o argumento obrigatório `query`."
 
 ### Modos
 
@@ -301,21 +322,23 @@ Uma lição indica a ferramenta a que se aplica, ou `general`. O playbook guarda
 
 ### Entrega
 
-- **Seção de prompt** (`hermes-atlas-evolution.playbook`). O Hermes a monta no início de cada sessão e a congela no prompt de sistema daquela sessão. Ela lista as lições ativas de qualquer origem, primeiro as medidas como eficazes e depois as de maior evidência, até 8 lições e 1.200 caracteres, sob um cabeçalho de uma linha. A seção é registrada com limite de 1.400 caracteres. Ela só lê o banco e conta cada sessão uma vez (`shown`), por mais que o Hermes monte de novo o prompt daquela sessão, pela fila de gravação dos hooks, então uma passada rodando em outro processo não deixa uma sessão nova sem as suas lições.
-- **Dica no resultado que falhou** (`transform_tool_result`, só com `tool_hints` ligado). Desligada por padrão desde a 0.6.0: o Hermes só mantém a alteração do primeiro plugin num resultado de ferramenta, então uma dica descartaria a alteração que outro plugin faz naquele resultado. O hook continua registrado enquanto as lições estão ligadas, como o manifesto declara, e não devolve nada enquanto `tool_hints` está desligado. Quando uma chamada com status `error` ou `blocked` falha com uma assinatura que tem lição ativa, a frase é acrescentada àquele resultado. Um objeto JSON ganha a chave `hermes_atlas_evolution_lesson`; qualquer outro texto ganha uma linha final que começa com `[Lição do Atlas Evolution]` (`[Atlas Evolution lesson]` em inglês). Cada assinatura vira dica uma vez por sessão, com no máximo 6 dicas por sessão (`hints.MAX_HINTS_PER_SESSION`), e só quando a chamada tem ID de sessão. Resultados com mais de 262.144 caracteres e chamadas bem-sucedidas ficam intactos, assim como um resultado JSON que já tem um campo `hint` preenchido, como as dicas que as ferramentas de terminal e de arquivos do Hermes escrevem: o Hermes já orientou. Só lições ligadas a uma falha (derivadas e rascunhos do refletor) podem virar dica. O índice das lições ativas é recarregado no máximo uma vez por minuto, então uma lição aprovada durante uma sessão pode virar dica naquela mesma sessão.
+- **Seção de prompt** (`hermes-atlas-evolution.playbook`). O Hermes a monta no início de cada sessão e a congela no prompt de sistema daquela sessão. Ela lista as lições ativas de qualquer origem, primeiro as medidas como eficazes e depois as de maior evidência, até 8 lições e 1.200 caracteres, sob um cabeçalho de uma linha. A seção é registrada com limite de 1.400 caracteres. Ela só lê o banco. Conta cada sessão uma vez (`shown`), por mais que o Hermes monte de novo o prompt daquela sessão, e grava essa contagem pela fila de gravação dos hooks; assim, uma passada rodando em outro processo nunca deixa uma sessão nova sem as suas lições. Um chat que pode atender outra pessoa recebe só lições de modelo fixo (veja [Quem é atendido](#quem-é-atendido)).
+- **Dica no resultado que falhou** (`transform_tool_result`, só com `tool_hints` ligado). Desligada por padrão desde a 0.6.0: o Hermes só mantém a alteração do primeiro plugin num resultado de ferramenta, então uma dica descartaria a alteração que outro plugin faz naquele resultado. O hook continua registrado enquanto as lições estão ligadas, como o manifesto declara, e não devolve nada enquanto `tool_hints` está desligado. Quando uma chamada com status `error` ou `blocked` falha com uma assinatura que tem lição ativa, a frase é acrescentada àquele resultado. Um objeto JSON ganha a chave `hermes_atlas_evolution_lesson`; qualquer outro texto ganha uma linha final que começa com `[Lição do Atlas Evolution]` (`[Atlas Evolution lesson]` em inglês). Cada assinatura vira dica uma vez por sessão, com no máximo 6 dicas por sessão (`hints.MAX_HINTS_PER_SESSION`), e só quando a chamada tem ID de sessão. Resultados com mais de 262.144 caracteres e chamadas bem-sucedidas ficam intactos, assim como um resultado JSON que já tem um campo `hint` preenchido, como as dicas que as ferramentas de terminal e de arquivos do Hermes escrevem: o Hermes já orientou. Só lições ligadas a uma falha (derivadas e rascunhos do refletor) podem virar dica, e uma sessão que não atende o dono recebe só lições de modelo fixo. O índice das lições ativas é recarregado no máximo uma vez por minuto, então uma lição aprovada durante uma sessão pode virar dica naquela mesma sessão.
 
 Como a seção fica fixa durante toda a sessão e a dica é acrescentada a um resultado novo de ferramenta, nenhum dos dois caminhos altera um prefixo que o provedor já tenha em cache.
 
 ## O refletor
 
-O refletor (`reflector`) rascunha lições para falhas recorrentes que não têm modelo. Vem ligado; `reflector: false` o desliga, e um valor inválido também. Enquanto está desligado, nada do que segue acontece.
+O refletor (`reflector`) rascunha lições para falhas recorrentes que não têm modelo fixo. Vem ligado; `reflector: false` o desliga, e um valor inválido também. Enquanto está desligado, nada do que segue acontece.
 
-**O que é guardado.** Quando o plugin carrega com o refletor ligado e `lessons` não está em `off`, o hook de ferramentas guarda, para cada assinatura de falha das classes `code_exception`, `command_failed`, `network`, `auth` e `other`, o trecho de erro mais recente (`failure_sample`). A leitura do histórico guarda os mesmos trechos a partir do histórico que reprocessa. Cada trecho é formado por:
+**O que é guardado.** Quando o plugin carrega com o refletor ligado e `lessons` não está em `off`, o hook de ferramentas guarda, para cada assinatura de falha das classes `code_exception`, `command_failed`, `network`, `auth` e `other`, o trecho de erro mais recente (`failure_sample`) de um turno que atendia o dono. A leitura do histórico guarda os mesmos trechos a partir do histórico que reprocessa. Cada trecho é formado por:
 
 1. as últimas 4 linhas não vazias do texto de erro e da saída, unidas, com no máximo 1.200 caracteres;
-2. passadas pelo redator de segredos do Hermes, quando o plugin roda dentro do Hermes, com `force=True` para valer mesmo quando o perfil desligou a redação;
+2. passadas pelo mascaramento de segredos do Hermes, quando o plugin roda dentro do Hermes, com `force=True` para valer mesmo quando o perfil desligou o mascaramento;
 3. mascaradas pelo plugin: URLs viram `<url>`, e-mails `<email>`, caminhos de dois ou mais segmentos `<path>`, sequências hexadecimais de 16 ou mais caracteres `<hex>`, valores com prefixo de credencial `<secret>`, sequências de 5 ou mais dígitos `<n>` e textos entre aspas com mais de 40 caracteres `'<text>'`;
 4. cortadas nos últimos 300 caracteres (`EXCERPT_LIMIT`).
+
+Um trecho expira depois de 14 dias ou quando a falha ganha uma lição, em cada passada e na poda diária dos hooks, então ele não sobrevive à própria janela quando nenhuma passada roda.
 
 **Quais falhas recebem rascunho.** A mesma regra de recorrência das lições derivadas: pelo menos 3 ocorrências, em pelo menos 2 sessões ou 2 dias, com trecho guardado e sem lição. As mais frequentes vêm primeiro.
 
@@ -339,7 +362,7 @@ Cada passada mede toda lição ativa ligada a uma assinatura de falha (`lessons.
 
 | Item | Valor |
 |---|---|
-| Janela "antes" | os 14 dias anteriores ao dia da ativação (`BASELINE_DAYS`), contados na primeira passada depois da ativação e então congelados, para que a retenção nunca os altere |
+| Janela "antes" | os 14 dias anteriores ao dia da ativação (`BASELINE_DAYS`), contados na primeira passada depois da ativação em que a leitura do histórico já cobriu esse período, e então congelados, para que a retenção nunca os altere |
 | Janela "depois" | os últimos 14 dias desde a ativação (`AFTER_WINDOW_DAYS`): a partir do dia seguinte à ativação, ou de 13 dias antes de hoje quando a ativação é mais antiga |
 | Dia da ativação | fica fora das duas janelas, porque é em parte anterior à lição |
 | Taxa | falhas da assinatura por chamada da ferramenta, quando as duas janelas têm pelo menos 5 chamadas; senão, falhas por dia de calendário de cada janela |
@@ -357,7 +380,7 @@ O veredito é recalculado a cada passada enquanto a lição está ativa. Reativa
 
 ## Skills pelo resultado
 
-O Hermes informa cada skill que carrega pelo `on_skill_lifecycle`. O plugin liga uma skill `loaded` ao turno aberto da mesma sessão ou tarefa, até 16 skills por turno (`signals.MAX_SKILLS_PER_TURN`), e cobra de cada uma o desfecho do turno (`skill_outcome_daily`):
+O Hermes informa cada skill que carrega pelo `on_skill_lifecycle`. O plugin liga uma skill `loaded` ao turno aberto da mesma sessão ou tarefa, até 16 skills por turno (`signals.MAX_SKILLS_PER_TURN`), e atribui a cada uma o desfecho do turno (`skill_outcome_daily`):
 
 - o turno falhou, foi interrompido ou foi lento;
 - o turno teve pelo menos um erro de ferramenta;
@@ -465,7 +488,7 @@ A cada passada, o radar (`radar`) lê o que deixa o Hermes lento ou desperdiça 
 | Chamadas de ferramenta que o Hermes bloqueou porque o `pre_tool_call` de outro plugin travou ou deu erro (`plugin_fault`) | as contagens de falha do próprio plugin | pelo menos 3 na janela | `plugin_health`, risco médio, `hermes plugins list` |
 | Comandos de terminal que falharam depois que outro plugin os reescreveu (`rewritten_command`) | as contagens de falha do próprio plugin | pelo menos 3 na janela | `plugin_conflict`, risco médio, `hermes plugins list` |
 
-As leituras de plugins vêm da lista do gerenciador de plugins do Hermes, lida só quando esse módulo já está carregado no processo; o radar não o importa. Um processo sem ele usa o retrato do último processo que conseguiu tirar um, guardado no banco do plugin, e, sem retrato, os plugins ficam de fora. Os manifestos são lidos da pasta de plugins distribuídos com o Hermes e de `<HERMES_HOME>/plugins/`, no máximo 500 pastas e 64 KiB por manifesto. Os plugins que disputam um hook aparecem na ordem alfabética das chaves, que é a ordem em que o Hermes os carrega, a menos que um plugin dependa de outro.
+As leituras de plugins vêm da lista do gerenciador de plugins do Hermes, lida só quando esse módulo já está carregado no processo; o radar não o importa. Um processo sem ele usa o retrato do último processo que conseguiu tirar um, guardado no banco do plugin, e, sem retrato, os plugins ficam de fora. Os manifestos são lidos da pasta de plugins distribuídos com o Hermes e de `<HERMES_HOME>/plugins/`, no máximo 500 pastas e 64 KiB por manifesto. Os plugins que disputam um hook aparecem na ordem alfabética das chaves, que é a ordem em que o Hermes os carrega, a menos que um plugin dependa de outro. O Atlas Evolution deixa a si mesmo fora da lista de `transform_tool_result` enquanto `tool_hints` está desligado, o padrão: o hook dele não devolve nada nesse caso, então nunca descarta a alteração de outro plugin.
 
 As configurações que esses achados apontam são acompanhadas como [mudanças](#mudanças-e-experimentos), então uma mudança numa delas ganha o próprio veredito de antes e depois. O resumo mostra as mesmas leituras na janela dele, de até 14 dias, na seção "Saúde do Hermes".
 
@@ -496,7 +519,7 @@ O plugin só aplica os dois tipos de lição. Para todos os outros, o `proposals
 
 ### Quem pode decidir
 
-O `proposals approve`, o `proposals reject` e os subcomandos `approve`, `retire`, `add` e `review` de `lessons` se recusam a rodar quando o ambiente traz um marcador de agente (`cli.AGENT_MARKERS`): `HERMES_SESSION_ID`, `HERMES_KANBAN_TASK` ou `HERMES_DELEGATED_CHILD_CONTEXT`, definidos pelo Hermes para trabalho do agente, ou `ATLAS_EVOLUTION_AGENT`, que o plugin acrescenta a todo subprocesso de uma sessão do agente por meio de `register_session_env`. No Linux, eles também se recusam quando um processo do Hermes, como um gateway ou uma sessão de chat, é ancestral do comando, ou quando o comando roda no cgroup do systemd de um gateway do Hermes; as duas coisas são lidas em `/proc`, e o próprio lançador do `hermes evolution` não conta. Por isso, limpar os marcadores do ambiente ou se desligar com `setsid` não basta para um agente passar pela checagem. Rode-os no seu próprio terminal.
+O `proposals approve`, o `proposals reject` e os subcomandos `approve`, `retire`, `add` e `review` de `lessons` se recusam a rodar quando o ambiente traz um marcador de agente (`cli.AGENT_MARKERS`): `HERMES_SESSION_ID`, `HERMES_KANBAN_TASK` ou `HERMES_DELEGATED_CHILD_CONTEXT`, definidos pelo Hermes para trabalho do agente, ou `ATLAS_EVOLUTION_AGENT`, que o plugin acrescenta a todo subprocesso de uma sessão do agente por meio de `register_session_env`. No Linux, eles também se recusam quando um processo do Hermes, como um gateway ou uma sessão de chat, é ancestral do comando, ou quando o comando roda no cgroup do systemd de um gateway do Hermes; as duas coisas são lidas em `/proc`, e o próprio lançador do `hermes evolution` não conta. Por isso, limpar os marcadores do ambiente ou se desvincular do processo pai com `setsid` não basta para um agente passar pela checagem. Rode-os no seu próprio terminal.
 
 Ativar algo mostra o texto antes e pergunta `[s/N]`: `lessons approve` e `lessons add --activate` mostram a lição, e `proposals approve` mostra a lição de uma proposta de lição ou o comando de qualquer outra. Sem terminal interativo, o comando exige `--yes`. `lessons retire` e `proposals reject` não perguntam.
 
@@ -525,7 +548,7 @@ O `hermes evolution report` monta o resumo dos últimos 1 a 35 dias (padrão 7) 
 | Resumo | turnos interativos, p50 e p95, chamadas e erros de ferramentas, custo estimado pela contabilidade do Hermes quando disponível, sinais do dono |
 | Comparação com o período anterior | as seis métricas do perfil acima, com um veredito |
 | Falhas que se repetem | até 8 assinaturas, com contagem, dias e status da lição; `approval_refused` aparece como "nunca vira lição" |
-| Ciclo de auto-melhoria | revisões em segundo plano, parcela que não produziu nada, tokens, parcela dos tokens que foi para o aprendizado, reescritas de skills e as skills mais reescritas |
+| Ciclo de automelhoria | revisões em segundo plano, parcela que não produziu nada, tokens, parcela dos tokens que foi para o aprendizado, reescritas de skills e as skills mais reescritas |
 | Skills pelo resultado | o perfil inteiro e até 8 skills com pelo menos 8 turnos, marcando as que vão pior que o perfil |
 | Playbook | contagem por status e até 8 lições ativas com o efeito medido |
 | Mudanças e o efeito medido | até 8 mudanças que já têm veredito |
@@ -534,7 +557,7 @@ O `hermes evolution report` monta o resumo dos últimos 1 a 35 dias (padrão 7) 
 
 O `--format json` devolve a estrutura completa, que traz também os turnos de cron e de subagentes, os totais por ferramenta, os eventos de skills, o bloco de skills pelo resultado, o uso observado pelos hooks, as leituras do radar (`health`), as pesquisas na web (`research`) e os bloqueios da guarda por tipo (`guard`). Onde um número não pôde ser medido, o resumo diz "não medido".
 
-**Entrega semanal.** O `report --schedule-spec` imprime uma receita: um script e os argumentos de um `hermes cron create` nativo no modo sem agente, por padrão no dia da semana 1, às 8 horas, com entrega local (`--weekday`, `--hour`, `--deliver`, `--days` e `--lang` mudam isso; o dia 0 é domingo). O script roda primeiro o `learn --notify-only`, na base do melhor esforço, e depois o `report`, então o resumo é entregue mesmo quando a passada falha. O comando não grava arquivo nem cria rotina: salve o `script_content` da receita em `script_path`, leia, e então rode o `posix_command` dela, uma chamada `hermes cron create`.
+**Entrega semanal.** O `report --schedule-spec` imprime uma receita: um script e os argumentos de um `hermes cron create` nativo no modo sem agente, por padrão no dia da semana 1, às 8 horas, com entrega local (`--weekday`, `--hour`, `--deliver`, `--days` e `--lang` mudam isso; o dia 0 é domingo). O script roda primeiro o `learn --notify-only`, como tentativa (se falhar, o `report` roda assim mesmo), e depois o `report`, então o resumo é entregue mesmo quando a passada falha. O comando não grava arquivo nem cria rotina: salve o `script_content` da receita em `script_path`, leia, e então rode o `posix_command` dela, uma chamada `hermes cron create`.
 
 ```sh
 hermes evolution report --schedule-spec --weekday 1 --hour 8 --deliver local --lang pt
@@ -564,7 +587,7 @@ Saída ilustrativa, com números inventados: um trecho no formato do código atu
 - `example_search` · missing_argument (`query`): 3 vezes, 3 dias · lição: ativa
 - `terminal` · approval_refused: 2 vezes, 2 dias · nunca vira lição: quem decide é a aprovação do usuário
 
-## Ciclo de auto-melhoria
+## Ciclo de automelhoria
 
 - 12 revisões em segundo plano · 66,7% não produziram nada
 - 9 reescritas de skills (9 pela revisão automática) · 1 skills
@@ -608,9 +631,9 @@ O `hermes evolution status` (`status`) diz se o plugin está observando, aprende
 - o status da leitura do histórico e os totais de sessões, turnos, chamadas de ferramentas e falhas;
 - o refletor: ligado ou desligado, as chamadas de hoje diante do limite diário e os rascunhos aguardando;
 - as lições por estado (ativas, aguardando aprovação, aposentadas) e o número de propostas abertas;
-- a guarda de runtime e os comandos que ela barrou nos últimos 7 dias.
+- a guarda de runtime: os comandos que ela barrou nos últimos 7 dias e o que ela cobre (systemd no Linux, launchd no macOS, serviços e tarefas do Windows), ou que está desligada porque os plugins rodam num host de plugins.
 
-**Todos os perfis deste Hermes.** Cada perfil carrega os próprios plugins, mesmo quando um único gateway atende todos, então o perfil em que você está pode não ser o que faz o trabalho. Uma tabela lista o perfil padrão e cada pasta em `profiles/` da raiz do Hermes (até 200): as sessões dele nos últimos 7 dias, se o plugin está instalado, instalado com o nome antigo `hermes-evolution` (até a 0.5.0) ou não instalado, o fim da última passada e as lições ativas e aguardando. Perfis sem sessão em 7 dias e sem o plugin ficam fora da tabela. Tudo é só leitura: a tabela `sessions` do `state.db` de cada perfil, a pasta `plugins/` dele e, onde o plugin tem dados, o `evolution/evolution.sqlite3`.
+**Todos os perfis deste Hermes.** Cada perfil carrega os próprios plugins, mesmo quando um único gateway atende todos, então o perfil em que você está pode não ser o que faz o trabalho. Uma tabela lista o perfil padrão e cada pasta em `profiles/` da raiz do Hermes (até 200): as sessões dele nos últimos 7 dias, se o plugin está instalado, instalado com o nome antigo `hermes-evolution` (até a 0.5.0), instalado com os dois nomes (quem roda é a cópia antiga, e a nova fica inativa) ou não instalado, o fim da última passada e as lições ativas e aguardando. Perfis sem sessão em 7 dias e sem o plugin ficam fora da tabela. Tudo é só leitura: a tabela `sessions` do `state.db` de cada perfil, a pasta `plugins/` dele e, onde o plugin tem dados, o `evolution/evolution.sqlite3`.
 
 **Código antigo.** Um gateway ou dashboard que carrega o plugin registra a versão que carregou (`status.record_runtime`). O `hermes plugins update` troca o código no disco, mas não recarrega um gateway em execução, então o `status` compara cada versão registrada com a versão do disco e aponta um processo que continua vivo e roda outra versão, com o ID do processo, o tipo e a versão. O `hermes gateway restart` resolve. A checagem de processo vivo só roda em sistemas POSIX, então no Windows nenhum processo é apontado. Os registros de processos que já terminaram são apagados.
 
@@ -620,11 +643,11 @@ Uma lista final diz o que precisa de atenção, com o comando de cada item:
 - nenhum evento dos hooks hoje;
 - o autopilot desligado, nenhuma passada ainda ou a última passada com falha;
 - lições aguardando aprovação;
-- perfis que ainda têm a cópia com o nome antigo, com os comandos que migram cada um (`plugins remove hermes-evolution` e depois `plugins install sesantanajr/hermes-atlas-evolution --enable`);
+- perfis que ainda têm a cópia com o nome antigo, com os comandos que migram cada um (`plugins remove hermes-evolution` e depois `plugins install sesantanajr/hermes-atlas-evolution --enable`), e perfis que têm as duas cópias, com o comando que remove a antiga seguido de `hermes gateway restart`;
 - um perfil mais movimentado: outro perfil com o plugin que teve pelo menos 10 sessões em 7 dias e mais de 4 vezes as deste, com o comando que mostra o status dele;
 - perfis usados nos últimos 7 dias que não têm o plugin, com o comando de instalação.
 
-**Aviso ao dono.** Quando uma sessão termina, o Hermes chama o `on_session_finalize`, e o plugin pode devolver um aviso curto sobre decisões pendentes: lições aguardando aprovação, rascunhos do refletor para ler, propostas de risco alto ou uma última passada que falhou. Há no máximo um aviso por dia UTC, e só nas superfícies locais do dono (CLI, TUI, Desktop), nunca para um subagente e nunca num chat do gateway, onde do outro lado pode estar outra pessoa. O Hermes mostra o aviso fora da conversa; ele não inicia um turno do agente.
+**Aviso ao dono.** Quando uma sessão termina, o Hermes chama o `on_session_finalize`, e o plugin pode devolver um aviso curto sobre decisões pendentes: lições aguardando aprovação, rascunhos do refletor para ler, propostas de risco alto ou uma última passada que falhou. Há no máximo um aviso por dia UTC, e só nas superfícies locais do dono (CLI, TUI, Desktop), nunca para um subagente e nunca num chat do gateway, onde do outro lado pode estar outra pessoa. O Hermes mostra o aviso fora da conversa; ele não inicia um turno do agente. O Hermes 0.23.1 descarta esse texto nas sessões locais que ele hospeda quando o visualizador fecha ou a sessão é recolhida (`cli_close`, `tui_close`, `new_session`, `ws_orphan_reap`, `startup_orphan_reap` e parecidos), então, nesses casos, o plugin não devolve nada e o aviso do dia não é gasto; as mesmas decisões aparecem no `status` e no resumo.
 
 ## Comandos
 
@@ -632,7 +655,7 @@ Subcomandos de `hermes evolution`. A saída é JSON, exceto no `report` e no `st
 
 | Comando | O que faz |
 |---|---|
-| `status [--format md\|json] [--no-learn]` | Se o plugin está observando, aprendendo e protegendo este perfil, e a situação de cada perfil da mesma raiz do Hermes (veja [Status e aviso ao dono](#status-e-aviso-ao-dono)). Faz a primeira passada quando o perfil nunca teve uma, salvo com `--no-learn`. |
+| `status [--format md\|json] [--no-learn]` | Mostra se o plugin está observando, aprendendo e protegendo este perfil, e a situação de cada perfil da mesma raiz do Hermes (veja [Status e aviso ao dono](#status-e-aviso-ao-dono)). Faz a primeira passada quando o perfil nunca teve uma, salvo com `--no-learn`. |
 | `learn [--notify-only]` | Uma passada agora: reprocessa o histórico enquanto a leitura não termina, deriva lições, consulta o refletor se ligado, mede, lê o radar, atualiza as propostas. Espera até 30 segundos por uma passada que já esteja rodando. |
 | `report [--days 1..35] [--format md\|json]` | O resumo, comparado com o período anterior. |
 | `report --schedule-spec [--weekday 0..6] [--hour 0..23] [--deliver DESTINO]` | Imprime a receita semanal de cron. Não cria nada. |
@@ -641,7 +664,7 @@ Subcomandos de `hermes evolution`. A saída é JSON, exceto no `report` e no `st
 | `lessons approve <id> [--yes]`, `lessons retire <id>` | Ativa (depois de mostrar o texto) ou aposenta uma lição. Só o operador. |
 | `lessons add "<texto>" [--tool NOME] [--activate] [--yes]` | Adiciona uma lição sua, em quarentena salvo `--activate`. Só o operador. |
 | `proposals list [--all]` | Propostas abertas, da mais arriscada para a menos. |
-| `proposals approve <id> [--note TEXTO] [--yes]`, `proposals reject <id> [--note TEXTO]` | Decide uma proposta. Só o operador. Lição entra em vigor; o resto devolve o comando para você executar. |
+| `proposals approve <id> [--note TEXTO] [--yes]`, `proposals reject <id> [--note TEXTO]` | Decide uma proposta. Só o operador. Uma lição entra em vigor na hora; nos outros casos, o comando volta para você executar. |
 | `skills [--days 1..35]` | Reescritas, vai-e-volta e reescritas não usadas por skill, mais as skills pelo resultado. |
 | `experiments` | Mudanças acompanhadas e seus vereditos. |
 | `usage [--days 1..35]` | Chamadas e tokens vistos pelos hooks, ao lado da contabilidade do Hermes. |
@@ -657,12 +680,12 @@ Subcomandos de `hermes evolution`. A saída é JSON, exceto no `report` e no `st
 | `language` | `auto`, `en`, `pt` | `auto` | `auto` segue `HERMES_LANGUAGE`, `display.language`, o locale e, por fim, inglês. |
 | `tool_hints` | booleano | `false` | Acrescenta a lição correspondente ao resultado de ferramenta que falhou. Vem desligado porque o Hermes só mantém a alteração do primeiro plugin num resultado de ferramenta. |
 | `feedback_signals` | booleano | `true` | Conta correções, perguntas repetidas e agradecimentos do dono. |
-| `agent_tools` | booleano | `false` | Oferece `hermes_atlas_evolution_plan` e `hermes_atlas_evolution_lessons` ao agente. |
+| `agent_tools` | booleano | `false` | Oferece `hermes_atlas_evolution_plan` e `hermes_atlas_evolution_lessons` ao agente, só nas sessões do próprio dono. |
 | `slow_turn_seconds` | inteiro, de 5 a 3600 | `60` | Turno com pelo menos essa duração conta como lento. |
-| `owner_sender_ids` | até 20 textos | `[]` | Remetentes do gateway contados como o dono. Sessões locais sempre contam. |
-| `reflector` | booleano | `true` | Rascunha lições para falhas sem modelo pela tarefa auxiliar `evolution_reflector`. Os rascunhos sempre aguardam aprovação. |
+| `owner_sender_ids` | até 20 ids, em texto ou números inteiros | `[]` | Remetentes do gateway cujos turnos atendem o dono (veja [Quem é atendido](#quem-é-atendido)). Sessões locais sempre atendem. |
+| `reflector` | booleano | `true` | Rascunha lições para falhas sem modelo fixo dos turnos do dono pela tarefa auxiliar `evolution_reflector`. Os rascunhos sempre aguardam aprovação. |
 | `reflector_daily_limit` | inteiro, de 1 a 50 | `6` | Chamadas de modelo do refletor por dia UTC. |
-| `autopilot_minutes` | `0`, ou inteiro de 15 a 1440 | `60` | Roda a passada em segundo plano no máximo uma vez por intervalo. Com `0`, ela só roda quando você chama `hermes evolution learn`. |
+| `autopilot_minutes` | `0`, ou inteiro de 15 a 1440 | `60` | Roda a passada em segundo plano no máximo uma vez por intervalo. Com `0`, a passada em segundo plano fica desligada: as passadas só rodam pelo `learn`, pelo `ops tick`, pela receita semanal e pelo primeiro `status`. |
 | `runtime_guard` | booleano | `true` | Barra os comandos de terminal do agente que parariam o gateway ou apagariam aquilo de que o Hermes em execução precisa. |
 
 As opções podem ser definidas em dois lugares (`cli.effective_settings`):
@@ -678,18 +701,19 @@ plugins:
     hermes-atlas-evolution:
       settings:
         lessons: suggest
+        autopilot_minutes: 120
         language: pt
 ```
 
 Os valores definidos pelo Hermes vencem o `settings.json` chave a chave. Os valores gravados com o nome usado até a 0.5.0, `plugins.entries.hermes-evolution.settings`, continuam valendo, e os do nome atual vencem chave a chave; note que o `hermes plugins remove hermes-evolution` apaga esse bloco antigo do `config.yaml`. O plugin lê as configurações quando carrega, e isso define os hooks, a seção de prompt, a guarda de runtime, o intervalo do autopilot e o acesso do refletor ao modelo, então reinicie o gateway depois de mudá-los. Cada passada do autopilot e cada comando leem as configurações de novo, então um novo modo de `lessons` ou um novo limite do refletor vale a partir da passada seguinte.
 
-A validação muda conforme quem chama (`evolve.options`). Os comandos recusam com erro um `lessons`, `slow_turn_seconds`, `owner_sender_ids`, `reflector`, `reflector_daily_limit`, `autopilot_minutes` ou `runtime_guard` inválido. Dentro do gateway e no autopilot, cada valor inválido volta por conta própria, e um aviso é registrado uma vez quando o plugin carrega: um `lessons` inválido significa `off`, um `reflector` inválido desliga o refletor, um `autopilot_minutes` inválido significa 0 (passadas só quando você pede), um `runtime_guard` inválido mantém a guarda ligada, e os demais ficam no padrão. Um `settings.json` ilegível desliga as lições até ser corrigido; os valores definidos no formulário do Hermes continuam valendo para as demais opções. `tool_hints` só fica ligado quando é `true`, e `feedback_signals` fica ligado a menos que seja `false`; `reflector` e `runtime_guard` aceitam `true` ou `false`; `autopilot_minutes` aceita 0 ou um inteiro de 15 a 1440.
+A validação muda conforme quem chama (`evolve.options`). Os comandos recusam com erro um `lessons`, `slow_turn_seconds`, `owner_sender_ids`, `reflector`, `reflector_daily_limit`, `autopilot_minutes` ou `runtime_guard` inválido. Dentro do gateway e no autopilot, cada valor inválido é trocado sozinho por um valor seguro, e um aviso é registrado uma vez quando o plugin carrega: um `lessons` inválido significa `off`, um `reflector` inválido desliga o refletor, um `autopilot_minutes` inválido significa 0 (passadas só quando você pede), um `runtime_guard` inválido mantém a guarda ligada, e os demais ficam no padrão. Um `settings.json` ilegível desliga as lições até ser corrigido; os valores definidos no formulário do Hermes continuam valendo para as demais opções. `tool_hints` só fica ligado quando é `true`, e `feedback_signals` fica ligado a menos que seja `false`; `reflector` e `runtime_guard` aceitam `true` ou `false`; `autopilot_minutes` aceita 0 ou um inteiro de 15 a 1440.
 
 **Idioma** (`i18n`). Tudo o que uma pessoa ou o agente lê sai em inglês ou português do Brasil: lições, o cabeçalho da seção de prompt, dicas, o resumo, diagnósticos, planos, recomendações, cartões Kanban, as respostas das ferramentas do agente, mensagens de erro e a ajuda dos comandos. O idioma é escolhido nesta ordem: `--lang en|pt` na linha de comando, a opção `language` do plugin, o `HERMES_LANGUAGE` do perfil, o `display.language` da configuração do perfil, o locale (`LC_ALL`, `LC_MESSAGES`, `LANG`) e, por fim, inglês. A ajuda dos comandos é montada antes da leitura das opções, então segue só o `HERMES_LANGUAGE`, o `display.language` e o locale. Códigos como `pt`, `pt-BR` e `pt_br` selecionam português. Nomes de campo, códigos e identificadores da saída JSON continuam em inglês. Um catálogo de pares de frases no estilo gettext (`catalog`) traduz o resto, e o `tests/test_i18n.py` falha quando falta o par de uma frase de diagnóstico, de um texto de ajuda, de um cartão Kanban ou de um plano.
 
 ## Ferramentas do agente e a skill distribuída
 
-As duas ferramentas pertencem ao conjunto `hermes-atlas-evolution` e só ficam disponíveis com `agent_tools` (`agent_advice` no `settings.json`) ligado.
+As duas ferramentas pertencem ao toolset `hermes-atlas-evolution` e só ficam disponíveis com `agent_tools` (`agent_advice` no `settings.json`) ligado. Elas só respondem numa sessão que atende o dono (veja [Quem é atendido](#quem-é-atendido)); fora disso, devolvem um erro.
 
 | Ferramenta | Ações |
 |---|---|
@@ -700,14 +724,15 @@ A skill `hermes-atlas-evolution:evolution-review` é registrada junto com o plug
 
 ## Armazenamento
 
-As tabelas do ciclo ficam em `<HERMES_HOME>/evolution/evolution.sqlite3`, ao lado das tabelas do observador de operações. O banco está no esquema 8, criado na 0.5.0 e mantido na 0.6.0, então a troca do nome para `hermes-atlas-evolution` preserva tudo o que foi aprendido. Os esquemas 0 a 7 são migrados automaticamente no primeiro uso: o 4 trouxe o ciclo, o 5 as skills pelo resultado, o 6 os trechos do refletor, o 7 as linhas de base congeladas das lições e o 8 as contagens da guarda de runtime. Qualquer outro esquema é recusado, inclusive um banco já migrado aberto por uma versão anterior do plugin.
+As tabelas do ciclo ficam em `<HERMES_HOME>/evolution/evolution.sqlite3`, ao lado das tabelas do observador de operações. O banco está no esquema 8, criado na 0.5.0 e mantido na 0.6.0, então a troca do nome para `hermes-atlas-evolution` preserva tudo o que foi aprendido. Os esquemas 0 a 7 são migrados automaticamente no primeiro uso: o 4 trouxe o ciclo, o 5 as skills pelo resultado, o 6 os trechos do refletor, o 7 as linhas de base congeladas das lições e o 8 as contagens da guarda de runtime. Tabelas acrescentadas depois do esquema 8, como a `failure_owner`, são criadas quando faltam, sem mudar a versão: uma versão que não conhece uma tabela a ignora, então a 0.5.0 ainda abre um banco usado pela 0.6.0. Um banco num esquema mais novo, gravado por uma versão posterior do plugin, também abre, porque as versões seguintes só acrescentam tabelas e colunas; a 0.4.0 ou anterior recusa um banco no esquema 8. No macOS, o banco usa sincronização completa, como o Hermes faz com o `state.db`.
 
 | Tabela | Uma linha por | Guarda |
 |---|---|---|
 | `tool_daily` | dia e ferramenta | chamadas, erros, bloqueios, duração total |
 | `failure` | assinatura | ferramenta, classe, detalhe, primeira e última ocorrência, total, sessões, hash da última sessão com falha |
 | `failure_daily` | dia e assinatura | contagem |
-| `failure_sample` | assinatura | o trecho de erro limpo guardado para o refletor e quando foi atualizado; vazia com o refletor desligado |
+| `failure_owner` | assinatura | quantas falhas dela aconteceram em turnos que atendiam o dono |
+| `failure_sample` | assinatura | o trecho de erro mascarado guardado para o refletor e quando foi atualizado; vazia com o refletor desligado; guardado por no máximo 14 dias |
 | `turn_daily` | dia e superfície | contadores de turnos e faixas de latência |
 | `feedback_daily` | dia e tipo | contagem de correções, perguntas repetidas ou agradecimentos |
 | `skill_daily` | dia, skill e ação | contagem |
@@ -719,6 +744,6 @@ As tabelas do ciclo ficam em `<HERMES_HOME>/evolution/evolution.sqlite3`, ao lad
 | `guard_daily` | dia e tipo | comandos barrados pela guarda de runtime: `gateway_stop` ou `runtime_removal`, nunca o comando em si |
 | `cursor` | chave | posição no `agent.log` e nos arquivos rotacionados, último retrato da configuração, último horário do ledger, fim da última passada e o status dela, a reserva do autopilot, quando a observação começou, a posição, o status e os totais da leitura do histórico, chamadas do refletor no dia, o dia do último aviso ao dono, o último retrato de plugins do radar e, para cada processo de gateway ou dashboard que carregou o plugin, identificado pelo ID do processo, a versão do plugin, o tipo e o início |
 
-Agregados diários, mudanças, propostas decididas e lições aposentadas ficam por 90 dias (`experience.RETENTION_DAYS`). Lições não aposentadas e propostas abertas ou aprovadas são mantidas. A retenção é aplicada por cada passada e pela primeira gravação de hook de cada dia UTC em cada processo. Ela cobre também a `guard_daily`.
+Agregados diários, mudanças, propostas decididas e lições aposentadas ficam por 90 dias (`experience.RETENTION_DAYS`). Lições não aposentadas e propostas abertas ou aprovadas são mantidas. A retenção é aplicada por cada passada e pela primeira gravação de hook de cada dia UTC em cada processo. Ela cobre também a `guard_daily`. Os ids de entrega que evitam contar um evento duas vezes (`seen`) ficam 2 dias.
 
 As gravações dos hooks compartilham uma conexão por processo e perfil. Enquanto o banco está ocupado, uma atualização espera numa fila de até 512 entradas; o que estoura é contado e informado como `dropped_events` pelo `hermes evolution usage`.

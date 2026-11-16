@@ -1,5 +1,7 @@
 # Contributing to Atlas Evolution
 
+[![Tests](https://github.com/sesantanajr/hermes-atlas-evolution/actions/workflows/tests.yml/badge.svg)](https://github.com/sesantanajr/hermes-atlas-evolution/actions/workflows/tests.yml)
+
 Thank you for considering a contribution. This project is a plugin for Hermes Agent that runs inside other people's agents, so three things matter more than anything else: it must never slow down or break a turn, it must never store what users say, and the operator decides what reaches the agent.
 
 ## Before you start
@@ -7,6 +9,7 @@ Thank you for considering a contribution. This project is a plugin for Hermes Ag
 - Open an issue for anything larger than a small fix, so the approach can be agreed first.
 - Security problems go through [SECURITY.md](SECURITY.md), not public issues.
 - Documentation is bilingual. A change to `README.md` or `docs/` needs the same change in `README.pt-BR.md` or `docs/pt-BR/`. If you do not write Portuguese, say so in the pull request and a maintainer will translate.
+- So is everything a person or the agent reads. A new message needs its pt-BR pair in `hermes_atlas_evolution/catalog.py` (a pattern when it carries values); `tests/test_i18n.py` walks every `raise ValueError(...)` and `raise SystemExit(...)` of the package and fails when one has no Portuguese form.
 
 ## Development setup and tests
 
@@ -44,7 +47,7 @@ python -m hermes_atlas_evolution --home /tmp/evolution-test --hermes-version 0.2
 ## Code style
 
 - **Standard library only.** The plugin has no runtime dependency. Optional integrations are imported lazily and must degrade when the package is missing.
-- **Public plugin API only.** Use `ctx` and the modules of the published Hermes plugin API. The one exception is read-only introspection of what Hermes has already loaded (the health radar's plugin list and the guard's view of where Hermes lives): look the module up in `sys.modules` without importing it, wrap the call, and skip the reading when it is missing or fails. `hermes plugins validate` lists imports of private Hermes modules. Look up optional `ctx` methods with `getattr` so that an older or stricter host still loads the plugin.
+- **Public plugin API only.** Use `ctx` and the modules of the published Hermes plugin API. The one exception is read-only introspection of what Hermes has already loaded (the health radar's plugin list, the guard's view of where Hermes lives, the Hermes version the command reads, the session origin the turn hooks ask for and the plugin isolation mode `status` reads): look the module up in `sys.modules` without importing it, wrap the call, and skip the reading when it is missing or fails. `hermes plugins validate` lists imports of private Hermes modules. Look up optional `ctx` methods with `getattr` so that an older or stricter host still loads the plugin.
 - **Tests use `unittest`** and temporary directories. A fix comes with a regression test that fails without it.
 - **Thresholds are named constants** at the top of their module. When you change one, update `docs/evolution-loop.md` and `docs/pt-BR/evolution-loop.md` in the same pull request.
 - **Validate at the edge.** Functions that receive settings or hook payloads check types and ranges and raise `ValueError` with a message an operator can act on. Inside the gateway, settings fall back to safe defaults instead.

@@ -40,7 +40,7 @@ A versão 0.4.0 acrescentou estes campos à saída:
 | `tool_result_error` | `logs.events` no `health`; `health.logs.events` no `ops inspect` e no `ops tick` | Linhas de log que apenas repetem a saída de uma ferramenta que falhou. Elas não contam mais como falha de armazenamento, de memória ou de plugin. Aparece quando é maior que zero. |
 | `schedule_errors`, `recent_fire_errors` | `workloads.cron.counts` | Rotinas habilitadas que o Hermes não conseguiu agendar, e disparos vencidos nas últimas 24 horas que nunca chegaram ao executor. |
 | `scheduled` | `workloads.kanban.counts` | Cartões aguardando na coluna `scheduled`. |
-| `served_by_host_gateway` | `gateway` no `health`; `health.gateway` no `ops inspect` e no `ops tick` | O perfil é um perfil nomeado atendido pelo gateway raiz, cujo registro é usado nas checagens. |
+| `served_by_host_gateway` | `gateway` no `health`; `health.gateway` no `ops inspect` e no `ops tick` | O perfil é um perfil com nome atendido pelo gateway raiz, cujo registro é usado nas checagens. |
 
 ## Comandos
 
@@ -61,7 +61,7 @@ hermes evolution ops similar "disco lento e pesquisas demoradas"
 | `ops tick [--notify-only]` | Coleta, compara com o histórico, registra hipóteses e linhas de base e executa somente as ações habilitadas pela configuração. Também roda uma passada do ciclo de evolução, no máximo uma vez por hora, e a devolve no campo `evolution`; a passada é reservada como a do autopilot, então as duas nunca rodam ao mesmo tempo, e tem um prazo de 200 segundos, dentro dos 300 segundos que o script do `schedule-spec` dá ao tick. Se o tick falhar, tenta encerrar um ensaio ativo no Linux. |
 | `ops history` | Mostra até 100 incidentes e 100 ensaios, com o estado de cada um. |
 | `ops review [--days N]` | Cruza medições adaptativas, feedback e resultados dos ensaios. Padrão de 14 dias, de 1 a 90. |
-| `ops feedback CODIGO helpful\|dismissed\|reset` | Avalia um alerta adaptativo já emitido. |
+| `ops feedback CÓDIGO helpful\|dismissed\|reset` | Avalia um alerta adaptativo já emitido. |
 | `ops similar "<texto>" [--limit 1..10]` | Procura incidentes anteriores parecidos com o texto. Padrão 5. |
 | `ops plan research\|delegation\|operations [--effort quick\|standard\|deep] [--durable]` | Devolve um plano somente leitura. Esforço padrão `standard`. |
 | `ops handoff TIPO ASSUNTO` | Cria um cartão Kanban de verificação bloqueado. `TIPO` é `resources`, `research`, `delegation`, `curator` ou `gateway`. |
@@ -91,7 +91,7 @@ Cada diagnóstico apresenta hipótese, evidências, alternativas, confiança e a
 O aprendizado adaptativo agrupa as observações em faixas de seis horas UTC e compara a amostra atual com a mesma faixa dos dias anteriores, numa janela de 28 dias, com estatística robusta (mediana ponderada com meia-vida de 7 dias e desvio absoluto mediano), depois de pelo menos 5 amostras. Considera RAM disponível, pressão de CPU, memória e I/O, tokens de prompt, tempo de pesquisa, taxas de erro de ferramenta e de API e profundidade da fila Kanban, conforme a cobertura. Só o `ops tick` grava amostras.
 
 - `--sensitivity low|balanced|high`, ou a chave `sensitivity`, ajusta o limiar. O padrão é `balanced`, e a opção da linha de comando vence a chave.
-- `ops feedback CODIGO helpful|dismissed|reset` ajusta a recorrência dos alertas. Um alerta dispensado fica em silêncio por 14 dias. Os demais voltam no máximo a cada 12 horas, ou a cada 6 horas quando avaliados como úteis, e um aumento de severidade é entregue na hora. Alertas críticos são sempre entregues, no máximo uma vez por hora.
+- `ops feedback CÓDIGO helpful|dismissed|reset` ajusta a recorrência dos alertas. Um alerta dispensado fica em silêncio por 14 dias. Os demais voltam no máximo a cada 12 horas, ou a cada 6 horas quando avaliados como úteis, e um aumento de severidade é entregue na hora. Alertas críticos são sempre entregues, no máximo uma vez por hora.
 - Um diagnóstico que não propõe ação, como um cache de página saudável, continua no relatório e não é enviado como aviso.
 
 `ops similar` compara incidentes com termos e trigramas bilíngues. A chave `semantic_incident_model` pode indicar o caminho absoluto do diretório de um modelo multilíngue local do SentenceTransformers, já instalado em formato `safetensors`. Nesse caso o comando usa CPU e arquivos locais, com código remoto e downloads desativados. A similaridade ajuda a consultar incidentes. A decisão de remediação usa medições checáveis e regras independentes.
@@ -123,7 +123,7 @@ O `ops plan` devolve um plano somente leitura com um orçamento sugerido: consul
 
 Ligue `agent_tools` nas configurações do plugin no Hermes, ou defina `"agent_advice": true` em `<HERMES_HOME>/evolution/settings.json`, e recarregue o plugin para liberar `hermes_atlas_evolution_plan` e `hermes_atlas_evolution_lessons` ao perfil. Inclua `hermes-atlas-evolution` quando o perfil usa uma lista explícita de toolsets. A ferramenta de planos devolve apenas o plano.
 
-A leitura compartilhada dos quadros Kanban exige `"inspect_shared_kanban": true`. A criação de cartão exige a sua própria autorização de encaminhamento, independente dessa chave. O exemplo associa as verificações ao perfil `reviewer` no quadro existente `ops`.
+A leitura dos quadros Kanban compartilhados exige `"inspect_shared_kanban": true`. A criação de cartão exige a sua própria autorização de encaminhamento, independente dessa chave. O exemplo associa as verificações ao perfil `reviewer` no quadro existente `ops`.
 
 ```json
 {
@@ -175,7 +175,7 @@ Salve a configuração em `<HERMES_HOME>/evolution/settings.json`.
 
 **Verificação e reversão.** Cada ajuste usa `systemctl --runtime`. O supervisor registra a intenção antes de aplicar, confere o valor efetivo, mede a resposta e restaura a configuração anterior se o efeito ficar incerto ou a pressão não cair pelo menos 20%. O próximo tick depois de 15 minutos encerra o ensaio. Depois de qualquer ensaio, nenhum outro começa por uma hora. Um ensaio ineficaz ou não verificado bloqueia a mesma unidade e o mesmo recurso por 24 horas, e ensaios ineficazes repetidos em 14 dias adiam aquele recurso por 24, 48 e depois 96 horas. O comando só usa as permissões que o processo já tem. Ajustes externos observados têm precedência.
 
-Programe `hermes evolution ops tick` **a cada cinco minutos** no agendador existente, com o usuário que administra essas unidades. A aplicação exige que os ticks de verificação também estejam rodando. Para encerrar um ensaio antes da hora, rode `hermes evolution ops rollback`. Use `ops history` para confirmar que o peso foi restaurado. O ajuste é temporário no systemd e sai com o reboot do host. A limpeza de dados, o desligamento de plugins, as mudanças de memória e as correções de código são recomendações de revisão nesta versão.
+Programe `hermes evolution ops tick` **a cada cinco minutos** no agendador existente, com o usuário que administra essas unidades. A aplicação exige que os ticks de verificação também estejam rodando. Para encerrar um ensaio antes da hora, rode `hermes evolution ops rollback`. Use `ops history` para confirmar que o peso foi restaurado. O ajuste é temporário no systemd e é desfeito quando o host reinicia. A limpeza de dados, o desligamento de plugins, as mudanças de memória e as correções de código são recomendações de revisão nesta versão.
 
 Os cenários de mudança e reversão de peso são testados com um adaptador de systemd simulado. Valide o controlador e a unidade escolhida em homologação antes de autorizar o modo `apply`.
 
@@ -199,8 +199,8 @@ O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 
 
 ## Dados e compatibilidade
 
-- Os bancos ficam em `<HERMES_HOME>/evolution/`: `evolution.sqlite3`, com as métricas do observador e o ciclo de evolução, e `supervisor.sqlite3`, com incidentes, linhas de base, amostras adaptativas e ensaios. As métricas do observador ficam por 35 dias; os agregados do ciclo, os incidentes e os ensaios encerrados, por 90 dias. A retenção de 35 dias é aplicada pela primeira gravação de hook de cada dia UTC em cada processo, então vale mesmo sem `tick` agendado. Backups e logs próprios do Hermes seguem a retenção que já têm.
-- Desde a 0.5.0, o `evolution.sqlite3` está no esquema 8, e a 0.6.0 o mantém: os esquemas 0 a 7 são migrados automaticamente e qualquer outro esquema é recusado. A 0.4.0 ou anterior não abre um banco migrado: voltar até ela exige restaurar um backup do arquivo ou apagá-lo. A troca do nome do plugin na 0.6.0 não move os dados: o `<HERMES_HOME>/evolution/` mantém o nome.
+- Os bancos ficam em `<HERMES_HOME>/evolution/`: `evolution.sqlite3`, com as métricas do observador e o ciclo de evolução, e `supervisor.sqlite3`, com incidentes, linhas de base, amostras adaptativas e ensaios. As métricas do observador ficam por 35 dias (os ids de entrega que evitam contar um evento duas vezes, 2 dias); os agregados do ciclo, os incidentes e os ensaios encerrados, por 90 dias. A retenção de 35 dias é aplicada pela primeira gravação de hook de cada dia UTC em cada processo, então vale mesmo sem `tick` agendado. Backups e logs próprios do Hermes seguem a retenção que já têm.
+- Desde a 0.5.0, o `evolution.sqlite3` está no esquema 8, e a 0.6.0 o mantém: os esquemas 0 a 7 são migrados automaticamente, e um esquema mais novo, gravado por uma versão posterior do plugin, também abre, porque as versões seguintes só acrescentam tabelas e colunas (a 0.6.0 acrescenta uma tabela e fica no esquema 8, então a 0.5.0 ainda abre o banco). A 0.4.0 ou anterior não abre um banco migrado: voltar até ela exige restaurar um backup do arquivo ou apagá-lo. A troca do nome do plugin na 0.6.0 não move os dados: o `<HERMES_HOME>/evolution/` mantém o nome.
 - As gravações dos hooks compartilham uma conexão por processo e por perfil, que fica aberta enquanto o Hermes roda. No Windows, isso significa que o `evolution.sqlite3` não pode ser apagado enquanto o Hermes está rodando.
 - Os bancos do próprio Hermes (`state.db`, quadros Kanban) são abertos somente para leitura. Para o `status`, isso inclui o `state.db` dos outros perfis da mesma raiz, onde ele só conta sessões, e o banco do plugin nesses perfis, onde ele lê a última passada e as contagens de lições.
 - Arquivos de notas da versão 0.1 são preservados. Os comandos que registram novas notas e o comando de chat legado exigem `legacy_memory_commands: true`. A injeção antiga de notas também exige `automatic_shared_recall: true`. Por padrão, a inspeção usa os sinais da memória nativa do Hermes.
@@ -212,9 +212,9 @@ O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 
 |---|---|
 | `health [--upstream-tag TAG]` | Imprime o instantâneo dos arquivos do Hermes e dos sinais do host em que o `ops inspect` se apoia. |
 | `tick [--upstream-tag TAG] [--days 1..35] [--changes-only]` | Roda a política de manutenção da versão 0.2 e registra as decisões. O `ops tick` já a inclui. |
-| `feedback CODIGO helpful\|dismissed\|reset` | Registra como um achado de manutenção se saiu. |
+| `feedback CÓDIGO helpful\|dismissed\|reset` | Registra como um achado de manutenção se saiu. |
 | `history` | Mostra as prioridades de manutenção e o feedback. |
-| `memory [--shared \| --dm PLATAFORMA USUARIO CHAT] ...` | Acesso aos dados de notas da 0.1: `remember`, `recall`, `evaluate`, `audit`, `forget`. |
+| `memory [--shared \| --dm PLATAFORMA USUÁRIO CHAT] ...` | Acesso aos dados de notas da 0.1: `remember`, `recall`, `evaluate`, `audit`, `forget`. |
 
 ## Como retirar o plugin
 
