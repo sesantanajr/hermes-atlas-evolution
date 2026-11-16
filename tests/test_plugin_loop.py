@@ -702,7 +702,7 @@ class LiveSettingsTest(PluginBase):
         sys.modules["hermes_cli.managed_scope"] = scope
         before = plugin._settings_stamp
         (managed / "config.yaml").write_text("x: 1\n")
-        plugin._settings_checked = 0.0
+        plugin._settings_checked = float("-inf")
         self.hermes_settings(agent_tools=False, owner_platforms=["api_server"])
         self.assertTrue(plugin.refresh_settings())   # a change of the managed file alone is noticed
         self.assertNotEqual(plugin._settings_stamp, before)

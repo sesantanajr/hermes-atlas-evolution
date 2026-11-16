@@ -258,7 +258,7 @@ class _Plugin:
         self.lessons_tool = LessonsTool(home, lang=evolution["language"])   # one instance: it holds the hourly cap
         self.clock_allowed = False   # the host can stop the autopilot's clock (on_unload): it may be started later
         self.section_registered = False   # the playbook section exists only when lessons were on at load
-        self._settings_checked = 0.0
+        self._settings_checked = float("-inf")   # never: the monotonic clock may be under 30 s on a fresh machine
         self._settings_stamp = _settings_stamp(home)
         self._settings_lock = threading.Lock()
 
