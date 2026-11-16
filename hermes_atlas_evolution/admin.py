@@ -111,6 +111,27 @@ def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout:
         raise ValueError(detail or ("Hermes refused the setting" if what == "setting" else "Hermes refused the command"))
 
 
+def hermes_output(home: Path, args: list, *, runner=None, executable=None, timeout: int = 300) -> tuple[int, str]:
+    """Run `hermes --profile <name> <args...>` and return (exit code, what it printed), never raising for its exit
+    code: for Hermes' own checks, whose exit code says "issues found" (124 = it did not answer in time)."""
+    profile = Path(home).resolve()
+    command_path = executable() if callable(executable) else (executable or hermes_executable())
+    if command_path is None:
+        return 127, "Hermes command not found"
+    env = dict(os.environ, HERMES_HOME=str(profile), NO_COLOR="1")
+    env.pop("HERMES_PROFILE", None)
+    run = subprocess.run if runner is None else runner
+    try:
+        result = run([command_path, "--profile", profile_name(profile), *[str(item) for item in args]], env=env,
+                     cwd=str(profile), stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8",
+                     errors="replace", timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return 124, "Hermes did not answer in time; check the result before trying again"
+    except (OSError, subprocess.SubprocessError) as error:
+        return 126, type(error).__name__
+    return result.returncode, (result.stdout or "") + (result.stderr or "")
+
+
 def cli_writer(home: Path, *, runner=None, executable=None):
     """A writer that sets each value with `hermes --profile <name> config set ...`, Hermes' public command, which
     checks the key, takes Hermes' config lock and writes atomically. Raises ValueError with Hermes' own message."""
@@ -166,7 +187,7 @@ def recommended_settings(current: dict, suggestions: list[dict]) -> dict:
 
 def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: str = "en", writer=None,
            actor: str = "dashboard", runner=None) -> dict:
-    """One decision. `body`: {"kind": lesson|all|proposal|apply|apply_all|undo|settings|memory, ...}. `runner` replaces
+    """One decision. `body`: {"kind": lesson|all|proposal|apply|apply_all|schedule_digest|undo|settings|memory, ...}. `runner` replaces
     subprocess.run for the Hermes commands of "apply" and of its undo (tests)."""
     from . import decisions, memory_care
     from .experience import experience
@@ -178,6 +199,11 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
         from . import actions
 
         return actions.apply_proposal(home, int(body["id"]), now=now, actor=actor, runner=runner)
+    if kind == "schedule_digest":
+        from . import actions
+
+        return actions.schedule_digest(home, deliver=str(body.get("deliver") or "local"), lang=lang, now=now,
+                                       actor=actor, runner=runner)
     if kind == "apply_all":
         from . import actions
 
@@ -216,6 +242,17 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
         result["settings"] = write_settings(home, runtime_config, {result["key"]: result["restore"]}, now=now,
                                             writer=writer, actor=actor)
         with experience(home) as conn:
+            decisions.mark_undone(conn, result["id"], now=now)
+        result["undone"] = True
+    elif result.get("kind") == "cron_create" and result.get("restorable"):
+        result.pop("restorable")
+        code, out = hermes_output(home, ["cron", "remove", result["job"]], runner=runner, timeout=120)
+        # Gone already (removed by hand) only when Hermes says so of this very job: "Job with ID or name '<job>' not
+        # found". Any other failure (Hermes missing, a profile gone, a timeout) leaves the job, and the undo, as is.
+        gone = code == 1 and re.search(rf"\bjob\b[^\n]*'{re.escape(result['job'])}'[^\n]*\bnot found\b", out, re.I)
+        if code != 0 and not gone:
+            raise ValueError(" ".join(out.split())[-200:] or "Hermes refused the command")
+        with experience(home) as conn:   # removed now, or already gone (removed by hand)
             decisions.mark_undone(conn, result["id"], now=now)
         result["undone"] = True
     elif result.get("kind") == "proposal_apply" and result.get("restorable"):

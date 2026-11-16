@@ -697,6 +697,9 @@ Subcommands of `hermes evolution`. Output is JSON, except `report` and `status` 
 | Command | What it does |
 |---|---|
 | *(none)*, `menu` | The interactive menu (see [The terminal menu](#the-terminal-menu)). Without a terminal to answer from, or in an agent's shell, the bare command prints `status`, and `menu` says why it did not open. |
+| `care [check\|pm-doctor\|doctor\|fix\|gc] [--yes]` | Hermes' health read from its own files (`check`, open to anyone), and Hermes' own checks and repairs (operator only). See [Maintenance](maintenance.md). |
+| `system [check\|plan\|upgrade\|repair\|report] [--full] [--skip PKG...] [--yes]` | The operating system's update, Linux with apt: `check` and `report` read; `plan`, `upgrade` and `repair` are the operator's, as root. See [Maintenance](maintenance.md). |
+| `schedule-digest [--deliver local\|<channel>]` | The weekly digest as a Hermes cron job with no agent, once; undone from `decisions`. Operator only. |
 | `status [--format md\|json] [--no-learn]` | Shows whether the plugin is observing, learning and protecting this profile, and the state of every profile of the same Hermes root (see [Status and owner notice](#status-and-owner-notice)). Runs the first pass when the profile never had one, unless `--no-learn`. |
 | `owner [list \| add <id> \| remove <id> \| add-platform <name> \| remove-platform <name>]` | Who counts as you in chats (see [Who is served](#who-is-served)). Operator only. |
 | `learn [--notify-only]` | One pass now: replay history while the backfill is not done, derive lessons, ask the reflector if on, measure, read the radar, refresh proposals. Waits up to 30 seconds for a pass that is already running. |
@@ -724,7 +727,7 @@ Subcommands of `hermes evolution`. Output is JSON, except `report` and `status` 
 
 | Screen | What it shows and does |
 |---|---|
-| Summary | The lessons mode, active and waiting lessons, open proposals, the last pass, the guard, the reflector and the automatic actions; what needs attention, in full sentences; and up to five **suggestions** with a letter (`a`, `b`…) that act at once: decide the waiting lessons, apply the recommended changes, turn on the complete automatic actions, tidy the memory, read the observations |
+| Summary | The lessons mode, active and waiting lessons, open proposals, the last pass, the guard, the reflector and the automatic actions; what needs attention, in full sentences; and up to six **suggestions** with a letter (`a`, `b`…) that act at once: decide the waiting lessons, apply the recommended changes, turn on the complete automatic actions, tidy the memory, finish an interrupted system update or install security updates, free old tool versions, schedule the weekly digest, read the observations |
 | 1 Lessons waiting for you | Each one with its exact sentence and origin; approve or reject one, or approve all of them after reading every sentence (the agent's own proposals are approved one by one) |
 | 2 Open proposals | Grouped as changes the plugin applies, lessons, changes you apply and observations, each with its title, risk, what was seen (with the numbers), what applying it does and how to undo it. `a` applies a change now with Hermes' own command, `t` applies all of them, `d` dismisses an observation, `e` writes the lesson for a failure no template covers |
 | 3 Active lessons | With the measured effect; retire one |
@@ -735,6 +738,8 @@ Subcommands of `hermes evolution`. Output is JSON, except `report` and `status` 
 | 8 Hermes memory | See [Hermes memory](#hermes-memory) |
 | 9, 10 | The digest of 7 days and the full status |
 | 11 | A learning pass now |
+| 12 Hermes health | Read from Hermes' own files, with no agent, network or token: the gateway, the session database, disk and folder growth, memory, swap, CPU, old tool versions; and Hermes' own `pm doctor`, `doctor`, `doctor --fix` (after a backup) and `pm gc` (see [Maintenance](maintenance.md)) |
+| 13 Operating system | The system's check, plan, update, repair and last report (Linux with apt; see [Maintenance](maintenance.md)) |
 
 A decision is made with the same code as the dashboard panel (`admin.py`) and recorded in the same history, with `terminal` as the place. The menu opens only in the operator's terminal: never where the commands that decide refuse to run (an agent's shell, see [SECURITY.md](../SECURITY.md)), and never without a terminal on both ends.
 

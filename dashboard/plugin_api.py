@@ -160,6 +160,9 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
     except (TypeError, ValueError):
         reload_keys = []
     hermes = _prefix(state["profile"])
+    texts, care_values = status._TEXT.get(lang, status._TEXT["en"]), status._care_values(state)
+    health_md = "\n".join("- " + texts[code].format(**care_values) for code in state.get("attention") or ()
+                           if code.startswith(("hermes_", "os_")) and code in texts)
     return {
         "lang": lang, "days": days, "generated": now, "profile": state["profile"], "version": state["plugin_version"],
         "mode": opts["lessons"], "status": state, "report": digest, "lessons": playbook, "proposals": queue,
@@ -168,7 +171,7 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
         "settings": {"values": values, "reload": reload_keys, "recommended": recommended,
                      "reload_keys": ["runtime_guard", "tool_hints"], "problems": sorted(set(settings_problems))},
         "owner": {"channels": channels, "suggestions": suggestions},
-        "status_md": status.markdown(state, lang), "report_md": report.markdown(digest, lang),
+        "status_md": status.markdown(state, lang), "report_md": report.markdown(digest, lang), "health_md": health_md,
         "commands": {"menu": f"{hermes} evolution", "review": f"{hermes} evolution lessons review",
                      "learn": f"{hermes} evolution learn",
                      "approve_lesson": f"{hermes} evolution lessons approve {{id}}",

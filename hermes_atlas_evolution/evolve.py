@@ -192,15 +192,44 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
 
     automatic = actions.automatic(home, now=now, mode=opts["auto_actions"], runtime_config=runtime_config, usage=usage,
                                   deadline=deadline)
+    care = _daily_checks(home, now=now, deadline=deadline)
     if automatic["applied"]:
         with experience(home) as conn:
             pending = proposals.listing(conn, status="open")
-    return {"automatic": automatic,"now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons,
+    return {"automatic": automatic, "care": care,"now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons,
             "lessons_promoted": len(promoted), "lessons_withdrawn": withdrawn, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
             "proposals_closed_as_applied": closed, "radar": [item["code"] for item in reading["findings"]],
             "open_proposals": pending}
+
+
+def _daily_checks(home: Path, *, now: float, deadline: float | None) -> dict:
+    """Hermes' own health (hermes_care, every 6 hours) and the operating system's (system_update, daily): read-only,
+    no model, no network; their findings go to `status` and the menu. Never fails the pass."""
+    import time as _time
+
+    from . import hermes_care, system_update
+
+    import os as _os
+
+    found: dict = {}
+    if deadline is not None and deadline - _time.monotonic() < 30:
+        return found
+    # Only for a profile Hermes set up (a scratch folder has no config.yaml); ATLAS_EVOLUTION_HOST_CHECKS=0 opts out.
+    if not (Path(home) / "config.yaml").exists() or _os.environ.get("ATLAS_EVOLUTION_HOST_CHECKS") == "0":
+        return found
+    try:
+        with experience(home) as conn:
+            care = hermes_care.cached(conn, home, now=now)
+            found["hermes"] = care.get("findings") if isinstance(care, dict) else None
+        if Path("/etc/os-release").exists():
+            with experience(home) as conn:
+                system = system_update.cached(conn, home, now=now)
+                found["system"] = system.get("findings") if isinstance(system, dict) else None
+    except (OSError, ValueError, sqlite3.Error, RecursionError) as error:
+        found["error"] = type(error).__name__
+    return found
 
 
 def notify_view(result: dict) -> dict | None:

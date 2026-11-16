@@ -1,5 +1,5 @@
 name: hermes-atlas-evolution
-version: "0.8.3"
+version: "0.8.4"
 requires_hermes: ">=0.23.1"
 description: >-
   A measured self-improvement loop for Hermes Agent. Learns from Hermes' own history on the first pass,
@@ -11,7 +11,9 @@ description: >-
   for your approval. Lessons travel between profiles as packs; `hermes evolution` opens an interactive menu in
   your terminal, and an Evolution tab in the dashboard shows what was learned and what waits for you. It also
   finds what repeats in Hermes' memory and, by itself where it is safe, takes out identical copies and locks skills
-  the curator keeps rewriting, each action with its undo.
+  the curator keeps rewriting, each action with its undo. It reads Hermes' own health without the agent or tokens
+  (gateway, session database, disk growth, memory, swap, old tools) and updates the operating system safely
+  (Ubuntu, Debian: checks before and after, a copy of /etc, a repair for an interrupted update).
 license: MIT
 homepage: https://github.com/sesantanajr/hermes-atlas-evolution
 author: "Sérgio Sant'Ana Júnior"

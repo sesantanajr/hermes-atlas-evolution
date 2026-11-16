@@ -165,13 +165,14 @@ def owner_suggestions(channels: list[dict], *, owners=(), platforms=()) -> list[
     return found
 
 
-def _digest_scheduled(home: Path) -> bool:
-    """Whether Hermes' scheduler holds an enabled weekly digest of this plugin for the profile."""
+def _digest_scheduled(home: Path, *, paused_too: bool = True) -> bool:
+    """Whether Hermes' scheduler holds the weekly digest of this plugin for the profile (a job the owner paused
+    counts: it is theirs to resume, and a second one would deliver twice)."""
     from .workloads import _load_json
 
     status, data = _load_json(Path(home) / "cron" / "jobs.json", 4 * 1024 * 1024)
     jobs = data.get("jobs") if status == "ok" and isinstance(data, dict) else None
-    return any(isinstance(job, dict) and job.get("enabled") is not False
+    return any(isinstance(job, dict) and (paused_too or job.get("enabled") is not False)
                and job.get("name") in ("hermes-atlas-evolution-digest", "hermes-evolution-digest")
                for job in jobs or ())
 
@@ -265,6 +266,19 @@ def never_ran(home: Path) -> bool:
             source.close()
     except sqlite3.Error:
         return False
+
+
+# Findings of hermes_care and system_update that `status` and the menu show, as attention codes.
+CARE_ATTENTION = ("hermes_gateway_crashed", "os_held_by_plugin", "hermes_gateway_heartbeat_stale", "hermes_gateway_memory_growth", "hermes_state_db_unreadable",
+                  "hermes_state_db_damaged", "hermes_state_db_wal_large", "hermes_disk_critical", "hermes_disk_low",
+                  "hermes_disk_filling", "hermes_storage_growth", "hermes_memory_low", "hermes_swap_full",
+                  "hermes_cpu_saturated", "hermes_unused_tools", "hermes_gateway_not_at_boot",
+                  "os_dpkg_interrupted", "os_package_manager_stuck", "os_apt_broken", "os_reboot_required", "os_security_updates", "os_unattended_off",
+                  "os_lists_stale", "os_unit_not_enabled")
+
+
+def _gb(value) -> str:
+    return f"{value / 2**30:.1f} GB" if isinstance(value, (int, float)) else "?"
 
 
 def build(home: Path, *, now: float | None = None, config=None, runtime_config=None) -> dict:
@@ -375,6 +389,22 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         report["settings_reload"] = []
     if report["settings_reload"]:
         attention.append("settings_reload")
+    # Hermes' own health and the operating system's, as the last learning pass read them (hermes_care, system_update)
+    care = system = None
+    try:
+        with experience(home) as conn:
+            rows = dict(conn.execute("SELECT key, value FROM cursor WHERE key IN ('care_check', 'system_check')").fetchall())
+        care = json.loads(rows["care_check"]) if "care_check" in rows else None
+        system = json.loads(rows["system_check"]) if "system_check" in rows else None
+    except (OSError, ValueError, sqlite3.Error):
+        pass
+    report["care"], report["system"] = care, system
+    for code in (care or {}).get("findings") or ():
+        if f"hermes_{code}" in CARE_ATTENTION:
+            attention.append(f"hermes_{code}")
+    for code in (system or {}).get("findings") or ():
+        if f"os_{code}" in CARE_ATTENTION:
+            attention.append(f"os_{code}")
     report["attention"] = attention
     return report
 
@@ -400,11 +430,39 @@ _TEXT = {
            "autopilot_off": "The autopilot is off: the loop only runs when you call `hermes evolution learn`.",
            "no_autopilot_pass": "The autopilot has not run a pass in this profile yet.",
            "autopilot_failing": "The last autopilot pass failed; it is retried in 10 minutes. See Hermes' agent.log.",
-           "lessons_waiting": "Lessons are waiting for your approval: decide on each in your own terminal with `hermes evolution lessons review`.",
+           "lessons_waiting": "Lessons are waiting for your approval: decide in the menu (`hermes evolution`) or with `hermes evolution lessons review`, in your own terminal.",
            "profiles_without_plugin": "Profiles used in the last 7 days that do not have the plugin (each profile loads its own plugins):",
            "owner_unknown": "These chat channels count as someone else's, so they get template lessons only and their failures wait for your approval. If one of them is you, run `hermes evolution owner` in your own terminal:",
            "chat_item": "`{origin}`: {sessions} sessions in 7 days from {senders} sender(s)",
-           "digest_unscheduled": "Decisions wait for you and nothing reminds you of them (Hermes 0.23.1 drops end-of-session notices). Schedule the weekly digest to your chat with `hermes evolution report --schedule-spec --deliver <channel>` and run the command it prints.",
+           "hermes_gateway_crashed": "The gateway's state file says it runs, but its process is gone: it crashed. Start it again (`hermes gateway restart`, from your terminal) and look at its log.",
+           "os_held_by_plugin": "A system update of this plugin was stopped before it released the packages it left out ({held}): they get no update, not even security ones, until you repair (menu → Operating system → repair).",
+           "hermes_gateway_heartbeat_stale": "The gateway says it is running but has not written its heartbeat for {age} s: it may be stuck. Look at `hermes gateway status`.",
+           "hermes_gateway_memory_growth": "The gateway uses {rss} of memory, more than twice its usual: a restart frees it (`hermes gateway restart`, from your terminal).",
+           "hermes_state_db_unreadable": "Hermes' session database could not be read. Run Hermes' check: menu → Hermes health → `hermes doctor`.",
+           "hermes_state_db_damaged": "Hermes' session database failed its integrity check. Back it up and repair it: menu → Hermes health → repair.",
+           "hermes_state_db_wal_large": "The session database's write-ahead log is {wal}: Hermes folds it back by itself when nothing writes; `hermes doctor --fix` does it now.",
+           "hermes_disk_critical": "Only {free} free where Hermes writes: below Hermes' own floor. Free room now (see Hermes health for what grew).",
+           "hermes_disk_low": "Only {free} free where Hermes writes. See Hermes health for what grew and what can go.",
+           "hermes_disk_filling": "At this pace the disk Hermes writes to is full in about {days} days.",
+           "hermes_storage_growth": "Hermes' folders grew fast: {grown}.",
+           "hermes_memory_low": "The machine has little memory left ({available} of {total}).",
+           "hermes_swap_full": "The swap is almost full ({used} of {swap}): the machine is short of memory and everything slows down.",
+           "hermes_cpu_saturated": "The processors are saturated (load {load} on {cpus} CPUs over 15 minutes).",
+           "hermes_unused_tools": "Old versions of Hermes' tools take {size} and nothing uses them: menu → Hermes health → `hermes pm gc`.",
+           "hermes_gateway_not_at_boot": "The gateway runs as a user service without linger: after a reboot it does not start. Fix: `loginctl enable-linger {user}`.",
+           "os_package_manager_stuck": "A package manager has been working for {busy} h (an apt left waiting at its question?): while it runs, nothing else can update the system, and a half-way update would not show. Finish or close it.",
+           "os_dpkg_interrupted": "An update of the system stopped half-way (dpkg). Finish it before anything else: menu → Operating system → repair.",
+           "os_apt_broken": "The system's package manager reports broken dependencies: menu → Operating system → repair.",
+           "os_reboot_required": "The system waits for a reboot ({packages}). Plan it: Hermes' services come back by themselves when they are enabled.",
+           "os_security_updates": "{count} security update(s) of the system are waiting: menu → Operating system.",
+           "os_unattended_off": "Automatic security updates of the system are off (unattended-upgrades).",
+           "os_lists_stale": "The system's package lists were not refreshed for more than 7 days.",
+           "os_unit_not_enabled": "A Hermes service is not enabled: after a reboot it does not start ({units}).",
+           "health": "Hermes and the system", "health_gateway": "Gateway", "health_db": "Session database",
+           "health_disk": "Disk", "health_memory": "Memory", "health_os": "System", "running": "running",
+           "stopped": "not running", "free_of": "free of", "swap": "swap", "updates": "updates waiting",
+           "security": "security", "reboot": "reboot waiting",
+           "digest_unscheduled": "Decisions wait for you and nothing reminds you of them (Hermes 0.23.1 drops end-of-session notices). Schedule the weekly digest to your chat: the menu's suggestion, or `hermes evolution schedule-digest --deliver <channel>` (a Hermes cron job with no agent).",
            "settings_reload": "These settings changed and apply at the next load of the plugin: {keys}. Hermes reloads plugins in a running gateway when one is enabled, disabled or updated; `hermes gateway restart` also does it.",
            "settings_ignored": "These values in `settings.json` are ignored: {keys}. They would widen whom the plugin trusts or turn a protection off, and the agent's own file tools can write that file. Set the ones you want in the Hermes settings form, with `hermes evolution owner` (sender ids and platforms), or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> <value>` in your own terminal.",
            "sessions": "sessions", "none": "Nothing needs attention.",
@@ -440,11 +498,39 @@ _TEXT = {
            "autopilot_off": "O autopilot está desligado: o ciclo só roda quando você chama `hermes evolution learn`.",
            "no_autopilot_pass": "O autopilot ainda não fez nenhuma passada neste perfil.",
            "autopilot_failing": "A última passada do autopilot falhou; ela é repetida em 10 minutos. Veja o agent.log do Hermes.",
-           "lessons_waiting": "Há lições aguardando a sua aprovação: decida cada uma no seu próprio terminal com `hermes evolution lessons review`.",
+           "lessons_waiting": "Há lições aguardando a sua aprovação: decida pelo menu (`hermes evolution`) ou com `hermes evolution lessons review`, no seu próprio terminal.",
            "profiles_without_plugin": "Perfis usados nos últimos 7 dias que não têm o plugin (cada perfil carrega os próprios plugins):",
            "owner_unknown": "Estes canais de chat contam como de outra pessoa, então recebem só lições de modelo fixo e as falhas deles esperam a sua aprovação. Se um deles é você, rode `hermes evolution owner` no seu próprio terminal:",
            "chat_item": "`{origin}`: {sessions} sessões em 7 dias de {senders} remetente(s)",
-           "digest_unscheduled": "Há decisões esperando por você e nada as lembra (o Hermes 0.23.1 descarta os avisos de fim de sessão). Agende o resumo semanal no seu chat com `hermes evolution report --schedule-spec --deliver <canal>` e rode o comando que ele imprime.",
+           "hermes_gateway_crashed": "O arquivo de estado do gateway diz que ele roda, mas o processo sumiu: ele caiu. Suba-o de novo (`hermes gateway restart`, no seu terminal) e veja o log dele.",
+           "os_held_by_plugin": "Uma atualização do sistema feita por este plugin parou antes de liberar os pacotes que deixou de fora ({held}): eles não recebem atualização, nem de segurança, até você reparar (menu → Sistema operacional → reparar).",
+           "hermes_gateway_heartbeat_stale": "O gateway diz que está rodando, mas não grava o sinal de vida há {age} s: pode estar travado. Veja `hermes gateway status`.",
+           "hermes_gateway_memory_growth": "O gateway usa {rss} de memória, mais que o dobro do normal: reiniciar libera (`hermes gateway restart`, no seu terminal).",
+           "hermes_state_db_unreadable": "Não foi possível ler o banco de sessões do Hermes. Rode a checagem do Hermes: menu → Saúde do Hermes → `hermes doctor`.",
+           "hermes_state_db_damaged": "O banco de sessões do Hermes falhou na checagem de integridade. Faça um backup e repare: menu → Saúde do Hermes → reparar.",
+           "hermes_state_db_wal_large": "O log de escrita do banco de sessões está com {wal}: o Hermes o recolhe sozinho quando nada escreve; o `hermes doctor --fix` faz isso agora.",
+           "hermes_disk_critical": "Só {free} livres onde o Hermes grava: abaixo do mínimo do próprio Hermes. Libere espaço agora (veja em Saúde do Hermes o que cresceu).",
+           "hermes_disk_low": "Só {free} livres onde o Hermes grava. Veja em Saúde do Hermes o que cresceu e o que pode sair.",
+           "hermes_disk_filling": "Neste ritmo, o disco onde o Hermes grava enche em cerca de {days} dias.",
+           "hermes_storage_growth": "Pastas do Hermes cresceram rápido: {grown}.",
+           "hermes_memory_low": "A máquina tem pouca memória livre ({available} de {total}).",
+           "hermes_swap_full": "O swap está quase cheio ({used} de {swap}): falta memória na máquina e tudo fica lento.",
+           "hermes_cpu_saturated": "Os processadores estão saturados (carga {load} em {cpus} CPUs nos últimos 15 minutos).",
+           "hermes_unused_tools": "Versões antigas das ferramentas do Hermes ocupam {size} e nada as usa: menu → Saúde do Hermes → `hermes pm gc`.",
+           "hermes_gateway_not_at_boot": "O gateway roda como serviço do usuário sem linger: depois de um reinício ele não sobe. Correção: `loginctl enable-linger {user}`.",
+           "os_package_manager_stuck": "Um gerenciador de pacotes está trabalhando há {busy} h (um apt esquecido esperando a resposta?): enquanto ele roda, nada mais atualiza o sistema e uma atualização pela metade não apareceria. Termine-o ou feche-o.",
+           "os_dpkg_interrupted": "Uma atualização do sistema parou no meio (dpkg). Termine-a antes de qualquer coisa: menu → Sistema operacional → reparar.",
+           "os_apt_broken": "O gerenciador de pacotes do sistema relata dependências quebradas: menu → Sistema operacional → reparar.",
+           "os_reboot_required": "O sistema espera um reinício ({packages}). Planeje-o: os serviços do Hermes voltam sozinhos quando estão habilitados.",
+           "os_security_updates": "{count} atualização(ões) de segurança do sistema esperam: menu → Sistema operacional.",
+           "os_unattended_off": "As atualizações automáticas de segurança do sistema estão desligadas (unattended-upgrades).",
+           "os_lists_stale": "As listas de pacotes do sistema não são atualizadas há mais de 7 dias.",
+           "os_unit_not_enabled": "Um serviço do Hermes não está habilitado: depois de um reinício ele não sobe ({units}).",
+           "health": "Hermes e sistema", "health_gateway": "Gateway", "health_db": "Banco de sessões",
+           "health_disk": "Disco", "health_memory": "Memória", "health_os": "Sistema", "running": "rodando",
+           "stopped": "parado", "free_of": "livres de", "swap": "swap", "updates": "atualizações esperando",
+           "security": "de segurança", "reboot": "reinício pendente",
+           "digest_unscheduled": "Há decisões esperando por você e nada as lembra (o Hermes 0.23.1 descarta os avisos de fim de sessão). Agende o resumo semanal no seu chat: a sugestão do menu, ou `hermes evolution schedule-digest --deliver <canal>` (um job de cron do Hermes sem agente).",
            "settings_reload": "Estas configurações mudaram e valem na próxima carga do plugin: {keys}. O Hermes recarrega os plugins num gateway em execução quando um é ligado, desligado ou atualizado; `hermes gateway restart` também faz isso.",
            "settings_ignored": "Estes valores do `settings.json` são ignorados: {keys}. Eles ampliariam em quem o plugin confia ou desligariam uma proteção, e as ferramentas de arquivo do próprio agente conseguem gravar esse arquivo. Defina os que você quer no formulário de configurações do Hermes, com o `hermes evolution owner` (ids de remetente e plataformas) ou com `hermes config set plugins.entries.hermes-atlas-evolution.settings.<chave> <valor>` no seu próprio terminal.",
            "sessions": "sessões", "none": "Nada precisa de atenção.",
@@ -460,6 +546,51 @@ _TEXT = {
            "statuses": {"done": "lido", "running": "em leitura", "waiting": "aguardando a primeira passada",
                         "no_history": "sem histórico", "unreadable": "ilegível", "unsupported_history": "formato não suportado"}},
 }
+
+
+def _care_values(report: dict) -> dict:
+    care, system = report.get("care") or {}, report.get("system") or {}
+    gate, memory = care.get("gateway") or {}, care.get("memory") or {}
+    load = care.get("load") or {}
+    grown = ", ".join(f"`{item['folder']}` {_gb(item['before'])} → {_gb(item['now'])}" for item in care.get("growth") or ())
+    units = ", ".join(f"`{unit['unit']}`" for unit in system.get("units") or () if not unit.get("enabled"))
+    return {"age": gate.get("heartbeat_age") if gate.get("heartbeat_age") is not None else "?", "rss": _gb(gate.get("rss")), "wal": _gb((care.get("database") or {}).get("wal")),
+            "free": _gb(care.get("free")), "days": care.get("days_to_full"), "grown": grown or "?",
+            "available": _gb(memory.get("available")), "total": _gb(memory.get("total")),
+            "used": _gb(memory.get("swap_used")), "swap": _gb(memory.get("swap_total")),
+            "load": load.get("15m"), "cpus": load.get("cpus"), "size": _gb(care.get("reclaimable")),
+            "user": care.get("owner") or system.get("owner") or "root", "packages": ", ".join(system.get("reboot_packages") or ()) or "?",
+            "count": system.get("security") or 0, "units": units or "?",
+            "held": ", ".join(system.get("plugin_holds") or ()) or "?",
+            "busy": round((system.get("busy_seconds") or 0) / 3600, 1)}
+
+
+def _health_lines(report: dict, t: dict) -> list[str]:
+    care, system = report.get("care"), report.get("system")
+    if not care and not system:
+        return []
+    lines = ["", f"## {t['health']}", ""]
+    if care:
+        gate, memory, db = care.get("gateway") or {}, care.get("memory") or {}, care.get("database") or {}
+        state = t["running"] if gate.get("running") else t["stopped"]
+        lines.append(f"- **{t['health_gateway']}:** {state}" + (f" · {gate.get('version')}" if gate.get("version") else "")
+                     + (f" · RSS {_gb(gate.get('rss'))}" if gate.get("rss") else ""))
+        if db.get("present"):
+            lines.append(f"- **{t['health_db']}:** {db.get('journal') or '?'} · WAL {_gb(db.get('wal'))}"
+                         + (f" · quick_check {db['quick_check']}" if db.get("quick_check") else ""))
+        if care.get("free") is not None:
+            lines.append(f"- **{t['health_disk']}:** {_gb(care['free'])} {t['free_of']} {_gb(care.get('total'))}")
+        if memory.get("total"):
+            lines.append(f"- **{t['health_memory']}:** {_gb(memory.get('available'))} {t['free_of']} {_gb(memory['total'])}"
+                         + (f" · {t['swap']} {_gb(memory.get('swap_used'))}/{_gb(memory.get('swap_total'))}"
+                            if memory.get("swap_total") else ""))
+    if system and system.get("supported"):
+        parts = [str((system.get("os") or {}).get("name") or "?")]
+        parts.append(f"{system.get('upgradable', 0)} {t['updates']} ({system.get('security', 0)} {t['security']})")
+        if system.get("reboot_required"):
+            parts.append(t["reboot"])
+        lines.append(f"- **{t['health_os']}:** " + " · ".join(parts))
+    return lines
 
 
 def markdown(report: dict, lang: str = "en") -> str:
@@ -510,6 +641,9 @@ def markdown(report: dict, lang: str = "en") -> str:
         if code == "settings_ignored":
             lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report["settings_ignored"])))
             continue
+        if code.startswith(("hermes_", "os_")):
+            lines.append("- " + t[code].format(**_care_values(report)))
+            continue
         if code == "settings_reload":
             lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report["settings_reload"])))
             continue
@@ -529,6 +663,7 @@ def markdown(report: dict, lang: str = "en") -> str:
                     lines.append("  - " + t["chat_item"].format(**item))
     if not report["attention"]:
         lines.append(t["none"])
+    lines += _health_lines(report, t)
     shown = [row for row in report.get("profiles", []) if row["sessions_7d"] or row["plugin"] != "missing" or row["current"]]
     if shown:
         lines += ["", f"## {t['profiles']}", "",
