@@ -93,21 +93,29 @@ def _yaml():
         return None
 
 
+def _cache(home: Path) -> dict | None:
+    """The catalog copy Hermes keeps in a profile (`cache/plugin-catalog.json`), read as a regular file only."""
+    from .environment import read_text
+
+    text = read_text(Path(home) / "cache" / "plugin-catalog.json", CACHE_LIMIT)
+    try:
+        data = json.loads(text) if text else None
+    except (ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("entries"), list) else None
+
+
 def load_catalog(homes, *, source: Path | None = None) -> dict:
-    """Hermes' plugin catalog: the newest copy Hermes cached in any of `homes`, else the one in its source.
+    """Hermes' plugin catalog: the copy Hermes cached in the first of `homes` that has one (the lead's own first),
+    else the one in its source. Used for what it says about versions and tiers; what Hermes removed for safety is read
+    per profile by removed_reason, as Hermes itself does.
     {"source": "cache" | "hermes" | "none", "generated_at", "entries": {name: entry}, "removed": [...]}"""
     best = None
     for home in homes:
-        path = Path(home) / "cache" / "plugin-catalog.json"
-        try:
-            info = path.stat()
-            if path.is_symlink() or info.st_size > CACHE_LIMIT or (best is not None and info.st_mtime <= best[0]):
-                continue
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(data, dict) and isinstance(data.get("entries"), list):
-            best = (info.st_mtime, data)
+        data = _cache(Path(home))
+        if data is not None:
+            best = (0, data)
+            break
     entries, removed, origin, generated = {}, [], "none", None
     if best is not None:
         origin, generated = "cache", _text(best[1].get("generated_at"), 40) or None
@@ -170,12 +178,52 @@ def lookup(plugin: dict, catalog: dict) -> dict | None:
     return None
 
 
-def removed_reason(plugin: dict, catalog: dict) -> str | None:
-    """Why Hermes' catalog removed this plugin, when it did (by name or repository)."""
+def _in_tree_removed(source: Path | None) -> list[dict]:
+    """`plugin-catalog/removed.yaml` of Hermes' source (`removed:` list of name/repo/reason), with a small reader."""
+    from .environment import read_text
+
+    folder = source or hermes_source()
+    text = read_text(Path(folder) / "plugin-catalog" / "removed.yaml", 1_000_000) if folder else None
+    found, current, inside = [], None, False
+    for line in (text or "").splitlines():
+        if line.startswith("removed:"):
+            inside = True
+            continue
+        if not inside or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith((" ", "-")):
+            break
+        body = line.strip()
+        if body.startswith("- "):
+            current = {"name": "", "repo": "", "reason": ""}
+            found.append(current)
+            body = body[2:].strip()
+        key, _, value = body.partition(":")
+        if current is not None and key.strip() in ("name", "repo", "reason"):
+            current[key.strip()] = _text(value.strip().strip("'\""), 300)
+    return [item for item in found if item["name"] or item["repo"]]
+
+
+def removed_entries(home: Path | None, *, source: Path | None = None) -> list[dict]:
+    """What Hermes refuses to load in a profile: the kill list of its source plus the copy cached in that profile
+    (the same union Hermes' own `cached_removed_entries` uses there)."""
+    entries = list(_in_tree_removed(source))
+    data = _cache(Path(home)) if home is not None else None
+    for raw in (data or {}).get("removed") or ():
+        item = _removed(raw)
+        if item is not None:
+            entries.append(item)
+    return entries
+
+
+def removed_reason(plugin: dict, catalog: dict, *, home: Path | None = None, source: Path | None = None) -> str | None:
+    """Why Hermes removed this plugin from its catalog, when it did: by its manifest name, folder, install source or
+    git repository, against the kill list of that profile (`home`), else the one in `catalog`."""
+    entries = removed_entries(home, source=source) if home is not None else list(catalog.get("removed") or ())
     names = {plugin.get("name"), plugin.get("folder")} - {None, ""}
-    repo = normalize_repo(plugin.get("repo"))
-    for item in catalog.get("removed") or ():
-        if (item["name"] and item["name"] in names) or (repo and item["repo"] and normalize_repo(item["repo"]) == repo):
+    repos = {normalize_repo(plugin.get("repo")), normalize_repo(str(plugin.get("source") or "").split("#", 1)[0])} - {""}
+    for item in entries:
+        if (item["name"] and item["name"] in names) or (item["repo"] and normalize_repo(item["repo"]) in repos):
             return item["reason"] or "removed from the Hermes catalog"
     return None
 

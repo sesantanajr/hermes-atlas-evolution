@@ -127,7 +127,7 @@ config_schema:
     description: >-
       auto (default): Atlas Evolution looks at every profile of this Hermes (plugins, skills, memory, health) and does
       by itself what is safe and can be undone (identical memory copies, locking skills the curator keeps rewriting,
-      turning off a plugin the Hermes catalog removed, cleaning failed installs, freeing old tool versions); the rest
+      installing itself in profiles in use that never had it, cleaning failed installs, freeing old tool versions); the rest
       waits for you as a proposal with its reason. assist: only identical memory copies by itself. manual: it only
       measures and proposes. Every action is in the history with its undo.
   runtime_guard:

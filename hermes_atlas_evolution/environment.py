@@ -1,15 +1,23 @@
 """The whole Hermes at once (0.8.5): every profile, its plugins and skills, how much it is used, and what to do.
 
-One profile looks after the whole Hermes (`lead`: the default profile when the plugin is on there, else the first
-profile that has it), so the work is done once however many profiles load the plugin. `scan` reads, never writes:
-the profiles' folders, their config.yaml, each plugin's manifest, git checkout and Python source (parsed, never run),
-each skill's SKILL.md and Hermes' skill usage records. `findings` turns that, Hermes' plugin catalog and the
-knowledge base (ecosystem.py) into situations of the playbook, each with its reason, its numbers and its action.
+One profile looks after the whole Hermes (`lead`): the default one when the plugin is on there and has run a pass in
+the last two days, else the first such profile in name order, else the first profile with the plugin on. The work is
+then done once however many profiles load the plugin. `scan` reads, never writes, and never follows a link out of
+the folders it reads: each profile's config.yaml, each plugin's manifest, install record, git checkout and Python
+source (parsed with `ast`, never imported or run), each skill's SKILL.md and Hermes' skill usage records. Every file
+is opened as a regular file only (a named pipe, a device or a link is skipped) and read up to a size limit.
 
-What the plugin reads in a plugin's source: which tools a transform hook acts on (`if tool_name != "web_search"`,
-`_TOOLS.get(tool_name)`, `tool_name in {...}`), and whether a `pre_tool_call` hook rewrites the terminal's command.
-Hermes keeps only the first transform result of each call, so two plugins conflict only when they transform the same
-tool; plugins that act on different tools do not, and nothing is reported then.
+`findings` turns that, Hermes' plugin catalog and the knowledge base (ecosystem.py) into situations of the playbook,
+each with its reason, its numbers and its action. What the plugin reads in a plugin's source:
+- which tools a transform hook acts on: only some (`if tool_name != "web_search": return`, `_TOOLS.get(tool_name)`),
+  all but some (`if tool_name in SKIP: return`), or any; Hermes keeps only the first transform result of each call, in
+  its load order (requires_plugins first, then alphabetical by manifest name), so two plugins conflict only when they
+  can transform the same tool;
+- whether a `pre_tool_call` hook rewrites the terminal's command (it writes its `args["command"]`, or answers
+  Hermes' {"action": "modify", "args": {"command": ...}} directive).
+
+Nothing found here is trusted later as it was stored: before the plugin changes anything in a profile, `verify`
+reads that profile again from disk and the change runs only if the same situation is still there.
 """
 
 from __future__ import annotations
@@ -17,7 +25,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
+import stat
 import time
 from pathlib import Path
 
@@ -26,41 +36,96 @@ REPOSITORY = "sesantanajr/hermes-atlas-evolution"
 PROFILE_MAX = 100
 PLUGIN_MAX = 200
 SKILL_MAX = 3000
-SOURCE_FILES_MAX = 120
-SOURCE_BYTES_MAX = 768 * 1024
+SKILL_WALK_MAX = 20_000          # entries looked at under one profile's skills/
+SOURCE_FILES_MAX = 120           # Python files read per plugin
+SOURCE_FILE_BYTES = 128 * 1024   # a larger file is skipped (its hooks count as acting on any tool)
+SOURCE_PLUGIN_BYTES = 384 * 1024
+SOURCE_SCAN_BYTES = 8 * 1024 * 1024   # all plugins of one scan; past it, hooks are not read (no finding from them)
 UNUSED_SKILL_DAYS = 30   # Hermes' own curator.archive_after_days default
 IDLE_PLUGIN_DAYS = 1     # installed and not loaded for longer than this (a plugin just installed is left alone)
 LEFTOVER_DAYS = 1
 IDLE_PROFILE_DAYS = 30
+LEAD_PASS_SECONDS = 2 * 86_400
 SIMILAR = 0.6
 FIRST_WINS = ("transform_tool_result", "transform_terminal_output", "transform_llm_output")
-KINDS = ("plugin_removed", "plugin_removed_off", "plugin_transform_overlap", "plugin_duplicate", "plugin_unused",
-         "plugin_leftover", "plugin_update", "plugin_obsolete", "self_missing", "profile_idle", "skills_unused",
-         "skills_duplicate", "skills_similar", "skills_shared")   # what findings() reports
+KINDS = ("plugin_removed", "plugin_transform_overlap", "plugin_transform_protected", "plugin_hints_overlap",
+         "plugin_duplicate", "plugin_unused", "plugin_leftover", "plugin_update", "plugin_obsolete", "self_missing",
+         "self_off", "profile_idle", "skills_unused", "skills_duplicate", "skills_similar", "skills_shared")
 _TOOLISH = {"tool_name", "tool", "name", "function_name", "tool_id"}
+_ARGSISH = {"args", "arguments", "tool_args", "tool_input", "params", "kwargs_args"}
 _PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _PLUGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
+_LEFTOVER = re.compile(r"\.install-[A-Za-z0-9_-]{1,64}")
+_SHA = re.compile(r"[0-9a-f]{40}")
 _WORD = re.compile(r"[a-zà-ú0-9]{4,}")
+_HOOK_NAMES = re.compile(r"(pre|post|on|transform)_[a-z_]{2,60}")
 
 
-# ── profiles ─────────────────────────────────────────────────────────────────────────────────────────────────────
+class ScanTimeout(Exception):
+    """The scan ran past its deadline; nothing it found is used."""
+
+
+# ── reading, safely ──────────────────────────────────────────────────────────────────────────────────────────────
+def read_text(path: Path, limit: int) -> str | None:
+    """A regular file's text, at most `limit` bytes, or None: a link, a named pipe, a device, a larger file or an
+    unreadable one is never read (opening a pipe would block the pass for good)."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        handle = os.open(path, flags)
+    except (OSError, ValueError):
+        return None
+    try:
+        info = os.fstat(handle)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return None
+        data = os.read(handle, limit + 1)
+        if len(data) > limit:
+            return None
+        return data.decode("utf-8-sig", errors="replace")
+    except (OSError, MemoryError):
+        return None
+    finally:
+        os.close(handle)
+
+
+def _is_dir(path: Path) -> bool:
+    """A real folder (not a link to one)."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+def _entries(folder: Path, limit: int) -> list[os.DirEntry]:
+    try:
+        with os.scandir(folder) as found:
+            items = []
+            for entry in found:
+                items.append(entry)
+                if len(items) >= limit:
+                    break
+    except OSError:
+        return []
+    return sorted(items, key=lambda entry: entry.name)
+
+
+# ── profiles and the lead ────────────────────────────────────────────────────────────────────────────────────────
 def root_of(home: Path) -> Path:
     home = Path(home).resolve()
     return home.parent.parent if home.parent.name == "profiles" else home
 
 
 def profiles(root: Path) -> list[tuple[str, Path]]:
-    """(name, home) of every profile of this Hermes: the default one (the root) first."""
+    """(name, home) of every profile of this Hermes: the default one (the root) first. A profile folder that is a
+    link, or whose name is not a profile name, is not one."""
     found = [("default", Path(root))]
-    try:
-        entries = sorted(Path(root, "profiles").iterdir())
-    except OSError:
-        entries = []
-    for entry in entries:
+    for entry in _entries(Path(root, "profiles"), PROFILE_MAX * 4):
         if len(found) > PROFILE_MAX:
             break
-        if _PROFILE.fullmatch(entry.name) and not entry.name.startswith(".") and entry.is_dir() and not entry.is_symlink():
-            found.append((entry.name, entry))
+        if _PROFILE.fullmatch(entry.name) and not entry.name.startswith(".") and _is_dir(Path(entry.path)):
+            found.append((entry.name, Path(entry.path)))
     return found
 
 
@@ -82,76 +147,196 @@ def _plugin_lists(config) -> tuple[list | None, list]:
 
 def has_plugin(home: Path, config) -> bool:
     enabled, disabled = _plugin_lists(config)
-    return (Path(home) / "plugins" / PLUGIN_ID / "plugin.yaml").is_file() and enabled is not None \
+    return _is_dir(Path(home) / "plugins" / PLUGIN_ID) and enabled is not None \
         and PLUGIN_ID in enabled and PLUGIN_ID not in disabled
 
 
-def lead(root: Path, *, read_config=None) -> str | None:
-    """The profile that looks after the whole Hermes: the default one when the plugin is on there, else the first."""
+def _last_pass(home: Path) -> float:
+    """When this profile's plugin last finished a pass (its own database, read-only), 0 when never."""
+    path = Path(home) / "evolution" / "evolution.sqlite3"
+    if not path.is_file():
+        return 0.0
+    import sqlite3
+    from urllib.parse import quote
+
+    try:
+        source = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=1)
+        try:
+            row = source.execute("SELECT value FROM cursor WHERE key='loop_status'").fetchone()
+        finally:
+            source.close()
+        found = json.loads(row[0]) if row else {}
+        return float(found.get("at") or 0) if isinstance(found, dict) else 0.0
+    except (sqlite3.Error, ValueError, TypeError, OSError):
+        return 0.0
+
+
+_LEAD_MEMO: dict = {}
+_READ_CONFIG = _read_config   # the memo is used only with Hermes' own reader (a test's reader is never memoized)
+
+
+def lead(root: Path, *, read_config=None, now: float | None = None) -> str | None:
+    """The profile that looks after the whole Hermes: of the profiles with the plugin on, the default one when it ran a
+    pass in the last two days, else the first one (by name) that did, else the default one or the first one. A profile
+    nobody uses never keeps the others waiting, and the choice does not move between passes."""
     read_config = read_config or _read_config
-    for name, home in profiles(root):
-        if has_plugin(home, read_config(home)):
-            return name
+    now = time.time() if now is None else now
+    found = profiles(root)
+    stamps = []
+    for _name, home in found:
+        try:
+            info = os.stat(Path(home) / "config.yaml")
+            stamps.append((info.st_mtime_ns, info.st_size))
+        except OSError:
+            stamps.append(None)
+    key = (str(root), tuple(stamps), int(now // 3600))
+    memo = read_config is _READ_CONFIG
+    if memo and key in _LEAD_MEMO:
+        return _LEAD_MEMO[key]
+    candidates = [(name, home) for name, home in found if has_plugin(home, read_config(home))]
+    leader = None
+    for name, home in candidates:
+        if now - _last_pass(home) < LEAD_PASS_SECONDS:
+            leader = name
+            break
+    if leader is None and candidates:
+        leader = candidates[0][0]
+    if memo:
+        if len(_LEAD_MEMO) > 32:
+            _LEAD_MEMO.clear()
+        _LEAD_MEMO[key] = leader
+    return leader
+
+
+def lead_home(home: Path, *, read_config=None) -> Path | None:
+    """The home of the profile that looks after the whole Hermes, None when no profile has the plugin on."""
+    root = root_of(home)
+    leader = lead(root, read_config=read_config)
+    for name, folder in profiles(root):
+        if name == leader:
+            return Path(folder)
     return None
+
+
+# ── shared state of the whole Hermes (what was undone, where the plugin has been) ───────────────────────────────
+def _state_path(root: Path) -> Path:
+    return Path(root) / "evolution" / "fleet-state.json"
+
+
+def state(root: Path) -> dict:
+    """{"seen": [profiles where the plugin was ever found], "skip": [situations the owner undid]}. Kept in the
+    default profile's data folder of the plugin, so a change of lead keeps it."""
+    text = read_text(_state_path(root), 1_000_000)
+    try:
+        data = json.loads(text) if text else {}
+    except ValueError:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    return {"seen": sorted({str(item) for item in data.get("seen") or () if isinstance(item, str)}),
+            "skip": sorted({str(item) for item in data.get("skip") or () if isinstance(item, str)})}
+
+
+def remember(root: Path, *, seen=(), skip=()) -> None:
+    """Add to the shared state (written whole, owner-only, never through a link)."""
+    folder = Path(root) / "evolution"
+    if folder.is_symlink() or (folder.exists() and not _is_dir(folder)):
+        return
+    current = state(root)
+    merged = {"seen": sorted(set(current["seen"]) | {str(item) for item in seen})[:1000],
+              "skip": sorted(set(current["skip"]) | {str(item) for item in skip})[:5000]}
+    if merged == current:
+        return
+    try:
+        folder.mkdir(mode=0o700, exist_ok=True)
+        temporary = folder / f".fleet-state.{os.getpid()}.tmp"
+        handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(merged, stream)
+        os.replace(temporary, _state_path(root))
+    except OSError:
+        pass
 
 
 # ── plugins ──────────────────────────────────────────────────────────────────────────────────────────────────────
 def manifest(folder: Path) -> dict | None:
-    """name, version, description and the hooks and tools a plugin.yaml declares (a small reader: no PyYAML)."""
-    path = Path(folder) / "plugin.yaml"
-    try:
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > 65_536:
-            return None
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    """name, version, kind, description, requires_plugins and the hooks and tools a plugin.yaml (or plugin.yml)
+    declares. A small reader: no PyYAML, which the standalone runner may not have."""
+    text = None
+    for name in ("plugin.yaml", "plugin.yml"):
+        text = read_text(Path(folder) / name, 65_536)
+        if text is not None:
+            break
+    if text is None:
         return None
-    found: dict = {"name": Path(folder).name, "version": "", "description": "", "provides_hooks": [], "provides_tools": []}
+    found: dict = {"name": Path(folder).name, "version": "", "kind": "", "description": "", "provides_hooks": [],
+                   "provides_tools": [], "requires_plugins": []}
     current, folded = None, []
-    for line in text.splitlines():
-        if line and not line.startswith((" ", "#", "-", "\t")):
+    for raw in text.replace("\r\n", "\n").split("\n"):
+        line = raw.replace("\t", "    ")
+        if line and not line.startswith((" ", "#", "-")):
             if current == "description" and folded:
                 found["description"] = " ".join(folded)[:400]
             key, _, value = line.partition(":")
-            current, folded = key.strip(), []
-            value = value.strip()
-            if current in ("name", "version") and value:
+            current, folded = key.strip().strip("'\""), []
+            value = value.split(" #", 1)[0].strip()
+            if current in ("name", "version", "kind") and value:
                 found[current] = value.strip("'\"")[:96]
-            elif current == "description" and value and value not in (">-", ">", "|", "|-"):
+            elif current == "description" and value and value not in (">-", ">", "|", "|-", ">+", "|+"):
                 found["description"] = value.strip("'\"")[:400]
                 current = None
+            elif current in ("provides_hooks", "provides_tools", "requires_plugins") and value.startswith("["):
+                found[current] = [item.strip().strip("'\"")[:96] for item in value.strip("[]").split(",") if item.strip()]
         elif current == "description" and line.strip():
             folded.append(line.strip())
-        elif current in ("provides_hooks", "provides_tools") and line.strip().startswith("- "):
-            found[current].append(line.strip()[2:].strip().strip("'\"")[:96])
+        elif current in ("provides_hooks", "provides_tools", "requires_plugins") and line.strip().startswith("- "):
+            item = line.strip()[2:].strip()
+            if current == "requires_plugins" and item.startswith("id:"):
+                item = item[3:].strip()
+            found[current].append(item.strip("'\"")[:96])
+        elif current == "requires_plugins" and line.strip().startswith("id:") and found[current] == []:
+            found[current].append(line.strip()[3:].strip().strip("'\"")[:96])
     if current == "description" and folded:
         found["description"] = " ".join(folded)[:400]
+    if not _PLUGIN.fullmatch(found["name"]):
+        found["name"] = Path(folder).name
     return found
 
 
 def git_origin(folder: Path) -> tuple[str, str]:
     """(origin URL, HEAD commit) of a plugin's git checkout, read from its .git files; ("", "") when not one."""
     git = Path(folder) / ".git"
+    if not _is_dir(git):
+        return "", ""
     repo = sha = ""
+    config = read_text(git / "config", 65_536) or ""
+    section = re.search(r'\[remote "origin"\]([^\[]*)', config)
+    url = re.search(r"^\s*url\s*=\s*(\S+)", section.group(1), re.M) if section else None
+    repo = url.group(1)[:300] if url else ""
+    head = (read_text(git / "HEAD", 4096) or "").strip()
+    if head.startswith("ref: "):
+        ref = head[5:].strip()
+        if re.fullmatch(r"refs/[A-Za-z0-9._/-]{1,200}", ref) and ".." not in ref:
+            sha = (read_text(git / ref, 4096) or "").strip()
+            if not _SHA.fullmatch(sha):
+                packed = read_text(git / "packed-refs", 1_000_000) or ""
+                match = re.search(rf"^([0-9a-f]{{40}}) {re.escape(ref)}$", packed, re.M)
+                sha = match.group(1) if match else ""
+    else:
+        sha = head
+    return repo, sha if _SHA.fullmatch(sha or "") else ""
+
+
+def install_record(home: Path, name: str, folder: str) -> dict:
+    """Hermes' install record of a plugin (`plugins/.install-metadata.json`), {} when none."""
+    text = read_text(Path(home) / "plugins" / ".install-metadata.json", 1_000_000)
     try:
-        config = (git / "config").read_text(encoding="utf-8", errors="replace")[:65_536]
-        section = re.search(r'\[remote "origin"\]([^\[]*)', config)
-        url = re.search(r"^\s*url\s*=\s*(\S+)", section.group(1), re.M) if section else None
-        repo = url.group(1)[:300] if url else ""
-        head = (git / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
-        if head.startswith("ref: "):
-            ref = head[5:].strip()
-            if re.fullmatch(r"refs/[A-Za-z0-9._/-]{1,200}", ref) and ".." not in ref:
-                try:
-                    sha = (git / ref).read_text(encoding="utf-8").strip()
-                except OSError:
-                    packed = (git / "packed-refs").read_text(encoding="utf-8", errors="replace")[:1_000_000]
-                    match = re.search(rf"^([0-9a-f]{{40}}) {re.escape(ref)}$", packed, re.M)
-                    sha = match.group(1) if match else ""
-        else:
-            sha = head
-    except (OSError, AttributeError):
-        pass
-    return repo, sha if re.fullmatch(r"[0-9a-f]{40}", sha or "") else ""
+        data = json.loads(text) if text else {}
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    record = data.get(name) or data.get(folder)
+    return record if isinstance(record, dict) else {}
 
 
 def _size(folder: Path, limit: int = 4000) -> tuple[int, float]:
@@ -160,26 +345,21 @@ def _size(folder: Path, limit: int = 4000) -> tuple[int, float]:
     stack = [Path(folder)]
     while stack and seen < limit:
         current = stack.pop()
-        try:
-            entries = list(current.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
+        for entry in _entries(current, limit):
             seen += 1
             try:
-                info = entry.lstat()
+                info = entry.stat(follow_symlinks=False)
             except OSError:
                 continue
             newest = max(newest, info.st_mtime)
-            if entry.is_symlink():
-                continue
-            if entry.is_dir():
-                stack.append(entry)
-            else:
+            if stat.S_ISDIR(info.st_mode):
+                stack.append(Path(entry.path))
+            elif stat.S_ISREG(info.st_mode):
                 total += info.st_size
     return total, newest
 
 
+# ── reading a plugin's source ────────────────────────────────────────────────────────────────────────────────────
 def _constants(tree) -> dict[str, set[str]]:
     """Module-level names bound to literal collections of strings (keys of a dict included)."""
     found: dict[str, set[str]] = {}
@@ -210,70 +390,186 @@ def _toolish(node) -> bool:
     return isinstance(node, ast.Name) and node.id in _TOOLISH
 
 
-def _tools_in(function, functions, constants, depth: int = 0) -> set[str] | None:
-    """The tool names a hook callback limits itself to, or None when it may act on any tool."""
-    found: set[str] = set()
+def _strings_of(node, constants) -> set[str] | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, ast.Name) and node.id in constants:
+        return set(constants[node.id])
+    return _literal_strings(node)
+
+
+def _compare(node, constants) -> tuple[bool, set[str]] | None:
+    """(positive, names) of a test on the tool's name: positive when the test is true for exactly those names
+    (`==`, `in`, `.get()`), negative when it is true for every other name (`!=`, `not in`); None when it is no such
+    test. `not <test>` flips it."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        inner = _compare(node.operand, constants)
+        return None if inner is None else (not inner[0], inner[1])
+    if isinstance(node, ast.Compare) and len(node.ops) == 1:
+        left, right, op = node.left, node.comparators[0], node.ops[0]
+        if _toolish(right) and not _toolish(left):
+            left, right = right, left
+        if not _toolish(left):
+            return None
+        names = _strings_of(right, constants)
+        if names is None:
+            return None
+        if isinstance(op, (ast.Eq, ast.In, ast.Is)):
+            return True, names
+        if isinstance(op, (ast.NotEq, ast.NotIn, ast.IsNot)):
+            return False, names
+    return None
+
+
+def _exits(body) -> bool:
+    """A branch that ends the callback with nothing changed (`return`, `return None`, `return result`)."""
+    if not body:
+        return False
+    last = body[-1]
+    return isinstance(last, ast.Return) and (last.value is None or isinstance(last.value, (ast.Constant, ast.Name))
+                                             and getattr(last.value, "value", None) in (None, "", False) or
+                                             isinstance(last.value, ast.Name))
+
+
+def _scope(function, functions, constants, depth: int = 0) -> tuple[str, set[str]]:
+    """Which tools a hook callback can change: ("only", names), ("except", names) or ("any", set())."""
+    only: set[str] = set()
+    excluded: set[str] = set()
+    unknown = False
     for node in ast.walk(function):
-        if isinstance(node, ast.Compare) and (_toolish(node.left) or any(_toolish(item) for item in node.comparators)):
-            for side in (node.left, *node.comparators):
-                if isinstance(side, ast.Constant) and isinstance(side.value, str):
-                    found.add(side.value)
-                elif isinstance(side, ast.Name) and side.id in constants:
-                    found |= constants[side.id]
+        if isinstance(node, ast.If):
+            tests = [node.test]
+            joined = None
+            if isinstance(node.test, ast.BoolOp):
+                tests, joined = node.test.values, type(node.test.op)
+            for test in tests:
+                found = _compare(test, constants)
+                if found is None:
+                    continue
+                positive, names = found
+                leaves = _exits(node.body)
+                if leaves:   # a guard: the callback stops for these names
+                    if joined is ast.And and len(tests) > 1:
+                        unknown = True   # it stops only when another condition holds too
+                    elif positive:
+                        excluded |= names
+                    else:
+                        only |= names
+                elif joined is ast.Or and len(tests) > 1:
+                    unknown = True   # it acts when another condition holds too
+                elif positive:
+                    only |= names
                 else:
-                    found |= _literal_strings(side) or set()
+                    excluded |= names
         elif isinstance(node, ast.Call):
             callee = node.func
             if isinstance(callee, ast.Attribute) and callee.attr == "get" and isinstance(callee.value, ast.Name) \
                     and callee.value.id in constants and node.args and _toolish(node.args[0]):
-                found |= constants[callee.value.id]
+                only |= constants[callee.value.id]
             elif depth < 2 and isinstance(callee, ast.Name) and callee.id in functions \
                     and any(_toolish(argument) for argument in node.args):
-                inner = _tools_in(functions[callee.id], functions, constants, depth + 1)
-                found |= inner or set()
-    return found or None
+                kind, names = _scope(functions[callee.id], functions, constants, depth + 1)
+                if kind == "only":
+                    only |= names
+                elif kind == "except":
+                    excluded |= names
+    if unknown or (only and excluded):
+        return "any", set()
+    if only:
+        return "only", only
+    if excluded:
+        return "except", excluded
+    return "any", set()
+
+
+def _params(function) -> set[str]:
+    arguments = getattr(function, "args", None)
+    if arguments is None:
+        return set()
+    names = [item.arg for item in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)]
+    if names and names[0] in ("self", "cls"):
+        names = names[1:]
+    found = {name for name in names if name in _ARGSISH}
+    if len(names) >= 2 and not found:
+        found.add(names[1])   # (tool_name, args, ...) is Hermes' calling convention
+    return found
 
 
 def _rewrites_command(function) -> bool:
-    """Whether a callback changes a `command` argument: it writes args["command"], or answers Hermes' pre_tool_call
-    directive {"action": "modify", "args": {"command": ...}}."""
-    modify = False
+    """Whether a pre_tool_call callback changes the tool's `command` argument: it writes `<args>["command"]` (or
+    `<args>.update(command=...)`) on its own args parameter, or returns {"action": "modify", "args": {"command": ...}}.
+    Writing a `command` key of any other dictionary (a log record) does not count."""
+    params = _params(function)
     for node in ast.walk(function):
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AugAssign) else []
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign)) else []
         for target in targets:
-            if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) and target.slice.value == "command":
+            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id in params \
+                    and isinstance(target.slice, ast.Constant) and target.slice.value == "command":
                 return True
-        if isinstance(node, ast.Constant) and node.value == "modify":
-            modify = True
-    return modify and any(isinstance(node, ast.Dict) and any(isinstance(key, ast.Constant) and key.value == "command"
-                                                                for key in node.keys) for node in ast.walk(function))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "update" \
+                and isinstance(node.func.value, ast.Name) and node.func.value.id in params:
+            if any(keyword.arg == "command" for keyword in node.keywords) or any(
+                    isinstance(item, ast.Dict) and any(isinstance(key, ast.Constant) and key.value == "command"
+                                                      for key in item.keys) for item in node.args):
+                return True
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+            pairs = {key.value: value for key, value in zip(node.value.keys, node.value.values)
+                     if isinstance(key, ast.Constant) and isinstance(key.value, str)}
+            action, arguments = pairs.get("action"), pairs.get("args")
+            if isinstance(action, ast.Constant) and action.value == "modify" and isinstance(arguments, ast.Dict) \
+                    and any(isinstance(key, ast.Constant) and key.value == "command" for key in arguments.keys):
+                return True
+    return False
 
 
-_HOOK_NAMES = re.compile(r"(pre|post|on|transform)_[a-z_]{2,60}")
-
-
-def code_hooks(folder: Path) -> dict:
-    """What a plugin's Python source registers, without running it: {hook: {"tools": [...] | None, "rewrites": bool}}.
-    `ctx.register_hook("hook", f)` and helpers called with ("hook", f) are both read; `f` is looked up in every file
-    of the plugin (an imported function too). "tools" None: the callback may act on any tool."""
-    trees, budget = [], SOURCE_BYTES_MAX
-    try:
-        files = sorted(Path(folder).glob("*.py"))[:SOURCE_FILES_MAX] + sorted(Path(folder).glob("*/*.py"))[:SOURCE_FILES_MAX]
-    except OSError:
-        files = []
-    for path in files:
+def _python_files(folder: Path) -> list[Path]:
+    found = []
+    for entry in _entries(folder, 2000):
+        if entry.name.startswith((".", "__pycache__")):
+            continue
+        path = Path(entry.path)
         try:
-            if path.is_symlink() or "__pycache__" in path.parts:
-                continue
-            text = path.read_text(encoding="utf-8", errors="replace")
+            info = entry.stat(follow_symlinks=False)
         except OSError:
             continue
-        budget -= len(text)
-        if budget < 0:
+        if stat.S_ISREG(info.st_mode) and entry.name.endswith(".py"):
+            found.append(path)
+        elif stat.S_ISDIR(info.st_mode) and entry.name not in ("tests", "test", "node_modules", "venv", ".venv"):
+            for inner in _entries(path, 2000):
+                if inner.name.endswith(".py") and not inner.name.startswith("."):
+                    try:
+                        if stat.S_ISREG(inner.stat(follow_symlinks=False).st_mode):
+                            found.append(Path(inner.path))
+                    except OSError:
+                        continue
+        if len(found) >= SOURCE_FILES_MAX:
+            break
+    return found[:SOURCE_FILES_MAX]
+
+
+def code_hooks(folder: Path, budget: dict | None = None) -> dict | None:
+    """What a plugin's Python source registers, without running it:
+    {hook: {"scope": "only" | "except" | "any", "tools": [...], "rewrites": bool}}. `ctx.register_hook("hook", f)`
+    and helpers called with ("hook", f) are both read; `f` is looked up in every file of the plugin (an imported
+    function too). None when the scan's source budget is spent: nothing is concluded from this plugin's code."""
+    budget = budget if budget is not None else {"left": SOURCE_SCAN_BYTES}
+    if budget["left"] <= 0:
+        return None
+    trees, used, skipped = [], 0, False
+    for path in _python_files(folder):
+        text = read_text(path, SOURCE_FILE_BYTES)
+        if text is None:
+            skipped = True   # too large or not a regular file: what it registers is unknown
+            continue
+        used += len(text)
+        budget["left"] -= len(text)
+        if used > SOURCE_PLUGIN_BYTES or budget["left"] < 0:
+            skipped = True
             break
         try:
             trees.append(ast.parse(text))
-        except (SyntaxError, ValueError, RecursionError):
+        except Exception:   # SyntaxError, RecursionError, MemoryError (deep nesting): skip the file, never fail
+            skipped = True
             continue
     functions, constants = {}, {}
     for tree in trees:
@@ -300,38 +596,88 @@ def code_hooks(folder: Path) -> dict:
             function = (callback if isinstance(callback, ast.Lambda)
                         else functions.get(callback.id) if isinstance(callback, ast.Name)
                         else functions.get(callback.attr) if isinstance(callback, ast.Attribute) else None)
-            entry = hooks.setdefault(hook, {"tools": set(), "rewrites": False, "known": True})
+            entry = hooks.setdefault(hook, {"scopes": [], "rewrites": False})
             if function is None:
-                entry["known"] = False
+                entry["scopes"].append(("any", set()))
                 continue
-            tools = _tools_in(function, functions, constants)
-            if tools is None:
-                entry["known"] = False
-            else:
-                entry["tools"] |= tools
-            entry["rewrites"] = entry["rewrites"] or _rewrites_command(function)
-    return {hook: {"tools": sorted(item["tools"]) if item["known"] else None, "rewrites": item["rewrites"]}
-            for hook, item in hooks.items()}
+            try:
+                entry["scopes"].append(_scope(function, functions, constants))
+                entry["rewrites"] = entry["rewrites"] or (hook == "pre_tool_call" and _rewrites_command(function))
+            except RecursionError:
+                entry["scopes"].append(("any", set()))
+    result = {}
+    for hook, entry in hooks.items():
+        kinds = {kind for kind, _names in entry["scopes"]}
+        if kinds == {"only"}:
+            scope, tools = "only", set().union(*(names for _kind, names in entry["scopes"]))
+        elif kinds == {"except"} and len(entry["scopes"]) == 1:
+            scope, tools = "except", entry["scopes"][0][1]
+        else:
+            scope, tools = "any", set()
+        result[hook] = {"scope": scope, "tools": sorted(tools), "rewrites": entry["rewrites"]}
+    if skipped and not result:
+        return {"_unread": {"scope": "any", "tools": [], "rewrites": False}}
+    return result
 
 
-def _plugins_of(home: Path, enabled, disabled, bundled: Path | None, *, now: float) -> tuple[list, list]:
+def overlap(first: dict | None, later: dict | None) -> tuple[str, list[str]]:
+    """Whether two transform callbacks can change the same tool: ("none", []), ("tools", names) or ("any", [])."""
+    if not first or not later:
+        return "any", []
+    a, b = first.get("scope"), later.get("scope")
+    x, y = set(first.get("tools") or ()), set(later.get("tools") or ())
+    if a == "only" and b == "only":
+        shared = x & y
+    elif a == "only" and b == "except":
+        shared = x - y
+    elif a == "except" and b == "only":
+        shared = y - x
+    elif a == "only":
+        shared = x
+    elif b == "only":
+        shared = y
+    else:
+        return "any", []
+    return ("tools", sorted(shared)) if shared else ("none", [])
+
+
+def load_order(items: list[dict]) -> list[dict]:
+    """Hermes 0.23.1's load order of enabled plugins (plugins_manifest.resolve_plugin_load_order): waves of
+    requires_plugins, alphabetical by manifest name within each; a cycle falls back to alphabetical for all."""
+    import graphlib
+
+    by_name = {item["name"]: item for item in items}
+    sorter = graphlib.TopologicalSorter({name: {dep for dep in item.get("requires") or () if dep in by_name and dep != name}
+                                         for name, item in by_name.items()})
+    try:
+        sorter.prepare()
+        order = []
+        while sorter.is_active():
+            ready = sorted(sorter.get_ready())
+            order.extend(ready)
+            sorter.done(*ready)
+    except graphlib.CycleError:
+        order = sorted(by_name)
+    return [by_name[name] for name in order]
+
+
+def _plugins_of(home: Path, enabled, disabled, bundled: Path | None, *, now: float, budget: dict) -> tuple[list, list]:
     """The plugins a profile has (its own folder, and the bundled ones it enables) and leftover install folders."""
     found, leftovers = [], []
     sources = [("profile", Path(home) / "plugins")]
     if bundled is not None:
-        sources.append(("bundled", bundled))
+        sources.append(("bundled", Path(bundled)))
     for origin, base in sources:
-        try:
-            entries = sorted(base.iterdir())[:PLUGIN_MAX]
-        except OSError:
+        if origin == "profile" and not _is_dir(base):
             continue
-        for entry in entries:
-            if entry.is_symlink() or not entry.is_dir():
-                continue
-            if origin == "profile" and entry.name.startswith(".install-"):
-                size, newest = _size(entry, 2000)
+        for entry in _entries(base, PLUGIN_MAX * 3):
+            path = Path(entry.path)
+            if origin == "profile" and _LEFTOVER.fullmatch(entry.name):
+                if not _is_dir(path):
+                    continue
+                size, newest = _size(path, 2000)
                 try:
-                    newest = max(newest, entry.lstat().st_mtime)
+                    newest = max(newest, os.lstat(path).st_mtime)
                 except OSError:
                     pass
                 if now - newest > LEFTOVER_DAYS * 86_400:
@@ -339,7 +685,10 @@ def _plugins_of(home: Path, enabled, disabled, bundled: Path | None, *, now: flo
                 continue
             if entry.name.startswith((".", "_")) or not _PLUGIN.fullmatch(entry.name):
                 continue
-            meta = manifest(entry)
+            linked = entry.is_symlink()
+            if not (linked and origin == "profile" and path.is_dir()) and not _is_dir(path):
+                continue
+            meta = manifest(path)
             if meta is None:
                 continue
             keys = {entry.name, meta["name"]}
@@ -351,12 +700,17 @@ def _plugins_of(home: Path, enabled, disabled, bundled: Path | None, *, now: flo
                 state = "not_loaded"
             if origin == "bundled" and state != "enabled":
                 continue   # bundled plugins the profile does not turn on are part of Hermes, not of the profile
-            repo, sha = git_origin(entry) if origin == "profile" else ("", "")
-            size, newest = _size(entry) if origin == "profile" else (0, 0.0)
-            found.append({"folder": entry.name, "name": meta["name"], "version": meta["version"],
+            repo, sha = git_origin(path) if origin == "profile" and not linked else ("", "")
+            size, newest = _size(path) if origin == "profile" and not linked else (0, 0.0)
+            record = install_record(home, meta["name"], entry.name) if origin == "profile" else {}
+            found.append({"folder": entry.name, "name": meta["name"], "version": meta["version"], "kind": meta["kind"],
                           "description": meta["description"], "declared_hooks": meta["provides_hooks"],
-                          "origin": origin, "state": state, "repo": repo, "sha": sha, "bytes": size,
-                          "changed": newest, "hooks": code_hooks(entry) if state == "enabled" else {}})
+                          "requires": meta["requires_plugins"], "origin": origin, "state": state, "repo": repo,
+                          "sha": sha, "bytes": size, "changed": newest, "linked": linked,
+                          "source": str(record.get("source") or "")[:300], "allow_removed": record.get("allow_removed") is True,
+                          "hooks": code_hooks(path, budget) if state == "enabled" else {}})
+            if len(found) >= PLUGIN_MAX:
+                break
     return found, leftovers
 
 
@@ -384,51 +738,63 @@ def _iso(value) -> float | None:
     try:
         from datetime import datetime
 
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            from datetime import timezone
+
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return stamp.timestamp()
+    except (ValueError, OverflowError, OSError):
         return None
 
 
 def _bundled(base: Path) -> set[str]:
     """The skills Hermes ships and keeps in every profile (`skills/.bundled_manifest`, `name:hash` lines): Hermes'
     own, re-synced on update, so never the owner's to archive, merge or share."""
-    try:
-        text = (base / ".bundled_manifest").read_text(encoding="utf-8", errors="replace")[:1_000_000]
-    except OSError:
-        return set()
+    text = read_text(base / ".bundled_manifest", 512 * 1024) or ""
     return {line.split(":", 1)[0].strip() for line in text.splitlines() if line.strip()}
+
+
+def _skill_files(base: Path) -> list[Path]:
+    """SKILL.md files under skills/, at most 5 folders deep, hidden folders (.archive, .hub) and links left out."""
+    found, seen = [], 0
+    stack = [(base, 0)]
+    while stack and seen < SKILL_WALK_MAX and len(found) < SKILL_MAX:
+        folder, depth = stack.pop()
+        for entry in _entries(folder, 5000):
+            seen += 1
+            if entry.name.startswith("."):
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISDIR(info.st_mode) and depth < 5:
+                stack.append((Path(entry.path), depth + 1))
+            elif stat.S_ISREG(info.st_mode) and entry.name == "SKILL.md" and depth > 0:
+                found.append(Path(entry.path))
+    return sorted(found)
 
 
 def _skills_of(home: Path) -> list[dict]:
     base = Path(home) / "skills"
+    if not _is_dir(base):
+        return []
     bundled = _bundled(base)
     try:
-        usage = json.loads((base / ".usage.json").read_text(encoding="utf-8"))
-        usage = usage if isinstance(usage, dict) else {}
-    except (OSError, ValueError):
+        usage = json.loads(read_text(base / ".usage.json", 8 * 1024 * 1024) or "{}")
+    except ValueError:
         usage = {}
+    usage = usage if isinstance(usage, dict) else {}
     found = []
-    try:
-        paths = sorted(base.rglob("SKILL.md"))
-    except OSError:
-        paths = []
-    for path in paths[:SKILL_MAX]:
-        try:
-            relative = path.relative_to(base)
-        except ValueError:
-            continue
-        if any(part.startswith(".") for part in relative.parts) or len(relative.parts) > 5 or path.is_symlink():
-            continue
-        try:
-            if path.stat().st_size > 256 * 1024:
-                continue
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+    for path in _skill_files(base):
+        text = read_text(path, 256 * 1024)
+        if text is None:
             continue
         name, description, body = _front(text)
         folder = path.parent.name
         record = usage.get(folder) if isinstance(usage.get(folder), dict) else {}
-        found.append({"folder": folder, "path": relative.parent.as_posix(), "name": name or folder,
+        found.append({"folder": folder, "path": path.parent.relative_to(base).as_posix(), "name": name or folder,
                       "description": description, "sha": hashlib.sha256(text.encode()).hexdigest()[:16],
                       "body_sha": hashlib.sha256(body.strip().encode()).hexdigest()[:16],
                       "last_used": _iso(record.get("last_used_at")), "created": _iso(record.get("created_at")),
@@ -440,9 +806,44 @@ def _skills_of(home: Path) -> list[dict]:
 
 
 # ── the scan ─────────────────────────────────────────────────────────────────────────────────────────────────────
+def _own_transform(home: Path, config) -> bool:
+    """Whether this plugin's own transform hook returns text in that profile (tool_hints on, lessons not off), read
+    as the plugin there would read it: its settings in config.yaml over its settings.json."""
+    try:
+        from .cli import effective_settings
+        from .evolve import options
+
+        opts = options(effective_settings(home, config if isinstance(config, dict) else {}),
+                       config if isinstance(config, dict) else {}, strict=False)
+        return bool(opts["tool_hints"] and opts["lessons"] != "off")
+    except Exception:
+        return False
+
+
+def scan_profile(name: str, home: Path, *, now: float, read_config, bundled: Path | None, sessions,
+                 budget: dict | None = None) -> dict:
+    config = read_config(home)
+    enabled, disabled = _plugin_lists(config)
+    plugins, leftovers = _plugins_of(home, enabled, disabled, bundled, now=now,
+                                     budget=budget if budget is not None else {"left": SOURCE_SCAN_BYTES})
+    entries = (((config or {}).get("plugins") or {}).get("entries") or {}) if isinstance(config, dict) else {}
+    return {"profile": name, "home": str(home),
+            # a profile Hermes never configured has no config.yaml: nothing is proposed or run for it
+            "config_read": isinstance(config, dict) and (Path(home) / "config.yaml").is_file(),
+            "sessions_7d": sessions(home, since=now - 7 * 86_400) or 0,
+            "sessions_30d": sessions(home, since=now - IDLE_PROFILE_DAYS * 86_400) or 0,
+            "plugins": plugins, "leftovers": leftovers, "skills": _skills_of(home),
+            "self": has_plugin(home, config),
+            "self_installed": _is_dir(Path(home) / "plugins" / PLUGIN_ID),
+            "self_disabled": PLUGIN_ID in disabled,
+            "self_configured": isinstance(entries, dict) and PLUGIN_ID in entries,
+            "own_transform": _own_transform(home, config) if has_plugin(home, config) else False}
+
+
 def scan(root: Path, *, now: float | None = None, read_config=None, bundled: Path | None = None,
-         sessions=None) -> dict:
-    """Every profile of the Hermes at `root`: its plugins, leftover installs, skills and use. Read only."""
+         sessions=None, deadline: float | None = None, only: str | None = None) -> dict:
+    """Every profile of the Hermes at `root` (or only the profile `only`): its plugins, leftover installs, skills
+    and use. Read only. ScanTimeout past `deadline` (time.monotonic)."""
     from .ecosystem import hermes_source
 
     now = time.time() if now is None else now
@@ -452,20 +853,15 @@ def scan(root: Path, *, now: float | None = None, read_config=None, bundled: Pat
         bundled = source / "plugins" if source is not None else None
     if sessions is None:
         from .status import _sessions as sessions
-    rows = []
+    rows, budget = [], {"left": SOURCE_SCAN_BYTES}
     for name, home in profiles(root):
-        config = read_config(home)
-        enabled, disabled = _plugin_lists(config)
-        plugins, leftovers = _plugins_of(home, enabled, disabled, bundled, now=now)
-        settings = (((config or {}).get("plugins") or {}).get("entries") or {}).get(PLUGIN_ID) if isinstance(config, dict) else None
-        rows.append({"profile": name, "home": str(home), "config_read": isinstance(config, dict),
-                     "sessions_7d": sessions(home, since=now - 7 * 86_400) or 0,
-                     "sessions_30d": sessions(home, since=now - IDLE_PROFILE_DAYS * 86_400) or 0,
-                     "plugins": plugins, "leftovers": leftovers, "skills": _skills_of(home),
-                     "self": has_plugin(home, config),
-                     "tool_hints": bool(isinstance(settings, dict) and isinstance(settings.get("settings"), dict)
-                                        and settings["settings"].get("tool_hints") is True)})
-    return {"at": now, "root": str(root), "profiles": rows}
+        if only is not None and name != only:
+            continue
+        if deadline is not None and time.monotonic() > deadline:
+            raise ScanTimeout(name)
+        rows.append(scan_profile(name, home, now=now, read_config=read_config, bundled=bundled, sessions=sessions,
+                                 budget=budget))
+    return {"at": now, "root": str(root), "profiles": rows, "complete": budget["left"] > 0}
 
 
 # ── findings ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -485,161 +881,12 @@ def _finding(kind: str, profile: str, subject: str, *, risk: str, evidence: dict
 
 
 def _cmd(profile: str, args: str) -> str:
-    return f"hermes {'' if profile == 'default' else f'-p {profile} '}{args}"
-
-
-def findings(reading: dict, catalog: dict, known: dict, *, now: float | None = None) -> list[dict]:
-    """The situations of the playbook found in a scan, most important first."""
-    from .ecosystem import lookup, obsolete, removed_reason
-
-    now = time.time() if now is None else now
-    notes = known.get("plugins") or {}
-    found: list[dict] = []
-    copies: dict[str, set[str]] = {}
-    updates: dict[str, dict] = {}
-    for row in reading.get("profiles") or ():
-        profile = row["profile"]
-        # Hermes loads plugins in alphabetical order of their manifest name (requires_plugins aside): that order
-        # decides which transform result counts.
-        on = sorted((item for item in row["plugins"] if item["state"] == "enabled"), key=lambda item: item["name"])
-        # A plugin the Hermes catalog removed (its kill list): off at once, the removal is yours.
-        for item in row["plugins"]:
-            reason = removed_reason(item, catalog)
-            if reason:
-                found.append(_finding("plugin_removed" if item["state"] == "enabled" else "plugin_removed_off", profile,
-                                      item["folder"], risk="high", evidence={"reason": reason, "state": item["state"]},
-                                      command=_cmd(profile, f"plugins remove {item['folder']}")))
-        # Archived, delisted, missing or unmaintained upstream (knowledge base, checked against GitHub).
-        for item in row["plugins"]:
-            if item["origin"] != "profile":
-                continue
-            note = obsolete(item, known)
-            if note:
-                found.append(_finding("plugin_obsolete", profile, item["folder"],
-                                      risk="low" if note.get("state") == "unmaintained" else "medium",
-                                      evidence={"state": note.get("state"), "basis": note.get("basis"),
-                                                "replacement": note.get("superseded_by") or [], "loaded": item["state"]},
-                                      command=_cmd(profile, f"plugins remove {item['folder']}")))
-        # Transform hooks: Hermes keeps the first result of each call; a conflict is two plugins on the same tool.
-        for hook in FIRST_WINS:
-            users = [item for item in on if hook in item["hooks"] or hook in item["declared_hooks"]]
-            users = [item for item in users if not (item["name"] == PLUGIN_ID and not row["tool_hints"])]
-            for index, first in enumerate(users):
-                for later in users[index + 1:]:
-                    a = (first["hooks"].get(hook) or {}).get("tools", None) if hook in first["hooks"] else None
-                    b = (later["hooks"].get(hook) or {}).get("tools", None) if hook in later["hooks"] else None
-                    shared = sorted(set(a) & set(b)) if a is not None and b is not None else None
-                    if shared == []:
-                        continue   # different tools: both changes apply
-                    protected = _protected(later, notes) and not _protected(first, notes)
-                    off = first if protected else later
-                    other = later if off is first else first
-                    found.append(_finding("plugin_transform_overlap", profile, off["folder"], key=f"{hook}:{other['folder']}",
-                                          risk="high" if _protected(later, notes) else "medium",
-                                          evidence={"hook": hook, "first": first["folder"], "later": later["folder"],
-                                                    "tools": shared, "first_tools": a, "later_tools": b,
-                                                    "off": off["folder"], "protected": _protected(later, notes)},
-                                          command=_cmd(profile, f"plugins disable {off['folder']}")))
-        # Two plugins doing one job: rewriting the terminal's commands, or a role only one should fill.
-        rewriters = [item for item in on if (item["hooks"].get("pre_tool_call") or {}).get("rewrites")]
-        if len(rewriters) > 1:
-            keep = rewriters[0]
-            for item in rewriters[1:]:
-                found.append(_finding("plugin_duplicate", profile, item["folder"], risk="medium",
-                                      evidence={"role": "terminal_rewrite", "keep": keep["folder"], "plugins":
-                                                [entry["folder"] for entry in rewriters]},
-                                      command=_cmd(profile, f"plugins disable {item['folder']}")))
-        roles: dict[str, list] = {}
-        for item in on:
-            note = notes.get(item["name"]) or notes.get(item["folder"])
-            if isinstance(note, dict) and note.get("exclusive") and isinstance(note.get("role"), str):
-                roles.setdefault(note["role"], []).append(item)
-        for role, items in roles.items():
-            if len(items) > 1 and role != "terminal_rewrite":
-                for item in items[1:]:
-                    found.append(_finding("plugin_duplicate", profile, item["folder"], risk="medium",
-                                          evidence={"role": role, "keep": items[0]["folder"],
-                                                    "plugins": [entry["folder"] for entry in items]},
-                                          command=_cmd(profile, f"plugins disable {item['folder']}")))
-        # Installed and never loaded: disk and confusion for nothing.
-        idle = [item for item in row["plugins"] if item["origin"] == "profile" and item["state"] != "enabled"
-                and item["name"] != PLUGIN_ID and now - (item["changed"] or now) > IDLE_PLUGIN_DAYS * 86_400]
-        if idle:
-            found.append(_finding("plugin_unused", profile, "", risk="low",
-                                  evidence={"plugins": [{"name": item["folder"], "state": item["state"],
-                                                         "mb": round(item["bytes"] / 2**20, 1)} for item in idle][:30],
-                                            "count": len(idle), "mb": round(sum(item["bytes"] for item in idle) / 2**20, 1)},
-                                  command=_cmd(profile, f"plugins remove {idle[0]['folder']}")))
-        for item in row["leftovers"]:
-            found.append(_finding("plugin_leftover", profile, item["folder"], risk="low",
-                                  evidence={"mb": round(item["bytes"] / 2**20, 1), "age_days": item["age_days"]}))
-        # A newer version in the Hermes catalog than the one installed (one finding per plugin, every profile in it).
-        for item in on:
-            entry = lookup(item, catalog) if item["origin"] == "profile" else None
-            if entry and entry["version"] and item["version"] and entry["version"] != item["version"] \
-                    and _newer(entry["version"], item["version"]):
-                group = updates.setdefault(item["folder"], {"catalog": entry["version"], "tier": entry["tier"],
-                                                            "profiles": []})
-                group["profiles"].append({"profile": profile, "installed": item["version"]})
-        # This plugin missing where the profile is used.
-        if not row["self"] and row["sessions_7d"] > 0 and row["config_read"]:
-            installed = any(item["name"] == PLUGIN_ID for item in row["plugins"])
-            found.append(_finding("self_missing", profile, PLUGIN_ID, risk="low",
-                                  evidence={"sessions_7d": row["sessions_7d"], "installed": installed},
-                                  command=_cmd(profile, f"plugins enable {PLUGIN_ID}" if installed
-                                               else f"plugins install {REPOSITORY} --enable")))
-        if row["sessions_30d"] == 0 and row["profile"] != "default" and row["config_read"]:
-            found.append(_finding("profile_idle", profile, "", risk="low",
-                                  evidence={"days": IDLE_PROFILE_DAYS, "plugins": len(on), "skills": len(row["skills"])},
-                                  command=_cmd(profile, "evolution status")))
-        # Skills: unused, the same text twice, near twins, and copies kept in every profile.
-        skills = [item for item in row["skills"] if item["state"] == "active" and not item.get("bundled")]
-        unused = [item for item in skills if not (item["pinned"] or item["locked"])
-                  and now - (item["last_used"] or item["created"] or now) > UNUSED_SKILL_DAYS * 86_400]
-        if unused:
-            unused.sort(key=lambda item: item["last_used"] or item["created"] or 0)
-            found.append(_finding("skills_unused", profile, "", risk="low",
-                                  evidence={"count": len(unused), "days": UNUSED_SKILL_DAYS, "total": len(skills),
-                                            "skills": [item["folder"] for item in unused][:40]},
-                                  command=_cmd(profile, f"curator archive {unused[0]['folder']}")))
-        by_text: dict[str, list] = {}
-        for item in skills:
-            by_text.setdefault(item["body_sha"], []).append(item)
-            copies.setdefault(item["sha"], set()).add(profile)
-        for group in by_text.values():
-            if len(group) > 1:
-                group.sort(key=lambda item: -(item["uses"] or 0))
-                found.append(_finding("skills_duplicate", profile, group[1]["folder"], risk="low",
-                                      evidence={"keep": group[0]["folder"], "copies": [item["folder"] for item in group]},
-                                      command=_cmd(profile, f"curator archive {group[1]['folder']}")))
-        pairs = []
-        ordered = sorted(skills, key=lambda item: item["folder"])[:400]
-        for index, left in enumerate(ordered):
-            for right in ordered[index + 1:]:
-                if left["body_sha"] != right["body_sha"] and _similar(left, right) >= SIMILAR:
-                    pairs.append((left["folder"], right["folder"]))
-        if pairs:
-            found.append(_finding("skills_similar", profile, "", risk="low",
-                                  evidence={"pairs": [list(pair) for pair in pairs[:15]], "count": len(pairs)},
-                                  command=_cmd(profile, "curator run --consolidate --dry-run")))
-    for folder, group in sorted(updates.items()):
-        names = [item["profile"] for item in group["profiles"]]
-        found.append(_finding("plugin_update", "all", folder, risk="low",
-                              evidence={**group, "count": len(names),
-                                        "commands": [_cmd(name, f"plugins update {folder}") for name in names][:20]},
-                              command=_cmd(names[0], f"plugins update {folder}")))
-    shared = sum(1 for where in copies.values() if len(where) >= 3)
-    if shared:
-        found.append(_finding("skills_shared", "all", "", risk="low",
-                              evidence={"skills": shared, "profiles": len(reading.get("profiles") or ())},
-                              command="hermes config get skills.external_dirs"))
-    order = {"high": 0, "medium": 1, "low": 2}
-    return sorted(found, key=lambda item: (order.get(item["risk"], 3), item["kind"], item["subject"]))
+    return f"hermes -p {profile} {args}"   # always the profile by name: a pinned active profile never changes it
 
 
 def _protected(item: dict, notes: dict) -> bool:
     note = notes.get(item["name"]) or notes.get(item["folder"]) or {}
-    return isinstance(note, dict) and note.get("protect") is True
+    return item["name"] == PLUGIN_ID or isinstance(note, dict) and note.get("protect") is True
 
 
 def _newer(candidate: str, current: str) -> bool:
@@ -649,6 +896,198 @@ def _newer(candidate: str, current: str) -> bool:
         return parts(candidate) > parts(current)
     except ValueError:
         return False
+
+
+def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet: dict | None = None,
+                     self_sha: str = "") -> list[dict]:
+    """The situations of one profile."""
+    from .ecosystem import obsolete, removed_reason
+
+    notes = known.get("plugins") or {}
+    fleet = fleet or {"seen": [], "skip": []}
+    profile, found = row["profile"], []
+    on = load_order([item for item in row["plugins"] if item["state"] == "enabled"])
+    # On Hermes' kill list: Hermes already refuses to load it (unless it was installed with --allow-removed); the
+    # removal is the owner's.
+    for item in row["plugins"]:
+        if item["origin"] != "profile":
+            continue
+        reason = removed_reason(item, catalog, home=Path(row["home"]))
+        if reason:
+            found.append(_finding("plugin_removed", profile, item["name"], risk="high",
+                                  evidence={"reason": reason, "state": item["state"], "allowed": item["allow_removed"],
+                                            "folder": item["folder"]},
+                                  command=_cmd(profile, f"plugins remove {item['name']}")))
+    for item in row["plugins"]:
+        if item["origin"] != "profile":
+            continue
+        note = obsolete(item, known)
+        if note:
+            found.append(_finding("plugin_obsolete", profile, item["name"],
+                                  risk="low" if note.get("state") == "unmaintained" else "medium",
+                                  evidence={"state": note.get("state"), "basis": note.get("basis"),
+                                            "replacement": note.get("superseded_by") or [], "loaded": item["state"]},
+                                  command=_cmd(profile, f"plugins remove {item['name']}")))
+    # Transform hooks: Hermes keeps the first result of each call, in its load order; a conflict is two plugins that
+    # can change the same tool's result.
+    for hook in FIRST_WINS:
+        users = []
+        for item in on:
+            hooks = item["hooks"]
+            if hooks is None:
+                continue   # not read (the scan's source budget): nothing is concluded
+            if hook in hooks or hook in item["declared_hooks"] or "_unread" in hooks:
+                if item["name"] == PLUGIN_ID and not row.get("own_transform"):
+                    continue   # its transform returns nothing here (tool_hints off)
+                users.append(item)
+        for index, first in enumerate(users):
+            for later in users[index + 1:]:
+                verdict, shared = overlap(first["hooks"].get(hook) or first["hooks"].get("_unread"),
+                                          later["hooks"].get(hook) or later["hooks"].get("_unread"))
+                if verdict == "none":
+                    continue   # different tools: both changes apply
+                evidence = {"hook": hook, "first": first["name"], "later": later["name"], "tools": shared,
+                            "first_scope": (first["hooks"].get(hook) or {}).get("scope", "any"),
+                            "first_tools": (first["hooks"].get(hook) or {}).get("tools", []),
+                            "later_scope": (later["hooks"].get(hook) or {}).get("scope", "any"),
+                            "later_tools": (later["hooks"].get(hook) or {}).get("tools", [])}
+                key = f"{hook}:{first['name']}:{later['name']}"
+                if PLUGIN_ID in (first["name"], later["name"]):
+                    other = later if first["name"] == PLUGIN_ID else first
+                    found.append(_finding("plugin_hints_overlap", profile, other["name"], key=key, risk="medium",
+                                          evidence={**evidence, "other": other["name"]},
+                                          command=_cmd(profile, f"config set plugins.entries.{PLUGIN_ID}.settings.tool_hints false")))
+                elif _protected(first, notes) and _protected(later, notes):
+                    found.append(_finding("plugin_transform_protected", profile, later["name"], key=key, risk="medium",
+                                          evidence=evidence, command=_cmd(profile, "plugins list")))
+                else:
+                    off = first if _protected(later, notes) else later
+                    found.append(_finding("plugin_transform_overlap", profile, off["name"], key=key,
+                                          risk="high" if _protected(later, notes) else "medium",
+                                          evidence={**evidence, "off": off["name"],
+                                                    "protected": _protected(later, notes)},
+                                          command=_cmd(profile, f"plugins disable {off['name']}")))
+    # Two plugins doing one job: rewriting the terminal's commands, or a role only one should fill.
+    rewriters = [item for item in on if item["hooks"] and (item["hooks"].get("pre_tool_call") or {}).get("rewrites")
+                 and ((item["hooks"]["pre_tool_call"].get("scope") == "only" and "terminal" in item["hooks"]["pre_tool_call"]["tools"])
+                      or item["hooks"]["pre_tool_call"].get("scope") != "only")]
+    groups = [("terminal_rewrite", rewriters)]
+    roles: dict[str, list] = {}
+    for item in on:
+        note = notes.get(item["name"]) or notes.get(item["folder"])
+        if isinstance(note, dict) and note.get("exclusive") and isinstance(note.get("role"), str) \
+                and note["role"] != "terminal_rewrite":
+            roles.setdefault(note["role"], []).append(item)
+    groups += sorted(roles.items())
+    for role, items in groups:
+        if len(items) < 2:
+            continue
+        keep = next((item for item in items if _protected(item, notes)), items[0])
+        for item in items:
+            if item is keep or _protected(item, notes):
+                continue
+            found.append(_finding("plugin_duplicate", profile, item["name"], risk="medium",
+                                  evidence={"role": role, "keep": keep["name"], "plugins": [entry["name"] for entry in items]},
+                                  command=_cmd(profile, f"plugins disable {item['name']}")))
+    # Installed and never loaded: disk and confusion for nothing.
+    idle = [item for item in row["plugins"] if item["origin"] == "profile" and item["state"] != "enabled"
+            and item["name"] != PLUGIN_ID and now - (item["changed"] or now) > IDLE_PLUGIN_DAYS * 86_400]
+    if idle:
+        found.append(_finding("plugin_unused", profile, "", risk="low",
+                              evidence={"plugins": [{"name": item["name"], "state": item["state"],
+                                                     "mb": round(item["bytes"] / 2**20, 1)} for item in idle][:30],
+                                        "count": len(idle), "mb": round(sum(item["bytes"] for item in idle) / 2**20, 1),
+                                        "commands": [_cmd(profile, f"plugins remove {item['name']}") for item in idle][:30]},
+                              command=_cmd(profile, f"plugins remove {idle[0]['name']}")))
+    for item in row["leftovers"]:
+        found.append(_finding("plugin_leftover", profile, item["folder"], risk="low",
+                              evidence={"mb": round(item["bytes"] / 2**20, 1), "age_days": item["age_days"]}))
+    # This plugin where the profile is used: installed by the Mode auto only where it never was (never found there,
+    # not turned off, never configured); anywhere else the owner decided, and it is only said.
+    if not row["self"] and row["sessions_7d"] > 0 and row["config_read"]:
+        decided = row["self_disabled"] or row["self_installed"] or row["self_configured"] or profile in fleet["seen"]
+        if decided:
+            found.append(_finding("self_off", profile, PLUGIN_ID, risk="low",
+                                  evidence={"sessions_7d": row["sessions_7d"], "disabled": row["self_disabled"],
+                                            "installed": row["self_installed"]},
+                                  command=_cmd(profile, f"plugins enable {PLUGIN_ID}" if row["self_installed"]
+                                               else f"plugins install {REPOSITORY} --enable")))
+        else:
+            found.append(_finding("self_missing", profile, PLUGIN_ID, risk="low",
+                                  evidence={"sessions_7d": row["sessions_7d"], "ref": self_sha},
+                                  command=_cmd(profile, f"plugins install {REPOSITORY} --enable"
+                                               + (f" --ref {self_sha}" if self_sha else ""))))
+    if row["sessions_30d"] == 0 and profile != "default" and row["config_read"]:
+        found.append(_finding("profile_idle", profile, "", risk="low",
+                              evidence={"days": IDLE_PROFILE_DAYS, "plugins": len(on), "skills": len(row["skills"])},
+                              command=_cmd(profile, "evolution status")))
+    # Skills (Hermes' bundled ones left out): unused, the same text twice, near twins.
+    skills = [item for item in row["skills"] if item["state"] == "active" and not item.get("bundled")]
+    unused = [item for item in skills if not (item["pinned"] or item["locked"])
+              and now - (item["last_used"] or item["created"] or now) > UNUSED_SKILL_DAYS * 86_400]
+    if unused:
+        unused.sort(key=lambda item: item["last_used"] or item["created"] or 0)
+        found.append(_finding("skills_unused", profile, "", risk="low",
+                              evidence={"count": len(unused), "days": UNUSED_SKILL_DAYS, "total": len(skills),
+                                        "skills": [item["folder"] for item in unused][:40]},
+                              command=_cmd(profile, f"curator archive {unused[0]['folder']}")))
+    by_text: dict[str, list] = {}
+    for item in skills:
+        by_text.setdefault(item["body_sha"], []).append(item)
+    for group in by_text.values():
+        if len(group) > 1:
+            group.sort(key=lambda item: (-(item["uses"] or 0), item["folder"]))
+            found.append(_finding("skills_duplicate", profile, group[1]["folder"], risk="low",
+                                  evidence={"keep": group[0]["folder"], "copies": [item["folder"] for item in group]},
+                                  command=_cmd(profile, f"curator archive {group[1]['folder']}")))
+    pairs = []
+    ordered = sorted(skills, key=lambda item: item["folder"])[:400]
+    for index, left in enumerate(ordered):
+        for right in ordered[index + 1:]:
+            if left["body_sha"] != right["body_sha"] and _similar(left, right) >= SIMILAR:
+                pairs.append((left["folder"], right["folder"]))
+    if pairs:
+        found.append(_finding("skills_similar", profile, "", risk="low",
+                              evidence={"pairs": [list(pair) for pair in pairs[:15]], "count": len(pairs)},
+                              command=_cmd(profile, "curator run --consolidate --dry-run")))
+    return found
+
+
+def findings(reading: dict, catalog: dict, known: dict, *, now: float | None = None, fleet: dict | None = None,
+             self_sha: str = "") -> list[dict]:
+    """The situations of the playbook found in a scan, most important first."""
+    from .ecosystem import lookup
+
+    now = time.time() if now is None else now
+    found: list[dict] = []
+    copies: dict[str, set[str]] = {}
+    updates: dict[str, dict] = {}
+    for row in reading.get("profiles") or ():
+        found += profile_findings(row, catalog, known, now=now, fleet=fleet, self_sha=self_sha)
+        for item in row["skills"]:
+            if item["state"] == "active" and not item.get("bundled"):
+                copies.setdefault(item["sha"], set()).add(row["profile"])
+        for item in row["plugins"]:
+            if item["state"] != "enabled" or item["origin"] != "profile":
+                continue
+            entry = lookup(item, catalog)
+            if entry and entry["version"] and item["version"] and entry["version"] != item["version"] \
+                    and _newer(entry["version"], item["version"]):
+                group = updates.setdefault(item["name"], {"catalog": entry["version"], "tier": entry["tier"], "profiles": []})
+                group["profiles"].append({"profile": row["profile"], "installed": item["version"]})
+    for name, group in sorted(updates.items()):
+        names = [item["profile"] for item in group["profiles"]]
+        found.append(_finding("plugin_update", "all", name, risk="low",
+                              evidence={**group, "count": len(names),
+                                        "commands": [_cmd(profile, f"plugins update {name}") for profile in names][:20]},
+                              command=_cmd(names[0], f"plugins update {name}")))
+    shared = sum(1 for where in copies.values() if len(where) >= 3)
+    if shared:
+        found.append(_finding("skills_shared", "all", "", risk="low",
+                              evidence={"skills": shared, "profiles": len(reading.get("profiles") or ())},
+                              command="hermes config get skills.external_dirs"))
+    order = {"high": 0, "medium": 1, "low": 2}
+    return sorted(found, key=lambda item: (order.get(item["risk"], 3), item["kind"], item["subject"]))
 
 
 def summary(reading: dict) -> dict:
@@ -679,7 +1118,21 @@ def stored(conn) -> dict | None:
         found = json.loads(row[0]) if row else None
     except ValueError:
         return None
-    return found if isinstance(found, dict) else None
+    if not isinstance(found, dict):
+        return None
+    try:
+        found["at"] = float(found.get("at") or 0)
+        if not 0 <= found["at"] < 4_102_444_800:   # before 2100
+            found["at"] = 0.0
+    except (TypeError, ValueError, OverflowError):
+        found["at"] = 0.0
+    return found
+
+
+def self_sha(home: Path) -> str:
+    """The commit the lead's own copy of the plugin runs, so a profile it installs runs the same code."""
+    _repo, sha = git_origin(Path(home) / "plugins" / PLUGIN_ID)
+    return sha
 
 
 def refresh(home: Path, *, now: float, force: bool = False, read_config=None, deadline: float | None = None) -> dict | None:
@@ -690,37 +1143,55 @@ def refresh(home: Path, *, now: float, force: bool = False, read_config=None, de
     from .experience import experience
 
     root = root_of(home)
-    leader = lead(root, read_config=read_config)
+    leader = lead(root, read_config=read_config, now=now)
     if leader is None or profile_name(home) != leader:
         return None
     with experience(home) as conn:
         cached = stored(conn)
-    if not force and cached and now - float(cached.get("at") or 0) < SCAN_EVERY_SECONDS:
+    if not force and cached and 0 <= now - float(cached.get("at") or 0) < SCAN_EVERY_SECONDS:
         return cached
     if deadline is not None and deadline - time.monotonic() < 60:
         return cached
-    reading = scan(root, now=now, read_config=read_config)
+    try:
+        reading = scan(root, now=now, read_config=read_config,
+                       deadline=None if deadline is None else deadline - 30)
+    except ScanTimeout:
+        return cached
+    seen = [row["profile"] for row in reading["profiles"]
+            if row["self"] or row["self_installed"] or row["self_disabled"] or row["self_configured"]]
+    remember(root, seen=seen)
     catalog = load_catalog([Path(row["home"]) for row in reading["profiles"]])
     known = knowledge()
-    found = findings(reading, catalog, known, now=now)
+    found = findings(reading, catalog, known, now=now, fleet=state(root), self_sha=self_sha(home))
     tiers: dict[str, int] = {}
     for entry in catalog["entries"].values():
         tiers[entry["tier"]] = tiers.get(entry["tier"], 0) + 1
     keep = {"at": now, "lead": leader, "summary": summary(reading), "profiles": [_compact(row) for row in reading["profiles"]],
             "catalog": {"source": catalog["source"], "generated_at": catalog["generated_at"],
                         "plugins": len(catalog["entries"]), "tiers": tiers, "removed": len(catalog["removed"])},
-            "findings": found}
+            "complete": reading.get("complete", True), "findings": found}
     with experience(home) as conn:
         sync(conn, catalog, known)
         conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('environment', ?)", (json.dumps(keep),))
     return keep
 
 
-def lead_home(home: Path, *, read_config=None) -> Path | None:
-    """The home of the profile that looks after the whole Hermes, None when no profile has the plugin on."""
+def verify(home: Path, proposal: dict, *, now: float | None = None, read_config=None) -> dict | None:
+    """The situation behind a proposal, read again from disk now: the fresh finding with the same code in the
+    target profile, or None when it is not there any more. Nothing stored (the proposal, the cached scan, another
+    profile's catalog copy) is trusted for a change."""
+    from .ecosystem import knowledge, load_catalog
+
+    now = time.time() if now is None else now
+    subject = str(proposal.get("subject") or "")
+    profile = subject.split("/", 1)[0] if "/" in subject else subject
+    if not _PROFILE.fullmatch(profile or ""):
+        return None
     root = root_of(home)
-    leader = lead(root, read_config=read_config)
-    for name, folder in profiles(root):
-        if name == leader:
-            return Path(folder)
-    return None
+    reading = scan(root, now=now, read_config=read_config, only=profile)
+    if not reading["profiles"]:
+        return None
+    row = reading["profiles"][0]
+    catalog = load_catalog([Path(row["home"])])
+    fresh = profile_findings(row, catalog, knowledge(), now=now, fleet=state(root), self_sha=self_sha(home))
+    return next((item for item in fresh if item["code"] == proposal.get("code")), None)

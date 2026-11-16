@@ -3,24 +3,14 @@
   "playbook": {
     "_version": "0.8.5",
     "plugin_removed": {
-      "level": "auto",
-      "risk": "high",
-      "action": "hermes -p <profile> plugins disable <plugin>",
-      "undo": "hermes -p <profile> plugins enable <plugin>",
-      "title_en": "A plugin the Hermes catalog removed is still on",
-      "title_pt": "Plugin removido do catálogo do Hermes ainda ligado",
-      "advice_en": "Hermes' maintainers removed it from the catalog (the reason is shown). Turn it off now and remove it; the Mode auto turns it off by itself.",
-      "advice_pt": "Os mantenedores do Hermes o tiraram do catálogo (o motivo aparece acima). Desligue agora e remova; no Modo auto o plugin o desliga sozinho."
-    },
-    "plugin_removed_off": {
       "level": "manual",
       "risk": "high",
       "action": "hermes -p <profile> plugins remove <plugin>",
       "undo": "",
-      "title_en": "A plugin the Hermes catalog removed is still installed",
-      "title_pt": "Plugin removido do catálogo do Hermes ainda instalado",
-      "advice_en": "It is off, but its files are still there. Remove it.",
-      "advice_pt": "Está desligado, mas os arquivos continuam lá. Remova."
+      "title_en": "A plugin the Hermes catalog removed for safety is still installed",
+      "title_pt": "Plugin que o catálogo do Hermes removeu por segurança continua instalado",
+      "advice_en": "Remove it with the command below. Hermes already refuses to load it, unless it was installed with --allow-removed; the plugin never turns it off or removes it by itself, since that bypass is your decision.",
+      "advice_pt": "Remova com o comando abaixo. O Hermes já se recusa a carregá-lo, a não ser que tenha sido instalado com --allow-removed; o plugin nunca o desliga nem remove sozinho, porque essa exceção é decisão sua."
     },
     "plugin_transform_overlap": {
       "level": "propose",
@@ -29,8 +19,8 @@
       "undo": "hermes -p <profile> plugins enable <plugin>",
       "title_en": "Two plugins change the same tool's result, and Hermes keeps only one",
       "title_pt": "Dois plugins mudam o resultado da mesma ferramenta, e o Hermes só fica com um",
-      "advice_en": "Keep the one whose change you need on those tools and turn the other off in this profile. A security plugin is never the one suggested.",
-      "advice_pt": "Fique com o plugin cuja mudança você precisa nessas ferramentas e desligue o outro neste perfil. Um plugin de segurança nunca é o sugerido para desligar."
+      "advice_en": "Keep the plugin whose change you need on those tools and turn the other off in this profile (one key here, never in Apply all). A security plugin is never the one suggested.",
+      "advice_pt": "Fique com o plugin cuja mudança você precisa nessas ferramentas e desligue o outro neste perfil (uma tecla aqui, nunca no Aplicar tudo). Um plugin de segurança nunca é o sugerido para desligar."
     },
     "plugin_duplicate": {
       "level": "propose",
@@ -39,8 +29,8 @@
       "undo": "hermes -p <profile> plugins enable <plugin>",
       "title_en": "Two plugins do the same job in one profile",
       "title_pt": "Dois plugins fazem o mesmo trabalho no mesmo perfil",
-      "advice_en": "They step on each other (the second one sees what the first already changed). Keep one: the plugin suggests turning off the second.",
-      "advice_pt": "Um atropela o outro (o segundo recebe o que o primeiro já mudou). Fique com um: o plugin sugere desligar o segundo."
+      "advice_en": "They step on each other. Keep one: the plugin suggests turning off the others (one key here, never in Apply all).",
+      "advice_pt": "Um atropela o outro. Fique com um: o plugin sugere desligar os outros (uma tecla aqui, nunca no Aplicar tudo)."
     },
     "plugin_unused": {
       "level": "manual",
@@ -75,12 +65,12 @@
     "self_missing": {
       "level": "auto",
       "risk": "low",
-      "action": "hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable",
+      "action": "hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable --ref <commit of this profile's copy>",
       "undo": "hermes -p <profile> plugins remove hermes-atlas-evolution",
       "title_en": "A profile in use without Atlas Evolution",
       "title_pt": "Perfil em uso sem o Atlas Evolution",
-      "advice_en": "Its errors, skills and memory are not learned from. The Mode auto installs it there by itself (Hermes downloads it).",
-      "advice_pt": "Os erros, as skills e a memória dele não são aproveitados. No Modo auto o plugin se instala lá sozinho (o Hermes baixa)."
+      "advice_en": "Its errors, skills and memory are not learned from. The Mode auto installs it there by itself, at the same version as this profile (Hermes downloads it), only in a profile that never had it.",
+      "advice_pt": "Os erros, as skills e a memória dele não são aproveitados. No Modo Auto o plugin se instala lá sozinho, na mesma versão deste perfil (o Hermes baixa), só num perfil que nunca o teve."
     },
     "profile_idle": {
       "level": "advice",
@@ -171,6 +161,36 @@
       "title_pt": "Plugin arquivado, retirado do catálogo ou sem manutenção",
       "advice_en": "It will get no fixes, security ones included. Remove it, or move to its replacement when one is named.",
       "advice_pt": "Ele não vai receber correções, nem de segurança. Remova, ou troque pelo substituto quando houver um indicado."
+    },
+    "plugin_transform_protected": {
+      "level": "advice",
+      "risk": "medium",
+      "action": "",
+      "undo": "",
+      "title_en": "Two protective plugins change the same tool's result",
+      "title_pt": "Dois plugins de proteção mudam o resultado da mesma ferramenta",
+      "advice_en": "Neither is turned off for this. If the later one's warning matters on those tools, ask its maintainer to declare requires_plugins on the other, so Hermes loads it first.",
+      "advice_pt": "Nenhum é desligado por isso. Se o aviso do segundo importa nessas ferramentas, peça ao mantenedor dele para declarar requires_plugins do outro, para o Hermes carregá-lo antes."
+    },
+    "plugin_hints_overlap": {
+      "level": "manual",
+      "risk": "medium",
+      "action": "hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.tool_hints false",
+      "undo": "hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.tool_hints true",
+      "title_en": "This plugin's lesson hints hide another plugin's change",
+      "title_pt": "As dicas de lição deste plugin escondem a mudança de outro plugin",
+      "advice_en": "Turn this plugin's tool_hints off in that profile (the command is below): lessons still reach the agent at the start of each session.",
+      "advice_pt": "Desligue o tool_hints deste plugin nesse perfil (o comando está abaixo): as lições continuam chegando ao agente no começo de cada sessão."
+    },
+    "self_off": {
+      "level": "manual",
+      "risk": "low",
+      "action": "hermes -p <profile> plugins enable hermes-atlas-evolution",
+      "undo": "",
+      "title_en": "A profile in use where you turned Atlas Evolution off",
+      "title_pt": "Perfil em uso onde você desligou o Atlas Evolution",
+      "advice_en": "Your decision is kept: it is never turned on or reinstalled by itself. If you want it back there, run the command below.",
+      "advice_pt": "A sua decisão é mantida: ele nunca é religado nem reinstalado sozinho. Se quiser de volta nesse perfil, rode o comando abaixo."
     }
   }
 }

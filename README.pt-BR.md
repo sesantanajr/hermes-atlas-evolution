@@ -27,12 +27,11 @@ No **Modo Auto** o Atlas Evolution pensa e age por você, em todos os perfis do 
 
 - tira cópias idênticas de uma entrada da memória (guarda uma cópia do arquivo);
 - trava skills que o curador reescreve sem parar;
-- desliga um plugin que o catálogo do Hermes removeu por segurança;
-- se instala nos perfis em uso que ainda não o têm;
+- se instala, na mesma versão, nos perfis em uso que nunca o tiveram (nunca onde você o desligou ou removeu);
 - move para a lixeira as pastas deixadas por instalações que falharam;
 - libera versões antigas de ferramentas, no máximo uma vez por semana.
 
-O que poderia quebrar algo (desligar um de dois plugins, remover plugins, arquivar skills) espera você, com o motivo e uma tecla para aplicar. Cada ação vai para o histórico com o desfazer, e uma ação que você desfaz nunca se repete. Prefere decidir tudo? Troque para **Assistido** ou **Manual** no menu (tela 5) ou no dashboard.
+O que poderia quebrar algo (desligar um de dois plugins, remover plugins, arquivar skills) espera você, com o motivo e a tecla ou o comando para aplicar. Antes de mudar qualquer coisa num perfil, o plugin lê esse perfil de novo do disco: uma sugestão guardada nunca é tomada como verdade. Cada ação vai para o histórico com o desfazer, e uma ação que você desfaz nunca se repete. Prefere decidir tudo? Troque para **Assistido** ou **Manual** no menu (tela 5) ou no dashboard.
 
 Os dados ficam na sua máquina, o plugin não abre conexão de rede própria e o agente nunca decide nada.
 

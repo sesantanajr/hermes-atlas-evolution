@@ -387,9 +387,11 @@ class Review083Test(Base):
         propose(self.home, "skill_lock", "other", LOCK, "hermes curator lock other")
         failing = Hermes(fail_on="gone")
         first = actions.automatic(self.home, now=NOW, mode="full", runner=failing, usage={})
-        self.assertEqual((len(first["failed"]), len(failing.calls)), (1, 1))   # stops at the first refusal
+        # one refusal does not hold up the others (0.8.5); two in one pass stop it
+        self.assertEqual((len(first["failed"]), len(failing.calls)), (1, 2))
+        self.assertEqual([item["subject"] for item in first["applied"]], ["other"])
         second = actions.automatic(self.home, now=NOW + 60, mode="full", runner=failing, usage={})
-        self.assertEqual([item["subject"] for item in second["applied"]], ["other"])
+        self.assertEqual((second["applied"], second["failed"]), ([], []))   # the refused one waits a day
         late = Hermes()
         actions.automatic(self.home, now=NOW + 120, mode="full", runner=late, usage={}, deadline=clock.monotonic() + 5)
         self.assertEqual(late.calls, [])

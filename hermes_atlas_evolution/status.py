@@ -788,7 +788,15 @@ _ENV_TEXT = {
 
 
 def environment_markdown(home: Path, lang: str = "en", *, mode: str = "auto") -> str:
-    """The Environment tab and screen: every profile, the catalog, and what to do, from the lead profile."""
+    """The Environment tab and screen: every profile, the catalog, and what to do, from the lead profile. Never
+    raises: a damaged record shows as not looked at yet."""
+    try:
+        return _environment_markdown(home, lang, mode=mode)
+    except Exception:
+        return _ENV_TEXT.get(lang, _ENV_TEXT["en"])["not_yet"].format(lead="?") + "\n"
+
+
+def _environment_markdown(home: Path, lang: str = "en", *, mode: str = "auto") -> str:
     from datetime import datetime
 
     from . import environment, explain
@@ -801,7 +809,10 @@ def environment_markdown(home: Path, lang: str = "en", *, mode: str = "auto") ->
     found = _environment(home)
     if not found:
         return t["not_yet"].format(lead=name) + "\n"
-    stamp = datetime.fromtimestamp(float(found.get("at") or 0)).strftime("%d/%m %H:%M" if lang == "pt" else "%Y-%m-%d %H:%M")
+    try:
+        stamp = datetime.fromtimestamp(float(found.get("at") or 0)).strftime("%d/%m %H:%M" if lang == "pt" else "%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OverflowError, OSError):
+        stamp = "?"
     shown = {"auto": "Auto", "assist": "Assistido" if lang == "pt" else "Assisted", "manual": "Manual"}.get(mode, mode)
     lines = [t["head"].format(lead=name, when=stamp, mode=shown), ""]
     catalog = found.get("catalog") or {}

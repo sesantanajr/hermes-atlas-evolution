@@ -537,7 +537,7 @@
   function Proposals(props) {
     const t = props.t, rows = props.data.proposals || [], act = props.actions;
     if (!rows.length) return h("p", { className: "hae-muted" }, t.proposalsEmpty);
-    const changes = rows.filter(function (row) { return (row.explain || {}).can_apply; });
+    const changes = rows.filter(function (row) { return (row.explain || {}).bulk; });   // one-by-one calls stay out
     const applied = function (result) {
       if (result && result.applied === true) return t.done.applied;
       if (result && Array.isArray(result.applied)) return fill(t.done.appliedN, { n: result.applied.length });

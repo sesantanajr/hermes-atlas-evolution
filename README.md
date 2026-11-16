@@ -27,12 +27,11 @@ In **Mode auto** Atlas Evolution thinks and acts for you, in every profile of yo
 
 - takes out identical copies of a memory entry (a copy of the file is kept);
 - locks skills the curator keeps rewriting;
-- turns off a plugin the Hermes catalog removed for safety;
-- installs itself in profiles in use that do not have it yet;
+- installs itself, at the same version, in profiles in use that never had it (never where you turned it off or removed it);
 - moves folders left by failed installs to its trash;
 - frees old tool versions, at most once a week.
 
-What could break something (turning off one of two plugins, removing plugins, archiving skills) waits for you, with its reason and one key to apply. Every action goes to the history with its undo, and an action you undo is never repeated. Rather decide everything yourself? Switch to **Assisted** or **Manual** in the menu (screen 5) or the dashboard.
+What could break something (turning off one of two plugins, removing plugins, archiving skills) waits for you, with its reason and the key or command to apply. Before it changes anything in a profile, the plugin reads that profile again from disk: a stored suggestion is never trusted. Every action goes to the history with its undo, and an action you undo is never repeated. Rather decide everything yourself? Switch to **Assisted** or **Manual** in the menu (screen 5) or the dashboard.
 
 Its data stays on your machine, it opens no network connection of its own, and the agent never decides anything.
 

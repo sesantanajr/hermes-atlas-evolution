@@ -115,10 +115,10 @@ TEXT = {
         "auto_title": "Mode", "auto_q": "Switch to the mode “{mode}”?",
         "auto_now": "Now: {mode}.",
         "auto_modes": ["Auto (default): Atlas Evolution thinks and acts for you, in every profile of this Hermes. By itself"
-                       " it takes out identical memory copies, locks skills the curator keeps rewriting, turns off plugins"
-                       " the Hermes catalog removed, installs itself where a profile is used without it, cleans failed"
-                       " installs and frees old tool versions once a week. What could break something waits for you,"
-                       " with its reason and one key to apply.",
+                       " it takes out identical memory copies, locks skills the curator keeps rewriting, installs itself"
+                       " (same version) in profiles in use that never had it, moves folders of failed installs to its"
+                       " trash and frees old tool versions once a week. What could break something waits for you, with"
+                       " its reason and the key or command to apply.",
                        "Assisted: only identical memory copies by itself; everything else waits for one key from you.",
                        "Manual: it measures and proposes; nothing changes by itself."],
         "auto_rules": "Each action goes to the history and can be undone; an automatic change you undo is never repeated.",
@@ -289,10 +289,10 @@ TEXT = {
         "auto_title": "Modo", "auto_q": "Passar para o modo “{mode}”?",
         "auto_now": "Agora: {mode}.",
         "auto_modes": ["Auto (padrão): o Atlas Evolution pensa e age por você, em todos os perfis deste Hermes. Sozinho ele"
-                       " tira cópias idênticas da memória, trava skills que o curador reescreve sem parar, desliga plugins"
-                       " que o catálogo do Hermes removeu, se instala onde um perfil é usado sem ele, limpa instalações"
-                       " que falharam e libera versões antigas de ferramentas uma vez por semana. O que poderia quebrar"
-                       " algo espera você, com o motivo e uma tecla para aplicar.",
+                       " tira cópias idênticas da memória, trava skills que o curador reescreve sem parar, se instala"
+                       " (na mesma versão) nos perfis em uso que nunca o tiveram, move para a lixeira pastas de"
+                       " instalações que falharam e libera versões antigas de ferramentas uma vez por semana. O que"
+                       " poderia quebrar algo espera você, com o motivo e a tecla ou o comando para aplicar.",
                        "Assistido: só as cópias idênticas da memória sozinho; o resto espera uma tecla sua.",
                        "Manual: mede e propõe; nada muda sozinho."],
         "auto_rules": "Cada ação vai para o histórico e pode ser desfeita; uma mudança automática que você desfaz nunca se repete.",
@@ -581,7 +581,7 @@ class Menu:
         waiting = state["lessons"]["awaiting_approval"]
         if waiting:
             found.append((self.t["suggest_waiting"].format(n=waiting), self.waiting))
-        changes = [item for item in items if item["explain"]["can_apply"]]
+        changes = [item for item in items if item["explain"].get("bulk")]   # one-by-one calls stay out
         if changes:
             titles = list(dict.fromkeys(item["explain"]["title"] for item in changes))
             what = titles[0] + (self.t["and_more"].format(n=len(titles) - 1) if len(titles) > 1 else "")
@@ -758,7 +758,7 @@ class Menu:
                     ordered.append(item)
                     told = item["explain"]
                     self.io.say(f"  {len(ordered):>2}  [{told['risk']}] {told['title']} · {item['subject']}")
-            changes = [item for item in ordered if item["explain"]["can_apply"]]
+            changes = [item for item in ordered if item["explain"].get("bulk")]
             prompt = self.t["proposals_prompt_all"].format(n=len(changes)) if changes else self.t["proposals_prompt"]
             answer = self.io.ask(prompt).lower()
             if not answer:

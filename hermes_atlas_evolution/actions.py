@@ -26,6 +26,9 @@ FAILURE_BACKOFF_SECONDS = 86_400   # an automatic change Hermes refused is tried
 STALE_APPLYING_SECONDS = 900       # a claim left by a process that died while Hermes ran
 COMMAND_SECONDS = 180              # Hermes may finish its own maintenance before the command (after an update)
 COMMAND_MIN_SECONDS = 30           # a pass this close to its deadline runs no Hermes command (a lock takes ~2 s)
+# Time a pass must still have before it starts each kind of change (Hermes may download a plugin, or collect garbage
+# for minutes): a pass is never cut in the middle of one.
+NEEDED_SECONDS = {"self_missing": COMMAND_SECONDS + 30, "pm_gc": 330}
 
 
 def _hermes(home: Path, args: list, *, runner=None) -> None:
@@ -53,28 +56,71 @@ def _profile_home(home: Path, name: str) -> Path:
     raise ValueError("Unknown profile")
 
 
+TRASH_KEEP_SECONDS = 30 * 86_400
+
+
+class Stale(ValueError):
+    """A change in another profile that is not true any more when read again from disk: nothing ran."""
+
+
+def _real_folder_chain(base: Path, parts: list[str], *, create: bool) -> Path:
+    """`base`/parts..., each part a real folder (never a link), made owner-only where it is created. ValueError when a
+    part is a link or not a folder."""
+    import os
+    import stat
+
+    current = Path(base)
+    for part in parts:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                raise ValueError("Nothing to move") from None
+            os.mkdir(current, 0o700)
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("Not a folder, or a link: nothing was moved")
+    return current
+
+
 def _trash(home: Path, target: Path, profile: str, folder: str, *, back: bool) -> None:
-    """Move a failed install's folder (`.install-*`) to `<root>/evolution/trash/<profile>/`, or back. Only such
-    folders, never a link, never over something that is already there."""
+    """Move a failed install's folder (`plugins/.install-*` of profile `profile`) to this profile's own
+    `evolution/trash/<profile>/`, or back. Only such folders; never through a link (any part of either path); never
+    over something that is already there. Entries kept longer than 30 days are deleted from the trash."""
     import os
     import re as _re
     import shutil
+    import stat
+    import time
 
-    from .environment import root_of
-
-    if not _re.fullmatch(r"\.install-[A-Za-z0-9_-]{1,64}", folder):
+    if not _re.fullmatch(r"\.install-[A-Za-z0-9_-]{1,64}", folder) or not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", profile):
         raise ValueError("Only a failed install's folder is moved")
-    live = Path(target) / "plugins" / folder
-    kept = root_of(home) / "evolution" / "trash" / profile / folder
+    own, target = Path(home).resolve(), Path(target).resolve()
+    plugins = _real_folder_chain(target, ["plugins"], create=False)
+    trash = _real_folder_chain(own, ["evolution", "trash", profile], create=not back)
+    live, kept = plugins / folder, trash / folder
     source, destination = (kept, live) if back else (live, kept)
-    if source.is_symlink() or not source.is_dir():
-        raise ValueError("Nothing to move")
-    if destination.exists():
+    try:
+        if not stat.S_ISDIR(os.lstat(source).st_mode):
+            raise ValueError("Nothing to move")
+    except FileNotFoundError:
+        raise ValueError("Nothing to move") from None
+    if os.path.lexists(destination):
         raise ValueError("Something is already there")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if os.name == "posix":
-        os.chmod(destination.parent, 0o700)
-    shutil.move(str(source), str(destination))
+    os.rename(source, destination)   # same file system: never a copy that could follow a link
+    now = time.time()
+    try:
+        entries = list(os.scandir(trash))
+    except OSError:
+        entries = []
+    for entry in entries:
+        try:
+            if _re.fullmatch(r"\.install-[A-Za-z0-9_-]{1,64}", entry.name) and entry.is_dir(follow_symlinks=False) \
+                    and now - entry.stat(follow_symlinks=False).st_mtime > TRASH_KEEP_SECONDS:
+                shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            continue
 
 
 def recover(conn) -> None:
@@ -141,6 +187,18 @@ def apply_proposal(home: Path, proposal_id: int, *, now: float, actor: str = "te
         if found is None:
             raise ValueError("The plugin cannot apply this proposal; approve it to see the command")
         previous = row["status"]
+    if row["kind"] in explain.FLEET:
+        # Another profile is changed: what is on disk now decides, never the stored proposal or the cached scan.
+        from .environment import verify
+
+        fresh = verify(home, dict(row), now=now)
+        again = explain.plan(fresh) if fresh is not None else None
+        if again is None or again != found:
+            with experience(home) as conn:
+                conn.execute("UPDATE proposal SET status='expired', updated=? WHERE id=? AND status IN ('open', 'approved')",
+                             (now, row["id"]))
+            raise Stale("Not so any more: checked again on disk, the situation changed or is gone; nothing was run")
+    with experience(home) as conn:
         claimed = conn.execute("UPDATE proposal SET status='applying', updated=? WHERE id=? AND status IN "
                                "('open', 'approved')", (time.time(), row["id"])).rowcount
     if not claimed:
@@ -163,6 +221,10 @@ def apply_proposal(home: Path, proposal_id: int, *, now: float, actor: str = "te
             return {"id": row["id"], "applied": False, "reason": "not_open"}
         decision = decisions.record_applied(conn, row["id"], code=row["code"], before=previous, apply=found[0],
                                             undo=found[1], now=now, actor=actor)
+    if row["kind"] == "self_missing":   # from now on that profile has had the plugin: turning it off there is kept
+        from .environment import remember, root_of
+
+        remember(root_of(home), seen=[str(row["subject"]).split("/", 1)[0]])
     return {"id": row["id"], "applied": True, "decision": decision, "undo": explain.command_text(found[1])}
 
 
@@ -172,10 +234,18 @@ def apply_many(home: Path, ids: list, *, now: float, actor: str = "terminal", ru
 
     applied, skipped = [], []
     usage = _usage(home)
+    from .experience import experience
+    from .explain import NOT_BULK
+
     for raw in ids[:50]:
         try:
+            with experience(home) as conn:
+                row = conn.execute("SELECT kind FROM proposal WHERE id=?", (int(raw),)).fetchone()
+            if row is not None and row["kind"] in NOT_BULK:
+                skipped.append({"id": raw, "reason": "one_by_one"})   # which plugin to keep is decided one by one
+                continue
             result = apply_proposal(home, int(raw), now=now, actor=actor, runner=runner, usage=usage)
-        except (TypeError, ValueError) as error:
+        except (TypeError, ValueError) as error:   # Stale included: checked again on disk, nothing ran
             skipped.append({"id": raw, "reason": str(error)[:160]})
             continue
         except (OSError, sqlite3.Error):
@@ -199,6 +269,10 @@ def undo_applied(home: Path, result: dict, *, now: float, runner=None) -> dict:
         if result.get("code"):
             conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES (?, ?)", (f"auto_skip:{result['code']}", str(now)))
         decisions.mark_undone(conn, result["id"], now=now)
+    if str(result.get("code") or "").startswith("env:"):
+        from .environment import remember, root_of
+
+        remember(root_of(home), skip=[result["code"]])   # kept for whichever profile looks after the Hermes next
     return {**result, "undone": True}
 
 
@@ -251,6 +325,9 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
     from . import explain
 
     usage = usage if isinstance(usage, dict) else _usage(home)
+    from .environment import root_of, state
+
+    shared_skips = set(state(root_of(home))["skip"])
     with experience(home) as conn:
         held = {}
         for key, value in conn.execute("SELECT key, value FROM cursor WHERE key LIKE 'auto_skip:%' OR key LIKE 'auto_fail:%'"):
@@ -260,11 +337,13 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
     for row in rows:
         if len(done["applied"]) >= MAX_CHANGES_PER_PASS:
             break
-        if deadline is not None and deadline - time.monotonic() < COMMAND_MIN_SECONDS:
-            break
+        needed = NEEDED_SECONDS.get(row["kind"], COMMAND_MIN_SECONDS)
+        if deadline is not None and deadline - time.monotonic() < needed:
+            continue   # not enough time left in this pass for this one: the next pass
         expected = (f"env:{row['kind']}:{str(row['subject']).replace('/', ':', 1)}" if row["kind"] in explain.FLEET
                     else f"{row['kind']}:{row['subject']}")
-        if row["code"] != expected or f"auto_skip:{row['code']}" in held or explain.plan(dict(row)) is None:
+        if row["code"] != expected or f"auto_skip:{row['code']}" in held or row["code"] in shared_skips \
+                or explain.plan(dict(row)) is None:
             continue   # only the proposals the loop writes itself, with a plain name, and never one the owner undid
         try:
             failed_at = float(held.get(f"auto_fail:{row['code']}") or 0)
@@ -274,18 +353,22 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
             continue
         try:
             result = apply_proposal(home, row["id"], now=now, actor="automatic", runner=runner, usage=usage)
-        except (OSError, ValueError) as error:
+        except Stale:
+            continue   # checked again on disk and not so any more: expired, nothing ran
+        except Exception as error:   # never fails the pass
             done["failed"].append({"proposal": row["id"], "error": str(error)[:120]})
             with experience(home) as conn:
                 conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES (?, ?)", (f"auto_fail:{row['code']}", str(now)))
-            break   # Hermes refusing one usually refuses the next too: the next pass tries again
+            if len(done["failed"]) >= 2:
+                break   # two refusals in one pass: something is wrong with Hermes itself; the next pass tries again
+            continue
         if result.get("applied"):
             done["applied"].append({"proposal": row["id"], "kind": row["kind"], "subject": row["subject"],
                                     "decision": result["decision"]})
-    if deadline is None or deadline - time.monotonic() >= COMMAND_MIN_SECONDS:
+    if deadline is None or deadline - time.monotonic() >= NEEDED_SECONDS["pm_gc"]:
         try:
             done["maintenance"] = reclaim(home, now=now, runner=runner)
-        except (OSError, ValueError) as error:
+        except Exception as error:   # never fails the pass
             done["failed"].append({"what": "pm_gc", "error": str(error)[:120]})
     return done
 

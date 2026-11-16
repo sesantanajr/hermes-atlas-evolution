@@ -109,8 +109,10 @@ TRUSTED_ONLY = {
     "owner_platforms": (("evolution", "owner_platforms"), lambda value: value not in (None, [], ())),
     "agent_tools": (("agent_advice",), lambda value: value is True),
     "runtime_guard": (("evolution", "runtime_guard"), lambda value: value is False),
-    "mode": (("evolution", "mode"), lambda value: value == "auto"),   # changes Hermes by itself
-    "auto_actions": (("evolution", "auto_actions"), lambda value: value == "full"),   # the 0.8.3 name of the mode
+    # settings.json may only choose the narrowest mode: anything else could widen an owner's choice made in Hermes'
+    # configuration (including the 0.8.3 name `auto_actions`).
+    "mode": (("evolution", "mode"), lambda value: value != "manual"),
+    "auto_actions": (("evolution", "auto_actions"), lambda value: value not in ("off", False)),
     "legacy_memory_commands": (("legacy_memory_commands",), lambda value: value is True),
     "automatic_shared_recall": (("automatic_shared_recall",), lambda value: value is True),
 }

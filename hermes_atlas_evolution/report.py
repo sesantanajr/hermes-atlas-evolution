@@ -207,8 +207,10 @@ _KIND = {
            "plugin_conflict": "Plugins compete for a hook where only the first counts",
            "approval_policy": "Approvals refused where nobody could approve",
            "tool_latency": "A tool that is slow call after call",
-           "plugin_removed": "Plugin removed from the Hermes catalog still on",
-           "plugin_removed_off": "Plugin removed from the Hermes catalog still installed",
+           "plugin_removed": "Plugin removed from the Hermes catalog still installed",
+           "plugin_transform_protected": "Two protective plugins change the same tool's result",
+           "plugin_hints_overlap": "This plugin's hints hide another plugin's change",
+           "self_off": "Profile in use with Atlas Evolution turned off",
            "plugin_transform_overlap": "Two plugins change the same tool's result",
            "plugin_duplicate": "Two plugins do the same job", "plugin_unused": "Plugins installed and never loaded",
            "plugin_leftover": "Folder left by a failed plugin install", "plugin_update": "Newer reviewed plugin version",
@@ -227,8 +229,10 @@ _KIND = {
            "plugin_conflict": "Plugins disputam um hook em que só o primeiro vale",
            "approval_policy": "Aprovações recusadas onde ninguém podia aprovar",
            "tool_latency": "Ferramenta lenta chamada após chamada",
-           "plugin_removed": "Plugin removido do catálogo do Hermes ainda ligado",
-           "plugin_removed_off": "Plugin removido do catálogo do Hermes ainda instalado",
+           "plugin_removed": "Plugin removido do catálogo do Hermes ainda instalado",
+           "plugin_transform_protected": "Dois plugins de proteção mudam o resultado da mesma ferramenta",
+           "plugin_hints_overlap": "As dicas deste plugin escondem a mudança de outro",
+           "self_off": "Perfil em uso com o Atlas Evolution desligado",
            "plugin_transform_overlap": "Dois plugins mudam o resultado da mesma ferramenta",
            "plugin_duplicate": "Dois plugins fazem o mesmo trabalho", "plugin_unused": "Plugins instalados que nunca carregam",
            "plugin_leftover": "Pasta deixada por instalação de plugin que falhou",
@@ -239,7 +243,7 @@ _KIND = {
 }
 _ADVISORY = ("skill_review", "investigate_failure", "investigate_latency", "config_review", "skill_outcome",
              "session_lifecycle", "context_weight", "compaction", "plugin_health", "plugin_conflict", "approval_policy",
-             "tool_latency", "profile_idle", "skills_similar", "skills_shared")
+             "tool_latency", "profile_idle", "skills_similar", "skills_shared", "plugin_transform_protected")
 
 
 def _number(value, lang: str, digits: int = 0) -> str:

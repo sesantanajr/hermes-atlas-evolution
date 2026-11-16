@@ -227,7 +227,7 @@ def _environment(home: Path, *, now: float, runtime_config=None, deadline: float
         return None   # a profile Hermes never configured (the test suite, a scratch home): nothing to look after
     try:
         return environment.refresh(home, now=now, deadline=deadline)
-    except (OSError, ValueError, sqlite3.Error, RecursionError) as error:
+    except Exception as error:   # MemoryError from a pathological file included: the pass never fails for this
         from logging import getLogger
 
         getLogger(__name__).warning("Atlas Evolution could not read the other profiles: %s", type(error).__name__)
