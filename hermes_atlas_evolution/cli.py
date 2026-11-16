@@ -22,7 +22,7 @@ from .operations import RETENTION_DAYS, database, recommendations, run_policy, s
 RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
 EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report", "owner",
                      "decisions")
-MAINTENANCE_ACTIONS = ("system", "care", "schedule-digest")
+MAINTENANCE_ACTIONS = ("system", "care", "schedule-digest", "environment")
 CYCLE_INTERVAL_SECONDS = 3600
 
 
@@ -53,10 +53,11 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
                "owner_platforms": ("evolution", "owner_platforms"),
                "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit"),
                "autopilot_minutes": ("evolution", "autopilot_minutes"), "runtime_guard": ("evolution", "runtime_guard"),
-               "auto_actions": ("evolution", "auto_actions")}
+               "mode": ("evolution", "mode")}
 # Keys the form does not show but `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key>` can set:
 # the 0.1 notes, whose recall puts stored text in front of the agent on every turn.
-CONFIG_KEYS = {"legacy_memory_commands": ("legacy_memory_commands",),
+CONFIG_KEYS = {"auto_actions": ("evolution", "auto_actions"),   # 0.8.3's name of the mode, still read
+               "legacy_memory_commands": ("legacy_memory_commands",),
                "automatic_shared_recall": ("automatic_shared_recall",)}
 
 
@@ -108,7 +109,10 @@ TRUSTED_ONLY = {
     "owner_platforms": (("evolution", "owner_platforms"), lambda value: value not in (None, [], ())),
     "agent_tools": (("agent_advice",), lambda value: value is True),
     "runtime_guard": (("evolution", "runtime_guard"), lambda value: value is False),
-    "auto_actions": (("evolution", "auto_actions"), lambda value: value == "full"),   # changes Hermes by itself
+    # settings.json may only choose the narrowest mode: anything else could widen an owner's choice made in Hermes'
+    # configuration (including the 0.8.3 name `auto_actions`).
+    "mode": (("evolution", "mode"), lambda value: value != "manual"),
+    "auto_actions": (("evolution", "auto_actions"), lambda value: value not in ("off", False)),
     "legacy_memory_commands": (("legacy_memory_commands",), lambda value: value is True),
     "automatic_shared_recall": (("automatic_shared_recall",), lambda value: value is True),
 }
@@ -215,6 +219,8 @@ def setup(parser: argparse.ArgumentParser) -> None:
     care = commands.add_parser("care", help=_("Check Hermes' own health without the agent or tokens, and run Hermes' repairs"))
     care.add_argument("care_action", nargs="?", default="check", choices=("check", "pm-doctor", "doctor", "fix", "gc"))
     care.add_argument("--yes", action="store_true", help=_("Do not ask before running Hermes' command"))
+    env = commands.add_parser("environment", help=_("Every profile of this Hermes: plugins, skills, conflicts and what to do"))
+    env.add_argument("environment_action", nargs="?", default="show", choices=("show", "scan", "catalog"))
     digest = commands.add_parser("schedule-digest", help=_("Schedule the weekly digest as a Hermes cron job with no agent"))
     digest.add_argument("--deliver", default="local", help=_("Where to deliver it: local, or a channel such as telegram"))
     health = commands.add_parser("health", help=_("Inspect Hermes files and host signals"))
@@ -902,6 +908,30 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
     from .experience import experience
 
     lang = getattr(args, "lang", None) or "en"
+    if args.evolution_action == "environment":
+        from . import environment, explain
+
+        lead = environment.lead_home(home)
+        if lead is None:
+            return {"lead": None, "reason": "no profile has Atlas Evolution on"}
+        task = getattr(args, "environment_action", "show")
+        if task == "scan":
+            found = environment.refresh(lead, now=now, force=True)
+            environment.publish(lead, found, now=now)   # what menu screen 14 and the panel then show
+        else:
+            with experience(lead) as conn:
+                found = environment.stored(conn)
+                if task == "catalog":
+                    rows = conn.execute("SELECT tier, COUNT(*) FROM catalog_plugin GROUP BY tier").fetchall()
+                    removed = conn.execute("SELECT name, reason FROM catalog_removed").fetchall()
+                    return {"tiers": {row[0]: row[1] for row in rows}, "removed": [dict(row) for row in removed],
+                            "catalog": (found or {}).get("catalog")}
+        if not found:
+            from .admin import profile_name
+
+            return {"lead": profile_name(lead), "scanned": False}
+        return {**{key: found[key] for key in ("at", "lead", "summary", "catalog", "profiles")},
+                "findings": [{**item, "explain": explain.describe(item, lang)} for item in found.get("findings") or ()]}
     if args.evolution_action == "schedule-digest":
         _operator_only()
         return actions.schedule_digest(home, deliver=args.deliver, lang=lang, now=now, actor="terminal")

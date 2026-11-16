@@ -2,6 +2,39 @@
 
 *In English: [CHANGELOG.md](CHANGELOG.md), with every version.*
 
+## 0.8.5
+
+O Atlas Evolution passa a cuidar de todos os perfis de um Hermes de uma vez, num Modo Auto ligado por padrão, e conhece o ecossistema de plugins do Hermes.
+
+### Novidades
+
+- **O modo** (`mode`: `auto` por padrão, `assist`, `manual`; tela 5 do menu, as configurações do painel). Substitui o `auto_actions`, que continua sendo lido quando `mode` não está definido (`off` → manual, `safe` → assist, `full` → auto), então quem o escolheu mantém a escolha; o `settings.json` do próprio plugin, que o agente consegue gravar, só pode restringir para `manual`. No auto, o plugin aplica sozinho só ações reversíveis, em todos os perfis: cópias idênticas da memória, travar skills que o curador reescreve sem parar, se instalar (no commit do próprio líder) nos perfis em uso que nunca o tiveram, mover pastas de instalações que falharam para a lixeira dele (guardadas 30 dias) e `hermes pm gc` no máximo uma vez por semana; no máximo 3 mudanças no Hermes por passada (além de até 10 cópias idênticas da memória e do pm gc semanal), cada uma só começa com tempo para terminar; uma ação que o dono desfaz nunca se repete, seja qual for o perfil líder depois.
+- **O ambiente** (`environment.py`; tela 14 do menu, a aba **Ambiente** do painel, `hermes evolution environment [show | scan | catalog]`). Um perfil cuida do Hermes inteiro (dos perfis com o plugin ligado, o padrão quando rodou uma passada nos últimos dois dias, senão o primeiro que rodou), no máximo a cada 6 horas, lendo o config.yaml, os plugins (manifesto, registro de instalação, checkout git e código Python, analisado com `ast` e nunca executado), as skills e o uso de cada perfil; cada arquivo só se for um arquivo comum e até um limite de tamanho. Achados: `plugin_transform_overlap` (dois plugins podem mudar o resultado da mesma ferramenta por um hook de transformação: o código é lido para saber em quais ferramentas cada um age, só algumas, todas menos algumas ou qualquer uma; o Hermes carrega em ondas de `requires_plugins`, em ordem alfabética do nome no manifesto, e fica com o primeiro resultado de cada chamada; plugins em ferramentas diferentes não são apontados; um plugin de segurança nunca é o sugerido para desligar), `plugin_transform_protected` e `plugin_hints_overlap` (dois plugins de proteção, ou o `tool_hints` deste próprio plugin: recomendação, nunca um plugin desligado), `plugin_duplicate` (dois plugins reescrevendo o comando do terminal, ou um papel que só um deveria cumprir), `plugin_removed` (na lista de removidos do Hermes para aquele perfil, como o Hermes lê; o Hermes já se recusa a carregá-lo, então o plugin só mostra o comando de remoção), `plugin_obsolete` (arquivado, retirado, inexistente ou sem manutenção, conferido em 16/11/2026), `plugin_unused` (instalado e nunca carregado), `plugin_leftover` (pastas `.install-*`), `plugin_update` (versão mais nova no catálogo do Hermes, agrupada por plugin), `self_missing` (nunca teve o plugin) e `self_off` (o dono o desligou: mantido), `profile_idle`, `skills_unused` (30 dias, o padrão do próprio curador do Hermes), `skills_duplicate`, `skills_similar`, `skills_shared` (cópias em 3 ou mais perfis: `skills.external_dirs`; as skills que vêm com o Hermes ficam de fora). **Antes de qualquer mudança num perfil, o plugin lê esse perfil de novo do disco** e só roda se a mesma situação ainda estiver lá: uma proposta guardada, a varredura em cache ou arquivos de outro perfil nunca são tomados como verdade. Desligar um de dois plugins é uma tecla naquela proposta, nunca no Aplicar tudo.
+- **A base de conhecimento** (`ecosystem.py`, `knowledge/*.json`), copiada para as tabelas `catalog_plugin`, `catalog_removed`, `knowledge_plugin` e `playbook` do `evolution.sqlite3` do perfil líder: o catálogo de plugins do próprio Hermes, lido da cópia que o Hermes guarda em cache (senão do código dele), o que o plugin sabe de plugins conhecidos, os plugins obsoletos do ecossistema e o playbook de cada situação (nível, risco, ação, desfazer, título e recomendação em inglês e português).
+- Cada proposta tem uma linha **O que fazer** no menu, nas abas Propostas e Ambiente do painel e no `hermes evolution environment`; mudanças em outros perfis aparecem e rodam como `hermes -p <perfil> ...`.
+
+### Mudanças
+
+- O radar não aponta mais plugins que compartilham um hook de transformação: era confuso e, para plugins em ferramentas diferentes, errado. O ambiente aponta só uma sobreposição real, dizendo quem vale.
+- Comandos do Hermes só rodam para um perfil de verdade (com `config.yaml`), então uma pasta de rascunho nunca faz o Hermes preparar uma casa nova; a suíte de testes nunca alcança o Hermes da própria máquina (`ATLAS_EVOLUTION_NO_HERMES=1`).
+- O README diz o que o plugin faz na prática e deixa de fora a saída de versões antigas.
+
+### Limites conhecidos
+
+- Quando o perfil que cuida do Hermes inteiro muda, o novo pode mostrar de novo uma sugestão que você rejeitou no antigo (uma mudança automática que você desfez continua desfeita).
+- Plugins guardados em pastas de categoria (`plugins/<categoria>/<nome>/`) não são lidos pelo ambiente.
+
+### Atualizar a partir da 0.8.4
+
+Com as configurações padrão, atualizar passa você para o Modo Auto. A primeira passada olha todos os perfis e pode, sozinha: tirar cópias idênticas da memória, travar skills que o curador reescreve sem parar, rodar `hermes pm gc` se versões antigas de ferramentas ocuparem 300 MB ou mais, instalar o plugin em perfis usados nos últimos 7 dias que nunca o tiveram (o Hermes baixa do GitHub) e mover para a lixeira pastas de instalações que falharam. Para olhar antes e decidir à mão, passe o modo para assist antes de atualizar: `hermes config set plugins.entries.hermes-atlas-evolution.settings.mode assist`.
+
+```bash
+hermes -p <perfil> plugins update hermes-atlas-evolution   # cada perfil que o tem; sem -p para o padrão
+hermes gateway restart
+sudo systemctl restart hermes-dashboard
+hermes evolution                                           # tela 14
+```
+
 ## 0.8.4
 
 O Atlas Evolution agora cuida do próprio Hermes e do servidor em que ele roda, sem agente e sem tokens, e mostra para que serve no topo do README, com telas do painel no dashboard e do terminal.
@@ -12,7 +45,7 @@ O Atlas Evolution agora cuida do próprio Hermes e do servidor em que ele roda, 
 - **A atualização do sistema operacional** (`system_update.py`; tela 13 do menu, `hermes evolution system check|plan|upgrade|repair|report`), Linux com apt. Uma checagem diária só de leitura; um plano (`apt-get update` e uma simulação que aponta pacotes que reiniciam os containers, pedem reinício, mexem no acesso remoto ou no gerenciador de pacotes); e uma atualização só do dono, como root no próprio terminal: a checagem precisa passar, o perfil do Hermes e o código do plugin precisam ser do root, uma cópia da versão de cada pacote e do `/etc` é guardada numa pasta só do root fora de todo perfil (`/var/lib/hermes-atlas-evolution/system/`, as 5 últimas execuções), o `apt-get --with-new-pkgs upgrade` roda numa unidade systemd própria mantendo os arquivos de configuração do dono e sem reiniciar serviço nenhum sozinho, e depois dpkg, apt, cada serviço que rodava e o Hermes são checados de novo, e um relatório lista o que mudou e como voltar. Ocupado quer dizer uma trava do dpkg ou do apt realmente em uso (`/proc/locks`) ou um gerenciador de pacotes rodando. Os pacotes deixados de fora são anotados antes de serem retidos e liberados quando a execução termina, falha ou é parada (um pacote só sai da lista quando realmente liberado, esperando até 3 minutos por um dpkg que ainda termina; `nome:arquitetura` comparado como o apt mostra); uma execução que sumiu é relatada, nunca esperada, e um reparo (também numa unidade própria) libera o que ela ainda retinha e termina uma atualização que uma queda de energia interrompeu. Nunca reinicia a máquina.
 - **O resumo semanal com uma tecla**: a sugestão do menu ou `hermes evolution schedule-digest --deliver <local|canal>` cria um job de cron do Hermes que roda um script, não o agente; uma vez só; desfeito pelo histórico (`hermes cron remove`).
 - O `status` e o menu mostram o que pede atenção na saúde do Hermes e na do sistema, com os valores; sugestões novas (terminar uma atualização interrompida, instalar atualizações de segurança, liberar versões antigas de ferramentas, agendar o resumo); as telas 12 e 13 vêm depois das que já existiam, então os números que você conhece não mudam.
-- O README começa com para que o plugin serve e telas do painel e do terminal (tiradas de um Hermes 0.23.1 real com dados de demonstração); a atualização e a saída da 0.5.0 estão em `docs/pt-BR/upgrading.md`; a saúde do Hermes e a atualização do sistema em `docs/pt-BR/maintenance.md`.
+- O README começa com para que o plugin serve e telas do painel e do terminal (tiradas de um Hermes 0.23.1 real com dados de demonstração); a atualização está em `docs/pt-BR/upgrading.md`; a saúde do Hermes e a atualização do sistema em `docs/pt-BR/maintenance.md`.
 
 ### Mudanças
 

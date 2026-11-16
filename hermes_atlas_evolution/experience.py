@@ -127,6 +127,24 @@ ADDITIVE_TABLES = (
     ("decision_log", "CREATE TABLE IF NOT EXISTS decision_log (id INTEGER PRIMARY KEY, at REAL NOT NULL, actor TEXT NOT NULL, "
                      "kind TEXT NOT NULL, target TEXT NOT NULL, action TEXT NOT NULL, before TEXT NOT NULL, "
                      "after TEXT NOT NULL, undone REAL)"),
+    # 0.8.5: what exists around Hermes (ecosystem.py), kept in the lead profile's database so the menu, the panel
+    # and any sqlite reader see the same thing. Hermes' own plugin catalog (tiers official, verified, community)
+    # and its kill list, the plugin's knowledge base of well-known plugins, and the playbook of situations and the
+    # action for each. Rewritten when their source changes.
+    ("catalog_plugin", "CREATE TABLE IF NOT EXISTS catalog_plugin (name TEXT PRIMARY KEY, tier TEXT NOT NULL, "
+                       "category TEXT NOT NULL, repo TEXT NOT NULL, sha TEXT NOT NULL, version TEXT NOT NULL, "
+                       "maintainer TEXT NOT NULL, description TEXT NOT NULL, hooks TEXT NOT NULL, tools TEXT NOT NULL, "
+                       "known_issues TEXT NOT NULL) WITHOUT ROWID"),
+    ("catalog_removed", "CREATE TABLE IF NOT EXISTS catalog_removed (name TEXT NOT NULL, repo TEXT NOT NULL, "
+                        "reason TEXT NOT NULL, PRIMARY KEY (name, repo)) WITHOUT ROWID"),
+    ("knowledge_plugin", "CREATE TABLE IF NOT EXISTS knowledge_plugin (name TEXT PRIMARY KEY, role TEXT NOT NULL, "
+                         "exclusive INTEGER NOT NULL, summary_en TEXT NOT NULL, summary_pt TEXT NOT NULL, "
+                         "transforms TEXT NOT NULL, notes TEXT NOT NULL) WITHOUT ROWID"),
+    ("knowledge_obsolete", "CREATE TABLE IF NOT EXISTS knowledge_obsolete (name TEXT PRIMARY KEY, repo TEXT NOT NULL, "
+                           "state TEXT NOT NULL, basis TEXT NOT NULL, superseded_by TEXT NOT NULL) WITHOUT ROWID"),
+    ("playbook", "CREATE TABLE IF NOT EXISTS playbook (situation TEXT PRIMARY KEY, level TEXT NOT NULL, "
+                 "risk TEXT NOT NULL, action TEXT NOT NULL, undo TEXT NOT NULL, title_en TEXT NOT NULL, "
+                 "title_pt TEXT NOT NULL, advice_en TEXT NOT NULL, advice_pt TEXT NOT NULL) WITHOUT ROWID"),
     # Per-signature lookups (lessons, promotion, the listing) would scan these tables once per signature.
     ("failure_daily_signature", "CREATE INDEX IF NOT EXISTS failure_daily_signature ON failure_daily(signature)"),
     ("failure_owner_daily_signature",

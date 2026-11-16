@@ -31,12 +31,31 @@ TEXT = {
         "never": "not yet", "ok": "ok", "failed": "failed", "on": "on", "off": "off", "guard_on": "on", "guard_off": "off",
         "yes_value": "yes", "no_value": "no",
         "items": ["Lessons waiting for you ({waiting})", "Open proposals ({proposals})", "Active lessons ({active})",
-                  "Decision history and undo", "Automatic actions ({auto})", "Settings", "Who is you in chats",
+                  "Decision history and undo", "Mode and automatic actions ({auto})", "Settings", "Who is you in chats",
                   "Hermes memory: repeats and room", "Digest of the last 7 days", "Full status",
                   "Run a learning pass now"],
-        "items_more": ["Hermes health (no agent, no tokens)", "Operating system ({os})"],
+        "items_more": ["Hermes health (no agent, no tokens)", "Operating system ({os})",
+                       "Environment: every profile, plugin and skill ({profiles})"],
         "suggest_digest": "Schedule the weekly digest in your chat (Hermes cron, no agent, no tokens)",
         "suggest_os_repair": "Finish the system update that stopped half-way",
+        "suggest_env": "See {n} thing(s) to fix across your profiles (plugins, skills)",
+        "advice": "What to do",
+        "what_maintenance": "ran Hermes' own maintenance: hermes {target} (nothing to undo)",
+        "and_more": " (+{n} other kind(s))",
+        "env_title": "Environment: every profile of this Hermes",
+        "env_mode": "Looked after by profile `{lead}` (its mode: {mode}; each other profile with the plugin follows its own) · last look: {when}",
+        "env_lead_elsewhere": "Profile `{lead}` looks after every profile; this screen shows and decides through it.",
+        "env_none": "No profile has Atlas Evolution turned on, so nobody looks after the whole Hermes yet.",
+        "env_not_yet": "Not looked at yet: press v to look now (about 15 seconds on a large Hermes).",
+        "env_catalog": "Hermes plugin catalog: {plugins} plugins ({tiers}) · {removed} removed from it",
+        "env_tiers": {"official": "official", "verified": "verified", "community": "community"},
+        "env_profiles": "Profiles ({n}):",
+        "env_row": "{profile:<18} {sessions:>4} sessions in 7 days · plugins: {on} on, {idle} never loaded · {skills} skills · Atlas Evolution: {self}",
+        "env_todo": "What to do ({n}), most important first:",
+        "env_clean": "Nothing to fix: no plugin conflict, duplicate, removed plugin or leftover found.",
+        "env_prompt": "Number to see and decide · v look again now · Enter back: ",
+        "env_scanning": "Looking at every profile...",
+        "env_auto_mark": "⚙ = the Mode auto does it by itself in the next pass (and you can undo it in the history).",
         "suggest_os_security": "Install {n} security update(s) of the system",
         "suggest_unused": "Free {size} of old Hermes tool versions",
         "deliver_prompt": "Deliver it where? local, or a channel such as telegram (Enter = local): ",
@@ -83,26 +102,30 @@ TEXT = {
         "os_no_report": "No update yet.", "os_still_running": "The update is still running; come back in a moment.",
         "os_lost": "The update stopped without finishing (it was killed, or the machine went down): repair it with this screen's repair option.",
         "yes_word": "yes", "no_word": "no", "unknown": "unknown",
-        "auto_line": "Automatic actions: {mode} · {count} in 7 days",
+        "auto_line": "Mode: {mode} · {count} automatic actions in 7 days",
         "attention_title": "Needs attention:", "suggest_title": "Suggestions:",
         "suggest_waiting": "Decide {n} lesson(s) waiting for you",
         "suggest_apply": "Apply {n} recommended change(s): {what}",
-        "suggest_full": "Turn on the complete automatic actions (from now on the plugin applies these by itself)",
+        "suggest_full": "Turn on the Mode auto (the plugin thinks and acts for you, in every profile)",
         "suggest_memory": "Tidy Hermes' memory: {n} repeat(s)",
         "suggest_advice": "Read {n} observation(s) with their numbers",
         "apply_all_q": "Apply these {n} change(s) to Hermes now? Each one can be undone in the history.",
         "applied": "Applied. To undo: {undo} (or from the history).", "applied_n": "Applied {n}.",
         "already": "It was already so in Hermes (the skill was already locked or pinned): nothing to undo.",
-        "auto_names": {"off": "off", "safe": "safe", "full": "full"},
-        "auto_title": "Automatic actions", "auto_q": "Set the automatic actions to “{mode}”?",
+        "auto_names": {"auto": "Auto", "assist": "Assisted", "manual": "Manual"},
+        "auto_title": "Mode", "auto_q": "Switch to the mode “{mode}”?",
         "auto_now": "Now: {mode}.",
-        "auto_modes": ["off: nothing happens by itself; everything waits for you.",
-                       "safe: takes out copies of a memory entry that are the very same text (a copy of the file is kept).",
-                       "full: also locks skills the curator keeps rewriting (at most 3 per pass)."],
+        "auto_modes": ["Auto (default): Atlas Evolution thinks and acts for you, in every profile of this Hermes. By itself"
+                       " it takes out identical memory copies, locks skills the curator keeps rewriting, installs itself"
+                       " (same version) in profiles in use that never had it, moves folders of failed installs to its"
+                       " trash and frees old tool versions once a week. What could break something waits for you, with"
+                       " its reason and the key or command to apply.",
+                       "Assisted: only identical memory copies by itself; everything else waits for one key from you.",
+                       "Manual: it measures and proposes; nothing changes by itself."],
         "auto_rules": "Each action goes to the history and can be undone; an automatic change you undo is never repeated.",
         "auto_recent": "Automatic actions of the last 7 days:", "auto_none": "None in the last 7 days.",
         "auto_prompt": "Decision number to undo · m change the mode · Enter back: ",
-        "mode_prompt": "1 off · 2 safe · 3 full · Enter keeps it: ",
+        "mode_prompt": "1 Auto · 2 Assisted · 3 Manual · Enter keeps it: ",
         "group_change": "Changes the plugin applies (reversible):", "group_lesson": "Lessons:",
         "group_manual": "Changes you apply:", "group_advice": "Observations:",
         "proposals_prompt_all": "Number to see · t apply the {n} change(s) · Enter back: ",
@@ -183,12 +206,31 @@ TEXT = {
         "never": "ainda não", "ok": "ok", "failed": "falhou", "on": "ligado", "off": "desligado", "guard_on": "ligada",
         "guard_off": "desligada", "yes_value": "sim", "no_value": "não",
         "items": ["Lições esperando você ({waiting})", "Propostas abertas ({proposals})", "Lições ativas ({active})",
-                  "Histórico de decisões e desfazer", "Ações automáticas ({auto})", "Configurações",
+                  "Histórico de decisões e desfazer", "Modo e ações automáticas ({auto})", "Configurações",
                   "Quem é você nos chats", "Memória do Hermes: repetições e espaço", "Resumo dos últimos 7 dias",
                   "Situação completa", "Rodar uma passada de aprendizado agora"],
-        "items_more": ["Saúde do Hermes (sem agente, sem tokens)", "Sistema operacional ({os})"],
+        "items_more": ["Saúde do Hermes (sem agente, sem tokens)", "Sistema operacional ({os})",
+                       "Ambiente: todos os perfis, plugins e skills ({profiles})"],
         "suggest_digest": "Agendar o resumo semanal no seu chat (cron do Hermes, sem agente, sem tokens)",
         "suggest_os_repair": "Terminar a atualização do sistema que parou no meio",
+        "suggest_env": "Ver {n} coisa(s) para arrumar nos seus perfis (plugins, skills)",
+        "advice": "O que fazer",
+        "what_maintenance": "rodou a manutenção do próprio Hermes: hermes {target} (nada a desfazer)",
+        "and_more": " (+{n} outro(s) tipo(s))",
+        "env_title": "Ambiente: todos os perfis deste Hermes",
+        "env_mode": "Cuidado pelo perfil `{lead}` (modo dele: {mode}; cada outro perfil com o plugin segue o próprio) · última olhada: {when}",
+        "env_lead_elsewhere": "O perfil `{lead}` cuida de todos os perfis; esta tela mostra e decide por meio dele.",
+        "env_none": "Nenhum perfil tem o Atlas Evolution ligado, então ninguém cuida do Hermes inteiro ainda.",
+        "env_not_yet": "Ainda não olhado: tecle v para olhar agora (uns 15 segundos num Hermes grande).",
+        "env_catalog": "Catálogo de plugins do Hermes: {plugins} plugins ({tiers}) · {removed} tirado(s) dele",
+        "env_tiers": {"official": "oficiais", "verified": "verificados", "community": "da comunidade"},
+        "env_profiles": "Perfis ({n}):",
+        "env_row": "{profile:<18} {sessions:>4} sessões em 7 dias · plugins: {on} ligado(s), {idle} nunca carregado(s) · {skills} skills · Atlas Evolution: {self}",
+        "env_todo": "O que fazer ({n}), do mais importante para o menos:",
+        "env_clean": "Nada para arrumar: nenhum conflito, duplicidade, plugin removido ou resto de instalação.",
+        "env_prompt": "Número para ver e decidir · v olhar de novo agora · Enter volta: ",
+        "env_scanning": "Olhando todos os perfis...",
+        "env_auto_mark": "⚙ = o Modo Auto faz sozinho na próxima passada (e você pode desfazer no histórico).",
         "suggest_os_security": "Instalar {n} atualização(ões) de segurança do sistema",
         "suggest_unused": "Liberar {size} de versões antigas das ferramentas do Hermes",
         "deliver_prompt": "Entregar onde? local, ou um canal como telegram (Enter = local): ",
@@ -235,26 +277,30 @@ TEXT = {
         "os_no_report": "Nenhuma atualização ainda.", "os_still_running": "A atualização ainda está rodando; volte daqui a pouco.",
         "os_lost": "A atualização parou sem terminar (foi morta, ou a máquina caiu): repare-a pela opção de reparo desta tela.",
         "yes_word": "sim", "no_word": "não", "unknown": "desconhecido",
-        "auto_line": "Ações automáticas: {mode} · {count} em 7 dias",
+        "auto_line": "Modo: {mode} · {count} ações automáticas em 7 dias",
         "attention_title": "Pede atenção:", "suggest_title": "Sugestões:",
         "suggest_waiting": "Decidir {n} lição(ões) esperando você",
         "suggest_apply": "Aplicar {n} mudança(s) recomendada(s): {what}",
-        "suggest_full": "Ligar as ações automáticas completas (daqui em diante o plugin aplica isso sozinho)",
+        "suggest_full": "Ligar o Modo auto (o plugin pensa e age por você, em todos os perfis)",
         "suggest_memory": "Organizar a memória do Hermes: {n} repetição(ões)",
         "suggest_advice": "Ler {n} observação(ões) com os números",
         "apply_all_q": "Aplicar estas {n} mudança(s) no Hermes agora? Cada uma pode ser desfeita no histórico.",
         "applied": "Aplicada. Para desfazer: {undo} (ou pelo histórico).", "applied_n": "{n} aplicada(s).",
         "already": "Já estava assim no Hermes (a skill já estava travada ou fixada): nada a desfazer.",
-        "auto_names": {"off": "desligadas", "safe": "seguras", "full": "completas"},
-        "auto_title": "Ações automáticas", "auto_q": "Passar as ações automáticas para “{mode}”?",
+        "auto_names": {"auto": "Auto", "assist": "Assistido", "manual": "Manual"},
+        "auto_title": "Modo", "auto_q": "Passar para o modo “{mode}”?",
         "auto_now": "Agora: {mode}.",
-        "auto_modes": ["desligadas: nada acontece sozinho; tudo espera você.",
-                       "seguras: tira cópias de uma entrada da memória que são exatamente o mesmo texto (guarda uma cópia do arquivo).",
-                       "completas: também trava skills que o curador reescreve sem parar (até 3 por passada)."],
+        "auto_modes": ["Auto (padrão): o Atlas Evolution pensa e age por você, em todos os perfis deste Hermes. Sozinho ele"
+                       " tira cópias idênticas da memória, trava skills que o curador reescreve sem parar, se instala"
+                       " (na mesma versão) nos perfis em uso que nunca o tiveram, move para a lixeira pastas de"
+                       " instalações que falharam e libera versões antigas de ferramentas uma vez por semana. O que"
+                       " poderia quebrar algo espera você, com o motivo e a tecla ou o comando para aplicar.",
+                       "Assistido: só as cópias idênticas da memória sozinho; o resto espera uma tecla sua.",
+                       "Manual: mede e propõe; nada muda sozinho."],
         "auto_rules": "Cada ação vai para o histórico e pode ser desfeita; uma mudança automática que você desfaz nunca se repete.",
         "auto_recent": "Ações automáticas dos últimos 7 dias:", "auto_none": "Nenhuma nos últimos 7 dias.",
         "auto_prompt": "Número da decisão para desfazer · m mudar o modo · Enter volta: ",
-        "mode_prompt": "1 desligadas · 2 seguras · 3 completas · Enter mantém: ",
+        "mode_prompt": "1 Auto · 2 Assistido · 3 Manual · Enter mantém: ",
         "group_change": "Mudanças que o plugin aplica (reversíveis):", "group_lesson": "Lições:",
         "group_manual": "Mudanças que você aplica:", "group_advice": "Observações:",
         "proposals_prompt_all": "Número para ver · t aplicar as {n} mudança(s) · Enter volta: ",
@@ -346,8 +392,8 @@ FIELDS = (
      "Deixar o agente ler e propor lições (as propostas continuam esperando você)"),
     ("runtime_guard", "Runtime guard (keeps the agent from taking Hermes down)",
      "Guarda de runtime (impede o agente de derrubar o Hermes)"),
-    ("auto_actions", "Automatic actions (what the plugin does by itself)",
-     "Ações automáticas (o que o plugin faz sozinho)"),
+    ("mode", "Mode: Auto, Assisted or Manual (what the plugin does by itself)",
+     "Modo: Auto, Assistido ou Manual (o que o plugin faz sozinho)"),
     ("owner_platforms", "Channels where every chat is you", "Canais em que todo chat é você"),
     ("owner_sender_ids", "Senders that are you", "Remetentes que são você"),
 )
@@ -410,6 +456,11 @@ def _bytes(value) -> str:
         if abs(value) >= size:
             return f"{value / size:.1f} {unit}"
     return f"{int(value)} B"
+
+
+def _count(value, lang: str) -> str:
+    text = f"{value:,}" if isinstance(value, int) else str(value)
+    return text.replace(",", ".") if lang == "pt" else text
 
 
 def _when(stamp, lang: str) -> str:
@@ -500,11 +551,11 @@ class Menu:
         config, _problems = safe_settings(self.home, self.runtime)
         return status.build(self.home, now=self.clock(), config=config, runtime_config=self.runtime)
 
-    def open_proposals(self) -> list[dict]:
+    def open_proposals(self, home=None) -> list[dict]:
         from . import explain, proposals
         from .experience import experience
 
-        with experience(self.home) as conn:
+        with experience(home or self.home) as conn:
             items = proposals.listing(conn, status="open")
         return [{**item, "explain": explain.describe(item, self.lang)} for item in items]
 
@@ -532,12 +583,17 @@ class Menu:
         waiting = state["lessons"]["awaiting_approval"]
         if waiting:
             found.append((self.t["suggest_waiting"].format(n=waiting), self.waiting))
-        changes = [item for item in items if item["explain"]["can_apply"]]
+        changes = [item for item in items if item["explain"].get("bulk")]   # one-by-one calls stay out
         if changes:
-            what = ", ".join(dict.fromkeys(item["explain"]["title"].lower() for item in changes))
+            titles = list(dict.fromkeys(item["explain"]["title"] for item in changes))
+            what = titles[0] + (self.t["and_more"].format(n=len(titles) - 1) if len(titles) > 1 else "")
             found.append((self.t["suggest_apply"].format(n=len(changes), what=what), lambda: self.apply_all(changes)))
-        if (state.get("auto_actions") or {}).get("mode") != "full":
-            found.append((self.t["suggest_full"], lambda: self.set_auto("full")))
+        if (state.get("auto_actions") or {}).get("mode") != "auto":
+            found.append((self.t["suggest_full"], lambda: self.set_auto("auto")))
+        env = state.get("environment") or {}
+        acts = [item for item in env.get("findings") or () if item.get("risk") in ("high", "medium")]
+        if acts:
+            found.insert(0, (self.t["suggest_env"].format(n=len(acts)), self.environment))
         repeats = len(memory_care.review(self.home, self.runtime)["issues"])
         if repeats:
             found.append((self.t["suggest_memory"].format(n=repeats), self.memory))
@@ -561,10 +617,11 @@ class Menu:
             while True:
                 state = self.state()
                 items = self.open_proposals()
-                automatic = state.get("auto_actions") or {"mode": "off", "last_7d": 0}
+                automatic = state.get("auto_actions") or {"mode": "manual", "last_7d": 0}
                 counts = {"waiting": state["lessons"]["awaiting_approval"], "proposals": state["proposals_open"],
                           "active": state["lessons"]["active"],
-                          "auto": self.t["auto_names"].get(automatic["mode"], automatic["mode"])}
+                          "auto": self.t["auto_names"].get(automatic["mode"], automatic["mode"]),
+                          "profiles": ((state.get("environment") or {}).get("summary") or {}).get("profiles", "…")}
                 last = (state["autopilot"] or {}).get("last_pass")
                 last_text = self.t["never"] if not last else \
                     f"{str(last.get('at') or '')[:16].replace('T', ' ')} ({self.t['ok'] if last.get('ok') is not False else self.t['failed']})"
@@ -591,7 +648,8 @@ class Menu:
                         self.io.say(f"   {letter}  {text}")
                 self.io.say()
                 os_name = ((state.get("system") or {}).get("os") or {}).get("name") or "Linux"
-                labels = [*self.t["items"], *(label.format(os=os_name) for label in self.t["items_more"])]
+                labels = [*self.t["items"], *(label.format(os=os_name, profiles=counts["profiles"])
+                                              for label in self.t["items_more"])]
                 for number, label in enumerate(labels, start=1):
                     self.io.say(f"  {number:>2}  {label.format(**counts)}")
                 self.io.say(f"   0  {self.t['quit']}")
@@ -604,7 +662,7 @@ class Menu:
                     continue
                 screens = [self.waiting, self.proposals, self.active, self.history, self.automatic, self.settings,
                            self.owner, self.memory, self.digest, self.full_status, self.learn, self.care,
-                           self.operating_system]
+                           self.operating_system, self.environment]
                 chosen = self.pick(answer, len(screens))
                 if chosen is None:
                     self.io.say(self.t["invalid"])
@@ -682,12 +740,9 @@ class Menu:
         for line in self.t["auto_modes"]:
             self.io.para("• " + line, indent=2)
         if self.confirm(self.t["auto_q"].format(mode=self.t["auto_names"].get(mode, mode))):
-            self.guarded(lambda: self.write({"auto_actions": mode}))
+            self.guarded(lambda: self.write({"mode": mode}))
 
     def proposals(self) -> None:
-        from . import admin, decisions, lessons
-        from .experience import experience
-
         while True:
             items = self.open_proposals()
             self.heading(self.t["proposals_title"])
@@ -705,7 +760,7 @@ class Menu:
                     ordered.append(item)
                     told = item["explain"]
                     self.io.say(f"  {len(ordered):>2}  [{told['risk']}] {told['title']} · {item['subject']}")
-            changes = [item for item in ordered if item["explain"]["can_apply"]]
+            changes = [item for item in ordered if item["explain"].get("bulk")]
             prompt = self.t["proposals_prompt_all"].format(n=len(changes)) if changes else self.t["proposals_prompt"]
             answer = self.io.ask(prompt).lower()
             if not answer:
@@ -717,66 +772,150 @@ class Menu:
             if chosen is None:
                 self.io.say(self.t["invalid"])
                 continue
-            item = ordered[chosen]
-            told = item["explain"]
+            self.detail(ordered[chosen])
+
+    def detail(self, item: dict, home=None) -> None:
+        """One proposal: what was seen, what to do about it, what applying does and its undo; and the decision.
+        `home`: the profile whose database holds it (the lead profile for the whole Hermes' situations)."""
+        from . import admin, decisions, lessons
+        from .experience import experience
+
+        home = home or self.home
+        told = item["explain"]
+        self.io.say()
+        self.io.say(self.io.bold(f"  #{item['id']} · {told['title']} · {item['subject']} · {told['risk']}"))
+        if told["what"]:
+            self.io.say(f"  {self.t['seen']}:")
+            self.io.para(told["what"])
+        if told.get("advice"):
+            self.io.say(f"  {self.t['advice']}:")
+            self.io.para(told["advice"])
+        if told["does"]:
+            self.io.say(f"  {self.t['does']}:")
+            self.io.para(told["does"])
+        if told["undo"]:
+            self.io.say(f"  {self.t['undo_how']}: {told['undo']}")
+        elif item.get("command") and told["category"] in ("advice", "manual"):
+            self.io.say(f"  {self.t['look_with'] if told['category'] == 'advice' else self.t['command']}: "
+                        f"{item['command']}")
+        if told["category"] == "change":
+            prompt, keys = self.t["change_prompt"], {"a": "apply", "r": "reject"}
+        elif told["category"] == "advice":
+            failure = item["kind"] == "investigate_failure"
+            prompt = self.t["failure_prompt"] if failure else self.t["advice_prompt"]
+            keys = {"d": "reject", **({"e": "write"} if failure else {})}
+        else:
+            prompt, keys = self.t["proposal_prompt"], {"a": "approve", "r": "reject"}
+        action = keys.get(self.io.ask(prompt).lower()[:1])
+        if action is None:
+            return
+        if action == "write":
+            text = self.io.ask(self.t["lesson_text"])
+            if not text:
+                return
+            activate = self.confirm(self.t["lesson_activate"])
+            with experience(home) as conn:
+                lesson_id = lessons.add_custom(conn, text, tool=item["subject"], origin="operator", now=self.clock(),
+                                               active=activate)
+                decisions.decide_proposal(conn, item["id"], "approve", now=self.clock(), actor="terminal",
+                                          lang=self.lang)
+            self.io.say(self.t["lesson_added"].format(id=lesson_id, status=self.t["did"]["approve"] if activate
+                                                      else self.t["waiting_title"].lower()))
+            return
+        if action == "apply":
+            result = admin.decide(home, self.runtime, {"kind": "apply", "id": item["id"]}, now=self.clock(),
+                                  lang=self.lang, actor="terminal")
+            self.io.say(self.t["applied"].format(undo=result.get("undo")) if result.get("applied")
+                        else self.t["already"] if result.get("reason") == "already" else self.t["changed"])
+            return
+        now_item = next((row for row in self.open_proposals(home) if row["id"] == item["id"]), None)
+        if now_item is None or (now_item["evidence"], now_item["command"]) != (item["evidence"], item["command"]):
+            self.io.say(self.t["changed"])   # decide only on what was shown
+            return
+        with experience(home) as conn:
+            result = decisions.decide_proposal(conn, item["id"], action, now=self.clock(), actor="terminal",
+                                               lang=self.lang)
+        command = result.get("run_this")
+        if told["category"] == "advice":
+            self.io.say(self.t["dismissed"])
+        elif command:
+            self.io.say(self.t["run_after"])
+            self.io.say(f"    {command}")
+        else:
+            self.io.say(self.t["recorded"])
+
+
+    # ── the whole Hermes ───────────────────────────────────────────────────────────────────────────
+    def environment(self) -> None:
+        """Every profile of this Hermes at once: what is there, and what to do, from the lead profile's last look."""
+        from . import environment
+        from .admin import profile_name
+        from .experience import experience
+
+        while True:
+            lead = environment.lead_home(self.home)
+            self.heading(self.t["env_title"])
+            if lead is None:
+                self.io.para(self.t["env_none"], indent=0)
+                self.pause()
+                return
+            with experience(lead) as conn:
+                found = environment.stored(conn)
+            values, _suggestions = self.settings_now()
+            lead_mode = environment.profile_mode(lead) or values.get("mode")
+            mode = self.t["auto_names"].get(lead_mode, lead_mode)
+            when = _when(found["at"], self.lang) if found else self.t["never"]
+            self.io.say(self.t["env_mode"].format(mode=mode, lead=profile_name(lead), when=when))
+            if Path(lead).resolve() != Path(self.home).resolve():
+                self.io.para(self.t["env_lead_elsewhere"].format(lead=profile_name(lead)), indent=0)
+            if not found:
+                self.io.para(self.t["env_not_yet"], indent=0)
+            else:
+                catalog = found.get("catalog") or {}
+                if catalog.get("plugins"):
+                    tiers = ", ".join(f"{_count(n, self.lang)} {self.t['env_tiers'].get(tier, tier)}"
+                                      for tier, n in sorted((catalog.get("tiers") or {}).items()))
+                    self.io.say(self.t["env_catalog"].format(plugins=_count(catalog["plugins"], self.lang), tiers=tiers,
+                                                             removed=catalog.get("removed", 0)))
+                rows = found.get("profiles") or []
+                self.io.say()
+                self.io.say(self.io.bold(self.t["env_profiles"].format(n=len(rows))))
+                for row in rows:
+                    self.io.say("  " + self.t["env_row"].format(
+                        profile=row["profile"], sessions=row["sessions_7d"], on=row["plugins_on"], idle=row["plugins_idle"],
+                        skills=row["skills"], self=self.t["yes_word"] if row["self"] else self.t["no_word"]))
+            items = [item for item in self.open_proposals(lead) if item["kind"] in environment.KINDS]
+            order = {"high": 0, "medium": 1, "low": 2}
+            items.sort(key=lambda item: (order.get(item.get("risk"), 3), item["kind"]))
             self.io.say()
-            self.io.say(self.io.bold(f"  #{item['id']} · {told['title']} · {item['subject']} · {told['risk']}"))
-            if told["what"]:
-                self.io.say(f"  {self.t['seen']}:")
-                self.io.para(told["what"])
-            if told["does"]:
-                self.io.say(f"  {self.t['does']}:")
-                self.io.para(told["does"])
-            if told["undo"]:
-                self.io.say(f"  {self.t['undo_how']}: {told['undo']}")
-            elif item.get("command") and told["category"] in ("advice", "manual"):
-                self.io.say(f"  {self.t['look_with'] if told['category'] == 'advice' else self.t['command']}: "
-                            f"{item['command']}")
-            if told["category"] == "change":
-                prompt, keys = self.t["change_prompt"], {"a": "apply", "r": "reject"}
-            elif told["category"] == "advice":
-                failure = item["kind"] == "investigate_failure"
-                prompt = self.t["failure_prompt"] if failure else self.t["advice_prompt"]
-                keys = {"d": "reject", **({"e": "write"} if failure else {})}
-            else:
-                prompt, keys = self.t["proposal_prompt"], {"a": "approve", "r": "reject"}
-            action = keys.get(self.io.ask(prompt).lower()[:1])
-            if action is None:
+            if found and not items:
+                self.io.say(self.t["env_clean"])
+            elif items:
+                self.io.say(self.io.bold(self.t["env_todo"].format(n=len(items))))
+                for number, item in enumerate(items, start=1):
+                    told = item["explain"]
+                    auto = " ⚙" if told.get("automatic") and lead_mode == "auto" else ""
+                    self.io.say(f"  {number:>2}  [{told['risk']}] {told['title']} · {item['subject']}{auto}")
+                if lead_mode == "auto" and any(item["explain"].get("automatic") for item in items):
+                    self.io.say(self.t["env_auto_mark"])
+            answer = self.io.ask(self.t["env_prompt"]).lower()
+            if not answer:
+                return
+            if answer == "v":
+                self.io.say(self.t["env_scanning"])
+                self.guarded(lambda: self._look_again(lead))
                 continue
-            if action == "write":
-                text = self.io.ask(self.t["lesson_text"])
-                if not text:
-                    continue
-                activate = self.confirm(self.t["lesson_activate"])
-                with experience(self.home) as conn:
-                    lesson_id = lessons.add_custom(conn, text, tool=item["subject"], origin="operator", now=self.clock(),
-                                                   active=activate)
-                    decisions.decide_proposal(conn, item["id"], "approve", now=self.clock(), actor="terminal",
-                                              lang=self.lang)
-                self.io.say(self.t["lesson_added"].format(id=lesson_id, status=self.t["did"]["approve"] if activate
-                                                          else self.t["waiting_title"].lower()))
+            chosen = self.pick(answer, len(items))
+            if chosen is None:
+                self.io.say(self.t["invalid"])
                 continue
-            if action == "apply":
-                result = admin.decide(self.home, self.runtime, {"kind": "apply", "id": item["id"]}, now=self.clock(),
-                                      lang=self.lang, actor="terminal")
-                self.io.say(self.t["applied"].format(undo=result.get("undo")) if result.get("applied")
-                            else self.t["already"] if result.get("reason") == "already" else self.t["changed"])
-                continue
-            now_item = next((row for row in self.open_proposals() if row["id"] == item["id"]), None)
-            if now_item is None or (now_item["evidence"], now_item["command"]) != (item["evidence"], item["command"]):
-                self.io.say(self.t["changed"])   # decide only on what was shown
-                continue
-            with experience(self.home) as conn:
-                result = decisions.decide_proposal(conn, item["id"], action, now=self.clock(), actor="terminal",
-                                                   lang=self.lang)
-            command = result.get("run_this")
-            if told["category"] == "advice":
-                self.io.say(self.t["dismissed"])
-            elif command:
-                self.io.say(self.t["run_after"])
-                self.io.say(f"    {command}")
-            else:
-                self.io.say(self.t["recorded"])
+            self.detail(items[chosen], home=lead)
+
+    def _look_again(self, lead) -> None:
+        """Look at every profile now and refresh the proposals of the lead profile with what was found."""
+        from . import environment
+
+        environment.publish(lead, environment.refresh(lead, now=self.clock(), force=True), now=self.clock())
 
     # ── automatic actions ──────────────────────────────────────────────────────────────────────────
     def automatic(self) -> None:
@@ -785,7 +924,7 @@ class Menu:
 
         while True:
             values, _suggestions = self.settings_now()
-            mode = values.get("auto_actions") or "off"
+            mode = values.get("mode") or "manual"
             self.heading(self.t["auto_title"])
             self.io.say(self.t["auto_now"].format(mode=self.io.bold(self.t["auto_names"].get(mode, mode))))
             for line in self.t["auto_modes"]:
@@ -803,8 +942,8 @@ class Menu:
                 return
             if answer == "m":
                 chosen = self.pick(self.io.ask(self.t["mode_prompt"]), 3)
-                if chosen is not None and ("off", "safe", "full")[chosen] != mode:
-                    self.guarded(lambda: self.write({"auto_actions": ("off", "safe", "full")[chosen]}))
+                if chosen is not None and ("auto", "assist", "manual")[chosen] != mode:
+                    self.guarded(lambda: self.write({"mode": ("auto", "assist", "manual")[chosen]}))
                 continue
             if not (answer.isascii() and answer.isdigit()) or int(answer) not in {row["id"] for row in done if not row["undone"]}:
                 self.io.say(self.t["invalid"])
@@ -864,8 +1003,12 @@ class Menu:
                                                  after=_value(row["after"].get("value")))
         if row["kind"] == "memory":
             return self.t["what_memory"].format(target=row["target"])
+        if row["kind"] == "maintenance":
+            return self.t["what_maintenance"].format(target=str(row["target"]).replace("_", " "))
         if row["kind"] == "proposal" and isinstance((row.get("after") or {}).get("applied"), list):
-            return f"{did} hermes " + " ".join(str(part) for part in row["after"]["applied"])
+            from .explain import command_text
+
+            return f"{did} " + command_text(row["after"]["applied"], self.lang)
         return self.t["what_lesson" if row["kind"] == "lesson" else "what_proposal"].format(did=did, target=row["target"])
 
     def history(self) -> None:
@@ -889,7 +1032,8 @@ class Menu:
             answer = self.io.ask(self.t["history_prompt"])
             if not answer:
                 return
-            if not (answer.isascii() and answer.isdigit()) or int(answer) not in {row["id"] for row in rows if not row["undone"]}:
+            if not (answer.isascii() and answer.isdigit()) or int(answer) not in {row["id"] for row in rows
+                                                                                  if row.get("undoable", not row["undone"])}:
                 self.io.say(self.t["invalid"])
                 continue
             self.undo(int(answer))
@@ -906,7 +1050,7 @@ class Menu:
             return MODES[self.lang].get(value, str(value))
         if key == "language":
             return LANGUAGES[self.lang].get(value, str(value))
-        if key == "auto_actions":
+        if key == "mode":
             return self.t["auto_names"].get(value, str(value))
         if isinstance(value, bool):
             return self.t["yes_value"] if value else self.t["no_value"]

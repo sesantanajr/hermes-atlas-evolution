@@ -130,6 +130,7 @@ Tudo em modo somente leitura e com limite de tamanho e de tempo.
 | `state.db` | Checagem de integridade e a contabilidade de uso do próprio Hermes. A leitura do histórico: sessões e mensagens dos 14 dias anteriores ao início da observação, de 25 em 25 sessões, classificadas em memória e descartadas. O radar: como terminaram as sessões dos últimos 7 dias e os tokens de prompt por chamada do agente, da `session_model_usage`. |
 | `pyvenv.cfg` do ambiente Python em execução | A guarda de runtime: o interpretador base para o qual o ambiente aponta. |
 | Os outros perfis da mesma raiz do Hermes | Para o `status`, até 200 perfis: o número de sessões nos últimos 7 dias, da tabela `sessions` de cada `state.db`, se a pasta `plugins/` tem o `hermes-atlas-evolution`, o antigo `hermes-evolution` ou os dois (a linha `name` de um `plugin.yaml` ali identifica um clone desta versão guardado com o nome antigo da pasta) e, onde o plugin tem dados, o fim da última passada e as contagens de lições, do `evolution/evolution.sqlite3`. Nada mais é lido, e nada é gravado lá. |
+| Todos os perfis, para o ambiente (0.8.5) | Só no perfil que cuida do Hermes inteiro, no máximo a cada 6 horas: o `config.yaml` de cada perfil (as listas de plugins), o `plugin.yaml`, o `.git/config` e o `.git/HEAD` de cada plugin, e os arquivos Python dele (no máximo 240 por plugin e 768 KB no total), analisados com `ast` e nunca importados nem executados; o `SKILL.md` de cada skill (cabeçalho e um hash do texto) e o `skills/.usage.json`; o tamanho e a idade das pastas `plugins/.install-*`; e o catálogo de plugins do Hermes, o `cache/plugin-catalog.json` de qualquer perfil (senão o `plugin-catalog/*.yaml` do código do Hermes). Nada é gravado em outro perfil a não ser pelos comandos do Hermes do modo e pela mudança da pasta de uma instalação que falhou para a lixeira do plugin. |
 | `/proc/<pid>/stat` e `/proc/<pid>/cmdline` dos processos ancestrais do comando, `/proc/self/cgroup` | No Linux, só quando um comando de decisão (`lessons approve`, `retire`, `add`, `review`, `proposals approve`, `reject`) roda: se um processo do Hermes é ancestral ou se o comando roda no cgroup de um gateway do Hermes. Nada é gravado. |
 | O gerenciador de plugins do Hermes, quando está carregado no processo | Para o radar: os plugins habilitados, o número de hooks que cada um registrou e o nome de um erro de carregamento. |
 | `plugin.yaml` dos plugins distribuídos com o Hermes e de `<HERMES_HOME>/plugins/` | Para o radar: os hooks que cada plugin declara (`provides_hooks`). No máximo 500 pastas e 64 KiB por manifesto. |
@@ -166,7 +167,8 @@ Tudo em modo somente leitura e com limite de tamanho e de tempo.
 
 | Configuração | Efeito |
 |---|---|
-| Instalação padrão | Observadores com dados agregados. O autopilot roda uma passada no máximo uma vez por hora, e as primeiras passadas aprendem com 14 dias do histórico do perfil. Falhas recorrentes com modelo fixo viram lições ativas (`lessons: auto`) assim que os turnos do próprio dono as encontram duas vezes; elas chegam ao agente nas sessões novas, são medidas e são aposentadas quando não ajudam. Falhas que só outras pessoas causaram esperam aprovação. O refletor rascunha lições que aguardam aprovação. A guarda de runtime barra os comandos descritos acima. Os comandos de operador podem inspecionar os sinais do perfil. |
+| Instalação padrão | Observadores com dados agregados. O autopilot roda uma passada no máximo uma vez por hora, e as primeiras passadas aprendem com 14 dias do histórico do perfil. Falhas recorrentes com modelo fixo viram lições ativas (`lessons: auto`) assim que os turnos do próprio dono as encontram duas vezes; elas chegam ao agente nas sessões novas, são medidas e são aposentadas quando não ajudam. Falhas que só outras pessoas causaram esperam aprovação. O refletor rascunha lições que aguardam aprovação. A guarda de runtime barra os comandos descritos acima. O Modo Auto age sozinho como descrito na linha `mode` abaixo. Os comandos de operador podem inspecionar os sinais do perfil. |
+| `mode` (`auto` por padrão) | `auto`: neste perfil, cópias idênticas da memória, travas de skills que o curador reescreve sem parar e um `hermes pm gc` semanal sozinho; a partir do perfil que cuida do Hermes inteiro, instalar o plugin em perfis usados sem ele que nunca o tiveram e mover pastas de instalações que falharam para a lixeira. `assist`: só as cópias idênticas da memória. `manual`: nada sozinho. Só `manual` vale vindo do `settings.json`. |
 | `owner_sender_ids` | Os ids de remetente, em texto ou número, cujos turnos de chat contam como do dono, como numa sessão local. |
 | `owner_platforms` | As plataformas em que todo chat conta como do dono, desde a primeira mensagem: só uma plataforma em que ninguém mais escreve, como um bot privado ou a própria interface do dono pelo servidor de API. |
 | `lessons: suggest` | As lições derivadas viram candidatas e aguardam aprovação, como todas as outras. |
@@ -182,18 +184,18 @@ Tudo em modo somente leitura e com limite de tamanho e de tempo.
 
 ## O que o plugin não faz no Hermes
 
-- Não trava, arquiva, reverte, edita nem cria skills. Isso aparece como comandos `hermes curator` para você.
-- Não altera a configuração do Hermes. Uma proposta que alteraria aparece como comando `hermes config`.
-- Não escreve na memória nem lê o conteúdo dela além das contagens de estrutura acima.
-- Não reescreve um prompt já em uso, não injeta contexto a cada turno (exceto a recuperação opcional das notas da 0.1) e não muda argumentos de ferramentas. As únicas alterações em conteúdo visível ao agente são a frase acrescentada ao resultado de uma ferramenta que falhou, com `tool_hints` ligado, e, quando a guarda de runtime barra um comando, a mensagem fixa de recusa no lugar do resultado.
-- Não para, não reinicia e não derruba nada. A guarda de runtime só recusa um comando; ela nunca executa um.
-- Não grava no histórico do Hermes: o `state.db` e os logs são abertos somente para leitura.
-- Não muda nada em outros perfis. O `status` só lê as sessões deles e o estado do próprio plugin neles, e imprime o comando de instalação ou de migração para você rodar.
+- Nunca arquiva, desfaz, edita ou cria uma skill. A única mudança em skills é `hermes curator lock` (e `unlock` para desfazer): na sua tecla, ou sozinho no Modo Auto para uma skill que o curador reescreve sem parar.
+- Nunca muda uma configuração do Hermes além das próprias (`plugins.entries.hermes-atlas-evolution.settings.*`, por `hermes config set`, quando você muda uma). Uma proposta que mudaria outra configuração aparece como um comando `hermes config`.
+- Memória do Hermes: só tira uma cópia de uma entrada que é exatamente o mesmo texto (sozinho nos Modos Assistido e Auto) ou a entrada que você escolhe, depois de guardar uma cópia do arquivo; não lê nada além das contagens de estrutura acima.
+- Não reescreve um prompt já em uso, não injeta contexto por turno (exceto a recuperação opcional das notas 0.1) e não muda argumentos de ferramentas. As únicas mudanças no que o agente vê são a frase juntada ao resultado de uma ferramenta que falhou, com `tool_hints` ligado, e as lições no começo da sessão.
+- Não para, não reinicia e não mata nada. A guarda de runtime só recusa um comando; nunca roda um.
+- Não grava no histórico do Hermes: o `state.db` e os logs são abertos só para leitura.
+- Outros perfis: no Modo Auto, a partir do perfil que cuida do Hermes inteiro, ele se instala (no próprio commit) num perfil usado nos últimos 7 dias que nunca o teve, e move a pasta de uma instalação que falhou (`plugins/.install-*`) para a lixeira dele. Desligar um de dois plugins só roda na sua tecla, naquela proposta. Todo o resto ali (remover ou atualizar um plugin, arquivar uma skill) é um comando para você. Antes de qualquer mudança ele lê aquele perfil de novo do disco.
 - Não aprova, nega nem contorna aprovações do Hermes, e nunca transforma uma aprovação recusada em conselho.
-- Não registra middleware, provedor, provedor de memória, padrão de mascaramento de dados sensíveis nem pacote de idioma, e não substitui nada do núcleo do Hermes.
-- Não cria rotinas de Cron. As receitas são impressas para você criar. O único cartão Kanban que ele cria é o cartão bloqueado do `ops handoff`, que exige `kanban_handoff`.
-- Não abre conexão de rede nem envia telemetria. Um modelo só é chamado pelo refletor, por meio do Hermes.
-- Não deixa o agente decidir: os comandos de decisão do playbook não rodam num terminal do agente.
+- Não registra middleware, provedor, provedor de memória, padrão de redação ou idioma, e não substitui nada no núcleo do Hermes.
+- O único job de Cron que ele cria é o resumo semanal, na sua tecla (`schedule-digest`), como um script sem agente; as outras receitas são impressas para você. O único cartão de Kanban que ele cria é o cartão bloqueado do `ops handoff`, que precisa de `kanban_handoff`.
+- Não abre conexão de rede própria e não envia telemetria. O Hermes baixa o plugin do GitHub quando o Modo Auto o instala em outro perfil, e o `hermes doctor` (seu clique) chama os provedores. Um modelo só é chamado pelo refletor, por meio do Hermes.
+- Não deixa o agente decidir: as decisões se recusam a rodar no shell de um agente.
 
 ## Notas de instalação
 

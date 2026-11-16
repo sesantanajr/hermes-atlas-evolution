@@ -277,10 +277,9 @@ def findings(reading: dict) -> list[dict]:
         found.append({"code": f"plugin_undeclared_hooks:{item['plugin']}", "kind": "plugin_health", "risk": "low",
                       "subject": item["plugin"], "evidence": {"registered": item["registered"], "declared": item["declared"]},
                       "command": f"hermes plugins doctor {item['plugin']}"})
-    for hook, names in loaded.get("overlaps", {}).items():
-        found.append({"code": f"plugin_transform_overlap:{hook}", "kind": "plugin_conflict", "risk": "medium",
-                      "subject": hook, "evidence": {"plugins": names, "rule": "first_string_wins"},
-                      "command": "hermes plugins list"})
+    # Plugins sharing a transform hook are no finding by themselves (0.8.5): Hermes keeps the first result of each
+    # call, so they conflict only on the same tool. environment.findings reads which tools each one changes, in every
+    # profile, and reports only a real overlap, with who wins and what to turn off.
     return found
 
 

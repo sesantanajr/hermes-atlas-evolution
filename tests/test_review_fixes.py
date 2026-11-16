@@ -1,5 +1,6 @@
 """Regression tests for the findings of the independent security and correctness review (0.4.0)."""
 
+import os
 import json
 import tempfile
 import unittest
@@ -12,6 +13,8 @@ from hermes_atlas_evolution.evolve import cycle, notify_view
 from hermes_atlas_evolution.experience import experience, prune
 from hermes_atlas_evolution.operations import close_observers
 from hermes_atlas_evolution.signals import TurnTracker, record_tool
+
+os.environ.setdefault("ATLAS_EVOLUTION_NO_HERMES", "1")   # never the real Hermes of this machine
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400

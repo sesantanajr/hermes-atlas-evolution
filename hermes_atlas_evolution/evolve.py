@@ -22,7 +22,10 @@ CONFIG_UNREAD = "_atlas_evolution_config_unread"
 
 DEFAULTS = {"lessons": "auto", "tool_hints": False, "feedback_signals": True, "language": "auto",
             "slow_turn_seconds": 60, "owner_sender_ids": (), "owner_platforms": (), "reflector": True, "reflector_daily_limit": 6,
-            "autopilot_minutes": 60, "runtime_guard": True, "auto_actions": "safe"}
+            "autopilot_minutes": 60, "runtime_guard": True, "mode": "auto"}
+# The 0.8.3 setting `auto_actions` maps on the mode when `mode` is not set (an owner who chose it keeps it).
+LEGACY_ACTIONS = {"off": "manual", "safe": "assist", "full": "auto"}
+MODE_ACTIONS = {"auto": "full", "assist": "safe", "manual": "off"}
 
 
 def _whole(value):
@@ -78,17 +81,24 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
     autopilot = checked("autopilot_minutes", _whole(raw.get("autopilot_minutes", DEFAULTS["autopilot_minutes"])),
                         lambda value: type(value) is int and (value == 0 or 15 <= value <= 1440),
                         "evolution.autopilot_minutes must be 0 (manual only) or an integer from 15 to 1440", 0)
-    chosen_actions = raw.get("auto_actions", DEFAULTS["auto_actions"])
-    if chosen_actions is False:   # a bare `off`, as for lessons
-        chosen_actions = "off"
-    # What runs by itself (actions.MODES); an invalid value runs nothing.
-    automatic = checked("auto_actions", chosen_actions, lambda value: value in ("off", "safe", "full"),
-                        "evolution.auto_actions must be off, safe or full", "off")
+    # The operating mode. auto (default): the plugin looks at every profile of this Hermes and applies by itself
+    # what is safe and reversible, the rest waits for you; assist: only identical memory copies by itself, everything
+    # else waits; manual: it only measures and proposes. An invalid value means manual: nothing runs by itself.
+    if "mode" in raw:
+        chosen = raw.get("mode")
+    elif "auto_actions" in raw:
+        legacy = raw.get("auto_actions")
+        chosen = LEGACY_ACTIONS.get("off" if legacy is False else legacy, legacy)
+    else:
+        chosen = DEFAULTS["mode"]
+    operating = checked("mode", chosen, lambda value: value in MODE_ACTIONS,
+                        "evolution.mode must be auto, assist or manual", "manual")
+    automatic = MODE_ACTIONS[operating]
     # A protection: an invalid value keeps it on.
     guard = checked("runtime_guard", raw.get("runtime_guard", True), lambda value: type(value) is bool,
                     "evolution.runtime_guard must be true or false", True)
     return {"lessons": mode, "tool_hints": raw.get("tool_hints", False) is True, "runtime_guard": guard,
-            "auto_actions": automatic,
+            "mode": operating, "auto_actions": automatic,
             "reflector": reflect, "reflector_daily_limit": daily, "autopilot_minutes": autopilot,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
             "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
@@ -117,6 +127,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     history = backfill.step(home, now=now, budget_s=budget, owner_sender_ids=opts["owner_sender_ids"],
                             owner_platforms=opts["owner_platforms"], owner_known=owner_known, cancelled=cancelled,
                             sample=opts["reflector"] and opts["lessons"] != "off", slow_ms=opts["slow_turn_seconds"] * 1000)
+    fleet = _environment(home, now=now, runtime_config=runtime_config, deadline=deadline)
     with experience(home) as conn:
         # Short transactions: hook writers of a running gateway share this database, so no phase keeps the
         # write lock while it reads files or waits for a model.
@@ -185,7 +196,9 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         conn.commit()   # Hermes' state.db is read with no write lock held on this database
         reading = radar.scan(home, conn, now=now, own_transform=opts["tool_hints"] and opts["lessons"] != "off")
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
-                                    changes=verdicts, outcomes=outcomes, radar=reading["findings"], lang=opts["language"])
+                                    changes=verdicts, outcomes=outcomes,
+                                    radar=reading["findings"] + list((fleet or {}).get("findings") or ()),
+                                    lang=opts["language"])
         fresh = set(created) | set(promoted)
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in fresh]
     from . import actions
@@ -196,12 +209,29 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     if automatic["applied"]:
         with experience(home) as conn:
             pending = proposals.listing(conn, status="open")
-    return {"automatic": automatic, "care": care,"now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons,
+    return {"automatic": automatic, "care": care, "environment": (fleet or {}).get("summary"), "now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons,
             "lessons_promoted": len(promoted), "lessons_withdrawn": withdrawn, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
             "proposals_closed_as_applied": closed, "radar": [item["code"] for item in reading["findings"]],
             "open_proposals": pending}
+
+
+def _environment(home: Path, *, now: float, runtime_config=None, deadline: float | None = None) -> dict | None:
+    """Every profile of this Hermes (environment.refresh), when this profile looks after them. Never fails the pass."""
+    import os as _os
+
+    from . import environment
+
+    if not (Path(home) / "config.yaml").is_file() or _os.environ.get("ATLAS_EVOLUTION_HOST_CHECKS") == "0":
+        return None   # a profile Hermes never configured (the test suite, a scratch home): nothing to look after
+    try:
+        return environment.refresh(home, now=now, deadline=deadline)
+    except Exception as error:   # MemoryError from a pathological file included: the pass never fails for this
+        from logging import getLogger
+
+        getLogger(__name__).warning("Atlas Evolution could not read the other profiles: %s", type(error).__name__)
+        return None
 
 
 def _daily_checks(home: Path, *, now: float, deadline: float | None) -> dict:

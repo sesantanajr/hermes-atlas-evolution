@@ -26,9 +26,9 @@ from pathlib import Path
 PLUGIN_ID = "hermes-atlas-evolution"
 SETTINGS = ("lessons", "language", "tool_hints", "feedback_signals", "agent_tools", "slow_turn_seconds",
             "owner_sender_ids", "owner_platforms", "reflector", "reflector_daily_limit", "autopilot_minutes",
-            "runtime_guard", "auto_actions")
+            "runtime_guard", "mode")
 BOOLEANS = ("tool_hints", "feedback_signals", "agent_tools", "reflector", "runtime_guard")
-CHOICES = {"lessons": ("auto", "suggest", "off"), "language": ("auto", "en", "pt"), "auto_actions": ("off", "safe", "full")}
+CHOICES = {"lessons": ("auto", "suggest", "off"), "language": ("auto", "en", "pt"), "mode": ("auto", "assist", "manual")}
 LISTS = ("owner_sender_ids", "owner_platforms")
 NUMBERS = ("slow_turn_seconds", "reflector_daily_limit", "autopilot_minutes")
 RELOAD_KEYS = ("runtime_guard", "tool_hints")   # applied at the next load of the plugin (integration.RELOAD_KEYS)
@@ -67,6 +67,8 @@ def hermes_executable() -> str | None:
     """The `hermes` command that runs this profile's Hermes (a .bat or .cmd shim is never run with a list argv)."""
     import shutil
 
+    if os.environ.get("ATLAS_EVOLUTION_NO_HERMES") == "1":   # the test suite: never the machine's real Hermes
+        return None
     found = shutil.which("hermes")
     for candidate in (found, "/usr/local/bin/hermes", str(Path.home() / ".local" / "bin" / "hermes")):
         if candidate and Path(candidate).is_file() and Path(candidate).suffix.lower() not in (".bat", ".cmd"):
@@ -92,6 +94,9 @@ def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout:
     command_path = executable() if callable(executable) else (executable or hermes_executable())
     if command_path is None:
         raise ValueError("Hermes command not found")
+    if runner is None and not (profile / "config.yaml").is_file():
+        # Hermes bootstraps a home it has never seen (and its shared install with it): only real profiles.
+        raise ValueError("Not a Hermes profile (no config.yaml)")
     env = dict(os.environ, HERMES_HOME=str(profile))
     env.pop("HERMES_PROFILE", None)   # the launch profile's own marker; --profile names the one changed
     run = subprocess.run if runner is None else runner
@@ -118,6 +123,8 @@ def hermes_output(home: Path, args: list, *, runner=None, executable=None, timeo
     command_path = executable() if callable(executable) else (executable or hermes_executable())
     if command_path is None:
         return 127, "Hermes command not found"
+    if runner is None and not (profile / "config.yaml").is_file():
+        return 127, "Not a Hermes profile (no config.yaml)"
     env = dict(os.environ, HERMES_HOME=str(profile), NO_COLOR="1")
     env.pop("HERMES_PROFILE", None)
     run = subprocess.run if runner is None else runner
@@ -173,7 +180,7 @@ def recommended_settings(current: dict, suggestions: list[dict]) -> dict:
     """The changes the recommended setup makes to `current`: lessons on auto, the reflector on, the automatic actions
     complete, and every channel that is the owner's by construction (status.owner_suggestions) counted as the owner.
     Empty when nothing changes."""
-    wanted = {"lessons": "auto", "reflector": True, "auto_actions": "full"}
+    wanted = {"lessons": "auto", "reflector": True, "mode": "auto"}
     platforms = list(current.get("owner_platforms") or [])
     senders = list(current.get("owner_sender_ids") or [])
     for item in suggestions or ():

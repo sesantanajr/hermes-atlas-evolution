@@ -19,6 +19,8 @@ from hermes_atlas_evolution.operations import close_observers
 
 from test_panel_decisions import WRITTEN, Base, load_api
 
+os.environ.setdefault("ATLAS_EVOLUTION_NO_HERMES", "1")   # never the real Hermes of this machine
+
 NOW = time.time()
 
 
@@ -215,10 +217,10 @@ class RecommendedTest(unittest.TestCase):
         suggestions = [{"kind": "platform", "value": "api_server"}, {"kind": "sender", "value": "hosted-owner:abc"},
                        {"kind": "platform", "value": "telegram"}]
         self.assertEqual(admin.recommended_settings(current, suggestions),
-                         {"lessons": "auto", "auto_actions": "full", "owner_platforms": ["telegram", "api_server"],
+                         {"lessons": "auto", "mode": "auto", "owner_platforms": ["telegram", "api_server"],
                           "owner_sender_ids": ["hosted-owner:abc"]})
         done = {"lessons": "auto", "reflector": True, "owner_platforms": ["api_server"], "owner_sender_ids": [],
-                "auto_actions": "full"}
+                "mode": "auto"}
         self.assertEqual(admin.recommended_settings(done, [{"kind": "platform", "value": "api_server"}]), {})
 
 
@@ -375,15 +377,15 @@ class MenuTest(Base):
         self.assertEqual(written[2], {"tool_hints": True})
         self.assertIn("Applies the next time the plugin loads: tool_hints", shown)
         # the recommended setup, after the change above, one setting at a time
-        self.assertEqual(written[3:], [{"lessons": "auto"}, {"auto_actions": "full"}])
+        self.assertEqual(written[3:], [{"lessons": "auto"}])   # the mode is already auto by default
         with experience(self.home) as conn:
             logged = [row[0] for row in conn.execute("SELECT target FROM decision_log ORDER BY id")]
-        self.assertEqual(logged, ["lessons", "language", "tool_hints", "lessons", "auto_actions"])
+        self.assertEqual(logged, ["lessons", "language", "tool_hints", "lessons"])
         refused = self.menu("6", "4", "abc", "", "0", runtime=runtime, writer=writer)
         self.assertIn("Not done: autopilot_minutes must be a whole number", refused)
         out_of_range = self.menu("6", "3", "500", "", "0", runtime=runtime, writer=writer)
         self.assertIn("Not done:", out_of_range)
-        self.assertEqual(len(written), 5)   # nothing written for a refused value
+        self.assertEqual(len(written), 4)   # nothing written for a refused value
 
     def test_memory_screen_takes_out_the_copy_the_owner_chooses(self):
         path = write_memory(self.home, "MEMORY.md", [MemoryCareTest.FACT, "Other.", MemoryCareTest.SIMILAR])

@@ -25,7 +25,7 @@
                 tools: "Old tools", os: "System updates", security: "{n} security", reboot: "Reboot waiting",
                 yes: "yes", no: "no", attention: "Needs attention", nothing: "Nothing needs attention.",
                 how: "Checks and repairs", hint: "Hermes' checks and repairs (hermes doctor, pm doctor, pm gc) and the system's update run from the menu in your terminal, with a backup first, never by the agent:" },
-      tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", health: "Health", settings: "Settings", history: "History",
+      tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", health: "Health", environment: "Environment", settings: "Settings", history: "History",
               digest: "Digest", status: "Status" },
       mode: { auto: "lessons: auto", suggest: "lessons: suggest", off: "lessons: off" },
       guardOn: "guard on", guardOff: "guard off", reflectorOn: "reflector on", reflectorOff: "reflector off",
@@ -65,14 +65,15 @@
       undo: "Undo", undone: "undone",
       historyEmpty: "No decision yet.",
       applyAll: "Apply the {n} change(s)", applyAllHint: "Reversible changes to Hermes, each one recorded with its undo.",
-      applyNow: "Apply now", dismiss: "Dismiss", seen: "What was seen", undoHow: "To undo",
+      applyNow: "Apply now", dismiss: "Dismiss", seen: "What was seen", advice: "What to do", undoHow: "To undo",
+      maintenanceRan: "ran Hermes' own maintenance (nothing to undo):",
       category: { change: "the plugin applies it", lesson: "lesson", manual: "you apply it", advice: "observation" },
-      autoLine: "Automatic actions", autoNames: { off: "off", safe: "safe", full: "full" },
+      autoLine: "Mode", autoNames: { auto: "Auto", assist: "Assisted", manual: "Manual" },
       copy: "Copy", copied: "Copied",
       share: "Share what this profile learned with another profile:",
       s: {
         title: "Settings", save: "Save", saving: "Saving…", recommended: "Apply the recommended setup",
-        recommendedHint: "Lessons on auto, reflector on, complete automatic actions, and the channels below that are yours by construction.",
+        recommendedHint: "Lessons on auto, reflector on, Mode auto, and the channels below that are yours by construction.",
         reloadNote: "Applies the next time the plugin loads (the gateway reloads plugins when one is enabled or updated).",
         reloadPending: "Waiting for the next load of the plugin: {keys}.",
         lessons: "Lessons", lessonsHint: "auto: lessons from fixed templates apply once your own turns hit the failure; suggest: every lesson waits for you; off: measure only.",
@@ -82,9 +83,10 @@
         slow_turn_seconds: "A turn is slow after (seconds)", tool_hints: "Add the lesson to the failing tool result",
         agent_tools: "Let the agent read and propose lessons (proposals still wait for you)",
         runtime_guard: "Runtime guard (keeps the agent from taking Hermes down)",
-        auto_actions: "Automatic actions (what the plugin does by itself)",
-        autoModes: { off: "off: everything waits for you", safe: "safe: takes out copies of a memory entry that are the very same text",
-                     full: "full: also locks skills the curator keeps rewriting" },
+        mode: "Mode (what the plugin does by itself)",
+        autoModes: { auto: "Auto (default): thinks and acts for you in every profile, only what is safe and can be undone",
+                     assist: "Assisted: only identical memory copies by itself; the rest waits for you",
+                     manual: "Manual: measures and proposes; nothing changes by itself" },
         autoHint: "Each action is recorded in the History with its undo; an automatic change you undo is never repeated.",
         guardWarn: "Turning the guard off lets the agent restart or delete what Hermes runs on.",
         owner: "Who is you in chats", ownerHint: "Turns from these count as yours: you get every lesson there, and your failures there teach. List only what nobody else uses.",
@@ -105,7 +107,7 @@
                 tools: "Ferramentas antigas", os: "Atualizações do sistema", security: "{n} de segurança", reboot: "Reinício pendente",
                 yes: "sim", no: "não", attention: "Pede atenção", nothing: "Nada pede atenção.",
                 how: "Checagens e reparos", hint: "As checagens e os reparos do Hermes (hermes doctor, pm doctor, pm gc) e a atualização do sistema rodam pelo menu no seu terminal, com backup antes, nunca pelo agente:" },
-      tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", health: "Saúde", settings: "Configurações", history: "Histórico",
+      tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", health: "Saúde", environment: "Ambiente", settings: "Configurações", history: "Histórico",
               digest: "Resumo", status: "Status" },
       mode: { auto: "lições: auto", suggest: "lições: suggest", off: "lições: off" },
       guardOn: "guarda ligada", guardOff: "guarda desligada", reflectorOn: "refletor ligado", reflectorOff: "refletor desligado",
@@ -145,14 +147,15 @@
       undo: "Desfazer", undone: "desfeita",
       historyEmpty: "Nenhuma decisão ainda.",
       applyAll: "Aplicar as {n} mudança(s)", applyAllHint: "Mudanças reversíveis no Hermes, cada uma registrada com o desfazer.",
-      applyNow: "Aplicar agora", dismiss: "Dispensar", seen: "O que foi visto", undoHow: "Para desfazer",
+      applyNow: "Aplicar agora", dismiss: "Dispensar", seen: "O que foi visto", advice: "O que fazer", undoHow: "Para desfazer",
+      maintenanceRan: "rodou a manutenção do próprio Hermes (nada a desfazer):",
       category: { change: "o plugin aplica", lesson: "lição", manual: "você aplica", advice: "observação" },
-      autoLine: "Ações automáticas", autoNames: { off: "desligadas", safe: "seguras", full: "completas" },
+      autoLine: "Modo", autoNames: { auto: "Auto", assist: "Assistido", manual: "Manual" },
       copy: "Copiar", copied: "Copiado",
       share: "Leve o que este perfil aprendeu para outro perfil:",
       s: {
         title: "Configurações", save: "Salvar", saving: "Salvando…", recommended: "Aplicar a configuração recomendada",
-        recommendedHint: "Lições em auto, refletor ligado, ações automáticas completas e os canais abaixo que são seus por construção.",
+        recommendedHint: "Lições em auto, refletor ligado, Modo Auto e os canais abaixo que são seus por construção.",
         reloadNote: "Vale na próxima carga do plugin (o gateway recarrega os plugins quando um é ligado ou atualizado).",
         reloadPending: "Esperando a próxima carga do plugin: {keys}.",
         lessons: "Lições", lessonsHint: "auto: lições de modelos fixos valem quando os seus turnos encontram a falha; suggest: toda lição espera você; off: só mede.",
@@ -162,9 +165,10 @@
         slow_turn_seconds: "Um turno é lento depois de (segundos)", tool_hints: "Juntar a lição ao resultado da ferramenta que falhou",
         agent_tools: "Deixar o agente ler e propor lições (as propostas continuam esperando você)",
         runtime_guard: "Guarda de runtime (impede o agente de derrubar o Hermes)",
-        auto_actions: "Ações automáticas (o que o plugin faz sozinho)",
-        autoModes: { off: "desligadas: tudo espera você", safe: "seguras: tira cópias de uma entrada da memória que são exatamente o mesmo texto",
-                     full: "completas: também trava skills que o curador reescreve sem parar" },
+        mode: "Modo (o que o plugin faz sozinho)",
+        autoModes: { auto: "Auto (padrão): pensa e age por você em todos os perfis, só o que é seguro e pode ser desfeito",
+                     assist: "Assistido: só as cópias idênticas da memória sozinho; o resto espera você",
+                     manual: "Manual: mede e propõe; nada muda sozinho" },
         autoHint: "Cada ação fica no Histórico com o desfazer; uma mudança automática que você desfaz nunca se repete.",
         guardWarn: "Desligar a guarda deixa o agente reiniciar ou apagar aquilo em que o Hermes roda.",
         owner: "Quem é você nos chats", ownerHint: "Os turnos destes contam como seus: ali você recebe todas as lições, e as suas falhas ensinam. Marque só o que ninguém mais usa.",
@@ -535,7 +539,7 @@
   function Proposals(props) {
     const t = props.t, rows = props.data.proposals || [], act = props.actions;
     if (!rows.length) return h("p", { className: "hae-muted" }, t.proposalsEmpty);
-    const changes = rows.filter(function (row) { return (row.explain || {}).can_apply; });
+    const changes = rows.filter(function (row) { return (row.explain || {}).bulk; });   // one-by-one calls stay out
     const applied = function (result) {
       if (result && result.applied === true) return t.done.applied;
       if (result && Array.isArray(result.applied)) return fill(t.done.appliedN, { n: result.applied.length });
@@ -590,6 +594,7 @@
               h("code", { className: "hae-code" }, row.subject), h("span", { className: "hae-muted" }, "#" + row.id)),
             told.what && told.category !== "lesson" ? h("div", null, h("strong", null, t.seen + ": "), inline(String(told.what), "w" + row.id)) : null,
             lesson ? h("div", { className: "hae-lesson" }, inline(String(lesson), "p" + row.id)) : null,
+            told.advice ? h("div", null, h("strong", null, t.advice + ": "), inline(String(told.advice), "a" + row.id)) : null,
             told.does ? h("div", { className: "hae-muted" }, inline(String(told.does), "d" + row.id)) : null,
             told.undo ? h("div", { className: "hae-muted" }, t.undoHow + ": ", h("code", { className: "hae-code" }, told.undo)) : null,
             told.category === "advice" || told.category === "manual" ? h(CopyCommand, { t: t, command: row.command }) : null,
@@ -628,7 +633,7 @@
       set(key, list);
     };
     const recommended = function () {
-      const values = Object.assign({}, form, { lessons: "auto", reflector: true, auto_actions: "full" });
+      const values = Object.assign({}, form, { lessons: "auto", reflector: true, mode: "auto" });
       suggestions.forEach(function (item) {
         const key = item.kind === "platform" ? "owner_platforms" : "owner_sender_ids";
         if ((values[key] || []).indexOf(item.value) < 0) values[key] = (values[key] || []).concat([item.value]);
@@ -671,7 +676,7 @@
             h(Button, { primary: true, onClick: recommended, disabled: disabled }, s.recommended),
             h("span", { className: "hae-muted" }, s.recommendedHint)) : null,
           field("lessons", select("lessons", ["auto", "suggest", "off"], s.modes), s.lessonsHint),
-          field("auto_actions", select("auto_actions", ["off", "safe", "full"], s.autoModes), s.autoHint),
+          field("mode", select("mode", ["auto", "assist", "manual"], s.autoModes), s.autoHint),
           field("reflector", checkbox("reflector")),
           field("reflector_daily_limit", number("reflector_daily_limit", 1, 50)),
           field("autopilot_minutes", number("autopilot_minutes", 0, 1440)),
@@ -716,21 +721,22 @@
         const what = row.kind === "lesson" ? (t.action[row.action] || row.action) + " #" + row.target
           : row.kind === "setting" ? (t.action.set) + " " + row.target + ": " + JSON.stringify(row.before.value) + " → " + JSON.stringify(row.after.value)
           : row.kind === "memory" ? t.memoryRemoved + " " + row.target
-          : row.kind === "proposal" && row.after && row.after.applied ? t.action.apply + " hermes " + row.after.applied.join(" ")
+          : row.kind === "maintenance" ? t.maintenanceRan + " hermes " + String(row.target).replace("_", " ")
+          : row.kind === "proposal" && row.after && row.after.applied ? t.action.apply + " " + (row.command || "hermes " + row.after.applied.join(" "))
           : (t.action[row.action] || row.action) + " " + t.tabs.proposals.toLowerCase() + " #" + row.target;
         return h("tr", { key: row.id, className: row.undone ? "hae-row-muted" : "" },
           h("td", null, when(row.at, t.lang)),
           h("td", null, t.actor[row.actor] || row.actor),
           h("td", null, what),
           h("td", { className: "hae-lesson" }, row.lesson ? inline(String(row.lesson), "h" + row.id) : ""),
-          h("td", null, row.undone ? t.undone : props.data.can_decide
+          h("td", null, row.undone ? t.undone : props.data.can_decide && row.undoable !== false
             ? h(Button, { disabled: !!act.working, onClick: function () {
                 act.send({ kind: "undo", id: row.id }, function (result) { return result && result.undone ? t.done.undo : String(result && result.reason || ""); });
               } }, t.undo) : null));
       }))));
   }
 
-  const TABS = ["overview", "lessons", "proposals", "health", "settings", "history", "digest", "status"];
+  const TABS = ["overview", "lessons", "proposals", "health", "environment", "settings", "history", "digest", "status"];
 
   function EvolutionPage() {
     const i18n = useI18n() || {};
@@ -778,7 +784,7 @@
         data ? h("div", { className: "hae-subtitle" }, t.profile + " ", h("code", { className: "hae-code" }, data.profile), " · v" + data.version) : null),
       h("div", { className: "hae-actions" },
         data ? h(Pill, { tone: data.mode === "off" ? "muted" : "good" }, t.mode[data.mode] || data.mode) : null,
-        data && data.automatic ? h(Pill, { tone: data.automatic.mode === "off" ? "muted" : "good" },
+        data && data.automatic ? h(Pill, { tone: data.automatic.mode === "manual" ? "muted" : "good" },
           t.autoLine + ": " + (t.autoNames[data.automatic.mode] || data.automatic.mode)) : null,
         data ? h(Pill, { tone: (data.status.runtime_guard || {}).enabled ? "good" : "bad" },
                  (data.status.runtime_guard || {}).enabled ? t.guardOn : t.guardOff) : null,
@@ -799,6 +805,7 @@
     else if (tab === "settings") body = h(Settings, common);
     else if (tab === "history") body = h(History, common);
     else if (tab === "health") body = h(Health, common);
+    else if (tab === "environment") body = h("div", { className: "hae-stack" }, h(Markdown, { text: data.environment_md || "" }));
     else if (tab === "digest") body = h(Markdown, { text: data.report_md });
     else body = h(Markdown, { text: data.status_md });
 

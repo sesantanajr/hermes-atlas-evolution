@@ -1,0 +1,13 @@
+{
+  "_about": "What Atlas Evolution knows about well-known Hermes plugins beyond Hermes' own catalog. role: the job a plugin does; exclusive: only one plugin of a profile should do it; protect: never the one the plugin suggests turning off; transforms: tools whose results it changes. Verified against each plugin's source.",
+  "plugins": {
+    "security-guidance": {"role": "security", "protect": true, "transforms": ["write_file", "patch", "skill_manage"],
+      "summary_en": "Bundled with Hermes: appends a security warning to file writes whose new content matches known-dangerous patterns (pickle.load, eval, verify=False, ...).",
+      "summary_pt": "Vem com o Hermes: junta um aviso de segurança à gravação de arquivo quando o conteúdo novo tem padrões perigosos conhecidos (pickle.load, eval, verify=False, ...)."},
+    "rtk-rewrite": {"role": "terminal_rewrite", "exclusive": true,
+      "summary_en": "Rewrites terminal commands through RTK so command output costs fewer tokens.",
+      "summary_pt": "Reescreve os comandos do terminal pelo RTK para a saída dos comandos gastar menos tokens."},
+    "hermes-atlas-evolution": {"role": "self", "protect": true,
+      "summary_en": "This plugin.", "summary_pt": "Este plugin."}
+  }
+}

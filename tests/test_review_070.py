@@ -17,6 +17,8 @@ from hermes_atlas_evolution.experience import experience, utc_day
 from hermes_atlas_evolution.operations import close_observers
 from hermes_atlas_evolution.signals import FeedbackSensor, command_program, owner_turn, record_tool
 
+os.environ.setdefault("ATLAS_EVOLUTION_NO_HERMES", "1")   # never the real Hermes of this machine
+
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400
 REFUSED = json.dumps({"output": "", "exit_code": -1, "error": "BLOCKED: User denied this command. The user has NOT "

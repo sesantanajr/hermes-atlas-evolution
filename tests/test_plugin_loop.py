@@ -1,5 +1,6 @@
 """End to end: register the plugin against a stand-in for Hermes and drive the evolution loop through its hooks."""
 
+import os
 import json
 import sys
 import tempfile
@@ -15,6 +16,8 @@ from hermes_atlas_evolution.hints import KEY
 from hermes_atlas_evolution.integration import register
 from hermes_atlas_evolution.operations import close_observers
 from hermes_atlas_evolution.signals import turn_summary
+
+os.environ.setdefault("ATLAS_EVOLUTION_NO_HERMES", "1")   # never the real Hermes of this machine
 
 ERROR = json.dumps({"error": "tool_call to 'files_search' is missing required argument(s): servico."})
 ARGS = {"calls": [{"name": "files_search", "arguments": {}}]}

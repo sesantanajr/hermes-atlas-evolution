@@ -133,8 +133,9 @@ class PluginHealthTest(Base):
         codes = {item["code"]: item for item in found["findings"] if item["kind"] in ("plugin_health", "plugin_conflict")}
         self.assertEqual(codes["plugin_error:broken"]["evidence"]["error"], "ModuleNotFoundError")   # no message text
         self.assertEqual(codes["plugin_undeclared_hooks:omh"]["evidence"], {"registered": 9, "declared": 2})
-        overlap = codes["plugin_transform_overlap:transform_tool_result"]
-        self.assertEqual(overlap["evidence"]["plugins"], ["aaa-pretty", "zzz-safety"])   # load order: the first wins
+        # sharing a transform hook is not a finding any more: environment.findings reports only a real overlap
+        self.assertNotIn("plugin_transform_overlap:transform_tool_result", codes)
+        self.assertEqual(found["plugins"]["overlaps"]["transform_tool_result"], ["aaa-pretty", "zzz-safety"])
         self.assertNotIn("plugin_error:off", codes)
 
     def test_this_plugin_competes_for_a_transform_only_while_its_hints_are_on(self):

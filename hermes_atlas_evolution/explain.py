@@ -19,14 +19,46 @@ from .report import _ADVISORY, _KIND, _RISK
 # Only changes whose undo is certain: archiving a skill is not undone by `curator restore` (Hermes 0.23.1 restores it
 # at the top level under its frontmatter name, or an older archived copy), so it stays a change the owner applies.
 APPLY = {"skill_lock": (("curator", "lock"), ("curator", "unlock"))}
-AUTOMATIC = ("skill_lock",)   # what the autopilot applies by itself with auto_actions: full
+# 0.8.5: changes in any profile of this Hermes (environment.py). The subject is "<profile>/<name>"; what runs is
+# recorded as ["@<profile>", ...] and runs with that profile's own `hermes --profile <profile>`. Before it runs,
+# actions.apply_proposal reads the profile again from disk (environment.verify): a stored proposal is never trusted.
+FLEET = {"plugin_transform_overlap": "disable", "plugin_duplicate": "disable", "self_missing": "install",
+         "plugin_leftover": "trash"}
+AUTOMATIC = ("skill_lock", "self_missing", "plugin_leftover")   # what the Mode auto applies by itself
+NOT_BULK = ("plugin_transform_overlap", "plugin_duplicate")     # which plugin to keep is the owner's call, one by one
 _SUBJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_PLUGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
+_LEFTOVER = re.compile(r"\.install-[A-Za-z0-9_-]{1,64}")
+_SHA = re.compile(r"[0-9a-f]{40}")
+SELF, SOURCE = "hermes-atlas-evolution", "sesantanajr/hermes-atlas-evolution"
+
+
+def _fleet_undo(forward: list) -> list | None:
+    """The undo of a fleet change, from the change's own shape only."""
+    if len(forward) == 3 and forward[:2] == ["plugins", "disable"] and _PLUGIN.fullmatch(forward[2]) \
+            and forward[2] != SELF:
+        return ["plugins", "enable", forward[2]]
+    if forward[:4] == ["plugins", "install", SOURCE, "--enable"] and (
+            len(forward) == 4 or len(forward) == 6 and forward[4] == "--ref" and _SHA.fullmatch(forward[5])):
+        return ["plugins", "remove", SELF]
+    if len(forward) == 2 and forward[0] == "__trash__" and _LEFTOVER.fullmatch(forward[1]):
+        return ["__restore__", forward[1]]
+    return None
+
+
+def _target(subject) -> tuple[str, str] | None:
+    if not isinstance(subject, str) or subject.count("/") != 1:
+        return None
+    profile, name = subject.split("/")
+    return (profile, name) if _PROFILE.fullmatch(profile) and (_PLUGIN.fullmatch(name) or _LEFTOVER.fullmatch(name)) \
+        else None
 
 
 def category(kind: str) -> str:
     if kind in ("lesson", "lesson_retire"):
         return "lesson"
-    if kind in APPLY:
+    if kind in APPLY or kind in FLEET:
         return "change"
     if kind in _ADVISORY:
         return "advice"
@@ -34,10 +66,16 @@ def category(kind: str) -> str:
 
 
 def undo_for(applied) -> list | None:
-    """The Hermes arguments that undo `applied` (what a decision recorded it ran), derived again from APPLY and never
-    read from the record: a changed record can only fail to undo, never run something else."""
+    """The Hermes arguments that undo `applied` (what a decision recorded it ran), derived again from APPLY and the
+    fleet changes' shapes and never read from the record: a changed record can only fail to undo, never run
+    something else."""
     if not isinstance(applied, list) or len(applied) < 2 or not all(isinstance(part, str) for part in applied):
         return None
+    if applied[0].startswith("@"):
+        if not _PROFILE.fullmatch(applied[0][1:]):
+            return None
+        backward = _fleet_undo(list(applied[1:]))
+        return None if backward is None else [applied[0], *backward]
     subject = applied[-1]
     if not _SUBJECT.fullmatch(subject):
         return None
@@ -49,6 +87,37 @@ def undo_for(applied) -> list | None:
 
 def plan(proposal: dict) -> tuple[list, list] | None:
     """(apply, undo) Hermes arguments for a proposal the plugin can apply, or None."""
+    fleet = FLEET.get(proposal.get("kind"))
+    if fleet is not None:
+        target = _target(proposal.get("subject"))
+        if target is None:
+            return None
+        profile, name = target
+        evidence = proposal.get("evidence")
+        if isinstance(evidence, str):
+            try:
+                import json
+
+                evidence = json.loads(evidence)
+            except ValueError:
+                evidence = {}
+        evidence = evidence if isinstance(evidence, dict) else {}
+        if fleet == "install":
+            if name != SELF:
+                return None   # only this plugin installs itself
+            ref = evidence.get("ref")
+            forward = ["plugins", "install", SOURCE, "--enable"] + (["--ref", ref] if isinstance(ref, str) and _SHA.fullmatch(ref) else [])
+        elif fleet == "trash":
+            if not _LEFTOVER.fullmatch(name):
+                return None
+            forward = ["__trash__", name]
+        else:
+            if name == SELF or not _PLUGIN.fullmatch(name) or (proposal.get("kind") == "plugin_transform_overlap"
+                                                               and evidence.get("off") not in (None, name)):
+                return None
+            forward = ["plugins", "disable", name]
+        backward = _fleet_undo(forward)
+        return None if backward is None else ([f"@{profile}", *forward], [f"@{profile}", *backward])
     found = APPLY.get(proposal.get("kind"))
     subject = proposal.get("subject")
     if found is None or not isinstance(subject, str) or not _SUBJECT.fullmatch(subject):
@@ -224,15 +293,214 @@ def _does(kind: str, subject: str, lang: str) -> str:
     return ""
 
 
+def command_text(args, lang: str = "en") -> str:
+    """What a plan runs, as the owner would type it: ["@atlas-ai", "plugins", "disable", "x"] is
+    `hermes -p atlas-ai plugins disable x`; the plugin's own trash moves are said in words."""
+    if not isinstance(args, (list, tuple)) or not args:
+        return ""
+    profile = None
+    if str(args[0]).startswith("@"):
+        profile, args = str(args[0])[1:], list(args[1:])
+    if args and args[0] in ("__trash__", "__restore__"):
+        verb = ({"en": "move to the plugin's trash", "pt": "mover para a lixeira do plugin"} if args[0] == "__trash__"
+                else {"en": "put back from the plugin's trash", "pt": "trazer de volta da lixeira do plugin"})
+        verb = verb.get(lang, verb["en"])
+        return f"{verb}: {profile or 'default'}/plugins/{args[-1]}"
+    prefix = f"hermes -p {profile} " if profile else "hermes "
+    return prefix + " ".join(str(item) for item in args)
+
+
+_PLAYBOOK: dict | None = None
+
+
+def playbook() -> dict:
+    global _PLAYBOOK
+    if _PLAYBOOK is None:
+        from .ecosystem import knowledge
+
+        _PLAYBOOK = knowledge().get("playbook") or {}
+    return _PLAYBOOK
+
+
+def _scope_text(scope, tools, lang: str) -> str:
+    pt = lang == "pt"
+    listed = ", ".join(f"`{item}`" for item in tools or () if isinstance(item, str))
+    if scope == "unknown":
+        return "em ferramentas que o código não mostra" if pt else "on tools its code does not show"
+    if scope == "only" and listed:
+        return f"só em {listed}" if pt else f"only on {listed}"
+    if scope == "except" and listed:
+        return f"em todas as ferramentas menos {listed}" if pt else f"on every tool but {listed}"
+    return "em qualquer ferramenta" if pt else "on any tool"
+
+
+def _env_what(kind: str, subject: str, e: dict, lang: str) -> str:
+    """What was seen across the profiles, with its numbers and names, in plain words."""
+    pt = lang == "pt"
+    where = e.get("profile") or "?"
+    names = lambda items: ", ".join(f"`{item}`" for item in items if isinstance(item, str))  # noqa: E731
+    target = subject.split("/", 1)[1] if "/" in subject else subject
+    if kind == "plugin_removed":
+        state = {"enabled": ("ligado", "on"), "disabled": ("desligado", "off"),
+                 "not_loaded": ("instalado sem estar ligado", "installed, not turned on")}.get(e.get("state"), ("?", "?"))
+        why = f": {e['reason']}" if e.get("reason") else ""
+        if e.get("allowed"):
+            return (f"`{target}` (perfil `{where}`, {state[0]}) foi tirado do catálogo do Hermes{why}."
+                    " Ele foi instalado com `--allow-removed`, então o Hermes ainda o carrega." if pt else
+                    f"`{target}` (profile `{where}`, {state[1]}) was removed from the Hermes catalog{why}."
+                    " It was installed with `--allow-removed`, so Hermes still loads it.")
+        return (f"`{target}` (perfil `{where}`, {state[0]}) foi tirado do catálogo do Hermes{why}."
+                " O Hermes já se recusa a carregá-lo; os arquivos continuam lá." if pt else
+                f"`{target}` (profile `{where}`, {state[1]}) was removed from the Hermes catalog{why}."
+                " Hermes already refuses to load it; its files are still there.")
+    if kind == "plugin_obsolete":
+        states = {"archived": ("está arquivado no GitHub", "is archived on GitHub"),
+                  "delisted": ("foi retirado do catálogo do Hermes", "was delisted from the Hermes catalog"),
+                  "missing": ("tem um repositório que não existe mais", "has a repository that no longer exists"),
+                  "removed": ("está na lista de removidos do Hermes", "is on Hermes' kill list"),
+                  "unmaintained": ("está sem manutenção", "is unmaintained")}.get(
+            e.get("state"), (f"está {e.get('state')}", f"is {e.get('state')}"))
+        replacement = names([item for item in e.get("replacement") or () if item != target])
+        basis = f" ({'fonte, em inglês' if pt else 'source'}: {e['basis']})" if e.get("basis") else ""
+        if pt:
+            return (f"`{target}` (perfil `{where}`) {states[0]}{basis}, conferido em 16/11/2026."
+                    + (f" Substituto: {replacement}." if replacement else ""))
+        return (f"`{target}` (profile `{where}`) {states[1]}{basis}, checked on 2026-11-16."
+                + (f" Replacement: {replacement}." if replacement else ""))
+    if kind in ("plugin_transform_overlap", "plugin_transform_protected", "plugin_hints_overlap", "plugin_transform_unclear"):
+        first, later, hook = e.get("first"), e.get("later"), e.get("hook")
+        tools = e.get("tools") or []
+        a = _scope_text(e.get("first_scope"), e.get("first_tools"), lang)
+        b = _scope_text(e.get("later_scope"), e.get("later_tools"), lang)
+        common = names(tools) if tools else ("qualquer ferramenta" if pt else "any tool")
+        if hook == "transform_llm_output":   # the model's answer, not a tool's result
+            text = (f"No perfil `{where}`, `{first}` e `{later}` mudam a resposta do modelo pelo hook `{hook}`. O Hermes"
+                    f" carrega `{first}` antes (ordem alfabética do nome, depois de requires_plugins) e fica só com a"
+                    f" primeira mudança de cada resposta: quando os dois mudam a mesma, a de `{later}` se perde, sem aviso."
+                    if pt else
+                    f"In profile `{where}`, `{first}` and `{later}` change the model's answer through the hook `{hook}`."
+                    f" Hermes loads `{first}` first (alphabetical by name, after requires_plugins) and keeps only the first"
+                    f" change of each answer: when both change the same one, `{later}`'s is lost, silently.")
+        elif pt:
+            text = (f"No perfil `{where}`, dois plugins mudam o resultado das ferramentas pelo hook `{hook}`: `{first}` age"
+                    f" {a} e `{later}` age {b}. Os dois podem mudar a mesma chamada em: {common}. O Hermes carrega"
+                    f" `{first}` antes (ordem alfabética do nome, depois de requires_plugins) e, em cada chamada, fica só"
+                    f" com a primeira mudança: nessas chamadas a de `{later}` se perde, sem aviso.")
+        else:
+            text = (f"In profile `{where}`, two plugins change tool results through the hook `{hook}`: `{first}` acts {a}"
+                    f" and `{later}` acts {b}. Both can change the same call on: {common}. Hermes loads `{first}` first"
+                    f" (alphabetical by name, after requires_plugins) and keeps only the first change of each call: on"
+                    f" those calls `{later}`'s is lost, silently.")
+        if kind == "plugin_hints_overlap":
+            text += (" Um dos dois é este plugin, com as dicas de lição nos resultados (`tool_hints`) ligadas." if pt else
+                     " One of them is this plugin, with lesson hints in tool results (`tool_hints`) on.")
+        elif kind == "plugin_transform_unclear":
+            text += (" O código de pelo menos um deles não mostra em quais ferramentas ele age (registro indireto, arquivo"
+                     " grande ou que não pôde ser lido), então isso é uma possibilidade, não uma certeza." if pt else
+                     " The code of at least one of them does not show which tools it acts on (an indirect registration, a"
+                     " large file or one that could not be read), so this is a possibility, not a certainty.")
+        elif kind == "plugin_transform_protected":
+            text += (" Os dois protegem algo (segurança ou este plugin): nenhum deve ser desligado por isso." if pt else
+                     " Both protect something (security, or this plugin): neither should be turned off for this.")
+        elif e.get("protected"):
+            text += (f" `{later}` é um plugin de segurança: o aviso dele é o que se perde. Por isso a sugestão é desligar"
+                     f" `{e.get('off')}`, não ele." if pt else
+                     f" `{later}` is a security plugin: its warning is what gets lost. So the suggestion is to turn"
+                     f" `{e.get('off')}` off, not it.")
+        return text
+    if kind == "plugin_duplicate":
+        role = {"terminal_rewrite": ("reescrevem os comandos do terminal", "rewrite the terminal's commands")}.get(
+            e.get("role"), (f"fazem o papel `{e.get('role')}`", f"fill the role `{e.get('role')}`"))
+        return (f"No perfil `{where}`, {names(e.get('plugins') or ())} {role[0]}, e estão todos ligados: o mesmo trabalho"
+                f" feito mais de uma vez em cada comando, com resultado que depende de como um trata o comando do outro."
+                f" Basta um: fique com `{e.get('keep')}` (o primeiro na ordem de carga do Hermes)." if pt else
+                f"In profile `{where}`, {names(e.get('plugins') or ())} {role[1]}, and all are on: the same job done more"
+                f" than once on every command, with a result that depends on how each one treats the other's command. One"
+                f" is enough: keep `{e.get('keep')}` (the first in Hermes' load order).")
+    if kind == "plugin_unused":
+        listed = ", ".join(f"`{item['name']}` ({_n(item.get('mb'), lang, 1)} MB)" for item in (e.get("plugins") or ())[:12]
+                           if isinstance(item, dict))
+        return (f"No perfil `{where}`, {_n(e.get('count'), lang)} plugin(s) instalado(s) não carrega(m), porque não está(ão)"
+                f" na lista de ligados ({_n(e.get('mb'), lang, 1)} MB): {listed}." if pt else
+                f"In profile `{where}`, {_n(e.get('count'), lang)} installed plugin(s) never load, because they are not on"
+                f" the list of plugins turned on ({_n(e.get('mb'), lang, 1)} MB): {listed}.")
+    if kind == "plugin_leftover":
+        return (f"No perfil `{where}`, a pasta `{target}` ficou de uma instalação que falhou há"
+                f" {_n(e.get('age_days'), lang)} dia(s) ({_n(e.get('mb'), lang, 1)} MB)." if pt else
+                f"In profile `{where}`, the folder `{target}` was left by an install that failed"
+                f" {_n(e.get('age_days'), lang)} day(s) ago ({_n(e.get('mb'), lang, 1)} MB).")
+    if kind == "plugin_update":
+        listed = ", ".join(f"`{item['profile']}` ({item['installed']})" for item in (e.get("profiles") or ())[:12]
+                           if isinstance(item, dict))
+        commands = "; ".join(f"`{item}`" for item in (e.get("commands") or ())[:12] if isinstance(item, str))
+        return (f"`{target}`: o catálogo do Hermes ({e.get('tier')}) tem a versão {e.get('catalog')}; instalada em"
+                f" {_n(e.get('count'), lang)} perfil(is): {listed}. Comandos: {commands}." if pt else
+                f"`{target}`: the Hermes catalog ({e.get('tier')}) has version {e.get('catalog')}; installed in"
+                f" {_n(e.get('count'), lang)} profile(s): {listed}. Commands: {commands}.")
+    if kind == "self_missing":
+        return (f"O perfil `{where}` teve {_n(e.get('sessions_7d'), lang)} sessão(ões) em 7 dias e nunca teve o Atlas"
+                " Evolution." if pt else
+                f"Profile `{where}` had {_n(e.get('sessions_7d'), lang)} session(s) in 7 days and never had Atlas Evolution.")
+    if kind == "self_off":
+        why = (("ele está na lista de desligados" if e.get("disabled") else "ele foi tirado ou nunca foi ligado"), 
+               ("it is on the list of plugins turned off" if e.get("disabled") else "it was removed or never turned on"))
+        return (f"O perfil `{where}` teve {_n(e.get('sessions_7d'), lang)} sessão(ões) em 7 dias sem o Atlas Evolution:"
+                f" {why[0]}. Isso foi uma decisão sua, então ele não é ligado sozinho." if pt else
+                f"Profile `{where}` had {_n(e.get('sessions_7d'), lang)} session(s) in 7 days without Atlas Evolution:"
+                f" {why[1]}. That was your decision, so it is not turned on by itself.")
+    if kind == "profile_idle":
+        return (f"O perfil `{where}` não teve sessões em {_n(e.get('days'), lang)} dias; ele tem {_n(e.get('plugins'), lang)}"
+                f" plugin(s) ligado(s) e {_n(e.get('skills'), lang)} skill(s)." if pt else
+                f"Profile `{where}` had no session in {_n(e.get('days'), lang)} days; it has {_n(e.get('plugins'), lang)}"
+                f" plugin(s) on and {_n(e.get('skills'), lang)} skill(s).")
+    if kind == "skills_unused":
+        return (f"No perfil `{where}`, {_n(e.get('count'), lang)} de {_n(e.get('total'), lang)} skills ativas não são usadas"
+                f" há {_n(e.get('days'), lang)} dias: {names((e.get('skills') or ())[:15])}." if pt else
+                f"In profile `{where}`, {_n(e.get('count'), lang)} of {_n(e.get('total'), lang)} active skills were not used"
+                f" for {_n(e.get('days'), lang)} days: {names((e.get('skills') or ())[:15])}.")
+    if kind == "skills_duplicate":
+        keep = (f"A mais usada é `{e.get('keep')}`." if e.get("used", True) else f"Nenhuma foi usada; fique com `{e.get('keep')}`."
+                ) if pt else (f"The most used is `{e.get('keep')}`." if e.get("used", True)
+                              else f"Neither was used; keep `{e.get('keep')}`.")
+        return (f"No perfil `{where}`, {names(e.get('copies') or ())} têm o mesmo texto. {keep}" if pt else
+                f"In profile `{where}`, {names(e.get('copies') or ())} have the same text. {keep}")
+    if kind == "skills_similar":
+        pairs = "; ".join(f"`{a}` ≈ `{b}`" for a, b in (e.get("pairs") or ())[:8])
+        return (f"No perfil `{where}`, {_n(e.get('count'), lang)} par(es) de skills com descrições quase iguais: {pairs}." if pt else
+                f"In profile `{where}`, {_n(e.get('count'), lang)} pair(s) of skills with nearly the same description: {pairs}.")
+    if kind == "skills_shared":
+        return (f"{_n(e.get('skills'), lang)} skill(s) estão copiadas, idênticas, em 3 ou mais dos {_n(e.get('profiles'), lang)}"
+                " perfis (as que vêm com o Hermes não contam)." if pt else
+                f"{_n(e.get('skills'), lang)} skill(s) are copied, identical, into 3 or more of the {_n(e.get('profiles'), lang)}"
+                " profiles (the ones that come with Hermes do not count).")
+    return ""
+
+
 def describe(proposal: dict, lang: str = "en") -> dict:
-    """The proposal as the menu and the panel show it."""
+    """The proposal as the menu and the panel show it: title, what was seen, what to do about it (advice), what
+    applying does, and its undo."""
     lang = lang if lang in ("en", "pt") else "en"
     kind, subject = proposal.get("kind") or "", str(proposal.get("subject") or "")
+    evidence = proposal.get("evidence") or {}
+    if isinstance(evidence, str):
+        try:
+            import json
+
+            evidence = json.loads(evidence)
+        except ValueError:
+            evidence = {}
     found = plan(proposal)
-    undo = None
-    if found is not None:
-        undo = "hermes " + " ".join(found[1])
-    return {"title": _KIND[lang].get(kind, kind), "risk": _RISK[lang].get(proposal.get("risk"), proposal.get("risk")),
-            "category": category(kind), "what": _what(kind, subject, proposal.get("evidence") or {}, lang),
-            "does": _does(kind, subject, lang), "undo": undo, "can_apply": found is not None,
+    undo = command_text(found[1], lang) if found is not None else None
+    entry = playbook().get(kind) if kind.startswith(("plugin_", "skills_", "self_", "profile_")) or kind in FLEET else None
+    if isinstance(entry, dict):
+        title, advice = entry.get(f"title_{lang}") or kind, entry.get(f"advice_{lang}") or ""
+        what = _env_what(kind, subject, evidence if isinstance(evidence, dict) else {}, lang)
+        does = ("Aplicar roda: " if lang == "pt" else "Applying runs: ") + command_text(found[0], lang) if found else ""
+    else:
+        title, advice = _KIND[lang].get(kind, kind), ""
+        what = _what(kind, subject, evidence if isinstance(evidence, dict) else {}, lang)
+        does = _does(kind, subject, lang)
+    return {"title": title, "risk": _RISK[lang].get(proposal.get("risk"), proposal.get("risk")),
+            "category": category(kind), "what": what, "advice": advice, "does": does, "undo": undo,
+            "can_apply": found is not None, "bulk": found is not None and kind not in NOT_BULK,
             "automatic": kind in AUTOMATIC and found is not None}
