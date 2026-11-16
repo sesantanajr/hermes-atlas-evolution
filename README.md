@@ -105,7 +105,7 @@ Set them in the **Evolution** tab of the dashboard, in the menu (screen 6), in H
 
 ## Privacy and safety
 
-- **What it keeps.** Counters, failure classes, hashed session ids, lessons and proposals, under `<HERMES_HOME>/evolution/`; no conversation text, prompt, tool argument or output. A copy of a memory file when an entry is taken out, and of the package list and `/etc` before a system update, owner-only.
+- **What it keeps.** Counters, failure classes, hashed session ids, lessons and proposals, under `<HERMES_HOME>/evolution/`; no conversation text, prompt, tool argument or output. A copy of a memory file when an entry is taken out, owner-only; before a system update, the package list and a copy of `/etc` in a root-only folder outside every profile (`/var/lib/hermes-atlas-evolution/system/`).
 - **What it reads**, read-only: Hermes' history, logs, skill records, its gateway and database files; for the system, the package manager's state ([full list](docs/hermes-integration.md#what-the-plugin-reads)).
 - **Network and model.** No connection of its own and no telemetry. Only the reflector calls a model, through Hermes. `hermes doctor`, run only on your click, calls the providers' APIs (and pings an `/anthropic` endpoint with one token); everything else here spends nothing.
 - **Decisions.** Only you decide, in your own terminal or in a dashboard with a login. The plugin changes its own data; its settings with `hermes config set`; Hermes' memory only to take out a repeat; skills only with `hermes curator lock`; the system only when you run its update. Each change has its undo or its copy.

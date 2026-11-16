@@ -31,27 +31,32 @@ What fixes things is the owner's, from the menu (screen 12) or `hermes evolution
 
 Linux with apt (Ubuntu, Debian). Every other system reads as "not supported" and nothing is run.
 
-**Check** (read-only; daily in the learning pass, and on each visit to screen 13): updates waiting (security ones counted apart), a reboot the system waits for and the packages that asked for it, `dpkg --audit` (an update left half-way), `apt-get check` without apt's lock (it never makes `unattended-upgrades` wait), another package manager running now (the `unattended-upgrade-shutdown` helper that waits for a shutdown does not count), held packages, room on `/`, `/boot` and `/var`, automatic security updates, the age of the package lists, Hermes' systemd units and the linger a user unit needs to start at boot. It is ready to update when nothing is half-way, broken or busy and there is room.
+**Check** (read-only; daily in the learning pass, and on each visit to screen 13): updates waiting (security ones counted apart), a reboot the system waits for and the packages that asked for it, `dpkg --audit` (an update left half-way), `apt-get check` without apt's lock (it never makes `unattended-upgrades` wait), whether another package manager works now (a dpkg or apt lock held, read from `/proc/locks`, or an `apt`, `apt-get`, `aptitude` or `dpkg` process; the `unattended-upgrade-shutdown` helper that only waits for a shutdown does not count), held packages and the ones a stopped run of this plugin still holds, room on `/`, `/boot` and `/var`, automatic security updates, the age of the package lists, Hermes' systemd units and the linger a user unit of the profile's owner needs to start at boot. While another package manager works, an unfinished dpkg is its own work in progress and is not reported. It is ready to update when nothing is half-way, broken or busy and there is room.
 
 **Plan**: `apt-get update`, then a simulation of `apt-get --with-new-pkgs upgrade` (or `full-upgrade` with `--full`): what would be upgraded, installed, removed or kept back, and the packages that need a word: restarts the containers (docker, containerd), needs a reboot (libc6, systemd, the kernel, openssl), restarts the web server, remote access (ssh, sudo), the boot loader, the package manager itself.
 
 **Update** (root, in the owner's own terminal; never the agent, never by itself):
 
-1. The check must pass.
-2. A copy of every installed package with its version and of `/etc`, owner-only, in `<profile>/evolution/system/<time>/`.
-3. `apt-get -y --with-new-pkgs upgrade` in its own systemd unit (`hermes-evolution-os-upgrade-<time>`), so a closed terminal, a dropped SSH connection or a restarted gateway never leaves dpkg half-way. It keeps every configuration file you changed (`--force-confold`), restarts no service by itself (`NEEDRESTART_MODE=l`), and holds the packages you asked to leave out only for this run.
-4. After: dpkg and apt checked again, every service that was running checked again (all of them, not only Hermes'), `hermes --version`, and a report with what changed and the command that goes back to each old version (`apt-get install <package>=<version>`, while that version is still available).
+1. The check must pass, and Hermes' profile and the plugin's own code must belong to root. If another user can change them, root would run what that user wrote: the plugin refuses and the plan shows what to do with apt yourself.
+2. A copy of every installed package with its version and of `/etc`, in a folder only root can read, outside every Hermes profile (so never inside a Hermes backup): `/var/lib/hermes-atlas-evolution/system/<time>-<random>/`. Its files are created new, never through a link; the latest 5 runs are kept.
+3. `apt-get -y --with-new-pkgs upgrade` in its own systemd unit (`hermes-evolution-os-upgrade-<run>`), so a closed terminal, a dropped SSH connection or a restarted gateway never leaves dpkg half-way. It keeps every configuration file you changed (`--force-confold`), restarts no service by itself (`NEEDRESTART_MODE=l`), and holds the packages you asked to leave out only for this run: they are written down before they are held, and released when the run ends, fails or is stopped (`systemctl stop`, Ctrl+C, a hang-up). A name apt would not accept is refused, never dropped in silence.
+4. After: dpkg and apt checked again, every service that was running checked again (all of them, not only Hermes'; a service that stopped on its own count only when it failed), units that newly failed, `hermes --version`, and a report with what changed and the command that goes back to each old version (`apt-get install <package>=<version>`, while that version is still available). `hermes evolution system report` and the menu show the latest one, written when it is first asked for if the menu was closed.
 
 The plugin never reboots. When the system waits for a reboot, plan it: Hermes' services come back by themselves when they are enabled (and, for a user unit, with linger).
 
-**Repair**: when an update stopped half-way (a power cut, a killed process), `dpkg --configure -a` and then `apt-get -f install`, keeping your configuration files; refused while another package manager runs.
+**A run that vanished** (the machine lost power, the unit was killed): the menu and `system report` say so instead of waiting for ever, and the check lists the packages that run still holds.
+
+**Repair**, in its own systemd unit like an update: releases what a stopped run of the plugin still holds, then `dpkg --configure -a` and `apt-get -f install`, keeping your configuration files; refused while another package manager works.
 
 ### How it was tested
 
 In containers (Docker) with Ubuntu 26.04, 24.04 and 22.04 and Debian 13, apart from any production system:
 
-- a full update of Ubuntu 24.04 and 22.04 images of April 2024 (67 and 55 packages, libc6, apt, dpkg and openssl among them), with one package left out (kept at its old version, its hold released after) and an edited configuration file of libc6 (kept);
-- a power cut in the middle of the update (the container killed while dpkg unpacked libc6, zlib or libsystemd, then started again): the check finds dpkg half-way and refuses an update, the repair refuses while another apt runs, then finishes the work, and the check is ready again;
+- a full update of Ubuntu 24.04 and 22.04 images of April 2024 (67 and 55 packages, libc6, apt, dpkg and openssl among them), with one package left out (kept at its old version, its hold released after) and an edited configuration file of libc6 (kept); the run folder only root's, outside the profile;
+- a power cut in the middle of the update (the container killed while dpkg unpacked libc6, zlib or libsystemd, then started again): the check finds dpkg half-way and the package the run still held, and refuses an update; the repair refuses while another apt runs, then releases the hold and finishes the work, and the check is ready again;
+- the update stopped as `systemctl stop` does (SIGTERM to the whole run): the package left out is released;
+- a real dpkg lock held by another program: the check says busy and names the lock, and is ready once it is released;
+- a Hermes owned by another user: root refuses to update through it;
 - an update of Ubuntu 26.04 with Hermes 0.23.1 installed, through `hermes evolution system upgrade`: libc6 2.43 updated, Hermes answers after, no service stopped.
 
 ## The weekly digest

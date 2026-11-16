@@ -105,7 +105,7 @@ Ajuste na aba **Evolution** do dashboard, no menu (tela 6), no Hermes Desktop em
 
 ## Privacidade e segurança
 
-- **O que ele guarda.** Contadores, classes de falha, ids de sessão com hash, lições e propostas, em `<HERMES_HOME>/evolution/`; nenhum texto de conversa, prompt, argumento ou saída de ferramenta. Uma cópia de um arquivo de memória quando uma entrada sai, e da lista de pacotes e do `/etc` antes de uma atualização do sistema, só do dono.
+- **O que ele guarda.** Contadores, classes de falha, ids de sessão com hash, lições e propostas, em `<HERMES_HOME>/evolution/`; nenhum texto de conversa, prompt, argumento ou saída de ferramenta. Uma cópia de um arquivo de memória quando uma entrada sai, só do dono; antes de uma atualização do sistema, a lista de pacotes e uma cópia do `/etc` numa pasta só do root, fora de todo perfil (`/var/lib/hermes-atlas-evolution/system/`).
 - **O que ele lê**, só para ler: o histórico, os logs e os registros de skills do Hermes, os arquivos do gateway e do banco; do sistema, o estado do gerenciador de pacotes ([lista completa](docs/pt-BR/hermes-integration.md#o-que-o-plugin-lê)).
 - **Rede e modelo.** Nenhuma conexão própria e nenhuma telemetria. Só o refletor chama um modelo, pelo Hermes. O `hermes doctor`, rodado só com um clique seu, consulta as APIs dos provedores (e manda um ping de 1 token para um endpoint `/anthropic`); todo o resto aqui não gasta nada.
 - **Decisões.** Só você decide, no seu próprio terminal ou num dashboard com login. O plugin muda os próprios dados; as próprias configurações com `hermes config set`; a memória do Hermes só para tirar uma repetição; skills só com `hermes curator lock`; o sistema só quando você roda a atualização dele. Cada mudança tem o desfazer ou a cópia.
