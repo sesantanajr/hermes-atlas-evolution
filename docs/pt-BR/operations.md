@@ -78,7 +78,7 @@ Com `--notify-only`, o `ops tick` não imprime nada quando não há novidade. Ca
 Para rodar sem habilitar o plugin, ou quando a instalação usa `plugins.isolation: host` (em que o Hermes ignora os comandos de CLI de plugins), execute a partir da raiz do projeto extraído:
 
 ```sh
-python -m hermes_evolution --home /caminho/do/perfil --hermes-version 0.23.1 \
+python -m hermes_atlas_evolution --home /caminho/do/perfil --hermes-version 0.23.1 \
   ops inspect --upstream-tag v0.23.1
 ```
 
@@ -121,7 +121,7 @@ O provedor, o modelo e os preços acima são apenas ilustrativos.
 
 O `ops plan` devolve um plano somente leitura com um orçamento sugerido: consultas de busca, extrações de página e frentes paralelas para pesquisa; frentes paralelas e rodadas de revisão para delegação; e amostras comparáveis para operações. Planos de pesquisa incluem descoberta de fontes, verificação de evidência e registro de incertezas. Planos de delegação indicam `delegate_task` para respostas que o agente atual precisa aguardar e Kanban para trabalhos que precisam sobreviver a reinícios (`--durable`).
 
-Ligue `agent_tools` nas configurações do plugin no Hermes, ou defina `"agent_advice": true` em `<HERMES_HOME>/evolution/settings.json`, e recarregue o plugin para liberar `hermes_evolution_plan` e `hermes_evolution_lessons` ao perfil. Inclua `hermes-evolution` quando o perfil usa uma lista explícita de toolsets. A ferramenta de planos devolve apenas o plano.
+Ligue `agent_tools` nas configurações do plugin no Hermes, ou defina `"agent_advice": true` em `<HERMES_HOME>/evolution/settings.json`, e recarregue o plugin para liberar `hermes_atlas_evolution_plan` e `hermes_atlas_evolution_lessons` ao perfil. Inclua `hermes-atlas-evolution` quando o perfil usa uma lista explícita de toolsets. A ferramenta de planos devolve apenas o plano.
 
 A leitura compartilhada dos quadros Kanban exige `"inspect_shared_kanban": true`. A criação de cartão exige a sua própria autorização de encaminhamento, independente dessa chave. O exemplo associa as verificações ao perfil `reviewer` no quadro existente `ops`.
 
@@ -140,7 +140,7 @@ hermes evolution ops schedule-spec --every-minutes 5 --upstream-tag v0.23.1
 
 O `handoff` cria no Kanban nativo um cartão bloqueado, destinado à verificação, com chave de idempotência por perfil, quadro, responsável, tipo, assunto e dia UTC. O operador libera o cartão depois de revisar o escopo. O assunto é um identificador de até 80 caracteres. O comando não faz nada dentro de um worker Kanban ou de uma tarefa delegada, e precisa do `hermes` no `PATH`.
 
-O `schedule-spec` entrega o script e os argumentos do Cron nativo para agendar `ops tick --notify-only` em modo `no_agent` como a rotina `hermes-evolution-watchdog`, com saída local e sem abrir uma sessão de modelo. O intervalo vai de 5 a 1.440 minutos. Nada é gravado. Revise o script e aplique a receita no perfil escolhido. O tick usa a política Linux desse perfil. Use o intervalo de cinco minutos em modo `apply`, para que os ensaios sejam verificados e encerrados.
+O `schedule-spec` entrega o script e os argumentos do Cron nativo para agendar `ops tick --notify-only` em modo `no_agent` como a rotina `hermes-atlas-evolution-watchdog`, com saída local e sem abrir uma sessão de modelo. O intervalo vai de 5 a 1.440 minutos. Nada é gravado. Revise o script e aplique a receita no perfil escolhido. O tick usa a política Linux desse perfil. Use o intervalo de cinco minutos em modo `apply`, para que os ensaios sejam verificados e encerrados.
 
 ## Remediação no Linux
 
@@ -218,7 +218,7 @@ O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 
 
 ## Como retirar o plugin
 
-Execute `hermes evolution ops rollback` antes de desabilitar o plugin com `hermes plugins disable hermes-evolution`, e recarregue o gateway do perfil. O plugin é instalado por perfil, então repita isso em cada perfil que o tiver (`hermes -p <perfil> ...`).
+Execute `hermes evolution ops rollback` antes de desabilitar o plugin com `hermes plugins disable hermes-atlas-evolution`, e recarregue o gateway do perfil. O plugin é instalado por perfil, então repita isso em cada perfil que o tiver (`hermes -p <perfil> ...`).
 
 ## Referências
 

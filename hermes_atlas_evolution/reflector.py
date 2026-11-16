@@ -162,7 +162,7 @@ def host_caller(ctx, task: str = "evolution_reflector"):
     def ask(instructions: str, text: str) -> dict | None:
         result = llm.complete_structured(instructions=instructions, input=[{"type": "text", "text": text}],
                                          json_schema=SCHEMA, schema_name="evolution_lesson", task=task,
-                                         max_tokens=300, timeout=60, purpose="hermes-evolution-reflector")
+                                         max_tokens=300, timeout=60, purpose="hermes-atlas-evolution-reflector")
         parsed = getattr(result, "parsed", None)
         return parsed if isinstance(parsed, dict) else None
 

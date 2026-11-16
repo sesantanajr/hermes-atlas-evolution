@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from hermes_evolution.diagnostics import snapshot
+from hermes_atlas_evolution.diagnostics import snapshot
 
 
 def create_state(db: sqlite3.Connection) -> None:
@@ -118,7 +118,7 @@ class DiagnosticsTest(unittest.TestCase):
     def test_large_database_checks_schema_without_claiming_integrity(self):
         with closing(sqlite3.connect(self.home / "state.db")) as db:
             create_state(db)
-        with patch("hermes_evolution.diagnostics._DB_SIZE_LIMIT", 1):
+        with patch("hermes_atlas_evolution.diagnostics._DB_SIZE_LIMIT", 1):
             result = snapshot(self.home)["database"]
         self.assertEqual(result["status"], "integrity_skipped_large")
 
@@ -146,7 +146,7 @@ class DiagnosticsTest(unittest.TestCase):
             "platforms": {"PRIVATE_PLATFORM": {"needs_attention": True, "error_message": "PRIVATE_ERROR"}},
         }
         state = self.home / "gateway_state.json"
-        with patch("hermes_evolution.diagnostics._process_liveness", return_value="confirmed"):
+        with patch("hermes_atlas_evolution.diagnostics._process_liveness", return_value="confirmed"):
             state.write_text(json.dumps(marker), encoding="utf-8")
             result = snapshot(self.home)
             self.assertNotIn("PRIVATE_", json.dumps(result))
@@ -170,7 +170,7 @@ class DiagnosticsTest(unittest.TestCase):
                           "other:slack": {"needs_attention": True}, "api_server": {"needs_attention": True}},
         }
         (self.home / "gateway_state.json").write_text(json.dumps(record), encoding="utf-8")
-        with patch("hermes_evolution.diagnostics._process_liveness", return_value="confirmed"):
+        with patch("hermes_atlas_evolution.diagnostics._process_liveness", return_value="confirmed"):
             served = snapshot(profiles / "work")
             unserved = snapshot(profiles / "idle")
             root = snapshot(self.home)

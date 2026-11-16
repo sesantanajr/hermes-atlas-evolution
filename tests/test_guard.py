@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hermes_evolution.guard import RuntimeGuard, check
+from hermes_atlas_evolution.guard import RuntimeGuard, check
 
 HOME = Path("/home/owner")
 RUNTIME = HOME / ".hermes" / "tools" / "python-3.14.10+build-linux-x64"
@@ -79,7 +79,7 @@ class HookTest(unittest.TestCase):
         self.assertIsNone(guard(tool_name="terminal", args={"command": "x" * 500_000}))
 
     def test_protected_paths_come_from_the_running_interpreter_and_hermes(self):
-        from hermes_evolution.guard import protected_paths
+        from hermes_atlas_evolution.guard import protected_paths
 
         folder = Path(tempfile.mkdtemp())
         paths = protected_paths(hermes_root=folder, profile_home=folder / "profiles" / "work")

@@ -11,16 +11,16 @@ The plugin relies on the published plugin API: it uses the `ctx` methods below a
 | Surface | Plugin API | Registered when |
 |---|---|---|
 | 17 hooks, listed below | `ctx.register_hook` | always, except `transform_tool_result` (lessons on and `tool_hints` on) and `pre_tool_call` (`runtime_guard` on) |
-| Prompt section `hermes-evolution.playbook`, up to 1,400 characters | `ctx.register_system_prompt_section` | `lessons` is `suggest` or `auto` |
-| Tools `hermes_evolution_plan` and `hermes_evolution_lessons`, toolset `hermes-evolution` | `ctx.register_tool` with a `check_fn` | always; both stay unavailable to the agent until `agent_tools` is on |
-| Skill `hermes-evolution:evolution-review` | `ctx.register_skill` | when the host offers the method |
+| Prompt section `hermes-atlas-evolution.playbook`, up to 1,400 characters | `ctx.register_system_prompt_section` | `lessons` is `suggest` or `auto` |
+| Tools `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons`, toolset `hermes-atlas-evolution` | `ctx.register_tool` with a `check_fn` | always; both stay unavailable to the agent until `agent_tools` is on |
+| Skill `hermes-atlas-evolution:evolution-review` | `ctx.register_skill` | when the host offers the method |
 | Variable `ATLAS_EVOLUTION_AGENT=1` in every subprocess of an agent session | `ctx.register_session_env` | when the host offers the method |
 | Auxiliary task `evolution_reflector`, inheriting from `compression` | `ctx.register_auxiliary_task`, then `ctx.llm.complete_structured` | `reflector` is on when the plugin loads and the host offers both |
-| Settings form with 11 options | `config_schema` in `plugin.yaml` | always; Hermes stores the values under `plugins.entries.hermes-evolution.settings` |
+| Settings form with 11 options | `config_schema` in `plugin.yaml` | always; Hermes stores the values under `plugins.entries.hermes-atlas-evolution.settings` |
 | CLI command `hermes evolution` | `ctx.register_cli_command` | in-process plugins only; Hermes skips it under `plugins.isolation: host` |
 | Slash command `/evolution` for the 0.1 notes | `ctx.register_command` | `legacy_memory_commands` is `true` |
 | Unload callback that writes queued counters and closes the database | `ctx.on_unload` | when the host offers the method |
-| Background thread `hermes-evolution-autopilot`, a daemon that runs the pass | none; started by the hooks `post_llm_call`, `on_session_end` and `on_kanban_dispatch_tick` | `autopilot_minutes` is not 0 |
+| Background thread `hermes-atlas-evolution-autopilot`, a daemon that runs the pass | none; started by the hooks `post_llm_call`, `on_session_end` and `on_kanban_dispatch_tick` | `autopilot_minutes` is not 0 |
 
 The hooks, the prompt section, the runtime guard, the autopilot interval and the reflector's task are set when the plugin loads, so restart the gateway after changing those settings. Each autopilot pass and each command read the settings again.
 
@@ -87,13 +87,13 @@ All of it is read-only and bounded in size and time.
 | `skills/.usage.json`, `skills/.curator_ledger.jsonl` | Skill health and tracked skill changes. Metadata and hashes only; skill bodies are never opened. |
 | `logs/agent.log`, and `agent.log.1` to `agent.log.5` on the first run | The completion line of each background review. The tails of the Hermes logs are also scanned for error categories. Links are ignored. |
 | `state.db` | Integrity check and Hermes' own usage accounting. The backfill: sessions and their messages from the 14 days before the plugin started observing, 25 sessions at a time, classified in memory and discarded. The radar: how the sessions of the last 7 days ended, and prompt tokens per agent call from `session_model_usage`. |
-| `state.db` of the other profiles of the same Hermes root | For `status`: the number of sessions in the last 7 days of each profile that has no `plugins/hermes-evolution` folder. Nothing else is read. |
+| `state.db` of the other profiles of the same Hermes root | For `status`: the number of sessions in the last 7 days of each profile that has no `plugins/hermes-atlas-evolution` folder. Nothing else is read. |
 | Hermes' plugin manager, when it is loaded in the process | For the radar: the enabled plugins, the number of hooks each registered and the name of a load error. |
 | `plugin.yaml` of the plugins bundled with Hermes and of `<HERMES_HOME>/plugins/` | For the radar: the hooks each plugin declares (`provides_hooks`). At most 500 folders and 64 KiB per manifest. |
 | `cron/jobs.json`, Kanban boards | Workload diagnostics, as counts. |
 | `gateway_state.json`, `gateway.pid` | Gateway state, including a named profile served by the root gateway. |
 | `memories/MEMORY.md`, `memories/USER.md` | Presence, size, UTF-8 readability and structure counts such as entries, duplicates and oversized entries. The content is not stored or reported. |
-| Hermes configuration | The plugin's own entry under `plugins.entries.hermes-evolution.settings`, `display.language`, an allowlist of settings for change tracking, and Cron, Kanban, delegation and memory limits. |
+| Hermes configuration | The plugin's own entry under `plugins.entries.hermes-atlas-evolution.settings`, `display.language`, an allowlist of settings for change tracking, and Cron, Kanban, delegation and memory limits. |
 | `HERMES_LANGUAGE` | The profile language, read through `agent.secret_scope` inside Hermes or from the environment outside it. |
 | `/proc`, `/sys/fs/cgroup`, systemd unit properties | Linux pressure and service measurements. |
 
@@ -123,7 +123,7 @@ All of it is read-only and bounded in size and time.
 | Default installation | Observers with aggregated data. The autopilot runs a pass at most once an hour, and the first passes learn from 14 days of the profile's history. Recurring failures become candidate lessons that wait for approval. The reflector drafts lessons that also wait for approval. The runtime guard vetoes the commands described above. Operator commands can inspect the profile's signals. |
 | `lessons: auto` | Derived lessons become active without approval and reach the agent in new sessions. Reflector drafts still wait. |
 | `lessons: off` | No lesson is derived and no lesson surface is registered. |
-| `agent_tools` (`agent_advice` in `settings.json`) | Exposes `hermes_evolution_plan` and `hermes_evolution_lessons`. The first returns steps, a budget and verification criteria. The second searches lessons, reports the queue and stores proposed lessons in quarantine. With an explicit toolset list, include `hermes-evolution`. |
+| `agent_tools` (`agent_advice` in `settings.json`) | Exposes `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons`. The first returns steps, a budget and verification criteria. The second searches lessons, reports the queue and stores proposed lessons in quarantine. With an explicit toolset list, include `hermes-atlas-evolution`. |
 | `reflector` (on by default) | Keeps scrubbed excerpts of untemplated failures and lets a pass ask a model, through Hermes, for quarantined drafts, within `reflector_daily_limit` calls per day. `false` switches it off. |
 | `autopilot_minutes` (60 by default) | Interval of the background pass. `0` leaves passes to `learn`, `ops tick` and the weekly recipe. |
 | `runtime_guard` (on by default) | Registers the `pre_tool_call` veto. `false` removes it. |
@@ -148,21 +148,21 @@ All of it is read-only and bounded in size and time.
 
 ## Installation notes
 
-- **From GitHub.** `hermes plugins install sesantanajr/hermes-atlas-evolution --enable` in the chosen profile; `hermes -p NAME` selects a profile. Check with `hermes plugins doctor --ci hermes-evolution`.
+- **From GitHub.** `hermes plugins install sesantanajr/hermes-atlas-evolution --enable` in the chosen profile; `hermes -p NAME` selects a profile. Check with `hermes plugins doctor --ci hermes-atlas-evolution`.
 - **Every profile you use.** Hermes loads plugins per profile, even when one gateway serves several profiles, so install the plugin in each one: `hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable`. `hermes evolution status` lists the busy profiles of the same Hermes root that do not have it.
-- **Manually.** Copy the whole plugin folder, with `plugin.yaml` at its root, to `<HERMES_HOME>/plugins/hermes-evolution/` and run `hermes plugins enable hermes-evolution`. The default home on Linux is `~/.hermes`. Windows installations usually use `%LOCALAPPDATA%\hermes`. Follow the profile's maintenance procedure if the gateway is already running.
-- **Host isolation.** Under `plugins.isolation: host` Hermes skips `register_cli_command`, so use `python -m hermes_evolution --home <profile> ...` from the plugin folder. The reflector does not run in that standalone runner; waiting excerpts are kept for the next pass run by Hermes. The autopilot and the reflector were not verified under host isolation. See [Operations](operations.md#running-outside-hermes).
+- **Manually.** Copy the whole plugin folder, with `plugin.yaml` at its root, to `<HERMES_HOME>/plugins/hermes-atlas-evolution/` and run `hermes plugins enable hermes-atlas-evolution`. The default home on Linux is `~/.hermes`. Windows installations usually use `%LOCALAPPDATA%\hermes`. Follow the profile's maintenance procedure if the gateway is already running.
+- **Host isolation.** Under `plugins.isolation: host` Hermes skips `register_cli_command`, so use `python -m hermes_atlas_evolution --home <profile> ...` from the plugin folder. The reflector does not run in that standalone runner; waiting excerpts are kept for the next pass run by Hermes. The autopilot and the reflector were not verified under host isolation. See [Operations](operations.md#running-outside-hermes).
 
 ## Advanced: let the native background review propose lessons
 
-Hermes can admit a named tool to the background review through `auxiliary.background_review.extra_tools`. Adding `hermes_evolution_lessons` lets the review record what it learned as a lesson proposal in the playbook, next to its usual skill and memory writes.
+Hermes can admit a named tool to the background review through `auxiliary.background_review.extra_tools`. Adding `hermes_atlas_evolution_lessons` lets the review record what it learned as a lesson proposal in the playbook, next to its usual skill and memory writes.
 
 ```yaml
 # config.yaml of the profile
 auxiliary:
   background_review:
     extra_tools:
-      - hermes_evolution_lessons
+      - hermes_atlas_evolution_lessons
 ```
 
 - This is operator configuration in Hermes. The plugin never sets it.

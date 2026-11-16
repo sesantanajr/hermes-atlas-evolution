@@ -2,7 +2,7 @@ import json
 import sqlite3
 import unittest
 
-from hermes_evolution.learning import action_cooldowns, initialize, record_feedback, record_outcome, retrospective, review
+from hermes_atlas_evolution.learning import action_cooldowns, initialize, record_feedback, record_outcome, retrospective, review
 
 
 DAY = 86_400
@@ -61,7 +61,7 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(len(review(self.conn, metrics={}, findings=findings, now=NOW + 2 * DAY)["alerts"]), 1)
 
     def test_diagnosis_without_a_proposed_action_is_not_a_notice(self):
-        from hermes_evolution.reasoning import diagnose
+        from hermes_atlas_evolution.reasoning import diagnose
 
         host = {"memory": {"total_bytes": 100, "available_bytes": 48, "page_cache_bytes": 32},
                 "pressure": {"memory": {"some": {"avg60": 0.0}}}}

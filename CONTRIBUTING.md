@@ -29,14 +29,14 @@ With a Hermes Agent 0.23.1 installation, also run the admission checks:
 
 ```sh
 hermes plugins validate .
-hermes plugins doctor --ci hermes-evolution   # with the plugin installed in a test profile
+hermes plugins doctor --ci hermes-atlas-evolution   # with the plugin installed in a test profile
 ```
 
 To try a command, point the standalone runner at a throwaway profile directory. Do not test against a profile you use.
 
 ```sh
 mkdir /tmp/evolution-test
-python -m hermes_evolution --home /tmp/evolution-test --hermes-version 0.23.1 report
+python -m hermes_atlas_evolution --home /tmp/evolution-test --hermes-version 0.23.1 report
 ```
 
 ## Code style
@@ -53,7 +53,7 @@ python -m hermes_evolution --home /tmp/evolution-test --hermes-version 0.23.1 re
 
 Everything a person or the agent reads exists in English and Brazilian Portuguese, and the catalog must stay complete.
 
-- A new sentence in a diagnostic, plan, recommendation, Kanban card, agent tool reply, error message or command help needs its pair in `hermes_evolution/catalog.py`: an exact `(English, Portuguese)` entry in `PAIRS`, or a pattern in `PATTERNS` when it carries values. `tests/test_i18n.py` extracts the diagnostic sentences, the command help, the Kanban card texts and the plans from the code and fails when one lacks its pair. For any other new text, add the pair and a test that the output comes out translated.
+- A new sentence in a diagnostic, plan, recommendation, Kanban card, agent tool reply, error message or command help needs its pair in `hermes_atlas_evolution/catalog.py`: an exact `(English, Portuguese)` entry in `PAIRS`, or a pattern in `PATTERNS` when it carries values. `tests/test_i18n.py` extracts the diagnostic sentences, the command help, the Kanban card texts and the plans from the code and fails when one lacks its pair. For any other new text, add the pair and a test that the output comes out translated.
 - A new lesson template in `lessons.TEMPLATES`, a digest label in `report._TEXT` and a reflector instruction in `reflector.INSTRUCTIONS` are written in both languages next to each other.
 - Codes, field names, identifiers and numbers are never translated.
 - Write Portuguese as spoken in Brazil, with the same meaning as the English, not a word-for-word copy.
@@ -73,7 +73,7 @@ Every change must keep these. A pull request that breaks one will not be merged.
 
 ## Documentation rule
 
-Every command, option, setting key, hook name and number in the documentation must exist in the code. Check commands with `python -m hermes_evolution --home /tmp/x --hermes-version 0.23.1 <command> --help`, and state plainly what has not been verified. Do not add benchmarks, user counts or results that were not measured.
+Every command, option, setting key, hook name and number in the documentation must exist in the code. Check commands with `python -m hermes_atlas_evolution --home /tmp/x --hermes-version 0.23.1 <command> --help`, and state plainly what has not been verified. Do not add benchmarks, user counts or results that were not measured.
 
 Hermes scans every file of a plugin before it installs or updates it, and a critical finding blocks both, with no override. Do not quote prompt-injection phrases verbatim in the documentation or the skill; describe what a filter refuses instead. Before a release, `hermes plugins validate .` must report the security scan as passed.
 

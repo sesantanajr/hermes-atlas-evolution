@@ -78,7 +78,7 @@ With `--notify-only`, `ops tick` prints nothing when nothing is new. Otherwise i
 To run without enabling the plugin, or when the installation uses `plugins.isolation: host` (where Hermes skips plugin CLI commands), run from the extracted project root:
 
 ```sh
-python -m hermes_evolution --home /path/to/profile --hermes-version 0.23.1 \
+python -m hermes_atlas_evolution --home /path/to/profile --hermes-version 0.23.1 \
   ops inspect --upstream-tag v0.23.1
 ```
 
@@ -121,7 +121,7 @@ The provider, the model and the prices above are placeholders.
 
 `ops plan` returns a read-only plan with a suggested budget: search queries, page extracts and parallel lanes for research, parallel lanes and review passes for delegation, and comparable samples for operations. Research plans include source discovery, evidence verification and a record of uncertainties. Delegation plans point to `delegate_task` for answers the current agent must wait for and to Kanban for work that must survive restarts (`--durable`).
 
-Turn on `agent_tools` in the Hermes plugin settings, or set `"agent_advice": true` in `<HERMES_HOME>/evolution/settings.json`, and reload the plugin to expose `hermes_evolution_plan` and `hermes_evolution_lessons` to the profile. Include `hermes-evolution` when the profile uses an explicit list of toolsets. The plan tool returns only the plan.
+Turn on `agent_tools` in the Hermes plugin settings, or set `"agent_advice": true` in `<HERMES_HOME>/evolution/settings.json`, and reload the plugin to expose `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` to the profile. Include `hermes-atlas-evolution` when the profile uses an explicit list of toolsets. The plan tool returns only the plan.
 
 Reading shared Kanban boards requires `"inspect_shared_kanban": true`. Creating a card requires your own handoff authorization, independently of that key. The example assigns verifications to the profile `reviewer` on the existing board `ops`.
 
@@ -140,7 +140,7 @@ hermes evolution ops schedule-spec --every-minutes 5 --upstream-tag v0.23.1
 
 `handoff` creates a blocked card meant for verification through the native Kanban, with an idempotency key per profile, board, assignee, kind, subject and UTC day. The operator releases the card after reviewing its scope. The subject is an identifier of up to 80 characters. The command does nothing inside a Kanban worker or a delegated task, and needs `hermes` on the `PATH`.
 
-`schedule-spec` delivers the script and the native Cron arguments to schedule `ops tick --notify-only` in `no_agent` mode as the job `hermes-evolution-watchdog`, with local output and without opening a model session. The interval is 5 to 1,440 minutes. Nothing is written. Review the script and apply the recipe in the chosen profile. The tick uses that profile's Linux policy. Use the five-minute interval in `apply` mode, so that trials are verified and closed.
+`schedule-spec` delivers the script and the native Cron arguments to schedule `ops tick --notify-only` in `no_agent` mode as the job `hermes-atlas-evolution-watchdog`, with local output and without opening a model session. The interval is 5 to 1,440 minutes. Nothing is written. Review the script and apply the recipe in the chosen profile. The tick uses that profile's Linux policy. Use the five-minute interval in `apply` mode, so that trials are verified and closed.
 
 ## Linux remediation
 
@@ -218,7 +218,7 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 
 ## Removing the plugin
 
-Run `hermes evolution ops rollback` before disabling the plugin with `hermes plugins disable hermes-evolution`, then reload the profile's gateway. The plugin is installed per profile, so repeat this in each profile that has it (`hermes -p <profile> ...`).
+Run `hermes evolution ops rollback` before disabling the plugin with `hermes plugins disable hermes-atlas-evolution`, then reload the profile's gateway. The plugin is installed per profile, so repeat this in each profile that has it (`hermes -p <profile> ...`).
 
 ## References
 

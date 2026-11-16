@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from hermes_evolution.workloads import inspect_workloads
+from hermes_atlas_evolution.workloads import inspect_workloads
 
 
 _NOW = 1_800_000_000
@@ -102,12 +102,12 @@ class WorkloadsTest(unittest.TestCase):
 
     def test_cron_json_and_record_limits_report_incomplete_coverage(self):
         path = self._write_cron({"jobs": [{"enabled": True}, {"enabled": True}]})
-        with patch("hermes_evolution.workloads._JOB_LIMIT", 1):
+        with patch("hermes_atlas_evolution.workloads._JOB_LIMIT", 1):
             result = self._inspect()["cron"]
         self.assertEqual(result["status"], "partial")
         self.assertTrue(result["row_limit_reached"])
         self.assertEqual(result["counts"]["jobs"], 1)
-        with patch("hermes_evolution.workloads._CRON_BYTES", 5):
+        with patch("hermes_atlas_evolution.workloads._CRON_BYTES", 5):
             self.assertEqual(self._inspect()["cron"]["status"], "file_limit")
         path.write_text("not JSON", encoding="utf-8")
         self.assertEqual(self._inspect()["cron"]["status"], "invalid_format")

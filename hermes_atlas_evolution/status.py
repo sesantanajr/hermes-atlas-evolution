@@ -20,7 +20,7 @@ from urllib.parse import quote
 from .experience import experience, utc_day
 
 REPOSITORY = "sesantanajr/hermes-atlas-evolution"
-PLUGIN_DIR = "hermes-evolution"
+PLUGIN_DIR = "hermes-atlas-evolution"
 
 
 def plugin_version() -> str:
@@ -108,8 +108,45 @@ def _sessions(home: Path, *, since: float) -> int | None:
         return None
 
 
+LEGACY_DIRS = ("hermes-evolution",)   # the plugin id used up to 0.5.0
+
+
+def _command(name: str, rest: str) -> str:
+    return f"hermes {'' if name == 'default' else f'-p {name} '}{rest}"
+
+
+def _profile_state(folder: Path) -> tuple[str, str | None, int, int]:
+    """(plugin state, last pass, active lessons, lessons waiting) of a profile, read-only from its own database."""
+    if (folder / "plugins" / PLUGIN_DIR).is_dir():
+        state = "installed"
+    elif any((folder / "plugins" / legacy / "plugin.yaml").is_file() for legacy in LEGACY_DIRS):
+        state = "legacy"
+    else:
+        return "missing", None, 0, 0
+    path = folder / "evolution" / "evolution.sqlite3"
+    if not path.is_file():
+        return state, None, 0, 0
+    try:
+        source = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=1)
+        try:
+            row = source.execute("SELECT value FROM cursor WHERE key='loop_status'").fetchone()
+            counts = dict(source.execute("SELECT status, COUNT(*) FROM lesson GROUP BY status").fetchall())
+        finally:
+            source.close()
+    except sqlite3.Error:
+        return state, None, 0, 0
+    try:
+        last = _iso(json.loads(row[0]).get("at")) if row else None
+    except (ValueError, AttributeError):
+        last = None
+    return state, last, counts.get("active", 0), counts.get("candidate", 0) + counts.get("quarantined", 0)
+
+
 def _profiles(home: Path, *, now: float) -> list[dict]:
-    """Every other profile of the same Hermes root that had sessions in 7 days and lacks the plugin."""
+    """Every profile of the same Hermes root: sessions in 7 days and the plugin's state there.
+
+    One gateway serves many profiles, but each profile loads its own plugins, so the profile you happen to be
+    in may not be the one doing the work."""
     home = Path(home).resolve()
     root = home.parent.parent if home.parent.name == "profiles" else home
     candidates = [("default", root)]
@@ -117,15 +154,32 @@ def _profiles(home: Path, *, now: float) -> list[dict]:
         candidates += [(entry.name, entry) for entry in sorted((root / "profiles").iterdir()) if entry.is_dir()][:200]
     except OSError:
         pass
-    found = []
+    rows = []
     for name, folder in candidates:
-        if folder.resolve() == home or (folder / "plugins" / PLUGIN_DIR).is_dir():
-            continue
-        count = _sessions(folder, since=now - 7 * 86_400)
-        if count:
-            found.append({"profile": name, "sessions_7d": count,
-                          "install": f"hermes {'' if name == 'default' else f'-p {name} '}plugins install {REPOSITORY} --enable"})
-    return sorted(found, key=lambda item: -item["sessions_7d"])
+        state, last, active, waiting = _profile_state(folder)
+        rows.append({"profile": name, "current": folder.resolve() == home,
+                     "sessions_7d": _sessions(folder, since=now - 7 * 86_400) or 0, "plugin": state,
+                     "last_pass": last, "lessons_active": active, "lessons_waiting": waiting,
+                     "install": _command(name, f"plugins install {REPOSITORY} --enable"),
+                     "migrate": f"{_command(name, 'plugins remove ' + LEGACY_DIRS[0])} && "
+                                f"{_command(name, f'plugins install {REPOSITORY} --enable')}",
+                     "status": _command(name, "evolution status")})
+    return rows
+
+
+def never_ran(home: Path) -> bool:
+    """True when no pass ever finished in this profile (the autopilot has not had its first turn or tick)."""
+    path = Path(home) / "evolution" / "evolution.sqlite3"
+    if not path.is_file():
+        return True
+    try:
+        source = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=1)
+        try:
+            return source.execute("SELECT 1 FROM cursor WHERE key='loop_status'").fetchone() is None
+        finally:
+            source.close()
+    except sqlite3.Error:
+        return False
 
 
 def build(home: Path, *, now: float | None = None, config=None, runtime_config=None) -> dict:
@@ -173,9 +227,18 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
                     "retired": lessons.get("retired", 0)},
         "proposals_open": proposals,
         "runtime_guard": {"enabled": opts["runtime_guard"], "vetoed_7d": sum(vetoed.values())},
-        "profiles_without_plugin": _profiles(Path(home), now=now),
+        "profiles": _profiles(Path(home), now=now),
         "stale_runtimes": stale,
     }
+    report["profiles_without_plugin"] = sorted(
+        (row for row in report["profiles"] if row["plugin"] == "missing" and row["sessions_7d"] and not row["current"]),
+        key=lambda row: -row["sessions_7d"])
+    report["legacy_installs"] = [row for row in report["profiles"] if row["plugin"] == "legacy"]
+    mine = next((row for row in report["profiles"] if row["current"]), None)
+    busiest = max((row for row in report["profiles"] if row["plugin"] == "installed" and not row["current"]),
+                  key=lambda row: row["sessions_7d"], default=None)
+    report["busier_profile"] = (busiest if busiest and mine and busiest["sessions_7d"] >= 10
+                                and busiest["sessions_7d"] > 4 * mine["sessions_7d"] else None)
     attention = []
     if stale:
         attention.append("stale_runtime")
@@ -189,6 +252,10 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         attention.append("autopilot_failing")
     if report["lessons"]["awaiting_approval"]:
         attention.append("lessons_waiting")
+    if report["legacy_installs"]:
+        attention.append("legacy_install")
+    if report["busier_profile"]:
+        attention.append("busier_profile")
     if report["profiles_without_plugin"]:
         attention.append("profiles_without_plugin")
     report["attention"] = attention
@@ -213,6 +280,12 @@ _TEXT = {
            "sessions": "sessions", "none": "Nothing needs attention.",
            "stale_runtime": "A running Hermes process still runs an older copy of the plugin than the one on disk (`hermes plugins update` does not reload a running gateway). Run `hermes gateway restart`; it waits for the running turns.",
            "stale_item": "pid {pid} ({kind}) loaded {version}",
+           "legacy_install": "These profiles still have the plugin under its old id hermes-evolution (up to 0.5.0). Remove it and install the new one; the data it learned stays:",
+           "busier_profile": "This profile is barely used. `{profile}` had {sessions} sessions in 7 days; see it with `{status}`.",
+           "profiles": "Profiles of this Hermes", "col_profile": "profile", "col_sessions": "sessions (7 d)",
+           "col_plugin": "plugin", "col_last": "last pass", "col_lessons": "lessons active / waiting",
+           "states": {"installed": "installed", "legacy": "old id (0.5.0)", "missing": "not installed"},
+           "first_pass": "First pass done now: {sessions} sessions, {tool_calls} tool calls of history read.",
            "statuses": {"done": "read", "running": "being read", "waiting": "waiting for the first pass",
                         "no_history": "no history", "unreadable": "unreadable", "unsupported_history": "unsupported format"}},
     "pt": {"title": "Atlas Evolution {version} · perfil `{profile}`", "since": "Observando desde",
@@ -232,6 +305,12 @@ _TEXT = {
            "sessions": "sessões", "none": "Nada precisa de atenção.",
            "stale_runtime": "Um processo do Hermes em execução ainda roda uma cópia do plugin mais antiga que a do disco (o `hermes plugins update` não recarrega um gateway em execução). Rode `hermes gateway restart`; ele espera os turnos em andamento.",
            "stale_item": "pid {pid} ({kind}) carregou a {version}",
+           "legacy_install": "Estes perfis ainda têm o plugin com o nome antigo hermes-evolution (até a 0.5.0). Remova-o e instale o novo; os dados aprendidos ficam:",
+           "busier_profile": "Este perfil quase não é usado. O `{profile}` teve {sessions} sessões em 7 dias; veja com `{status}`.",
+           "profiles": "Perfis deste Hermes", "col_profile": "perfil", "col_sessions": "sessões (7 d)",
+           "col_plugin": "plugin", "col_last": "última passada", "col_lessons": "lições ativas / aguardando",
+           "states": {"installed": "instalado", "legacy": "nome antigo (0.5.0)", "missing": "não instalado"},
+           "first_pass": "Primeira passada feita agora: {sessions} sessões e {tool_calls} chamadas de ferramentas do histórico lidas.",
            "statuses": {"done": "lido", "running": "em leitura", "waiting": "aguardando a primeira passada",
                         "no_history": "sem histórico", "unreadable": "ilegível", "unsupported_history": "formato não suportado"}},
 }
@@ -264,9 +343,18 @@ def markdown(report: dict, lang: str = "en") -> str:
     guard = report["runtime_guard"]
     lines.append(f"- **{t['guard']}:** " + (f"{t['on']} · {guard['vetoed_7d']} {t['vetoed']}" if guard["enabled"]
                                              else t["off"].split(" (")[0]))
+    if report.get("first_pass"):
+        lines += ["", "> " + t["first_pass"].format(**report["first_pass"])]
     lines += ["", f"## {t['attention']}", ""]
     for code in report["attention"]:
+        if code == "busier_profile":
+            lines.append("- " + t[code].format(**{**report["busier_profile"], "profile": report["busier_profile"]["profile"],
+                                                 "sessions": report["busier_profile"]["sessions_7d"]}))
+            continue
         lines.append(f"- {t[code]}")
+        if code == "legacy_install":
+            for item in report["legacy_installs"]:
+                lines.append(f"  - `{item['profile']}`: `{item['migrate']}`")
         if code == "stale_runtime":
             for item in report["stale_runtimes"]:
                 lines.append("  - " + t["stale_item"].format(**item))
@@ -275,6 +363,15 @@ def markdown(report: dict, lang: str = "en") -> str:
                 lines.append(f"  - `{item['profile']}` ({item['sessions_7d']} {t['sessions']}): `{item['install']}`")
     if not report["attention"]:
         lines.append(t["none"])
+    shown = [row for row in report.get("profiles", []) if row["sessions_7d"] or row["plugin"] != "missing" or row["current"]]
+    if shown:
+        lines += ["", f"## {t['profiles']}", "",
+                  f"| {t['col_profile']} | {t['col_sessions']} | {t['col_plugin']} | {t['col_last']} | {t['col_lessons']} |",
+                  "|---|---:|---|---|---:|"]
+        for row in sorted(shown, key=lambda item: (-item["sessions_7d"], item["profile"])):
+            name = f"**{row['profile']}**" if row["current"] else row["profile"]
+            lessons = f"{row['lessons_active']} / {row['lessons_waiting']}" if row["plugin"] != "missing" else "—"
+            lines.append(f"| {name} | {row['sessions_7d']} | {t['states'][row['plugin']]} | {row['last_pass'] or '—'} | {lessons} |")
     return "\n".join(lines) + "\n"
 
 

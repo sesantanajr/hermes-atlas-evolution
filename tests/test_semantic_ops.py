@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from hermes_evolution.semantic_ops import match_incidents
+from hermes_atlas_evolution.semantic_ops import match_incidents
 
 
 def incident(code, text, recent=1, **extra):

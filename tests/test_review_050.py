@@ -10,10 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_evolution import radar, report
-from hermes_evolution.cli import safe_settings
-from hermes_evolution.experience import day_offset, experience, prune
-from hermes_evolution.operations import close_observers
+from hermes_atlas_evolution import radar, report
+from hermes_atlas_evolution.cli import safe_settings
+from hermes_atlas_evolution.experience import day_offset, experience, prune
+from hermes_atlas_evolution.operations import close_observers
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 
@@ -39,7 +39,7 @@ class SettingsFallbackTest(Base):
     def test_an_unreadable_settings_file_keeps_the_form_values_and_turns_lessons_off(self):
         (self.home / "evolution").mkdir()
         (self.home / "evolution" / "settings.json").write_text("{not json")
-        runtime = {"plugins": {"entries": {"hermes-evolution": {"settings": {
+        runtime = {"plugins": {"entries": {"hermes-atlas-evolution": {"settings": {
             "autopilot_minutes": 0, "runtime_guard": True, "lessons": "auto"}}}}}
         config, problems = safe_settings(self.home, runtime)
         self.assertEqual(problems, ["settings.json"])

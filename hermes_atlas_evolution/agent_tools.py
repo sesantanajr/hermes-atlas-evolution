@@ -13,7 +13,7 @@ from .experience import experience
 
 PROPOSALS_PER_HOUR = 5
 LESSONS_TOOL = {
-    "name": "hermes_evolution_lessons",
+    "name": "hermes_atlas_evolution_lessons",
     "description": ("Look up lessons this profile learned from repeated tool failures, propose a new lesson for "
                     "operator review, or see the state of the improvement queue."),
     "parameters": {

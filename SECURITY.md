@@ -38,7 +38,7 @@ Reports of these kinds are especially welcome:
 | The plugin | a pass, from a recurring failure, live or replayed from Hermes' history, using a fixed template | `candidate`, or `active` in `auto` mode | after approval, or at once in `auto` |
 | The operator | `hermes evolution lessons add` in their own terminal | `quarantined`, or `active` with `--activate` after a confirmation | after approval |
 | The reflector (a model) | a pass with `reflector` on, the default | `quarantined`, in every mode | after approval |
-| The agent | `hermes_evolution_lessons` with `agent_tools` on, at most 5 per hour, also through the background review if you allow it | `quarantined`, high-risk proposal | after approval |
+| The agent | `hermes_atlas_evolution_lessons` with `agent_tools` on, at most 5 per hour, also through the background review if you allow it | `quarantined`, high-risk proposal | after approval |
 
 Error messages and command output are untrusted, whether they arrive through a hook or are replayed from Hermes' history. They never become lesson text: only a class and a short detail filtered as a name reach a template, and a detail read from command output must look like a lower-case command or module name. Lesson text from any writer is NFKC-normalized, and control, bidirectional, zero-width and private-use characters and secret-shaped values are refused, so the text the operator approves is the text the agent gets.
 
@@ -66,7 +66,7 @@ Everything is local, under `<HERMES_HOME>/evolution/`. On POSIX systems the fold
 
 Text that is stored as written, because someone wrote it on purpose:
 
-- **Lessons.** A sentence of 12 to 240 characters from `hermes evolution lessons add`, the agent's `hermes_evolution_lessons` or the reflector, checked as described above.
+- **Lessons.** A sentence of 12 to 240 characters from `hermes evolution lessons add`, the agent's `hermes_atlas_evolution_lessons` or the reflector, checked as described above.
 - **Proposal notes.** The optional `--note` of a decision, up to 200 characters.
 - **Legacy notes.** Only when `legacy_memory_commands` is enabled: notes saved with the 0.1 commands.
 

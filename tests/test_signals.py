@@ -4,9 +4,9 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hermes_evolution.experience import experience, label, prune
-from hermes_evolution.operations import close_observers
-from hermes_evolution.signals import (FeedbackSensor, TurnTracker, classify, effective_tool, failure_summary,
+from hermes_atlas_evolution.experience import experience, label, prune
+from hermes_atlas_evolution.operations import close_observers
+from hermes_atlas_evolution.signals import (FeedbackSensor, TurnTracker, classify, effective_tool, failure_summary,
                                       feedback_summary, record_skill_event, record_tool, skill_event_summary,
                                       surface_of, tool_summary, turn_summary)
 

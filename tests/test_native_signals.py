@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hermes_evolution.native_signals import native_findings, native_summary, observe_native
-from hermes_evolution.operations import close_observers, database
+from hermes_atlas_evolution.native_signals import native_findings, native_summary, observe_native
+from hermes_atlas_evolution.operations import close_observers, database
 
 
 class NativeSignalTests(unittest.TestCase):

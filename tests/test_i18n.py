@@ -10,13 +10,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hermes_evolution import i18n
-from hermes_evolution.advisory import EFFORTS, KINDS, plan
-from hermes_evolution.catalog import PAIRS, PATTERNS
-from hermes_evolution.native_actions import HANDOFF_RULES, PLAYBOOKS
-from hermes_evolution.operations import close_observers
+from hermes_atlas_evolution import i18n
+from hermes_atlas_evolution.advisory import EFFORTS, KINDS, plan
+from hermes_atlas_evolution.catalog import PAIRS, PATTERNS
+from hermes_atlas_evolution.native_actions import HANDOFF_RULES, PLAYBOOKS
+from hermes_atlas_evolution.operations import close_observers
 
-PACKAGE = Path(__file__).resolve().parent.parent / "hermes_evolution"
+PACKAGE = Path(__file__).resolve().parent.parent / "hermes_atlas_evolution"
 PORTUGUESE = re.compile(r"[ãõçáéíóúâêôàÁÉÍÓÚ]|\b(?:não|são|para|com|uma|pelo|pela|está|foram|antes|depois|rotina|falha|"
                         r"memória|os|as|de|do|da|em|que)\b", re.I)
 DIAGNOSTIC_MODULES = ("reasoning", "diagnostics", "workloads", "native_signals", "linux_host", "inventory", "ops_metrics")
@@ -113,7 +113,7 @@ class CommandLineLanguageTest(unittest.TestCase):
         self.home = Path(folder.name)
 
     def run_cli(self, **arguments):
-        from hermes_evolution.cli import execute
+        from hermes_atlas_evolution.cli import execute
 
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
@@ -138,11 +138,11 @@ class CommandLineLanguageTest(unittest.TestCase):
     def test_help_is_built_in_the_profile_language(self):
         import argparse
 
-        from hermes_evolution.cli import setup
+        from hermes_atlas_evolution.cli import setup
 
         for language, expected in (("pt", "Imprime o resumo da evolução"), ("en", "Print the evolution digest")):
             parser = argparse.ArgumentParser(prog="hermes evolution")
-            with patch("hermes_evolution.i18n.resolve", return_value=language):
+            with patch("hermes_atlas_evolution.i18n.resolve", return_value=language):
                 setup(parser)
             self.assertIn(expected, parser.format_help())
         for argv in (["--lang", "pt", "ops", "inspect"], ["ops", "inspect", "--lang", "pt"], ["report", "--lang", "pt"],

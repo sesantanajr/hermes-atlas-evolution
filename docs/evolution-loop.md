@@ -214,7 +214,7 @@ Signals and measurement continue in every mode. In every mode, lessons written b
 | `derived` | a pass, from a failure signature | yes | low |
 | `operator` | `hermes evolution lessons add` | no | low |
 | `reflector` | a pass with the reflector on | yes | medium |
-| `agent` | the `hermes_evolution_lessons` tool, action `propose` | no | high |
+| `agent` | the `hermes_atlas_evolution_lessons` tool, action `propose` | no | high |
 
 ### Text rules
 
@@ -229,8 +229,8 @@ A lesson names the tool it applies to, or `general`. The playbook holds at most 
 
 ### Delivery
 
-- **Prompt section** (`hermes-evolution.playbook`). Hermes renders it at the start of each session and freezes it into that session's system prompt. It lists active lessons of any origin, those measured as effective first and then those with the most evidence, up to 8 lessons and 1,200 characters, under a one-line header. The section is registered with a limit of 1,400 characters. It only reads the database and counts each display (`shown`) through the hook write queue, so a pass running in another process does not leave a new session without its lessons.
-- **Hint on the failing result** (`transform_tool_result`, when `tool_hints` is on). When a call with status `error` or `blocked` fails with a signature that has an active lesson, the sentence is added to that result. A JSON object gains the key `hermes_evolution_lesson`; any other text gains a final line that starts with `[Atlas Evolution lesson]` (`[Lição do Atlas Evolution]` in Portuguese). Each signature is hinted once per session, with at most 6 hints per session (`hints.MAX_HINTS_PER_SESSION`), and only when the call has a session ID. Results over 262,144 characters and successful calls are left untouched, and so is a JSON result that already has a non-empty `hint` field, such as the hints Hermes' terminal and file tools write: Hermes already advised. Only lessons bound to a failure (derived lessons and reflector drafts) can be hinted. The index of active lessons is reloaded at most once a minute, so a lesson approved during a session can be hinted in that session.
+- **Prompt section** (`hermes-atlas-evolution.playbook`). Hermes renders it at the start of each session and freezes it into that session's system prompt. It lists active lessons of any origin, those measured as effective first and then those with the most evidence, up to 8 lessons and 1,200 characters, under a one-line header. The section is registered with a limit of 1,400 characters. It only reads the database and counts each display (`shown`) through the hook write queue, so a pass running in another process does not leave a new session without its lessons.
+- **Hint on the failing result** (`transform_tool_result`, when `tool_hints` is on). When a call with status `error` or `blocked` fails with a signature that has an active lesson, the sentence is added to that result. A JSON object gains the key `hermes_atlas_evolution_lesson`; any other text gains a final line that starts with `[Atlas Evolution lesson]` (`[Lição do Atlas Evolution]` in Portuguese). Each signature is hinted once per session, with at most 6 hints per session (`hints.MAX_HINTS_PER_SESSION`), and only when the call has a session ID. Results over 262,144 characters and successful calls are left untouched, and so is a JSON result that already has a non-empty `hint` field, such as the hints Hermes' terminal and file tools write: Hermes already advised. Only lessons bound to a failure (derived lessons and reflector drafts) can be hinted. The index of active lessons is reloaded at most once a minute, so a lesson approved during a session can be hinted in that session.
 
 Because the section is fixed for the whole session and the hint is appended to a new tool result, neither path changes a prefix the provider has already cached.
 
@@ -255,7 +255,7 @@ The reflector (`reflector`) drafts lessons for recurring failures that have no t
 
 **When the excerpt is deleted.** As soon as the failure has a lesson, when the model declines or the draft is discarded, 14 days after its last update (`SAMPLE_DAYS`), and at every pass that runs with the reflector off. A provider error, or a pass without Hermes' model access, leaves the excerpt for a later pass.
 
-**Where it runs.** Only in a pass run inside Hermes, because the model access comes from Hermes: the autopilot of a Hermes process, `hermes evolution learn`, `ops tick` or the weekly recipe. The model access is registered when the plugin loads, so turning the reflector on takes effect in Hermes processes started after the change. It runs only while `lessons` is not `off` (otherwise the block reports `lessons_off`, since an approved draft would never be shown). The standalone runner (`python -m hermes_evolution`) drafts nothing; its `learn` reports `unavailable_without_hermes_llm` and keeps the waiting excerpts for the next pass run by Hermes.
+**Where it runs.** Only in a pass run inside Hermes, because the model access comes from Hermes: the autopilot of a Hermes process, `hermes evolution learn`, `ops tick` or the weekly recipe. The model access is registered when the plugin loads, so turning the reflector on takes effect in Hermes processes started after the change. It runs only while `lessons` is not `off` (otherwise the block reports `lessons_off`, since an approved draft would never be shown). The standalone runner (`python -m hermes_atlas_evolution`) drafts nothing; its `learn` reports `unavailable_without_hermes_llm` and keeps the waiting excerpts for the next pass run by Hermes.
 
 The `learn` output has a `reflector` block with the drafts, the number declined and failed, the calls made today and the daily limit.
 
@@ -481,7 +481,7 @@ A final list says what needs attention: no events today, the autopilot off, no p
 
 The options of the loop can be set in two places (`cli.effective_settings`):
 
-1. the Hermes settings form, declared by `config_schema` in `plugin.yaml` and stored by Hermes under `plugins.entries.hermes-evolution.settings`;
+1. the Hermes settings form, declared by `config_schema` in `plugin.yaml` and stored by Hermes under `plugins.entries.hermes-atlas-evolution.settings`;
 2. the `evolution` block of `<HERMES_HOME>/evolution/settings.json` (`agent_tools` corresponds to the top-level key `agent_advice` there).
 
 Hermes wins key by key. The plugin reads the settings when it loads, which sets the hooks, the prompt section, the runtime guard, the autopilot interval and the reflector's model access. Each autopilot pass and each command read the settings again.
@@ -492,14 +492,14 @@ Validation differs by caller (`evolve.options`). The commands reject an invalid 
 
 ## Agent tools and the bundled skill
 
-Both tools belong to the toolset `hermes-evolution` and are available only when `agent_tools` (`agent_advice` in `settings.json`) is on.
+Both tools belong to the toolset `hermes-atlas-evolution` and are available only when `agent_tools` (`agent_advice` in `settings.json`) is on.
 
 | Tool | Actions |
 |---|---|
-| `hermes_evolution_lessons` | `search`: up to 5 active lessons for a tool, `general` ones included. `propose`: stores a quarantined lesson for operator review, at most 5 per hour. `status`: lesson counts by status and up to 20 open proposals. |
-| `hermes_evolution_plan` | returns a bounded plan for research, delegation or operational diagnosis. It is described in [Operations](operations.md). |
+| `hermes_atlas_evolution_lessons` | `search`: up to 5 active lessons for a tool, `general` ones included. `propose`: stores a quarantined lesson for operator review, at most 5 per hour. `status`: lesson counts by status and up to 20 open proposals. |
+| `hermes_atlas_evolution_plan` | returns a bounded plan for research, delegation or operational diagnosis. It is described in [Operations](operations.md). |
 
-The skill `hermes-evolution:evolution-review` is registered with the plugin. It tells the agent how to run the review with the owner: read the digest, explain failures, skills by outcome and lessons, walk through the open proposals from the highest risk down with the exact lesson text, and hand the decisions to the owner as commands to run in their own terminal. The agent informs and recommends; the commands it runs cannot approve, reject or activate anything.
+The skill `hermes-atlas-evolution:evolution-review` is registered with the plugin. It tells the agent how to run the review with the owner: read the digest, explain failures, skills by outcome and lessons, walk through the open proposals from the highest risk down with the exact lesson text, and hand the decisions to the owner as commands to run in their own terminal. The agent informs and recommends; the commands it runs cannot approve, reject or activate anything.
 
 ## Storage
 

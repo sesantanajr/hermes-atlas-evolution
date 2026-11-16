@@ -9,9 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_evolution import proposals, radar
-from hermes_evolution.experience import experience, utc_day
-from hermes_evolution.operations import close_observers, database
+from hermes_atlas_evolution import proposals, radar
+from hermes_atlas_evolution.experience import experience, utc_day
+from hermes_atlas_evolution.operations import close_observers, database
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400

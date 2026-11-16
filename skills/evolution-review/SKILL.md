@@ -41,5 +41,5 @@ You inform and recommend; the owner runs the decisions in their own terminal.
 - A verdict compares the week before with the week after a change. It is a correlation: mention the
   number of concurrent changes when it is not zero.
 - Never present a lesson without its exact text, and never call a high-risk proposal routine.
-- To suggest a new lesson, use the `hermes_evolution_lessons` tool with `action: propose`. It is stored in
+- To suggest a new lesson, use the `hermes_atlas_evolution_lessons` tool with `action: propose`. It is stored in
   quarantine and appears in the queue for the owner.

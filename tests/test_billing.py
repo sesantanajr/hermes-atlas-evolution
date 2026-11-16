@@ -6,8 +6,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from hermes_evolution import billing
-from hermes_evolution.billing import native_billing
+from hermes_atlas_evolution import billing
+from hermes_atlas_evolution.billing import native_billing
 
 
 _NOW = 200_000
@@ -100,7 +100,7 @@ class NativeBillingTests(unittest.TestCase):
     def test_empty_db_and_row_limit_do_not_produce_partial_totals(self):
         self.assertEqual(self._report()["status"], "empty")
         self._insert(("s", "", "openai", "gpt-5", "", 1, 2, 3, 0, 0, 0, 1, 0, "estimated", _NOW, _NOW))
-        with patch("hermes_evolution.billing._ROW_LIMIT", 0):
+        with patch("hermes_atlas_evolution.billing._ROW_LIMIT", 0):
             limited = self._report()
         self.assertEqual(limited["status"], "row_limit")
         self.assertNotIn("totals", limited)

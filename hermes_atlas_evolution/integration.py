@@ -121,7 +121,7 @@ def autopilot_pass(home: Path, reflect) -> dict:
 
 
 def _register_skills(ctx) -> None:
-    """Expose the bundled skills as `hermes-evolution:<name>`. Optional: an older or stricter host skips them."""
+    """Expose the bundled skills as `hermes-atlas-evolution:<name>`. Optional: an older or stricter host skips them."""
     folder = Path(__file__).resolve().parent.parent / "skills"
     register_skill = getattr(ctx, "register_skill", None)
     if not callable(register_skill) or not folder.is_dir():
@@ -159,6 +159,15 @@ def register(ctx):
     except Exception:   # the plugin still loads with its own settings file
         runtime_config = {}
     from logging import getLogger
+
+    from .cli import legacy_install
+
+    old = legacy_install(home, runtime_config)
+    if old:   # the copy installed under the old id is still enabled: register nothing, never count twice
+        getLogger(__name__).warning(
+            "Atlas Evolution is installed twice in this profile, under %s (up to 0.5.0) and hermes-atlas-evolution. "
+            "The new copy stays inactive until the old one is removed: hermes plugins remove %s", old, old)
+        return
 
     # Unreadable settings.json: keep measuring with the values from Hermes' form, but show nothing to the
     # agent until the file is fixed.
@@ -388,7 +397,7 @@ def register(ctx):
     if lessons_on and evolution["tool_hints"]:
         ctx.register_hook("transform_tool_result", with_lesson)
     if lessons_on:
-        ctx.register_system_prompt_section("hermes-evolution.playbook", playbook_section, max_chars=1400)
+        ctx.register_system_prompt_section("hermes-atlas-evolution.playbook", playbook_section, max_chars=1400)
     if legacy_enabled:
         ctx.register_command("evolution", command, description="Access legacy Evolution notes", args_hint="<command>")
     _register_skills(ctx)
@@ -428,8 +437,8 @@ def register(ctx):
             return in_language(json.dumps({"error": "Playbook access has not been enabled for this Hermes profile."}))
         return in_language(lessons_tool.handle(args, **context))
 
-    ctx.register_tool(name=TOOL["name"], toolset="hermes-evolution", schema=TOOL, handler=advisory_tool,
+    ctx.register_tool(name=TOOL["name"], toolset="hermes-atlas-evolution", schema=TOOL, handler=advisory_tool,
                       check_fn=lambda: advice_enabled)
-    ctx.register_tool(name=LESSONS_TOOL["name"], toolset="hermes-evolution", schema=LESSONS_TOOL, handler=playbook_tool,
+    ctx.register_tool(name=LESSONS_TOOL["name"], toolset="hermes-atlas-evolution", schema=LESSONS_TOOL, handler=playbook_tool,
                       check_fn=lambda: advice_enabled)
     ctx.register_cli_command("evolution", "Review Hermes health, learning and operations", setup, operator_cli)

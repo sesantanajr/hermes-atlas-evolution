@@ -1,4 +1,4 @@
-name: hermes-evolution
+name: hermes-atlas-evolution
 version: "0.5.0"
 requires_hermes: ">=0.23.1"
 description: >-
@@ -15,8 +15,8 @@ tags:
   - skills
   - operations
 provides_tools:
-  - hermes_evolution_plan
-  - hermes_evolution_lessons
+  - hermes_atlas_evolution_plan
+  - hermes_atlas_evolution_lessons
 provides_hooks:
   - pre_tool_call
   - post_api_request
@@ -39,11 +39,12 @@ config_schema:
   lessons:
     type: str
     choices: ["off", suggest, auto]
-    default: suggest
+    default: auto
     label: Lessons
     description: >-
-      off: measure only. suggest: lessons wait for your approval before the agent sees them.
-      auto: recurring failures become active lessons and ineffective ones are retired automatically.
+      auto (default): recurring failures become active lessons written from fixed templates, each one is measured
+      and the ineffective ones are retired; drafts written by a model still wait for your approval.
+      suggest: every lesson waits for your approval. off: measure only.
   language:
     type: str
     choices: [auto, en, pt]
@@ -64,7 +65,7 @@ config_schema:
     type: bool
     default: false
     label: Agent tools
-    description: Offer hermes_evolution_plan and hermes_evolution_lessons to the agent. Proposed lessons stay quarantined.
+    description: Offer hermes_atlas_evolution_plan and hermes_atlas_evolution_lessons to the agent. Proposed lessons stay quarantined.
   slow_turn_seconds:
     type: int
     default: 60

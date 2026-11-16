@@ -149,7 +149,7 @@ class Autopilot:
                 self.poke()
                 delay = period
 
-        thread = threading.Thread(target=loop, name="hermes-evolution-clock", daemon=True)
+        thread = threading.Thread(target=loop, name="hermes-atlas-evolution-clock", daemon=True)
         self._clock = thread
         try:
             thread.start()
@@ -183,7 +183,7 @@ class Autopilot:
             if moment < self._due or (self._thread is not None and self._thread.is_alive()):
                 return False
             self._due = moment + CHECK_SECONDS
-            thread = threading.Thread(target=self._work, name="hermes-evolution-autopilot", daemon=True)
+            thread = threading.Thread(target=self._work, name="hermes-atlas-evolution-autopilot", daemon=True)
             self._thread = thread
         finally:
             self._lock.release()

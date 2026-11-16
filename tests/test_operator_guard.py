@@ -10,11 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hermes_evolution import lessons, proposals
-from hermes_evolution.agent_tools import LessonsTool
-from hermes_evolution.cli import AGENT_MARKERS, execute
-from hermes_evolution.experience import experience
-from hermes_evolution.operations import close_observers
+from hermes_atlas_evolution import lessons, proposals
+from hermes_atlas_evolution.agent_tools import LessonsTool
+from hermes_atlas_evolution.cli import AGENT_MARKERS, execute
+from hermes_atlas_evolution.experience import experience
+from hermes_atlas_evolution.operations import close_observers
 
 CLEAN = {name: "" for name in AGENT_MARKERS}
 LESSON = "When a CSV import fails, check the header row before retrying."

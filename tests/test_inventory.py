@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from hermes_evolution.inventory import scan_inventory
+from hermes_atlas_evolution.inventory import scan_inventory
 
 
 NOW = 1_795_000_000
@@ -118,7 +118,7 @@ class InventoryTest(unittest.TestCase):
             symlink.symlink_to(external.parent, target_is_directory=True)
         except (NotImplementedError, OSError):
             pass
-        with patch("hermes_evolution.inventory._PLUGIN_FILES_LIMIT", 1):
+        with patch("hermes_atlas_evolution.inventory._PLUGIN_FILES_LIMIT", 1):
             result = scan_inventory(self.home)
         self.assertEqual(result["skills"]["inspected"], 0)
         self.assertFalse(result["plugins"]["entries"][0]["footprint_complete"])
@@ -141,7 +141,7 @@ class InventoryTest(unittest.TestCase):
         self.write(self.home, "plugins/bulky/plugin.yaml", "name: bulky\nkind: standalone\n")
         self.write(self.home, "plugins/bulky/aux-data", "test data to exceed reduced threshold")
         self.write(self.home, "plugins/current/plugin.yaml", "name: current\nkind: standalone\n")
-        with patch("hermes_evolution.inventory._MIB", 1):
+        with patch("hermes_atlas_evolution.inventory._MIB", 1):
             result = scan_inventory(self.home, enabled_plugins={"current"}, disabled_plugins={"bulky"})
         finding = next(item for item in result["findings"] if item["id"] == "large_disabled_plugins")
         self.assertEqual(finding["evidence"], {"count": 1, "plugins": ["bulky"]})

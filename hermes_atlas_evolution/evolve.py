@@ -16,7 +16,7 @@ from .i18n import resolve
 from .experience import day_offset, experience, prune, utc_day
 from .skill_health import read_usage, skill_health, skill_outcomes
 
-DEFAULTS = {"lessons": "suggest", "tool_hints": True, "feedback_signals": True, "language": "auto",
+DEFAULTS = {"lessons": "auto", "tool_hints": True, "feedback_signals": True, "language": "auto",
             "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": True, "reflector_daily_limit": 6,
             "autopilot_minutes": 60, "runtime_guard": True}
 
@@ -179,7 +179,7 @@ def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: i
         raise ValueError("deliver must be a Hermes delivery target such as local or origin")
     profile = Path(home).expanduser().resolve()
     arguments = [*_profile_args(profile), "evolution", "report", "--days", str(days), "--lang", lang]
-    script_name = "hermes-evolution-digest.py"
+    script_name = "hermes-atlas-evolution-digest.py"
     script = f'''"""Deliver the Atlas Evolution digest without an agent turn."""
 import os
 import shutil
@@ -203,7 +203,7 @@ except (OSError, subprocess.TimeoutExpired):
 print(result.stdout.rstrip())
 '''
     create_args = ["hermes", *_profile_args(profile), "cron", "create", f"0 {hour} * * {weekday}", "--name",
-                   "hermes-evolution-digest", "--no-agent", "--script", script_name, "--deliver", deliver]
+                   "hermes-atlas-evolution-digest", "--no-agent", "--script", script_name, "--deliver", deliver]
     return {"status": "planned", "profile_home": str(profile), "script_name": script_name,
             "script_path": str(profile / "scripts" / script_name), "script_content": script,
             "create_args": create_args,

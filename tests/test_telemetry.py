@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hermes_evolution.operations import close_observers, database
-from hermes_evolution.telemetry import ResearchTracker, research_summary
+from hermes_atlas_evolution.operations import close_observers, database
+from hermes_atlas_evolution.telemetry import ResearchTracker, research_summary
 
 
 class ResearchTrackerTests(unittest.TestCase):

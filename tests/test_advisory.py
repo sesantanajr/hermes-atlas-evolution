@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from hermes_evolution.advisory import plan, tool_handler
+from hermes_atlas_evolution.advisory import plan, tool_handler
 
 
 class AdvisoryTests(unittest.TestCase):

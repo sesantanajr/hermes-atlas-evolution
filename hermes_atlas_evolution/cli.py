@@ -39,7 +39,8 @@ def settings(home: Path) -> dict:
     return result
 
 
-PLUGIN_ID = "hermes-evolution"
+PLUGIN_ID = "hermes-atlas-evolution"
+LEGACY_PLUGIN_IDS = ("hermes-evolution",)   # the id used up to 0.5.0
 # Keys the Hermes settings form edits (plugin.yaml config_schema) -> where they live in settings.json.
 NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "language"),
                "tool_hints": ("evolution", "tool_hints"), "feedback_signals": ("evolution", "feedback_signals"),
@@ -50,12 +51,31 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
 
 
 def native_settings(runtime_config) -> dict:
-    """`plugins.entries.hermes-evolution.settings` from the Hermes configuration, when present."""
+    """`plugins.entries.hermes-atlas-evolution.settings` from the Hermes configuration, when present. Values
+    saved under the id used up to 0.5.0 still apply, and the current id wins key by key."""
     plugins = runtime_config.get("plugins") if isinstance(runtime_config, dict) else None
     entries = plugins.get("entries") if isinstance(plugins, dict) else None
-    entry = entries.get(PLUGIN_ID) if isinstance(entries, dict) else None
-    values = entry.get("settings") if isinstance(entry, dict) else None
-    return values if isinstance(values, dict) else {}
+    merged: dict = {}
+    for plugin_id in (*LEGACY_PLUGIN_IDS, PLUGIN_ID):
+        entry = entries.get(plugin_id) if isinstance(entries, dict) else None
+        values = entry.get("settings") if isinstance(entry, dict) else None
+        if isinstance(values, dict):
+            merged.update({key: value for key, value in values.items() if value is not None})
+    return merged
+
+
+def legacy_install(home: Path, runtime_config) -> str | None:
+    """The old plugin id when this profile still has that copy installed and enabled, else None.
+
+    Both copies would observe the same turns and write to the same database, counting everything twice."""
+    plugins = runtime_config.get("plugins") if isinstance(runtime_config, dict) else None
+    enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
+    if not isinstance(enabled, list):
+        return None
+    for plugin_id in LEGACY_PLUGIN_IDS:
+        if plugin_id in enabled and (Path(home) / "plugins" / plugin_id / "plugin.yaml").is_file():
+            return plugin_id
+    return None
 
 
 def effective_settings(home: Path, runtime_config=None, *, base: dict | None = None) -> dict:
@@ -147,6 +167,8 @@ def setup(parser: argparse.ArgumentParser) -> None:
 
     state = commands.add_parser("status", help=_("Show whether the plugin is observing, learning and protecting this profile"))
     state.add_argument("--format", choices=("md", "json"), default="md")
+    state.add_argument("--no-learn", action="store_true",
+                       help=_("Only read; do not run the first pass when this profile never had one"))
     learn = commands.add_parser("learn", help=_("Run one evolution pass: derive lessons, measure changes, refresh proposals"))
     learn.add_argument("--notify-only", action="store_true", help=_("Print only new lessons, regressions and high-risk proposals"))
     playbook = commands.add_parser("lessons", help=_("Review the playbook learned from recurring tool failures"))
@@ -263,7 +285,20 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
     if action == "status":
         from . import status
 
+        first = None
+        if not getattr(args, "no_learn", False) and status.never_ran(home):
+            # The first look should show something: read the history now instead of waiting for a turn.
+            from .autopilot import run_exclusive
+
+            try:
+                ran = run_exclusive(home, lambda: cycle(home, now=now, runtime_config=runtime_config, config=config,
+                                                        lang=lang, reflect=reflect, backfill_budget_s=60.0), wait_s=5)
+                done = ran.get("history") or {}
+                first = {"sessions": done.get("sessions", 0), "tool_calls": done.get("tool_calls", 0)}
+            except ValueError:   # another pass is running right now: it will show up in a moment
+                first = None
         state = status.build(home, now=now, config=config, runtime_config=runtime_config)
+        state["first_pass"] = first
         return status.markdown(state, lang) if args.format == "md" else state
     if action == "learn":
         from .autopilot import run_exclusive
@@ -636,7 +671,7 @@ def main():
     def _(sentence: str) -> str:
         return text(sentence, resolve())
 
-    parser = argparse.ArgumentParser(prog="python -m hermes_evolution")
+    parser = argparse.ArgumentParser(prog="python -m hermes_atlas_evolution")
     parser.add_argument("--home", type=Path, default=os.environ.get("HERMES_HOME"), help=_("Explicit Hermes profile path"))
     parser.add_argument("--hermes-version", help=_("Installed version if running outside Hermes"))
     setup(parser)

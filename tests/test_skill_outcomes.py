@@ -4,11 +4,11 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hermes_evolution import experiments, proposals
-from hermes_evolution.experience import day_offset, experience, utc_day
-from hermes_evolution.operations import close_observers
-from hermes_evolution.signals import FeedbackSensor, TurnTracker, record_skill_correction
-from hermes_evolution.skill_health import compare_skill_windows, skill_outcomes, skill_window
+from hermes_atlas_evolution import experiments, proposals
+from hermes_atlas_evolution.experience import day_offset, experience, utc_day
+from hermes_atlas_evolution.operations import close_observers
+from hermes_atlas_evolution.signals import FeedbackSensor, TurnTracker, record_skill_correction
+from hermes_atlas_evolution.skill_health import compare_skill_windows, skill_outcomes, skill_window
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400

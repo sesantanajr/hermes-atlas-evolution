@@ -11,10 +11,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_evolution.autopilot import (CHECK_SECONDS, LEASE_SECONDS, RETRY_SECONDS, Autopilot, claim, finish,
+from hermes_atlas_evolution.autopilot import (CHECK_SECONDS, LEASE_SECONDS, RETRY_SECONDS, Autopilot, claim, finish,
                                         pinned_profile, run_exclusive)
-from hermes_evolution.experience import experience
-from hermes_evolution.operations import close_observers
+from hermes_atlas_evolution.experience import experience
+from hermes_atlas_evolution.operations import close_observers
 
 NOW = 1_794_700_000.0
 HOUR = 3600
@@ -150,7 +150,7 @@ class AutopilotTest(Base):
             raise RuntimeError("boom")
 
         pilot, clock = self.make(broken)
-        with self.assertLogs("hermes_evolution.autopilot", level="WARNING") as logged:
+        with self.assertLogs("hermes_atlas_evolution.autopilot", level="WARNING") as logged:
             pilot.poke()
             self.wait(pilot)
             clock["t"] += RETRY_SECONDS + 1

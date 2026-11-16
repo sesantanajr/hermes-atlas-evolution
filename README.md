@@ -11,7 +11,7 @@ A measured self-improvement loop for Hermes Agent: it learns from the profile's 
 
 **English** | [Português (Brasil)](README.pt-BR.md)
 
-Atlas Evolution is an independent, MIT-licensed community plugin for Hermes Agent (ID `hermes-evolution`, version 0.5.0). Anyone can install it in any Hermes profile; it depends on no other system. It uses the public Hermes plugin API and the Python standard library, and opens no network connection of its own. The reflector is on by default: when a failure that has no template keeps recurring, it asks a model through Hermes to draft a lesson, at most 3 times per pass and 6 times a day by default, and every draft waits for your approval. With `reflector: false` no model is called.
+Atlas Evolution is an independent, MIT-licensed community plugin for Hermes Agent (ID `hermes-atlas-evolution`, version 0.5.0). Anyone can install it in any Hermes profile; it depends on no other system. It uses the public Hermes plugin API and the Python standard library, and opens no network connection of its own. The reflector is on by default: when a failure that has no template keeps recurring, it asks a model through Hermes to draft a lesson, at most 3 times per pass and 6 times a day by default, and every draft waits for your approval. With `reflector: false` no model is called.
 
 ## Why
 
@@ -71,7 +71,7 @@ flowchart LR
 
 All of this runs by itself: the autopilot runs a pass in the background at most once an hour by default, and `hermes evolution status` shows whether the plugin is observing, learning and protecting the profile. The runtime guard, also on by default, vetoes agent terminal commands that would restart or kill the gateway the agent runs on, or delete what the running Hermes needs (see [Runtime guard](#runtime-guard)).
 
-The operations supervisor of 0.2.0 and 0.3.0 remains: Linux pressure, usage and cost, Cron and Kanban ([Operations](docs/operations.md)). The bundled skill `hermes-evolution:evolution-review` walks the owner through the digest. Thresholds are in [The evolution loop](docs/evolution-loop.md).
+The operations supervisor of 0.2.0 and 0.3.0 remains: Linux pressure, usage and cost, Cron and Kanban ([Operations](docs/operations.md)). The bundled skill `hermes-atlas-evolution:evolution-review` walks the owner through the digest. Thresholds are in [The evolution loop](docs/evolution-loop.md).
 
 ## Quick start
 
@@ -80,7 +80,7 @@ The operations supervisor of 0.2.0 and 0.3.0 remains: Linux pressure, usage and 
 hermes plugins install sesantanajr/hermes-atlas-evolution --enable
 
 # 2. Check that it loads
-hermes plugins doctor --ci hermes-evolution
+hermes plugins doctor --ci hermes-atlas-evolution
 
 # 3. Restart a running gateway, use Hermes, then check that the plugin observes, learns and protects
 hermes evolution status
@@ -98,6 +98,16 @@ hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable
 ```
 
 `hermes evolution status` lists the other profiles of the same Hermes root that had sessions in the last 7 days and do not have the plugin, with this command.
+
+**Update.** `hermes plugins update` fetches the new code but does not reload a gateway that is already running (Hermes reloads plugins on install, enable and disable). Update every profile that has the plugin, then restart the gateway once; the restart waits for the turns in progress:
+
+```sh
+hermes -p <profile> plugins update hermes-atlas-evolution   # once per profile; without -p for the default profile
+hermes gateway restart
+hermes evolution status                               # flags any Hermes process still running older code
+```
+
+**Cover image.** Hermes shows a plugin's cover only for entries of its curated [plugin catalog](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/catalog-submission), which Nous Research reviews. Installed from GitHub, Atlas Evolution shows a generic card until its catalog entry is accepted; its cover is [docs/banner.jpg](docs/banner.jpg) (1280×640, the 2:1 size the catalog asks for).
 
 **Choose the lessons mode.** In the default mode, `suggest`, nothing reaches the agent until you approve it:
 
@@ -158,7 +168,7 @@ Illustrative output with made-up numbers: an excerpt rendered by the current cod
 
 - **Sessions:** 31 ended · 12 ended as orphans (38.7%) · _reaped after a disconnect or restart, so Hermes' end-of-session work did not run_
 - **Context per agent call:** average of 41,200 tokens · 62.5% served from cache · 318 calls
-- **Plugins of this process:** 6 enabled · compete for `transform_tool_result` (only the first result counts): `example-filter` → `hermes-evolution`
+- **Plugins of this process:** 6 enabled · compete for `transform_tool_result` (only the first result counts): `example-filter` → `hermes-atlas-evolution`
 - **Runtime guard:** 2 commands vetoed (gateway restart or kill 2)
 
 ## Proposals awaiting a decision
@@ -194,7 +204,7 @@ Subcommands of `hermes evolution`. Output is JSON, except `report` and `status` 
 
 ## Configuration
 
-The main options are in the manifest's `config_schema`, so Hermes Desktop shows them under Settings → Plugins and stores them under `plugins.entries.hermes-evolution.settings`.
+The main options are in the manifest's `config_schema`, so Hermes Desktop shows them under Settings → Plugins and stores them under `plugins.entries.hermes-atlas-evolution.settings`.
 
 | Option | Type | Default | Effect |
 |---|---|---|---|
@@ -202,7 +212,7 @@ The main options are in the manifest's `config_schema`, so Hermes Desktop shows 
 | `language` | `auto`, `en`, `pt` | `auto` | `auto` follows `HERMES_LANGUAGE`, `display.language`, the locale, then English. |
 | `tool_hints` | boolean | `true` | Adds the matching lesson to a failing result. |
 | `feedback_signals` | boolean | `true` | Counts owner corrections, repeated questions and thanks. |
-| `agent_tools` | boolean | `false` | Offers `hermes_evolution_plan` and `hermes_evolution_lessons` to the agent. |
+| `agent_tools` | boolean | `false` | Offers `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` to the agent. |
 | `slow_turn_seconds` | integer, 5 to 3600 | `60` | A turn at least this long counts as slow. |
 | `owner_sender_ids` | up to 20 strings | `[]` | Gateway senders counted as the owner. Local sessions always count. |
 | `reflector` | boolean | `true` | Drafts lessons for untemplated failures through the auxiliary task `evolution_reflector`. Drafts always wait for approval. |
@@ -215,7 +225,7 @@ Without the Desktop, write them in the profile's `config.yaml`, quoting `"off"`:
 ```yaml
 plugins:
   entries:
-    hermes-evolution:
+    hermes-atlas-evolution:
       settings:
         lessons: auto
 ```
@@ -228,7 +238,7 @@ The hooks, the prompt section, the runtime guard, the autopilot interval and the
 
 Two paths, neither of which rewrites a cached prompt.
 
-- **Session prompt section.** Hermes renders `hermes-evolution.playbook` when a session starts and freezes it into that session: active lessons, effective ones first, at most 8 and 1,200 characters. A lesson activated mid-session appears in the next session. A pass running in another process does not leave a new session without its lessons.
+- **Session prompt section.** Hermes renders `hermes-atlas-evolution.playbook` when a session starts and freezes it into that session: active lessons, effective ones first, at most 8 and 1,200 characters. A lesson activated mid-session appears in the next session. A pass running in another process does not leave a new session without its lessons.
 - **Hint on the failing result.** When a call fails with a signature that has an active lesson, `transform_tool_result` appends the sentence to that result, as new content at the end of the conversation. Once per failure per session, at most 6 per session, never on success, and not when the result already carries a `hint` from Hermes' own tools.
 
 Nothing is injected per turn. With `lessons` set to `off`, neither surface is registered.
@@ -291,7 +301,7 @@ Requires Hermes Agent 0.23.1 or later and Python 3.11 or later.
 - First use migrates the database to schema 8, which earlier versions cannot open. To go back, restore a backup or delete `evolution.sqlite3`.
 - The autopilot needs a nudge: a pass that is due waits for the next turn, or for the next Kanban dispatcher tick when the dispatcher runs inside the gateway.
 - The backfill reads Hermes' history only before the plugin started observing the profile, at most 14 days back. It does not replay model calls and tokens.
-- Under `plugins.isolation: host` there is no `hermes evolution`: use `python -m hermes_evolution --home <profile> ...` (it reads `config.yaml` only with PyYAML). The cron recipes need the Hermes CLI; a standalone pass drafts nothing and keeps waiting excerpts for a pass run inside Hermes.
+- Under `plugins.isolation: host` there is no `hermes evolution`: use `python -m hermes_atlas_evolution --home <profile> ...` (it reads `config.yaml` only with PyYAML). The cron recipes need the Hermes CLI; a standalone pass drafts nothing and keeps waiting excerpts for a pass run inside Hermes.
 - Review counts depend on a line Hermes 0.23.1 writes to `agent.log`. Owner signals are heuristics over the first words of a message.
 - The runtime guard looks only at the command word of each part of a terminal command. It looks one level into `bash -c` and `sh -c`; a command nested deeper, one run over `ssh` or from a script, a command it cannot parse, and a path relative to the working folder all pass. It is a safety net, not a sandbox.
 
@@ -304,7 +314,7 @@ git clone https://github.com/sesantanajr/hermes-atlas-evolution
 cd hermes-atlas-evolution
 python -m unittest discover -s tests -v     # standard library only
 hermes plugins validate .                   # needs Hermes Agent 0.23.1
-python -m hermes_evolution --home /path/to/profile --hermes-version 0.23.1 report
+python -m hermes_atlas_evolution --home /path/to/profile --hermes-version 0.23.1 report
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the privacy and translation rules and [CHANGELOG.md](CHANGELOG.md) for the history.
@@ -323,4 +333,6 @@ Created by **Sérgio Sant'Ana Júnior**. [LinkedIn](https://www.linkedin.com/in/
 
 ## License
 
-[MIT](LICENSE)
+Atlas Evolution is free and open-source software, released under the [MIT License](LICENSE) (SPDX identifier `MIT`). You may use, copy, modify, merge, publish, distribute, sublicense and sell copies, including for commercial use, provided the copyright notice and the license text are kept in every copy. The software is provided as is, without warranty of any kind.
+
+Contributions are welcome under the same license; see [CONTRIBUTING.md](CONTRIBUTING.md).

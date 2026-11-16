@@ -8,13 +8,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_evolution import lessons
-from hermes_evolution.autopilot import Autopilot
-from hermes_evolution.experience import experience
-from hermes_evolution.hints import KEY
-from hermes_evolution.integration import register
-from hermes_evolution.operations import close_observers
-from hermes_evolution.signals import turn_summary
+from hermes_atlas_evolution import lessons
+from hermes_atlas_evolution.autopilot import Autopilot
+from hermes_atlas_evolution.experience import experience
+from hermes_atlas_evolution.hints import KEY
+from hermes_atlas_evolution.integration import register
+from hermes_atlas_evolution.operations import close_observers
+from hermes_atlas_evolution.signals import turn_summary
 
 ERROR = json.dumps({"error": "tool_call to 'files_search' is missing required argument(s): servico."})
 ARGS = {"calls": [{"name": "files_search", "arguments": {}}]}
@@ -96,8 +96,8 @@ class PluginLoopTest(PluginBase):
         declared = read_manifest(Path(__file__).resolve().parent.parent / "plugin.yaml")
         self.assertEqual(sorted(context.hooks), sorted(declared["provides_hooks"]))
         self.assertEqual(sorted(context.tools), sorted(declared["provides_tools"]))
-        self.assertEqual(list(context.sections), ["hermes-evolution.playbook"])
-        self.assertLessEqual(context.sections["hermes-evolution.playbook"]["max_chars"], 4000)
+        self.assertEqual(list(context.sections), ["hermes-atlas-evolution.playbook"])
+        self.assertLessEqual(context.sections["hermes-atlas-evolution.playbook"]["max_chars"], 4000)
         self.assertIn("evolution", context.cli)
         self.assertEqual(list(context.skills), ["evolution-review"])
         skill = context.skills["evolution-review"].read_text(encoding="utf-8")
@@ -111,7 +111,7 @@ class PluginLoopTest(PluginBase):
     def test_a_recurring_failure_becomes_a_lesson_the_agent_sees_when_it_fails_again(self):
         self.settings(evolution={"lessons": "auto", "language": "en"})
         context = self.plugin()
-        section = context.sections["hermes-evolution.playbook"]["content"]
+        section = context.sections["hermes-atlas-evolution.playbook"]["content"]
         self.assertEqual(section({"session_id": "s0"}), "")   # nothing learned yet: nothing injected
 
         for session in ("s1", "s2"):
@@ -133,7 +133,7 @@ class PluginLoopTest(PluginBase):
             self.assertEqual((summary["turns"], summary["completed"], summary["tool_errors"]), (4, 4, 4))
 
         fresh = self.plugin()   # a new gateway process picks the lesson up
-        text = fresh.sections["hermes-evolution.playbook"]["content"]({"session_id": "s3"})
+        text = fresh.sections["hermes-atlas-evolution.playbook"]["content"]({"session_id": "s3"})
         self.assertIn("When calling `files_search`, always pass the required argument `servico`.", text)
         payload = {"tool_name": "tool_call", "args": ARGS, "result": ERROR, "status": "error", "session_id": "s3",
                    "turn_id": "turn-s3", "tool_call_id": "s3-0"}
@@ -158,7 +158,7 @@ class PluginLoopTest(PluginBase):
         writer = sqlite3.connect(self.home / "evolution" / "evolution.sqlite3", timeout=0)
         writer.execute("BEGIN IMMEDIATE")   # e.g. `hermes evolution learn` running in another process
         try:
-            text = context.sections["hermes-evolution.playbook"]["content"]({"session_id": "busy"})
+            text = context.sections["hermes-atlas-evolution.playbook"]["content"]({"session_id": "busy"})
         finally:
             writer.execute("ROLLBACK")
             writer.close()
@@ -232,29 +232,29 @@ class PluginLoopTest(PluginBase):
         context.fire("on_skill_lifecycle", action="loaded", skill_name=None)
         close_observers()   # the next write has to open the database again
         broken = __import__("sqlite3").OperationalError("unable to open database file")
-        with patch("hermes_evolution.operations._open", side_effect=broken), self.assertLogs(
-                "hermes_evolution.integration", level="WARNING") as logged:
+        with patch("hermes_atlas_evolution.operations._open", side_effect=broken), self.assertLogs(
+                "hermes_atlas_evolution.integration", level="WARNING") as logged:
             for _ in range(3):   # a storage failure is reported once per event kind, never raised into the turn
                 context.fire("post_tool_call", tool_name="terminal", status="ok", turn_id="t", tool_call_id="c")
                 context.fire("on_skill_lifecycle", action="loaded", skill_name="deploy")
             self.assertIsNone(context.fire("transform_tool_result", tool_name="terminal", status="error",
                                            result="{}", session_id="s", tool_call_id="x"))
-            self.assertEqual(context.sections["hermes-evolution.playbook"]["content"]({}), "")
+            self.assertEqual(context.sections["hermes-atlas-evolution.playbook"]["content"]({}), "")
         self.assertEqual(len(logged.records), 3)   # tool, tool_outcome and skill
-        tool = context.tools["hermes_evolution_lessons"]
+        tool = context.tools["hermes_atlas_evolution_lessons"]
         self.assertTrue(tool["check"]())
         self.assertEqual(json.loads(tool["handler"]({"action": "search"})), {"lessons": []})
 
     def test_invalid_settings_never_switch_on_what_the_operator_switched_off(self):
         self.settings(evolution={"lessons": "everything", "slow_turn_seconds": "fast"})
-        with self.assertLogs("hermes_evolution.integration", level="WARNING"):
+        with self.assertLogs("hermes_atlas_evolution.integration", level="WARNING"):
             context = self.plugin()
         self.assertEqual(context.sections, {})                    # an invalid mode means off
         self.assertNotIn("transform_tool_result", context.hooks)
         self.settings(evolution={"lessons": "off", "slow_turn_seconds": 120.5})   # another key is wrong
         self.assertEqual(self.plugin().sections, {})
         self.settings(evolution={"lessons": "auto", "slow_turn_seconds": 120.0})  # a form may store whole floats
-        self.assertIn("hermes-evolution.playbook", self.plugin().sections)
+        self.assertIn("hermes-atlas-evolution.playbook", self.plugin().sections)
         (self.home / "evolution" / "settings.json").write_text("{not json")
         self.assertEqual(self.plugin().sections, {})              # unreadable file: measure only
 
@@ -275,7 +275,7 @@ class AutopilotLoopTest(PluginBase):
                          session_id=f"s{index}", turn_id=f"t{index}", tool_call_id=f"c{index}")
         context.fire("pre_llm_call", session_id="s0", turn_id="turn", platform="cli", user_message="ok")
         context.fire("post_llm_call", session_id="s0", turn_id="turn")
-        threads = [thread for thread in __import__("threading").enumerate() if thread.name == "hermes-evolution-autopilot"]
+        threads = [thread for thread in __import__("threading").enumerate() if thread.name == "hermes-atlas-evolution-autopilot"]
         for thread in threads:
             thread.join(10)
         close_observers()
@@ -290,7 +290,26 @@ class AutopilotLoopTest(PluginBase):
         context = self.plugin()
         context.fire("post_llm_call", session_id="s0", turn_id="turn")
         self.assertEqual([thread for thread in __import__("threading").enumerate()
-                          if thread.name == "hermes-evolution-autopilot"], [])
+                          if thread.name == "hermes-atlas-evolution-autopilot"], [])
+
+
+class LegacyInstallTest(PluginBase):
+    """A profile that still runs the plugin under its old id must not count everything twice."""
+
+    def test_the_new_plugin_stays_passive_while_the_old_id_is_still_enabled(self):
+        old = self.home / "plugins" / "hermes-evolution"
+        old.mkdir(parents=True)
+        (old / "plugin.yaml").write_text("name: hermes-evolution\nversion: \"0.5.0\"\n")
+        config = types.ModuleType("hermes_cli.config")
+        config.load_config_readonly = lambda: {"plugins": {"enabled": ["hermes-evolution", "other"]}}
+        with patch.dict(sys.modules, {"hermes_cli.config": config}), self.assertLogs(
+                "hermes_atlas_evolution.integration", level="WARNING") as logged:
+            context = self.plugin()
+        self.assertEqual((context.hooks, context.tools, context.cli), ({}, {}, {}))
+        self.assertIn("hermes plugins remove hermes-evolution", logged.output[0])
+        config.load_config_readonly = lambda: {"plugins": {"enabled": ["hermes-atlas-evolution"]}}
+        with patch.dict(sys.modules, {"hermes_cli.config": config}):
+            self.assertIn("post_tool_call", self.plugin().hooks)    # removed from the enabled list: active again
 
 
 class NativeSettingsTest(unittest.TestCase):
@@ -301,15 +320,20 @@ class NativeSettingsTest(unittest.TestCase):
         self.home = Path(folder.name)
 
     def test_values_from_the_hermes_settings_form_override_the_settings_file(self):
-        from hermes_evolution.cli import effective_settings
+        from hermes_atlas_evolution.cli import effective_settings
 
         (self.home / "evolution").mkdir()
         (self.home / "evolution" / "settings.json").write_text(json.dumps(
             {"evolution": {"lessons": "off", "language": "en", "slow_turn_seconds": 30}, "agent_advice": False,
              "rates_usd_per_million": {}}))
-        runtime = {"plugins": {"entries": {"hermes-evolution": {"settings": {
+        runtime = {"plugins": {"entries": {"hermes-atlas-evolution": {"settings": {
             "lessons": "auto", "agent_tools": True, "language": None, "owner_sender_ids": ["u1"]}}}}}
         merged = effective_settings(self.home, runtime)
+        legacy = {"plugins": {"entries": {"hermes-evolution": {"settings": {"lessons": "suggest", "reflector": False}}}}}
+        self.assertEqual(effective_settings(self.home, legacy)["evolution"]["reflector"], False)   # old id still read
+        both = {"plugins": {"entries": {"hermes-evolution": {"settings": {"lessons": "suggest"}},
+                                        "hermes-atlas-evolution": {"settings": {"lessons": "auto"}}}}}
+        self.assertEqual(effective_settings(self.home, both)["evolution"]["lessons"], "auto")      # the new id wins
         self.assertEqual(merged["evolution"]["lessons"], "auto")
         self.assertEqual(merged["evolution"]["language"], "en")          # unset in Hermes: the file value stays
         self.assertEqual(merged["evolution"]["slow_turn_seconds"], 30)
@@ -319,7 +343,7 @@ class NativeSettingsTest(unittest.TestCase):
         self.assertEqual(effective_settings(self.home, {"plugins": "garbage"})["evolution"]["lessons"], "off")
 
     def test_manifest_schema_matches_the_keys_the_code_reads(self):
-        from hermes_evolution.cli import NATIVE_KEYS
+        from hermes_atlas_evolution.cli import NATIVE_KEYS
 
         manifest = (Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(encoding="utf-8")
         schema = manifest.split("config_schema:", 1)[1]

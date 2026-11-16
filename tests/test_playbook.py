@@ -4,13 +4,13 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hermes_evolution import lessons, proposals
-from hermes_evolution.agent_tools import LESSONS_TOOL, LessonsTool
-from hermes_evolution.experience import experience
-from hermes_evolution.hints import KEY, MAX_HINTS_PER_SESSION, HintIndex, attach
-from hermes_evolution.signals import classify, record_tool
+from hermes_atlas_evolution import lessons, proposals
+from hermes_atlas_evolution.agent_tools import LESSONS_TOOL, LessonsTool
+from hermes_atlas_evolution.experience import experience
+from hermes_atlas_evolution.hints import KEY, MAX_HINTS_PER_SESSION, HintIndex, attach
+from hermes_atlas_evolution.signals import classify, record_tool
 
-from hermes_evolution.operations import close_observers  # noqa: E402
+from hermes_atlas_evolution.operations import close_observers  # noqa: E402
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400
