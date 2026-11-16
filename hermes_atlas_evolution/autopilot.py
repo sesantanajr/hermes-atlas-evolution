@@ -103,17 +103,31 @@ def run_exclusive(home: Path, run, *, wait_s: float = 30.0, now=time.time):
 
 @contextmanager
 def pinned_profile(home: Path):
-    """Make Hermes resolve this plugin's profile in the current thread."""
+    """Make Hermes resolve this plugin's profile in the current thread: its home and its secrets.
+
+    A gateway that serves several profiles keeps both in context variables that a new thread does not
+    inherit. Without the secret scope, a model call of the reflector would use the gateway's own profile
+    keys (or fail), not this profile's."""
     try:
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     except ImportError:   # outside Hermes: nothing to pin
         yield
         return
-    token = set_hermes_home_override(str(home))
+    home_token = set_hermes_home_override(str(home))
+    secret_token = reset_scope = None
+    try:
+        from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
+
+        secret_token = set_secret_scope(build_profile_secret_scope(Path(home)), profile_home=str(home))
+        reset_scope = reset_secret_scope
+    except Exception:   # an older Hermes without secret scopes: the home override is all there is
+        pass
     try:
         yield
     finally:
-        reset_hermes_home_override(token)
+        if reset_scope is not None:
+            reset_scope(secret_token)
+        reset_hermes_home_override(home_token)
 
 
 class Autopilot:

@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -367,10 +368,65 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
 AGENT_MARKERS = ("ATLAS_EVOLUTION_AGENT", "HERMES_SESSION_ID", "HERMES_KANBAN_TASK", "HERMES_DELEGATED_CHILD_CONTEXT")
 
 
+def _process(pid: int):
+    """(parent pid, argv) of a process from /proc, or None (not Linux, gone, or unreadable)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()[:8192]
+        argv = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+        return int(stat.rsplit(")", 1)[1].split()[1]), argv
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+# "evolution" as a word of its own: this command (hermes evolution ..., or argv quoted after a relaunch), not a
+# path such as hermes-atlas-evolution or hermes_atlas_evolution.
+_OWN_COMMAND = re.compile(r"(?:^|[\s'\"\[,])evolution(?:[\s'\"\],]|$)")
+
+
+def _is_hermes(argv: list[str]) -> bool:
+    """A Hermes process: the hermes launcher, or Python running the installed Hermes code."""
+    if not argv:
+        return False
+    if os.path.basename(argv[0]) in ("hermes", "hermes-agent"):
+        return True
+    return any("hermes-agent" in part or "hermes_cli" in part for part in argv[:8])
+
+
+def _in_hermes_cgroup(*, text: str | None = ...) -> bool:
+    """True when this process sits in the cgroup of a Hermes gateway service. Detaching with setsid or a
+    double fork changes the parent, not the cgroup."""
+    if text is ...:
+        try:
+            text = Path("/proc/self/cgroup").read_text(encoding="utf-8", errors="replace")[:8192]
+        except OSError:
+            return False
+    return isinstance(text, str) and "hermes-gateway" in text
+
+
+def _under_hermes(*, start: int | None = None, read=_process, depth: int = 24) -> bool:
+    """True when a Hermes process (a gateway, a chat session) is an ancestor of this command.
+
+    An agent can clear the environment markers of a shell it runs; it cannot change which process started
+    it. The command's own launcher chain (`hermes evolution ...`) is skipped."""
+    pid = os.getpid() if start is None else start
+    for _ in range(depth):
+        entry = read(pid)
+        if entry is None:
+            return False
+        parent, argv = entry
+        if _is_hermes(argv) and not _OWN_COMMAND.search(" ".join(argv)):   # this command's own launcher is skipped
+            return True
+        if parent <= 1 or parent == pid:
+            return False
+        pid = parent
+    return False
+
+
 def _operator_only() -> None:
     """Refuse playbook decisions from a shell the agent runs. Hermes marks those shells with the session id,
     and the plugin adds ATLAS_EVOLUTION_AGENT to every subprocess of an agent session."""
-    if any(os.environ.get(name, "").strip() for name in AGENT_MARKERS):
+    if any(os.environ.get(name, "").strip() for name in AGENT_MARKERS) or _under_hermes() or _in_hermes_cgroup():
         raise ValueError("Only the operator can decide on lessons and proposals. Run this command in your own "
                          "terminal; the agent can propose lessons, which wait for your approval.")
 

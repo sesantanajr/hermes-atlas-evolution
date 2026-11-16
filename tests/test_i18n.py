@@ -111,6 +111,10 @@ class CommandLineLanguageTest(unittest.TestCase):
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)
         self.home = Path(folder.name)
+        process_tree = patch.multiple("hermes_atlas_evolution.cli", _under_hermes=lambda **_: False,
+                                      _in_hermes_cgroup=lambda **_: False)   # not the host's process tree
+        process_tree.start()
+        self.addCleanup(process_tree.stop)
 
     def run_cli(self, **arguments):
         from hermes_atlas_evolution.cli import execute

@@ -198,15 +198,23 @@ class AutopilotTest(Base):
         constants = types.ModuleType("hermes_constants")
         constants.set_hermes_home_override = lambda path: override.set(str(path))
         constants.reset_hermes_home_override = lambda token: override.reset(token)
+        scope = contextvars.ContextVar("scope", default=None)
+        secrets = types.ModuleType("agent.secret_scope")
+        secrets.build_profile_secret_scope = lambda home: {"KEY": f"key-of-{Path(home).name}"}
+        secrets.set_secret_scope = lambda mapping, profile_home=None: scope.set((mapping, profile_home))
+        secrets.reset_secret_scope = lambda token: scope.reset(token)
+        agent = types.ModuleType("agent")
+        agent.secret_scope = secrets
         seen = []
-        with patch.dict(sys.modules, {"hermes_constants": constants}):
-            pilot, _ = self.make(lambda: seen.append(override.get()))
+        with patch.dict(sys.modules, {"hermes_constants": constants, "agent": agent, "agent.secret_scope": secrets}):
+            pilot, _ = self.make(lambda: seen.append((override.get(), scope.get())))
             pilot.poke()
             self.wait(pilot)
             with pinned_profile(self.home):
                 self.assertEqual(override.get(), str(self.home))
             self.assertIsNone(override.get())
-        self.assertEqual(seen, [str(self.home)])
+        # the profile's own API keys, never the gateway's: a multi-profile gateway scopes secrets per profile
+        self.assertEqual(seen, [(str(self.home), ({"KEY": f"key-of-{self.home.name}"}, str(self.home)))])
 
 
 if __name__ == "__main__":

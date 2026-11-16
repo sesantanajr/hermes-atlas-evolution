@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -234,6 +235,13 @@ class ExperimentsTest(Base):
 
 
 class CycleAndReportTest(Base):
+    def setUp(self):
+        super().setUp()
+        process_tree = patch.multiple("hermes_atlas_evolution.cli", _under_hermes=lambda **_: False,
+                                      _in_hermes_cgroup=lambda **_: False)   # not the host's process tree
+        process_tree.start()
+        self.addCleanup(process_tree.stop)
+
     def test_options_validate_and_default_safely(self):
         self.assertEqual(options({})["lessons"], "auto")                    # template lessons apply and are measured
         self.assertIs(options({})["reflector"], True)                      # on unless the operator turns it off

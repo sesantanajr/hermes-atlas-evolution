@@ -38,18 +38,18 @@ _SEPARATORS = frozenset({";", "&&", "||", "|", "&", "(", ")", "\n", ";;", "|&"})
 MESSAGES = {
     "en": {
         "gateway_stop": ("Atlas Evolution runtime guard: this command would stop or restart the Hermes gateway that this "
-                         "conversation runs on, cutting off the turns in progress, including this one. To restart Hermes, "
-                         "run `hermes gateway restart`: it waits for the running turns to finish and then restarts. A forced "
-                         "restart is for the owner to run from their own terminal."),
+                         "conversation runs on, cutting off the turns in progress, including this one. Do not retry it in "
+                         "another form. Tell the owner a restart is needed and why; the owner runs `hermes gateway restart` "
+                         "from their own terminal, which waits for the running turns to finish."),
         "runtime_removal": ("Atlas Evolution runtime guard: this command would delete or move {path}, which the running "
                             "Hermes needs; Hermes would stop working until someone repairs it by hand. Leave it in place. "
                             "Removing it is for the owner to do from their own terminal, with Hermes stopped."),
     },
     "pt": {
         "gateway_stop": ("Guarda de runtime do Atlas Evolution: este comando pararia ou reiniciaria o gateway do Hermes em "
-                         "que esta conversa roda, cortando os turnos em andamento, inclusive este. Para reiniciar o Hermes, "
-                         "use `hermes gateway restart`: ele espera os turnos em andamento terminarem e então reinicia. Um "
-                         "reinício forçado fica para o dono rodar no próprio terminal."),
+                         "que esta conversa roda, cortando os turnos em andamento, inclusive este. Não tente de outra forma. "
+                         "Diga ao dono que é preciso reiniciar e por quê; o dono roda `hermes gateway restart` no próprio "
+                         "terminal, e esse comando espera os turnos em andamento terminarem."),
         "runtime_removal": ("Guarda de runtime do Atlas Evolution: este comando apagaria ou moveria {path}, de que o Hermes "
                             "em execução precisa; o Hermes pararia de funcionar até alguém consertar à mão. Deixe como está. "
                             "Remover isso fica para o dono, no próprio terminal, com o Hermes parado."),
@@ -166,9 +166,9 @@ def _stops_gateway(verb: str, rest: list[str], words: list[str]) -> bool:
         return len(words) >= 2 and bool(_UNIT.match(words[0])) and words[1] in ("restart", "stop")
     if verb in ("pkill", "killall"):
         return any("hermes" in word.lower() for word in words)
-    if verb == "hermes" and "gateway" in words:   # `hermes gateway stop` leaves Hermes down; restart is fine
+    if verb == "hermes" and "gateway" in words:   # stop leaves Hermes down; restart is the owner's call
         position = words.index("gateway") + 1
-        return position < len(words) and words[position] == "stop"
+        return position < len(words) and words[position] in ("stop", "restart")
     return False
 
 

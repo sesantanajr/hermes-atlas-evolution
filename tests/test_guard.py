@@ -24,6 +24,7 @@ class CheckTest(unittest.TestCase):
                         "XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart hermes-gateway.service",
                         "cd /tmp; systemctl --user kill hermes-gateway",
                         "hermes gateway stop", "hermes -p atlas-ai gateway stop",
+                        "hermes gateway restart", "hermes gateway restart --yes", "hermes -p atlas-ai gateway restart -y",
                         "bash -c 'systemctl --user restart hermes-gateway'",
                         "sh -c \"killall hermes\"",
                         "pkill -f 'hermes gateway'", "killall hermes", "timeout 5 pkill -9 -f hermes"):
@@ -42,8 +43,8 @@ class CheckTest(unittest.TestCase):
 
     def test_ordinary_administration_passes(self):
         for command in ("systemctl --user status hermes-gateway", "journalctl --user -u hermes-gateway -n 50",
-                        "hermes gateway restart", "hermes gateway status", "echo 'systemctl restart hermes-gateway'",
-                        "hermes -p atlas-ai gateway restart", "bash -c 'ls -la'", "bash script.sh",
+                        "hermes gateway status", "echo 'systemctl restart hermes-gateway'",
+                        "bash -c 'ls -la'", "bash script.sh",
                         "rm -rf ~/.hermes/tools/python-3.13.2-old", "rm -rf /tmp/build", "pgrep -f hermes",
                         "ls ~/.hermes/tools", "grep -r killall ~/notes", "mv ~/.hermes/profiles/a/x.txt /tmp/",
                         "systemctl --user restart atlas-ui.service", "",
@@ -65,6 +66,7 @@ class HookTest(unittest.TestCase):
         directive = guard(tool_name="terminal", args={"command": "systemctl --user restart hermes-gateway"})
         self.assertEqual(directive["action"], "block")
         self.assertIn("hermes gateway restart", directive["message"])
+        self.assertIn("dono", directive["message"])          # the owner restarts, from their own terminal
         self.assertIn("turnos", directive["message"])
         self.assertEqual(seen, ["gateway_stop"])
         self.assertIsNone(guard(tool_name="terminal", args={"command": "ls"}))
