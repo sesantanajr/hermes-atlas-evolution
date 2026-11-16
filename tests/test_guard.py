@@ -29,7 +29,8 @@ class CheckTest(unittest.TestCase):
 
     def test_deleting_or_moving_what_hermes_runs_on_is_vetoed(self):
         for command in ("rm -rf ~/.hermes/tools/python-3.14*", f"mv {RUNTIME} /tmp/old-python",
-                        "rm -rf $HOME/.hermes", "sudo rm -rf /usr/local/lib/hermes-agent/",
+                        "rm -rf $HOME/.hermes",
+                        "sudo rm -r -f /usr/local/lib/hermes-agent/",
                         "find ~/.hermes/tools -name 'python*' -delete", "cd / && rm -rf ~/.hermes/tools",
                         "cat > a.txt <<EOF\nhello\nEOF\nrm -rf ~/.hermes"):
             with self.subTest(command):
