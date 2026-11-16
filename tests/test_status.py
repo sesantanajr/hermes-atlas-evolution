@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from hermes_atlas_evolution import status
 from hermes_atlas_evolution.autopilot import claim, finish
-from hermes_atlas_evolution.experience import experience, utc_day
+from hermes_atlas_evolution.experience import experience
 from hermes_atlas_evolution.operations import close_observers
 from hermes_atlas_evolution.signals import record_guard, record_tool
 

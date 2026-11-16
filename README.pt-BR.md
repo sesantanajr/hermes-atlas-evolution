@@ -68,21 +68,26 @@ hermes gateway restart
 hermes evolution status --lang pt
 ```
 
-O `plugins update` da linha de comando só troca os arquivos: ele não recarrega um gateway que já está rodando, então reinicie o gateway uma vez no final. (O Hermes recarrega um gateway em execução na instalação, ao ligar e ao desligar um plugin, e quando a atualização é feita pelo Hermes Desktop, pelo dashboard ou pelo `/plugins update` num chat.) Se ainda houver algo rodando (um turno, uma rotina do cron, uma tarefa delegada), o reinício lista o que é e pergunta, em inglês, `Interrupt them and restart the gateway? [y/N]`: responda N e rode de novo em alguns minutos, ou y para interromper. O `status` aponta um gateway que ainda roda código antigo.
+O `plugins update` da linha de comando só troca os arquivos: ele não recarrega um gateway que já está rodando, então reinicie o gateway uma vez no final. O dashboard mostra a aba **Evolution** quando relê os plugins; se ela não aparecer, reinicie o dashboard. (O Hermes recarrega um gateway em execução na instalação, ao ligar e ao desligar um plugin, e quando a atualização é feita pelo Hermes Desktop, pelo dashboard ou pelo `/plugins update` num chat.) Se ainda houver algo rodando (um turno, uma rotina do cron, uma tarefa delegada), o reinício lista o que é e pergunta, em inglês, `Interrupt them and restart the gateway? [y/N]`: responda N e rode de novo em alguns minutos, ou y para interromper. O `status` aponta um gateway que ainda roda código antigo.
 
 ## O que ele faz
 
+- **Mostra tudo no dashboard do Hermes.** Uma aba **Evolution** no dashboard e no Hermes Desktop mostra o que o perfil aprendeu, o que espera a sua decisão com o comando exato para rodar, o resumo e o status. Ela só lê: as decisões continuam no seu terminal ([detalhes](docs/pt-BR/hermes-integration.md#o-painel-no-dashboard)).
+- **Leva lições de um perfil para outro.** `lessons export` e `lessons import --from <perfil>` levam o que um perfil aprendeu para outro, ou para outra máquina, depois de mostrar cada frase. As lições importadas esperam até os seus turnos encontrarem a falha lá, e são medidas lá como qualquer outra ([detalhes](docs/pt-BR/evolution-loop.md#pacotes-de-lições)).
 - **Aprende com o histórico que o Hermes já guarda.** As primeiras passadas releem os últimos 14 dias de sessões do perfil, então uma falha que se repetiu na semana passada pode virar lição já no primeiro dia.
-- **Transforma falhas repetidas de ferramentas em lições.** Uma falha vista pelo menos 3 vezes, em 2 sessões ou em 2 dias, vira uma frase como "Ao chamar `example_search`, sempre passe o argumento obrigatório `query`." O agente lê as lições ativas no começo de cada sessão.
+- **Transforma falhas repetidas de ferramentas em lições.** Uma falha vista pelo menos 3 vezes, em 2 sessões ou em 2 dias, vira uma frase como "Ao chamar `example_search`, sempre passe o argumento obrigatório `query`." Chamadas que o Hermes encerra no próprio prazo também contam. O agente lê as lições ativas no começo de cada sessão.
 - **Separa os seus turnos dos turnos dos outros.** Uma lição só entra em vigor sozinha depois que os seus próprios turnos encontram a falha (o seu CLI, TUI ou Desktop, as suas automações, um chat com um remetente que você lista em `owner_sender_ids` ou qualquer chat de uma plataforma que você lista em `owner_platforms`, como um bot privado ou a sua própria interface). Falhas que só outras pessoas causaram num chat esperam a sua aprovação, e um chat em que outra pessoa pode estar lendo recebe só lições de modelo fixo, nunca texto escrito por você ou por um modelo de IA. O `hermes evolution owner` mostra cada canal de chat com os remetentes e imprime o comando que configura isso.
 - **Encontra os gargalos que você pode remover.** Aprovações recusadas onde ninguém podia aprovar (execuções avulsas, automações, subagentes), com as configurações do Hermes que decidem isso; as ferramentas que mais consomem tempo e uma ferramenta lenta chamada após chamada.
 - **Mantém a fila curta.** Lições que ninguém decidiu ainda são retiradas quando as evidências deixam de sustentá-las, quando repetem a frase de outra lição ou quando só dão um conselho que serviria para qualquer falha.
 - **Mede antes e depois.** Cada lição contra a própria falha, cada reescrita de skill pelos turnos que carregaram a skill, cada mudança de configuração pela semana anterior e pela seguinte. No modo `auto`, uma lição que não ajuda é aposentada.
 - **Pede a um modelo de IA quando nenhum modelo fixo serve.** O refletor rascunha uma lição pelo Hermes, com no máximo 6 chamadas por dia, por padrão, e o rascunho espera por você.
 - **Acompanha a saúde do Hermes.** Aponta sessões cortadas sem o encerramento normal, conversas que mandam texto demais ao modelo, compactações que liberam pouco espaço e plugins que falham ao carregar, brigam entre si ou quebram comandos de outro plugin (essas falhas nunca viram lição).
-- **Protege o Hermes em execução.** Barra comandos do agente que parariam, reiniciariam ou matariam o gateway (como unidade systemd no Linux, LaunchAgent no macOS ou serviço ou tarefa do Windows) ou apagariam o Python, o código ou o perfil em que o Hermes roda, e impede o agente de mudar as configurações deste plugin ou desligá-lo. O agente é orientado a deixar isso com você.
+- **Protege o Hermes em execução.** Barra comandos do agente que parariam, reiniciariam ou matariam o gateway (como unidade systemd no Linux, LaunchAgent no macOS ou serviço ou tarefa do Windows) ou apagariam o Python, o código ou o perfil em que o Hermes roda, e impede o agente de mudar as configurações deste plugin ou desligá-lo. Ele lê o comando do jeito que o shell executa: dentro de blocos `if`/`for`, de `$(...)`, como `python -m hermes_cli.main`, `kill $(pgrep ...)` e as outras formas descritas [nos detalhes da guarda](docs/pt-BR/hermes-integration.md#a-guarda-de-runtime). O agente é orientado a deixar isso com você.
 - **Roda sozinho e pergunta antes de mudar o Hermes.** Uma passada em segundo plano roda no máximo uma vez por hora em cada perfil. Mudanças no Hermes, como travar uma skill, são propostas com o comando exato para você rodar.
 - **Fala a sua língua.** Todas as mensagens, o resumo e as lições saem em inglês ou em português do Brasil, conforme o perfil.
+
+
+![A aba Evolution no dashboard do Hermes: lições ativas, o que espera a sua decisão com o comando para rodar e os comandos que levam lições para outro perfil](docs/pt-BR/dashboard-panel.png)
 
 ## Comandos
 
@@ -96,6 +101,8 @@ Subcomandos de `hermes evolution`. O `--lang en|pt` funciona com todos eles.
 | `lessons review` | Passa por cada lição que espera aprovação, com o texto exato: `a` aprova, `r` rejeita, Enter pula. |
 | `lessons approve <id>` | Ativa uma lição que está esperando, depois de mostrar o texto exato. |
 | `proposals list`, `proposals approve <id>`, `proposals reject <id>` | A fila de propostas e a sua decisão sobre uma delas. |
+| `lessons export [--out ARQUIVO]` | As lições ativas como um pacote que outro perfil ou outra máquina pode importar. |
+| `lessons import ARQUIVO` ou `lessons import --from <perfil>` | Traz as lições de um pacote ou de outro perfil, depois de mostrar cada uma (`--dry-run` não muda nada). |
 | `learn` | Faz uma passada agora, sem esperar a de segundo plano. |
 | `owner` | Lista cada canal de chat com os remetentes; `owner add <id>` ou `owner add-platform <nome>` imprime o comando `hermes config set` que marca um deles como você. Só no seu próprio terminal. |
 

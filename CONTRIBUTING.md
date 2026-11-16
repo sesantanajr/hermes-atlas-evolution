@@ -21,7 +21,7 @@ cd hermes-atlas-evolution
 python -m unittest discover -s tests -v
 ```
 
-The same suite runs on GitHub Actions on every push and pull request ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)): on Linux with Python 3.11, 3.12 and 3.13, and on macOS and Windows with Python 3.13. Tests that are POSIX by design (permission bits, the liveness probe, symlinked runtimes) skip themselves on Windows; anything else that fails there is a bug. Compute dates with `experience.utc_datetime` or `utc_day`, never `datetime.fromtimestamp`, which refuses times before 1970 on Windows.
+The same suite runs on GitHub Actions on every push and pull request ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)): on Linux with Python 3.11, 3.12, 3.13 and 3.14, and on macOS and Windows with Python 3.13. A lint job runs `ruff` for undefined names, unused imports and syntax the oldest supported Python refuses (`ruff check --target-version py311 --select F,E9,PLE`), and byte-compiles everything with Python 3.11. Run the same before a pull request if you have ruff; the plugin itself never depends on it. Tests that are POSIX by design (permission bits, the liveness probe, symlinked runtimes) skip themselves on Windows; anything else that fails there is a bug. Compute dates with `experience.utc_datetime` or `utc_day`, never `datetime.fromtimestamp`, which refuses times before 1970 on Windows.
 
 When Hermes Agent is installed, run the suite a second time with the Python interpreter of that installation, the one that can `import agent.redact`. The tests then also exercise Hermes' native redactor and the interpreter your users run:
 
@@ -48,7 +48,8 @@ python -m hermes_atlas_evolution --home /tmp/evolution-test --hermes-version 0.2
 
 - **Standard library only.** The plugin has no runtime dependency. Optional integrations are imported lazily and must degrade when the package is missing.
 - **Public plugin API only.** Use `ctx` and the modules of the published Hermes plugin API. The one exception is read-only introspection of what Hermes has already loaded (the health radar's plugin list, the guard's view of where Hermes lives, the Hermes version the command reads, the session origin the turn hooks ask for and the plugin isolation mode `status` reads): look the module up in `sys.modules` without importing it, wrap the call, and skip the reading when it is missing or fails. `hermes plugins validate` lists imports of private Hermes modules. Look up optional `ctx` methods with `getattr` so that an older or stricter host still loads the plugin.
-- **Tests use `unittest`** and temporary directories. A fix comes with a regression test that fails without it.
+- **Tests use `unittest`** and temporary directories. A fix comes with a regression test that fails without it. Close every connection a test opens (`addCleanup`): the suite should print no `ResourceWarning`.
+- **The dashboard panel** (`dashboard/`) is plain JavaScript on the host's plugin SDK, with no build step and no dependency. It renders text with React elements, never `innerHTML`, and its API only reads.
 - **Thresholds are named constants** at the top of their module. When you change one, update `docs/evolution-loop.md` and `docs/pt-BR/evolution-loop.md` in the same pull request.
 - **Validate at the edge.** Functions that receive settings or hook payloads check types and ranges and raise `ValueError` with a message an operator can act on. Inside the gateway, settings fall back to safe defaults instead.
 - **Bound every read.** Files and databases that belong to Hermes are opened read-only, with a size limit and, where a scan can be slow, a deadline.
@@ -88,7 +89,7 @@ Hermes scans every file of a plugin before it installs or updates it, and a crit
 
 None of these exists yet. Open an issue first, so the approach can be agreed.
 
-- A panel in Hermes Desktop and the Dashboard for the digest and the proposals.
+- Decisions from the dashboard panel (it only reads today), with the same operator checks as the terminal.
 - A bank of regression evaluations, to test a change against fixed tasks and not only against the following week.
 - Sending the skills that fail most, by outcome, to an optimizer such as GEPA through NousResearch's `hermes-agent-self-evolution`, with the results going through the same proposal queue.
 - Field results: run the loop on a real gateway for a few weeks and compare the lesson verdicts and the skills flagged by outcome with a manual review of the same turns. [Hermes integration](docs/hermes-integration.md#where-the-next-validation-has-the-most-value) lists where validation has the most value.

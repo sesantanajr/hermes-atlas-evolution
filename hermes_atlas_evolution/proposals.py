@@ -15,6 +15,9 @@ from . import lessons as playbook
 RISKS = ("low", "medium", "high")
 REOPEN_AFTER_SECONDS = 30 * 86_400
 REGRESSION_DAYS = 30
+INVESTIGATE_MIN_COUNT = 5   # failures in the window before an untemplated one is worth an investigation
+INVESTIGATE_MIN_DAYS = 2
+INVESTIGATE_LIMIT = 100     # at most this many investigation proposals are kept open
 # Who wrote a lesson decides the risk of showing it to the agent: fixed templates, a model, or the agent itself.
 LESSON_RISK = {"derived": "low", "operator": "low", "reflector": "medium", "agent": "high"}
 _UNTEMPLATED = ("code_exception", "command_failed", "other", "auth", "network")
@@ -35,6 +38,25 @@ def _upsert(conn, seen: set, code: str, kind: str, risk: str, subject: str, evid
 
 
 _INSTEAD = {"en": "<what to do instead>", "pt": "<o que fazer no lugar>"}
+
+
+def investigate_candidates(conn: sqlite3.Connection, *, now: float, days: int = 7) -> list[dict]:
+    """Every untemplated failure of the last `days` that qualifies for an investigation proposal, in the shape of
+    signals.failure_summary. Unlike that summary it has no top-N cut, so a proposal does not expire and come back
+    as busier failures move it out of the ranking; INVESTIGATE_LIMIT only bounds a pathological profile."""
+    from .experience import day_offset, utc_day
+
+    marks = ",".join("?" * len(_UNTEMPLATED))
+    rows = conn.execute(f"""SELECT f.signature, f.tool, f.klass, f.hint, SUM(d.count) AS recent,
+          COUNT(DISTINCT d.day) AS recent_days
+        FROM failure f JOIN failure_daily d ON d.signature=f.signature
+        WHERE d.day BETWEEN ? AND ? AND f.klass IN ({marks}) AND f.tool != 'unknown' GROUP BY f.signature
+        HAVING SUM(d.count) >= ? AND COUNT(DISTINCT d.day) >= ?
+        ORDER BY recent DESC, recent_days DESC, f.signature LIMIT ?""",
+                        (day_offset(now, days - 1), utc_day(now), *_UNTEMPLATED, INVESTIGATE_MIN_COUNT,
+                         INVESTIGATE_MIN_DAYS, INVESTIGATE_LIMIT)).fetchall()
+    return [{"signature": row["signature"], "tool": row["tool"], "class": row["klass"], "hint": row["hint"],
+             "count": row["recent"], "days": row["recent_days"]} for row in rows]
 
 
 def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None, reviews: dict | None = None,
@@ -79,7 +101,8 @@ def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None,
                  "input_tokens": reviews["input_tokens"], "output_tokens": reviews["output_tokens"]},
                 "hermes config set skills.creation_nudge_interval 20", now)
     for item in failures or ():
-        if item["class"] in _UNTEMPLATED and item["count"] >= 5 and item["days"] >= 2 and item["tool"] != "unknown":
+        if (item["class"] in _UNTEMPLATED and item["count"] >= INVESTIGATE_MIN_COUNT and item["days"] >= INVESTIGATE_MIN_DAYS
+                and item["tool"] != "unknown"):
             _upsert(conn, seen, f"investigate:{item['signature']}", "investigate_failure", "low", item["tool"],
                     {"class": item["class"], "hint": item["hint"], "count": item["count"], "days": item["days"]},
                     f"hermes evolution lessons add --tool {item['tool']} \"{_INSTEAD.get(lang, _INSTEAD['en'])}\"", now)
@@ -129,6 +152,8 @@ def decide(conn: sqlite3.Connection, proposal_id: int, decision: str, *, now: fl
             status = "approved"
     elif row["kind"] == "lesson":
         playbook.set_status(conn, evidence["lesson_id"], "retired", now=now)
+    elif row["kind"] == "lesson_retire":   # the owner keeps the lesson: auto mode must not retire it anyway
+        playbook.keep(conn, evidence["lesson_id"], now=now)
     note = " ".join(note.split())[:200] if isinstance(note, str) and note.strip() else None
     conn.execute("UPDATE proposal SET status=?, updated=?, note=? WHERE id=?", (status, now, note, proposal_id))
     return {"id": proposal_id, "kind": row["kind"], "status": status, "applied": applied,

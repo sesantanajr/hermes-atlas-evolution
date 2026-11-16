@@ -106,6 +106,22 @@ ADDITIVE_TABLES = (
     # a reused lesson id.
     ("lesson_owner_wait", "CREATE TABLE IF NOT EXISTS lesson_owner_wait (lesson_id INTEGER PRIMARY KEY, "
                           "signature TEXT NOT NULL) WITHOUT ROWID"),
+    # Lessons a pack brought in (packs.apply), and from where. Their evidence was gathered in another profile, so
+    # lessons.tidy does not withdraw them for lacking local failures while they wait.
+    ("lesson_import", "CREATE TABLE IF NOT EXISTS lesson_import (lesson_id INTEGER PRIMARY KEY, source TEXT NOT NULL, "
+                      "at REAL NOT NULL) WITHOUT ROWID"),
+    # The failures and tool calls of a lesson's activation day up to the moment it was activated (lessons.
+    # _record_change): the baseline adds them, so a lesson activated right after a one-day burst has one.
+    ("lesson_activation", "CREATE TABLE IF NOT EXISTS lesson_activation (lesson_id INTEGER PRIMARY KEY, "
+                          "activated REAL NOT NULL, failures INTEGER NOT NULL, calls INTEGER NOT NULL) WITHOUT ROWID"),
+    # Active lessons the owner chose to keep by rejecting the proposal to retire them: auto mode no longer
+    # retires them for that activation (lessons.evaluate). `activated` ties the decision to one activation.
+    ("lesson_keep", "CREATE TABLE IF NOT EXISTS lesson_keep (lesson_id INTEGER PRIMARY KEY, activated REAL NOT NULL, "
+                    "at REAL NOT NULL) WITHOUT ROWID"),
+    # Reflector calls that raised, per failure signature: after a few in a row the signature waits, so one
+    # excerpt a provider keeps refusing does not take every call of every day (reflector.reflect).
+    ("reflector_backoff", "CREATE TABLE IF NOT EXISTS reflector_backoff (signature TEXT PRIMARY KEY, "
+                          "failures INTEGER NOT NULL, last_attempt REAL NOT NULL, retry_after REAL NOT NULL) WITHOUT ROWID"),
     # Per-signature lookups (lessons, promotion, the listing) would scan these tables once per signature.
     ("failure_daily_signature", "CREATE INDEX IF NOT EXISTS failure_daily_signature ON failure_daily(signature)"),
     ("failure_owner_daily_signature",
@@ -167,12 +183,50 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
-def prune(conn: sqlite3.Connection, *, now: float) -> None:
+RETENTION_STEP_DAYS = 2      # how far past the newest day stored a prune may date its retention window
+RETENTION_CONFIRM_DAYS = 3   # days stored past the clock the last prune used before a jump of the clock is believed
+_DAILY_TABLES = ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "review_daily",
+                 "skill_outcome_daily", "guard_daily", "failure_owner_daily", "approval_daily")
+
+
+def _day_start(day) -> float | None:
+    try:
+        return (datetime.fromisoformat(day).replace(tzinfo=timezone.utc) - _EPOCH).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def retention_clock(conn: sqlite3.Connection, *, now: float) -> float:
+    """The time retention counts back from: `now`, but never more than RETENTION_STEP_DAYS past the newest day
+    stored. A clock far ahead, such as a machine that booted before its time sync, would otherwise delete every
+    aggregate at once.
+
+    Days stored past the clock the previous prune used (kept in the `cursor` table) may have been written by that
+    clock that is far ahead, so they count only once there are RETENTION_CONFIRM_DAYS of them: a clock that stayed
+    there, as after a real pause, is believed, and retention catches up then."""
+    saved = conn.execute("SELECT value FROM cursor WHERE key='retention_day'").fetchone()
+    last = _day_start(saved[0]) if saved else None
+    bound = "9999" if last is None else utc_day(last + RETENTION_STEP_DAYS * 86_400)
+    beyond = conn.execute("SELECT COUNT(*) FROM (" + " UNION ".join(
+        f"SELECT day FROM {table} WHERE day > ?" for table in _DAILY_TABLES) + ")", (bound,) * len(_DAILY_TABLES)).fetchone()[0]
+    if beyond >= RETENTION_CONFIRM_DAYS:
+        bound = "9999"
+    newest = conn.execute("SELECT MAX(day) FROM (" + " UNION ALL ".join(
+        f"SELECT MAX(day) AS day FROM {table} WHERE day <= ?" for table in _DAILY_TABLES) + ")",
+                          (bound,) * len(_DAILY_TABLES)).fetchone()[0]
+    start = _day_start(newest)
+    clock = now if start is None else min(now, start + RETENTION_STEP_DAYS * 86_400)
+    conn.execute("INSERT OR REPLACE INTO cursor VALUES ('retention_day', ?)", (utc_day(clock),))
+    return clock
+
+
+def prune(conn: sqlite3.Connection, *, now: float) -> float:
     """Drop aggregates older than the retention window. Lessons, retired ones included, and open proposals are
-    kept."""
+    kept. The window counts back from `retention_clock`, which it returns; failure excerpts expire by `now`."""
+    excerpts_before = now - SAMPLE_DAYS * 86_400
+    now = retention_clock(conn, now=now)
     cutoff = day_offset(now, RETENTION_DAYS)
-    for table in ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "review_daily",
-                  "skill_outcome_daily", "guard_daily", "failure_owner_daily", "approval_daily"):
+    for table in _DAILY_TABLES:
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))
     old = now - RETENTION_DAYS * 86_400
     conn.execute("DELETE FROM failure WHERE last_seen < ? AND signature NOT IN "
@@ -181,8 +235,11 @@ def prune(conn: sqlite3.Connection, *, now: float) -> None:
     conn.execute("DELETE FROM proposal WHERE status NOT IN ('open','approved') AND updated < ?", (old,))
     # Lessons are kept, retired ones included: a deleted row would free its id for another lesson, and a sentence
     # the owner turned down would come back as new once its record was gone.
-    # Excerpts expire here too, so they do not outlive their window when no learning pass runs.
+    # Excerpts expire here too, so they do not outlive their window when no learning pass runs. They expire by the
+    # clock itself: losing one early costs a draft, keeping one late breaks a promise.
     conn.execute("DELETE FROM failure_sample WHERE updated < ? OR signature NOT IN (SELECT signature FROM failure)",
-                 (now - SAMPLE_DAYS * 86_400,))
+                 (excerpts_before,))
+    conn.execute("DELETE FROM reflector_backoff WHERE signature NOT IN (SELECT signature FROM failure)")
     conn.execute("DELETE FROM failure_owner WHERE signature NOT IN (SELECT signature FROM failure)")
     conn.execute("DELETE FROM failure_owner_daily WHERE signature NOT IN (SELECT signature FROM failure)")
+    return now

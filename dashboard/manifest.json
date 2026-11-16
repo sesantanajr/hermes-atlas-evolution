@@ -1,0 +1,11 @@
+{
+  "name": "hermes-atlas-evolution",
+  "label": "Evolution",
+  "description": "What this profile learned from its own failures, what waits for your decision, and the weekly digest. Read-only: decisions stay in your terminal.",
+  "icon": "Sparkles",
+  "version": "0.8.0",
+  "tab": { "path": "/evolution", "position": "after:analytics" },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

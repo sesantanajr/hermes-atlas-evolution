@@ -111,6 +111,7 @@ class HistoryTest(Base):
         import sqlite3
 
         self.db = sqlite3.connect(self.home / "state.db")
+        self.addCleanup(self.db.close)
         self.db.executescript("""
             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, user_id TEXT, parent_session_id TEXT,
                 started_at REAL, ended_at REAL, end_reason TEXT);

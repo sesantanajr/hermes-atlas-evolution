@@ -7,7 +7,6 @@ when the operator selected a lessons mode that allows it.
 
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 from pathlib import Path
@@ -140,8 +139,9 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             reflection = reflector.reflect(conn, reflect, now=now, lang=opts["language"],
                                            daily_limit=opts["reflector_daily_limit"], deadline=deadline)
         conn.commit()
-        # Baselines wait for history the backfill is still replaying ("running"; "waiting" before the mark).
-        pending = backfill.replay_until(home) if history.get("status") in ("running", "waiting") else None
+        # Baselines wait for history the backfill has not settled yet: still replaying ("running"), before the mark
+        # ("waiting"), or a pass that could not read it ("unreadable"), so none is frozen from part of the history.
+        pending = backfill.replay_until(home) if history.get("status") not in backfill.SETTLED else None
         effects = lessons.evaluate(conn, now=now, mode=opts["lessons"], history_until=pending)
         conn.commit()   # the skill files and the Curator ledger are read with no write lock held
         skills = skill_health(home, now=now, days=7)
@@ -153,7 +153,9 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         except (sqlite3.Error, ValueError, OSError):
             verdicts = experiments.evaluate_changes(conn, None, now=now)
         conn.commit()
-        failures = signals.failure_summary(conn, now=now, days=7)
+        # Every recurring failure that could warrant an investigation, not only the week's most frequent ones: a
+        # proposal must not expire and come back as the ranking moves.
+        failures = proposals.investigate_candidates(conn, now=now, days=7)
         turns = signals.turn_summary(conn, now=now, days=7, surfaces=("local", "gateway"))
         start_day, end_day = logwatch.local_days(now, 7)
         reviews = logwatch.review_summary(conn, start_day=start_day, end_day=end_day)

@@ -1,7 +1,6 @@
 """Regression tests for the findings of the 0.6.0 data audit."""
 
 import json
-import os
 import tempfile
 import unittest
 from datetime import datetime, timezone

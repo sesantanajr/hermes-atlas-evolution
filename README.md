@@ -68,21 +68,25 @@ hermes gateway restart
 hermes evolution status
 ```
 
-The command-line `plugins update` only replaces the files: it does not reload a gateway that is already running, so restart the gateway once at the end. (Hermes does reload a running gateway on install, enable and disable, and when the update is applied from Hermes Desktop, the dashboard or `/plugins update` in a chat.) If something is still running (a turn, a cron job, a delegated task), the restart lists it and asks `Interrupt them and restart the gateway? [y/N]`: answer N and run it again in a few minutes, or y to interrupt them. `status` points out a gateway that still runs older code.
+The command-line `plugins update` only replaces the files: it does not reload a gateway that is already running, so restart the gateway once at the end. The dashboard shows the **Evolution** tab once it rescans its plugins; if it does not appear, restart the dashboard. (Hermes does reload a running gateway on install, enable and disable, and when the update is applied from Hermes Desktop, the dashboard or `/plugins update` in a chat.) If something is still running (a turn, a cron job, a delegated task), the restart lists it and asks `Interrupt them and restart the gateway? [y/N]`: answer N and run it again in a few minutes, or y to interrupt them. `status` points out a gateway that still runs older code.
 
 ## What it does
 
+- **Shows it all in the Hermes dashboard.** An **Evolution** tab in the dashboard and in Hermes Desktop shows what the profile learned, what waits for your decision with the exact command to run, the digest and the status. It only reads: decisions stay in your terminal ([details](docs/hermes-integration.md#the-dashboard-panel)).
+- **Carries lessons between profiles.** `lessons export` and `lessons import --from <profile>` bring what one profile learned to another, or to another machine, after showing you each sentence. Imported lessons wait until your own turns hit their failure there, and are measured there like any other ([details](docs/evolution-loop.md#lesson-packs)).
 - **Learns from the history Hermes already keeps.** The first passes replay the last 14 days of the profile's sessions, so a failure that recurred last week can become a lesson on the first day.
-- **Turns repeated tool failures into lessons.** A failure seen at least 3 times, in 2 sessions or on 2 days, becomes one sentence such as "When calling `example_search`, always pass the required argument `query`." The agent reads the active lessons at the start of each session.
+- **Turns repeated tool failures into lessons.** A failure seen at least 3 times, in 2 sessions or on 2 days, becomes one sentence such as "When calling `example_search`, always pass the required argument `query`." Calls that Hermes ends at its own deadline count too. The agent reads the active lessons at the start of each session.
 - **Tells your turns from everyone else's.** A lesson applies by itself only after your own turns hit the failure (your CLI, TUI or Desktop, your automations, a chat with a sender you list in `owner_sender_ids`, or any chat of a platform you list in `owner_platforms`, such as a private bot or your own interface). Failures that only other people caused in a chat wait for your approval, and a chat where someone else may read along gets only template lessons, never text you or a model wrote. `hermes evolution owner` shows each chat channel with its senders and prints the command that sets this up.
 - **Finds the bottlenecks you can remove.** Approvals refused where nobody could approve (one-shot runs, automations, subagents), with the Hermes settings that decide them; the tools that take the most time, and a tool that is slow call after call.
 - **Keeps the queue short.** Lessons nobody decided on yet are withdrawn when the evidence no longer supports them, when they repeat another lesson's sentence, or when they only give advice every failure would get.
 - **Measures before and after.** Each lesson against its own failure, each skill rewrite by the turns that loaded the skill, each setting change by the week before and the week after. In `auto` mode a lesson that does not help is retired.
 - **Asks an AI model when no template fits.** The reflector drafts a lesson through Hermes, at most 6 calls a day by default, and the draft waits for you.
 - **Watches Hermes' health.** It points out sessions cut off instead of closing normally, conversations that send too much text to the model, compactions that free little room, and plugins that fail to load, clash with each other or break another plugin's commands (those failures never become lessons).
-- **Protects the running Hermes.** It vetoes agent commands that would stop, restart or kill the gateway (as a systemd unit on Linux, a LaunchAgent on macOS or a Windows service or task) or delete the Python, the code or the profile that Hermes runs on, and it keeps the agent from changing this plugin's settings or switching it off. The agent is told to leave those to you.
+- **Protects the running Hermes.** It vetoes agent commands that would stop, restart or kill the gateway (as a systemd unit on Linux, a LaunchAgent on macOS or a Windows service or task) or delete the Python, the code or the profile that Hermes runs on, and it keeps the agent from changing this plugin's settings or switching it off. It reads the command the way the shell runs it: inside `if`/`for` blocks, `$(...)`, `python -m hermes_cli.main`, `kill $(pgrep ...)` and the other forms in [the guard's details](docs/hermes-integration.md#the-runtime-guard). The agent is told to leave those to you.
 - **Runs by itself and asks before changing Hermes.** A background pass runs at most once an hour per profile. Changes to Hermes, such as locking a skill, are proposed with the exact command for you to run.
 - **Speaks your language.** Every message, the digest and the lessons come in English or Brazilian Portuguese, following the profile.
+
+![The Evolution tab in the Hermes dashboard: active lessons, what waits for your decision with the command to run, and the commands that share lessons with another profile](docs/dashboard-panel.png)
 
 ## Commands
 
@@ -96,6 +100,8 @@ Subcommands of `hermes evolution`. `--lang en|pt` works with any of them.
 | `lessons review` | Goes through every lesson that waits for approval, with its exact text: `a` approves, `r` rejects, Enter skips. |
 | `lessons approve <id>` | Activates one waiting lesson after showing its exact text. |
 | `proposals list`, `proposals approve <id>`, `proposals reject <id>` | The queue of proposals, and your decision on one. |
+| `lessons export [--out FILE]` | The active lessons as a pack another profile or machine can import. |
+| `lessons import FILE` or `lessons import --from <profile>` | Brings in the lessons of a pack or of another profile, after showing each one (`--dry-run` changes nothing). |
 | `learn` | Runs a pass now instead of waiting for the background one. |
 | `owner` | Lists each chat channel with its senders; `owner add <id>` or `owner add-platform <name>` prints the `hermes config set` command that marks one as you. In your own terminal only. |
 

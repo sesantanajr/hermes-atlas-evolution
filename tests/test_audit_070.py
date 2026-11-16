@@ -4,7 +4,6 @@ the reflector excerpt, generic drafts, lesson ids, unattended approvals, indexes
 import hashlib
 import io
 import json
-import os
 import sqlite3
 import tempfile
 import unittest
@@ -274,7 +273,7 @@ class LessonIdTest(Base):
 
     def test_a_withdrawn_lesson_comes_back_with_its_id_when_its_failure_does(self):
         with experience(self.home) as conn:
-            signature = self.failure(conn, "terminal", "timeout", "", 5, 3)
+            self.failure(conn, "terminal", "timeout", "", 5, 3)
             drafted = self.failure(conn, "memory", "other", "y", 9, 4)
             bland = self.failure(conn, "terminal", "other", "z", 9, 4)
             [lesson] = lessons.derive(conn, now=NOW, mode="suggest")

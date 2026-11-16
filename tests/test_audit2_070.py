@@ -15,7 +15,7 @@ from hermes_atlas_evolution import backfill, lessons
 from hermes_atlas_evolution.experience import experience, prune, utc_day
 from hermes_atlas_evolution.guard import check
 from hermes_atlas_evolution.operations import close_observers
-from hermes_atlas_evolution.signals import NOT_LATENCY, approval_setting, classify, record_tool, slow_calls
+from hermes_atlas_evolution.signals import NOT_LATENCY, approval_setting, record_tool, slow_calls
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400

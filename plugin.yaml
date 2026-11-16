@@ -1,5 +1,5 @@
 name: hermes-atlas-evolution
-version: "0.7.0"
+version: "0.8.0"
 requires_hermes: ">=0.23.1"
 description: >-
   A measured self-improvement loop for Hermes Agent. Learns from Hermes' own history on the first pass,
@@ -8,7 +8,8 @@ description: >-
   call, approvals nobody could answer, heavy context, weak compaction) and stops the agent from taking down
   the gateway it runs on. Lessons from fixed templates apply at once (after the owner's own
   turns hit the failure) and are retired when they do not help; text written by a model or by the agent waits
-  for your approval.
+  for your approval. Lessons travel between profiles as packs, and an Evolution tab in the dashboard shows what
+  was learned and what waits for you.
 license: MIT
 homepage: https://github.com/sesantanajr/hermes-atlas-evolution
 author: "Sérgio Sant'Ana Júnior"
@@ -121,5 +122,6 @@ config_schema:
     description: >-
       Stop the agent from taking down the Hermes it runs in. Vetoes terminal commands that restart or kill the
       gateway (systemd, launchd or a Windows service or task; the agent is told to leave the restart to the owner,
-      whose hermes gateway restart asks before interrupting running turns) or that delete the running Python, the
-      Hermes code or this profile. Off where plugins run in a plugin host.
+      whose hermes gateway restart asks before interrupting running turns), that delete the running Python, the
+      Hermes code or this profile, or that change this plugin's settings or switch it off. Off where plugins run
+      in a plugin host.

@@ -150,10 +150,11 @@ def _register_skills(ctx) -> None:
                 getLogger(__name__).warning("Atlas Evolution could not register the bundled skill %s", child.name)
 
 
-# Session ends whose on_session_finalize text Hermes 0.23.1 drops: a local session closed by its viewer
-# (CLI, TUI, Desktop are viewers of the gateway) or reaped. See gateway/session_viewer_close.py.
-_UNSHOWN_END_REASONS = frozenset({"cli_close", "tui_close", "new_session", "session_reset", "ws_orphan_reap",
-                                  "startup_orphan_reap", "ws_disconnect", "idle_timeout", "lru_evict", "tui_shutdown"})
+# Session ends whose on_session_finalize text Hermes 0.23.1 shows: the classic CLI's exit ("shutdown") and its /new
+# or /reset ("session_boundary"); the TUI and Desktop backend pass no reason and return the text with
+# session.close. Every other reason (a viewer closing a gateway session, /resume, /branch, a reap) drops it, so the
+# day's notice waits for an end that shows it. See cli.py, hermes_cli/cli_session_mixin.py, tui_gateway/.
+_SHOWN_END_REASONS = frozenset({"shutdown", "session_boundary"})
 _OWNER_ONLY_TOOL = ("Atlas Evolution's tools answer only in the owner's own sessions (CLI, TUI, Desktop, automations, "
                     "or a chat with a sender listed in owner_sender_ids).")
 
@@ -359,7 +360,9 @@ class _Plugin:
                 record_skill_correction(self.home, self.turns.recent_skills(payload.get("session_id")))
             self.research.start(payload)
             self.turns.start(payload)
-            return shared_context(self.home, payload, self.config) if self.legacy else None
+            # The 0.1 shared notes are the owner's: never recalled into a turn that serves someone else.
+            return shared_context(self.home, payload, self.config) \
+                if self.legacy and self.served_owner(payload.get("session_id")) else None
         except Exception:
             return None
 
@@ -477,7 +480,8 @@ class _Plugin:
         try:
             if payload.get("parent_session_id") or surface_of(payload.get("platform")) != "local":
                 return None
-            if payload.get("reason") in _UNSHOWN_END_REASONS:
+            reason = payload.get("reason")
+            if reason is not None and reason not in _SHOWN_END_REASONS:
                 return None   # Hermes drops this text (no viewer is left): the day's notice waits for one it shows
             return pending_notice(self.home, now=time.time(), lang=self.lang)
         except Exception:   # a notice is a convenience; it must never disturb the end of a session
@@ -576,10 +580,12 @@ def _start(plugin: _Plugin) -> None:
 
 
 def _register_guard(ctx, plugin: _Plugin) -> None:
-    """pre_tool_call: remember what the agent wrote and, with runtime_guard on, veto what would take Hermes down.
+    """pre_tool_call, only with runtime_guard on: veto what would take Hermes down, and remember what the agent
+    wrote (a rewrite by another plugin is then told from the agent's own command).
 
-    Not in a plugin host (plugins.isolation: host). There every pre_tool_call is a call into the host, and
-    Hermes blocks a tool whose pre_tool_call fails: a host that crashed would block every tool of the profile."""
+    Hermes blocks a tool whose pre_tool_call fails or stalls, so the hook is not registered at all when the guard
+    is off. Not in a plugin host (plugins.isolation: host) either: there every pre_tool_call is a call into the
+    host, and a host that crashed would block every tool of the profile."""
     import os
 
     if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
@@ -588,16 +594,18 @@ def _register_guard(ctx, plugin: _Plugin) -> None:
         getLogger(__name__).info("Atlas Evolution runs in a plugin host here: the runtime guard stays off so a crashed "
                                  "host cannot block every tool of this profile")
         return
-    if plugin.evolution["runtime_guard"]:
-        from hermes_constants import get_default_hermes_root
+    if not plugin.evolution["runtime_guard"]:
+        return
+    from hermes_constants import get_default_hermes_root
 
-        from .guard import RuntimeGuard, protected_paths
-        from .signals import record_guard
+    from .guard import RuntimeGuard, own_process, protected_paths, protected_trees
+    from .signals import record_guard
 
-        home = plugin.home
-        plugin.guard = RuntimeGuard(protected=protected_paths(hermes_root=get_default_hermes_root(home=home), profile_home=home),
-                                    home=Path.home(), profile=home, lang=plugin.lang,
-                                    on_block=lambda kind: record_guard(home, kind))
+    home = plugin.home
+    plugin.guard = RuntimeGuard(protected=protected_paths(hermes_root=get_default_hermes_root(home=home), profile_home=home),
+                                trees=protected_trees(), own=(Path(__file__).resolve().parent.parent,),
+                                process=own_process(), home=Path.home(), profile=home, lang=plugin.lang,
+                                on_block=lambda kind: record_guard(home, kind))
     ctx.register_hook("pre_tool_call", plugin.pre_tool)
 
 
@@ -660,7 +668,9 @@ def register(ctx):
     ctx.register_hook("on_session_end", plugin.turn_ended)
     ctx.register_hook("on_skill_lifecycle", plugin.skill_event)
     lessons_on = evolution["lessons"] != "off"
-    if lessons_on:   # registered as the manifest declares; silent unless tool_hints is on
+    if lessons_on and evolution["tool_hints"]:
+        # Only with tool_hints on: while any plugin listens, Hermes reads every tool result for this hook and runs
+        # it in a thread of its own. (`hermes plugins validate` notes it as declared but not registered.)
         ctx.register_hook("transform_tool_result", plugin.with_lesson)
     if lessons_on:
         ctx.register_system_prompt_section("hermes-atlas-evolution.playbook", plugin.playbook_section, max_chars=1400)

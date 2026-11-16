@@ -25,6 +25,7 @@ class Base(unittest.TestCase):
         self.addCleanup(close_observers)
         self.home = Path(folder.name)
         self.history = sqlite3.connect(self.home / "state.db")
+        self.addCleanup(self.history.close)
         self.history.executescript("""
             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT, started_at REAL,
                 ended_at REAL, end_reason TEXT);

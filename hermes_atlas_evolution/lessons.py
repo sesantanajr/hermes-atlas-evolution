@@ -25,9 +25,20 @@ BASELINE_DAYS = 14
 EVALUATE_AFTER_DAYS = 5
 EVALUATE_AFTER_CALLS = 20
 RETIRE_AFTER_DAYS = 14
+DERIVE_BATCH = 200   # failures derive reads per pass, most frequent first, among those a template can describe
 TEXT_LIMIT = 240
 _TEXT = re.compile(r"[^\x00-\x08\x0b-\x1f\x7f]{12,%d}\Z" % TEXT_LIMIT)
-_SECRET = re.compile(r"(?:sk-|ghp_|gho_|github_pat_|xox[baprs]-|AKIA|AIza)[A-Za-z0-9_-]{8,}|://[^\s/:@]+:[^\s/@]+@")
+_SECRET = re.compile(r"(?:sk-|sk_live_|sk_test_|rk_live_|rk_test_|ghp_|gho_|ghs_|ghr_|ghu_|github_pat_|glpat-|"
+                     r"xox[a-z]-|AKIA|AIza|ya29\.)[A-Za-z0-9_.-]{8,}|npm_[A-Za-z0-9]{16,}|://[^\s/:@]+:[^\s/@]+@")
+# An opaque token: a long run of token characters with a part (between separators) where letters and digits keep
+# alternating, as in a key or a password. Names joined by separators, such as a tool name, `System32` in a path or
+# a `--flag=4096`, are not one.
+OPAQUE_RUN = 24
+OPAQUE_PART = 8
+OPAQUE_ALTERNATIONS = 3
+_TOKEN_RUN = re.compile(r"[A-Za-z0-9_\-+/=.]{%d,}" % OPAQUE_RUN)
+_TOKEN_PART = re.compile(r"[^_\-+/=.]{%d,}" % OPAQUE_PART)
+_ALTERNATION = re.compile(r"(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])")
 
 # class -> (needs_hint, English, Portuguese). {tool} and {hint} are identifier-like labels.
 TEMPLATES = {
@@ -93,15 +104,40 @@ def render(row, lang: str = "en") -> str:
     return template[2 if lang == "pt" else 1].format(tool=row["tool"], hint=row["hint"])
 
 
+def _opaque(text: str) -> bool:
+    """True when the text holds a token-like run (a key, a password, a session id) rather than words."""
+    return any(len(_ALTERNATION.findall(part)) >= OPAQUE_ALTERNATIONS
+               for run in _TOKEN_RUN.findall(text) for part in _TOKEN_PART.findall(run))
+
+
+def _redactor_changes(text: str) -> bool:
+    """True when Hermes' own secret redactor would change the text. False outside Hermes; a redactor that fails
+    counts as a change, so a failure never lets the text through."""
+    try:
+        from .signals import _native_redactor
+
+        redact = _native_redactor()
+    except Exception:   # outside Hermes, or a plugin copy without it: the patterns of this module still apply
+        return False
+    if redact is None:
+        return False
+    try:
+        return redact(text, force=True) != text   # force: even when the profile turned redaction off
+    except Exception:
+        return True
+
+
 def clean_text(text) -> str | None:
     """A lesson sentence in canonical form, or None. Control, format (bidi, zero-width) and private-use
-    characters are refused rather than stripped, so what the operator reads is exactly what the agent gets."""
+    characters are refused rather than stripped, so what the operator reads is exactly what the agent gets.
+    Text that looks like it carries a credential is refused: a known key prefix, credentials in a URL, an opaque
+    token, or anything Hermes' own redactor would hide."""
     if not isinstance(text, str):
         return None
     text = " ".join(unicodedata.normalize("NFKC", text).split())
     if any(unicodedata.category(char) in ("Cc", "Cf", "Co", "Cs", "Zl", "Zp") for char in text):
         return None
-    if not _TEXT.fullmatch(text) or _SECRET.search(text):
+    if not _TEXT.fullmatch(text) or _SECRET.search(text) or _opaque(text) or _redactor_changes(text):
         return None
     return text
 
@@ -152,8 +188,16 @@ def generic_advice(text: str) -> bool:
 
 
 def _record_change(conn, lesson_id: int, now: float, subject: str) -> None:
+    """Every activation passes here (`now` is the moment it took effect). Besides the tracked change, it keeps the
+    failures and tool calls of the activation day so far: the baseline (evaluate) is counted later, from whole
+    days before that day, and without them a lesson activated right after a one-day burst would have none."""
     conn.execute("""INSERT OR IGNORE INTO change(ref, kind, subject, detail, at) VALUES (?, 'lesson', ?, '{}', ?)""",
                  (f"lesson:{lesson_id}:{int(now)}", subject, now))
+    row = conn.execute("SELECT signature, tool FROM lesson WHERE id=?", (lesson_id,)).fetchone()
+    if row is not None and row[0] is not None:
+        day = utc_day(now)
+        failures, calls = _counts(conn, row[0], row[1], day, day)
+        conn.execute("INSERT OR REPLACE INTO lesson_activation VALUES (?, ?, ?, ?)", (lesson_id, now, failures, calls))
 
 
 OWNER_ACTIVATION = 2   # failures in the owner's own turns before a derived lesson may activate by itself
@@ -198,11 +242,18 @@ def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> li
     hit it too (promote)."""
     if mode not in MODES or mode == "off":
         return []
+    # Only failures a template can describe are read, so the batch is never filled with ones that cannot become a
+    # lesson (no template, no detail where the template needs one, no tool name, one session on one day).
+    classes = list(TEMPLATES)
+    detailed = [klass for klass, template in TEMPLATES.items() if template[0]]
     rows = conn.execute(f"""SELECT f.signature, f.tool, f.klass, f.hint, f.total, f.sessions,
           (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=f.signature) AS days, l.id AS lesson_id
         FROM failure f LEFT JOIN lesson l ON l.signature=f.signature
-        WHERE f.total >= ? AND (l.id IS NULL OR l.origin='derived' AND l.status='retired' AND l.verdict IS '{WITHDRAWN}')
-        ORDER BY f.total DESC LIMIT 200""", (MIN_TOTAL,)).fetchall()
+        WHERE f.total >= ? AND f.tool != 'unknown' AND f.klass IN ({",".join("?" * len(classes))})
+          AND (f.hint != '' OR f.klass NOT IN ({",".join("?" * len(detailed))}))
+          AND (f.sessions >= 2 OR (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=f.signature) >= 2)
+          AND (l.id IS NULL OR l.origin='derived' AND l.status='retired' AND l.verdict IS '{WITHDRAWN}')
+        ORDER BY f.total DESC LIMIT ?""", (MIN_TOTAL, *classes, *detailed, DERIVE_BATCH)).fetchall()
     created = []
     rewriters = rewriter_binaries(conn)
     taken = _decided_keys(conn, waiting=True)
@@ -295,6 +346,8 @@ def tidy(conn: sqlite3.Connection, *, now: float) -> int:
     lower it), when it would say the same sentence as another lesson (active, turned down, or a candidate with
     more evidence), when its missing binary turned out to come from another plugin's rewrite, or, for a draft,
     when it only gives advice every failure would get. Active, retired and operator lessons are never touched.
+    A lesson a pack brought in (packs.apply) is not withdrawn for lacking local failures: its evidence was
+    gathered in another profile, and it waits for the owner's own turns here.
     A withdrawn lesson stays as retired with the verdict WITHDRAWN, so its id is never given to another lesson,
     and derive brings it back, same id and text, if its failure returns. Run it only when the history replay is
     settled."""
@@ -302,13 +355,14 @@ def tidy(conn: sqlite3.Connection, *, now: float) -> int:
     taken = _decided_keys(conn, waiting=False)
     rows = conn.execute("""SELECT l.id, l.tool, l.klass, l.hint, l.origin, l.text,
           COALESCE(f.total, 0) AS total, COALESCE(f.sessions, 0) AS sessions,
-          (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=l.signature) AS days
+          (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=l.signature) AS days,
+          EXISTS (SELECT 1 FROM lesson_import i WHERE i.lesson_id=l.id) AS imported
         FROM lesson l LEFT JOIN failure f ON f.signature=l.signature
         WHERE (l.status='candidate' AND l.origin='derived') OR (l.status='quarantined' AND l.origin='reflector')
         ORDER BY total DESC, l.id""").fetchall()
     withdrawn = []
     for row in rows:
-        stale = row["total"] < MIN_TOTAL or row["sessions"] < 2 and row["days"] < 2
+        stale = not row["imported"] and (row["total"] < MIN_TOTAL or row["sessions"] < 2 and row["days"] < 2)
         foreign = row["klass"] == "missing_dependency" and row["hint"] in rewriters
         bland = row["origin"] == "reflector" and generic_advice(row["text"])
         key = _text_key(row["tool"], row["klass"], row["hint"]) if row["origin"] == "derived" else None
@@ -377,6 +431,13 @@ def set_status(conn: sqlite3.Connection, lesson_id: int, status: str, *, now: fl
         if status == "active":
             _record_change(conn, lesson_id, now, row["tool"])
     return {"id": lesson_id, "status": status, "previous": row["status"]}
+
+
+def keep(conn: sqlite3.Connection, lesson_id: int, *, now: float) -> None:
+    """The owner keeps an active lesson whose retirement was proposed: auto mode no longer retires it for this
+    activation (evaluate still measures it and reports the verdict). Another activation needs another decision."""
+    conn.execute("""INSERT OR REPLACE INTO lesson_keep(lesson_id, activated, at)
+        SELECT id, activated, ? FROM lesson WHERE id=? AND status='active' AND activated IS NOT NULL""", (now, lesson_id))
 
 
 def active_lessons(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -453,11 +514,14 @@ def _calendar_days(start: str, end: str) -> int:
 def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest", history_until: float | None = None) -> list[dict]:
     """Measure each active lesson bound to a failure against that failure before and after activation.
 
-    The baseline is the 14 days before activation, counted once and frozen, so retention never erases it.
-    While the backfill is still replaying Hermes' history up to `history_until`, a baseline that reaches
-    into that history waits: frozen now, it would hold only part of it.
-    The after window is the latest 14 days since activation (the mixed activation day is left out of both).
-    Rates are per call when both sides have call volume, otherwise per calendar day of each window."""
+    The baseline is the 14 days before activation plus the activation day up to the moment of activation (kept by
+    _record_change), counted once and frozen, so retention never erases it. While the backfill is still replaying
+    Hermes' history up to `history_until`, a baseline that reaches into that history waits: frozen now, it would
+    hold only part of it.
+    The after window is the latest 14 days since activation (the rest of the activation day is left out).
+    Rates are per call when both sides have call volume, otherwise per calendar day of each window. A baseline
+    without failures gives no verdict but inconclusive: there was nothing to reduce. A lesson the owner chose to
+    keep (keep) is never retired by auto mode."""
     results = []
     today = utc_day(now)
     for row in conn.execute("SELECT * FROM lesson WHERE status='active' AND signature IS NOT NULL AND activated IS NOT NULL").fetchall():
@@ -468,6 +532,10 @@ def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest", his
                 continue
             base_failures, base_calls = _counts(conn, row["signature"], row["tool"], day_offset(row["activated"], BASELINE_DAYS),
                                                 day_offset(row["activated"], 1))
+            same_day = conn.execute("SELECT failures, calls FROM lesson_activation WHERE lesson_id=? AND activated=?",
+                                    (row["id"], row["activated"])).fetchone()
+            if same_day is not None:
+                base_failures, base_calls = base_failures + same_day[0], base_calls + same_day[1]
             conn.execute("UPDATE lesson SET baseline_failures=?, baseline_calls=? WHERE id=?",
                          (base_failures, base_calls, row["id"]))
         after_start = max(day_offset(row["activated"], -1), day_offset(now, AFTER_WINDOW_DAYS - 1))
@@ -482,19 +550,24 @@ def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest", his
         ready = days_active >= EVALUATE_AFTER_DAYS or calls_after >= EVALUATE_AFTER_CALLS
         verdict = None
         if ready and days_after:
-            if base_failures == 0 and failures_after == 0:
-                verdict = "inconclusive"
+            if base_failures == 0:
+                verdict = "inconclusive"   # nothing to reduce: no rate after can show it helped or did not
             elif after <= 0.5 * before:
                 verdict = "effective"
             elif failures_after >= 3 and after >= 0.9 * before:
                 verdict = "ineffective"
             else:
                 verdict = "inconclusive"
-        retire = verdict == "ineffective" and days_active >= RETIRE_AFTER_DAYS and mode == "auto"
+        kept = verdict == "ineffective" and conn.execute(
+            "SELECT 1 FROM lesson_keep WHERE lesson_id=? AND activated=?", (row["id"], row["activated"])).fetchone()
+        retire = verdict == "ineffective" and days_active >= RETIRE_AFTER_DAYS and mode == "auto" and not kept
         if verdict:
-            conn.execute("UPDATE lesson SET verdict=?, rate_before=?, rate_after=?, evaluated=?, status=?, updated=? WHERE id=?",
-                         (verdict, before, after, now, "retired" if retire else "active",
-                          now if retire or verdict != row["verdict"] else row["updated"], row["id"]))
+            # Only while it is still active: an operator who retired it since this pass read it has the last word.
+            cursor = conn.execute("""UPDATE lesson SET verdict=?, rate_before=?, rate_after=?, evaluated=?, status=?, updated=?
+                WHERE id=? AND status='active'""", (verdict, before, after, now, "retired" if retire else "active",
+                                                    now if retire or verdict != row["verdict"] else row["updated"], row["id"]))
+            if not cursor.rowcount:
+                continue
         results.append({"id": row["id"], "tool": row["tool"], "class": row["klass"], "verdict": verdict,
                         "basis": "failures_per_call" if per_call else "failures_per_day",
                         "before": round(before, 4), "after": round(after, 4), "failures_before": base_failures,

@@ -189,7 +189,13 @@ def effective_tool(tool_name, args=None) -> str:
 
 
 def classify(tool_name, status, error_message=None, result=None, args=None) -> dict | None:
-    """Classify one failed tool call. Returns tool, class, hint and signature, or None for a success."""
+    """Classify one failed tool call. Returns tool, class, hint and signature, or None for a success.
+
+    `timeout` is Hermes' own deadline for a tool call (tools.sequential_call / concurrent_batch, on by default
+    in 0.23.1): always the class `timeout`, whatever the text says."""
+    if status == "timeout":
+        found = classify(tool_name, "error", error_message, result, args)
+        return reclassify({**found, "hint": ""}, "timeout") if found else None
     if status not in ("error", "blocked"):
         return None
     tool = effective_tool(tool_name, args)
@@ -256,7 +262,7 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     Hermes setting that decided it when nobody could have answered (see approval_setting), so the radar can tell
     those from the rest and name the setting."""
     status = payload.get("status")
-    if status not in ("ok", "error", "blocked"):
+    if status not in ("ok", "error", "blocked", "timeout"):
         return None
     now = time.time() if now is None else now
     tool = effective_tool(payload.get("tool_name"), payload.get("args"))
@@ -266,7 +272,8 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     duration = payload.get("duration_ms")
     duration = int(min(duration, 86_400_000)) if type(duration) in (int, float) and 0 <= duration < float("inf") else 0
     today = utc_day(now)
-    row = (today, failure["tool"] if failure else tool, int(status == "error"), int(status == "blocked"), duration)
+    row = (today, failure["tool"] if failure else tool, int(status in ("error", "timeout")), int(status == "blocked"),
+           duration)
     seen = ((failure["signature"], failure["tool"], failure["klass"], failure["hint"], now, now,
              _session_tag(payload.get("session_id"))) if failure else None)
     origin_name = label(origin, fallback="unknown") if isinstance(origin, str) else "unknown"
@@ -377,6 +384,8 @@ def surface_of(platform, source=None) -> str:
     and `hermes chat --source tool` run with platform "cli"): local (the owner's CLI, TUI, Desktop, ACP, a
     one-shot run), cron (scheduled and automated work: cron jobs, kanban workers, the Curator), subagent (a
     delegated child) or gateway (a messaging chat, an integration, an A2A peer: someone else may be there)."""
+    if isinstance(platform, str) and platform.strip().lower() == "subagent":
+        return "subagent"   # a delegated child keeps its parent's session source in its copied context
     kind = source if isinstance(source, str) and source.strip() else platform
     if not isinstance(kind, str):
         return "gateway"
@@ -417,6 +426,8 @@ def origin_label(payload: dict) -> str:
     """The session's real origin as a short label (telegram, api_server, oneshot, kanban, ...), for owner
     platforms and approval counts. Never free text."""
     platform = payload.get("platform")
+    if isinstance(platform, str) and platform.strip().lower() == "subagent":
+        return "subagent"
     source = payload.get("source") if isinstance(payload.get("source"), str) else session_source(platform)
     for value in (source, platform):
         if isinstance(value, str) and value.strip():
@@ -524,7 +535,7 @@ class TurnTracker:
         return entry[1]
 
     def tool(self, payload: dict) -> None:
-        if payload.get("status") not in ("ok", "error", "blocked"):
+        if payload.get("status") not in ("ok", "error", "blocked", "timeout"):
             return
         key = _key(payload.get("turn_id"))
         call = _key(payload.get("tool_call_id"))
@@ -535,7 +546,7 @@ class TurnTracker:
             if call:
                 turn.seen.add(call)
             turn.calls += 1
-            turn.errors += int(payload.get("status") == "error")
+            turn.errors += int(payload.get("status") in ("error", "timeout"))
 
     def finish(self, payload: dict, *, clock: float | None = None, now: float | None = None) -> bool:
         key = _key(payload.get("turn_id"))

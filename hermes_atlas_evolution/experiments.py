@@ -68,9 +68,12 @@ def config_snapshot(runtime_config) -> dict[str, str]:
 
 
 def detect_changes(conn: sqlite3.Connection, home: Path, runtime_config, *, now: float) -> list[dict]:
-    """Record configuration and skill changes seen since the last run."""
+    """Record configuration and skill changes seen since the last run. A configuration that could not be read
+    (evolve.CONFIG_UNREAD) is unknown, not empty: nothing is compared, and the last snapshot stays."""
+    from .evolve import CONFIG_UNREAD
+
     found = []
-    if isinstance(runtime_config, dict) and runtime_config:
+    if isinstance(runtime_config, dict) and runtime_config and not runtime_config.get(CONFIG_UNREAD):
         snapshot = config_snapshot(runtime_config)
         saved = conn.execute("SELECT value FROM cursor WHERE key='config_snapshot'").fetchone()
         try:

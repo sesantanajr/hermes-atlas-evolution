@@ -39,10 +39,14 @@ def _history(home: Path) -> sqlite3.Connection | None:
         return None
     try:
         source = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=2)
-        source.execute("SELECT 1 FROM sqlite_master LIMIT 1")
-        return source
     except sqlite3.Error:
         return None
+    try:
+        source.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+    except sqlite3.Error:   # opens, but is not a database it can read: closed here, not left to the collector
+        source.close()
+        return None
+    return source
 
 
 def _columns(source, table: str) -> set[str]:
