@@ -36,7 +36,12 @@ def attach(result, sentence: str, lang: str = "en") -> str | None:
             if KEY in data or isinstance(hint, str) and hint.strip():
                 return None   # already advised, by this plugin or by Hermes' own terminal hints
             data[KEY] = sentence
-            return json.dumps(data, ensure_ascii=False)
+            try:
+                return json.dumps(data, ensure_ascii=False)
+            except (ValueError, RecursionError):
+                # A deep enough stack (Python 3.14, a large thread stack) parses nesting it cannot write back:
+                # the lesson goes after the result as text, as for a result that cannot be parsed at all.
+                pass
     return f"{result}\n\n[{lessons.HINT_LABEL.get(lang, lessons.HINT_LABEL['en'])}] {sentence}"
 
 

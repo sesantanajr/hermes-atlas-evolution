@@ -131,6 +131,18 @@ class AgentShellTest(Base):
         self.assertEqual(own["lessons"][0]["lesson"], self.WRITTEN)   # the operator's own terminal sees it
 
 
+class DeepResultTest(unittest.TestCase):
+    """CI on Python 3.14 with a large stack parsed a deeply nested tool result it then could not write back."""
+
+    def test_a_result_that_parses_but_cannot_be_written_back_gets_the_lesson_as_text(self):
+        from hermes_atlas_evolution import hints
+
+        result = json.dumps({"error": "rg: command not found", "a": [[1]]})
+        with patch("hermes_atlas_evolution.hints.json.dumps", side_effect=RecursionError("stack")):
+            advised = hints.attach(result, "Install rg first.")
+        self.assertTrue(advised.startswith(result) and advised.endswith("Install rg first."))
+
+
 class AncestorTest(unittest.TestCase):
     """Only this command's own launcher chain is skipped when looking for a Hermes ancestor."""
 
