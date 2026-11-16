@@ -204,6 +204,8 @@ class CodeReadingTest(Fleet):
                  "files": (FILES_ONLY, "transform_tool_result", ("only", ["patch", "write_file"], False)),
                  "skip": (ALL_BUT_TERMINAL, "transform_tool_result", ("except", ["terminal"], False)),
                  "any": (ANY_TOOL, "transform_tool_result", ("any", [], False)),
+                 "hidden": ("def register(ctx):\n    ctx.register_hook('transform_tool_result', make())\n",
+                            "transform_tool_result", ("unknown", [], False)),
                  "rtk": (REWRITE_IN_PLACE, "pre_tool_call", ("only", ["terminal"], True)),
                  "atlas-rtk": (REWRITE_DIRECTIVE, "pre_tool_call", ("only", ["terminal"], True)),
                  "audit": (AUDIT_ONLY, "pre_tool_call", ("only", ["terminal"], False))}   # a log record is no rewrite
@@ -213,11 +215,13 @@ class CodeReadingTest(Fleet):
     def test_a_broken_deep_or_huge_source_never_fails_and_is_never_run(self):
         folder = plugin(self.root, "broken", code="def oops(:\n")
         (folder / "evil.py").write_text("raise SystemExit('ran')\n")
-        self.assertEqual(environment.code_hooks(folder), {"_unread": {"scope": "any", "tools": [], "rewrites": False}})
-        deep = plugin(self.root, "deep", code="x = " + "-" * 6000 + "1\n")   # MemoryError in the parser
-        self.assertEqual(environment.code_hooks(deep), {"_unread": {"scope": "any", "tools": [], "rewrites": False}})
+        self.assertEqual(environment.code_hooks(folder), {})   # registers nothing: not even parsed
+        (folder / "hooks.py").write_text("def x(:\n    ctx.register_hook('transform_tool_result', f)\n")
+        self.assertEqual(environment.code_hooks(folder), {"_unread": {"scope": "unknown", "tools": [], "rewrites": False}})
+        deep = plugin(self.root, "deep", code="ctx.register_hook\nx = " + "-" * 6000 + "1\n")   # MemoryError in the parser
+        self.assertEqual(environment.code_hooks(deep), {"_unread": {"scope": "unknown", "tools": [], "rewrites": False}})
         huge = plugin(self.root, "huge", code="# x\n" * 40_000)   # over the per-file limit: unknown, never read
-        self.assertEqual(environment.code_hooks(huge), {"_unread": {"scope": "any", "tools": [], "rewrites": False}})
+        self.assertEqual(environment.code_hooks(huge), {"_unread": {"scope": "unknown", "tools": [], "rewrites": False}})
         self.assertIsNone(environment.code_hooks(plugin(self.root, "late", code=WEB_ONLY), {"left": 0}))
 
     @POSIX_ONLY
@@ -428,6 +432,61 @@ class FindingsTest(Fleet):
         similar = next(item for item in found["skills_similar"] if item["evidence"]["profile"] == "a")
         self.assertIn(["board-report", "old-report"], similar["evidence"]["pairs"])
         self.assertEqual(found["skills_shared"][0]["evidence"]["skills"], 1)   # deploy-site; arxiv is Hermes' own
+
+
+class RobustnessTest(Fleet):
+    def test_an_unclear_overlap_is_advice_never_a_plugin_turned_off(self):
+        home = self.profile("work", enabled=["hidden", "web"])
+        plugin(home, "hidden", code="def register(ctx):\n    ctx.register_hook('transform_tool_result', make())\n",
+               hooks=["transform_tool_result"])
+        plugin(home, "web", code=WEB_ONLY, hooks=["transform_tool_result"])
+        found = [item for item in self.findings() if item["kind"].startswith("plugin_transform")]
+        self.assertEqual([item["kind"] for item in found], ["plugin_transform_unclear"])
+        self.assertIsNone(explain.plan(found[0]))
+        self.assertEqual(explain.category("plugin_transform_unclear"), "advice")
+        self.assertIn("possibilidade, não uma certeza", explain.describe(found[0], "pt")["what"])
+
+    def test_the_same_plugin_in_many_profiles_is_read_once(self):
+        budget = {"left": 10_000}
+        first = environment.code_hooks(plugin(self.profile("a"), "web", code=WEB_ONLY), budget)
+        left = budget["left"]
+        second = environment.code_hooks(plugin(self.profile("b"), "web", code=WEB_ONLY), budget)
+        self.assertEqual((first, budget["left"]), (second, left))
+
+    def test_odd_configs_catalog_entries_and_skill_trees_never_fail_the_scan(self):
+        odd = self.profile("odd")
+        self.configs[str(odd.resolve())] = {"plugins": ["not", "a", "mapping"]}
+        heavy = odd / "skills" / "tool" / "node_modules"
+        for index in range(50):
+            (heavy / f"pkg{index}").mkdir(parents=True)
+        skill(odd, "real-skill", description="A real skill", body="x " * 20)
+        reading = self.scan()
+        row = next(item for item in reading["profiles"] if item["profile"] == "odd")
+        self.assertEqual([item["folder"] for item in row["skills"]], ["real-skill"])
+        self.assertIsNotNone(ecosystem._entry({"name": "x", "known_issues": {"a": 1}}))
+
+    @POSIX_ONLY
+    def test_a_folder_name_that_is_not_utf8_is_skipped(self):
+        home = self.profile("work")
+        (home / "skills").mkdir(parents=True, exist_ok=True)
+        os.mkdir(os.fsencode(home / "skills") + b"/bad\xff")
+        os.mkdir(os.fsencode(home / "plugins") + b"/.install-\xff") if (home / "plugins").exists() else None
+        found = self.findings()
+        json.dumps(found)   # storable, never a surrogate
+        self.assertIsInstance(found, list)
+
+    def test_config_is_read_without_hermes_loader(self):
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        home = self.profile("work")
+        (home / "config.yaml").write_text("plugins:\n  enabled: [a]\n")
+        before = (home / "config.yaml").read_bytes()
+        with patch("hermes_atlas_evolution.integration._read_hermes_config", side_effect=AssertionError("loader used")):
+            data = environment._READ_CONFIG(home)
+        self.assertEqual(data, {"plugins": {"enabled": ["a"]}})
+        self.assertEqual((home / "config.yaml").read_bytes(), before)
 
 
 class CatalogTest(Fleet):
@@ -652,7 +711,7 @@ class ScreensTest(Fleet):
             self.assertIn(expected, text)
         self.assertIn("| work | 3 |", markdown)
         self.assertIn("Dois plugins fazem o mesmo trabalho", markdown)
-        self.assertIn("modo Auto", markdown)
+        self.assertIn("modo dele: Auto", markdown)
 
 
 if __name__ == "__main__":

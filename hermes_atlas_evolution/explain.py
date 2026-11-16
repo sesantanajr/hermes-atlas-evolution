@@ -293,7 +293,7 @@ def _does(kind: str, subject: str, lang: str) -> str:
     return ""
 
 
-def command_text(args) -> str:
+def command_text(args, lang: str = "en") -> str:
     """What a plan runs, as the owner would type it: ["@atlas-ai", "plugins", "disable", "x"] is
     `hermes -p atlas-ai plugins disable x`; the plugin's own trash moves are said in words."""
     if not isinstance(args, (list, tuple)) or not args:
@@ -302,7 +302,9 @@ def command_text(args) -> str:
     if str(args[0]).startswith("@"):
         profile, args = str(args[0])[1:], list(args[1:])
     if args and args[0] in ("__trash__", "__restore__"):
-        verb = "move to the plugin's trash" if args[0] == "__trash__" else "put back from the plugin's trash"
+        verb = ({"en": "move to the plugin's trash", "pt": "mover para a lixeira do plugin"} if args[0] == "__trash__"
+                else {"en": "put back from the plugin's trash", "pt": "trazer de volta da lixeira do plugin"})
+        verb = verb.get(lang, verb["en"])
         return f"{verb}: {profile or 'default'}/plugins/{args[-1]}"
     prefix = f"hermes -p {profile} " if profile else "hermes "
     return prefix + " ".join(str(item) for item in args)
@@ -323,6 +325,8 @@ def playbook() -> dict:
 def _scope_text(scope, tools, lang: str) -> str:
     pt = lang == "pt"
     listed = ", ".join(f"`{item}`" for item in tools or () if isinstance(item, str))
+    if scope == "unknown":
+        return "em ferramentas que o código não mostra" if pt else "on tools its code does not show"
     if scope == "only" and listed:
         return f"só em {listed}" if pt else f"only on {listed}"
     if scope == "except" and listed:
@@ -339,28 +343,31 @@ def _env_what(kind: str, subject: str, e: dict, lang: str) -> str:
     if kind == "plugin_removed":
         state = {"enabled": ("ligado", "on"), "disabled": ("desligado", "off"),
                  "not_loaded": ("instalado sem estar ligado", "installed, not turned on")}.get(e.get("state"), ("?", "?"))
+        why = f": {e['reason']}" if e.get("reason") else ""
         if e.get("allowed"):
-            return (f"`{target}` (perfil `{where}`, {state[0]}) foi tirado do catálogo do Hermes: {e.get('reason') or '?'}."
+            return (f"`{target}` (perfil `{where}`, {state[0]}) foi tirado do catálogo do Hermes{why}."
                     " Ele foi instalado com `--allow-removed`, então o Hermes ainda o carrega." if pt else
-                    f"`{target}` (profile `{where}`, {state[1]}) was removed from the Hermes catalog: {e.get('reason') or '?'}."
+                    f"`{target}` (profile `{where}`, {state[1]}) was removed from the Hermes catalog{why}."
                     " It was installed with `--allow-removed`, so Hermes still loads it.")
-        return (f"`{target}` (perfil `{where}`, {state[0]}) foi tirado do catálogo do Hermes: {e.get('reason') or '?'}."
+        return (f"`{target}` (perfil `{where}`, {state[0]}) foi tirado do catálogo do Hermes{why}."
                 " O Hermes já se recusa a carregá-lo; os arquivos continuam lá." if pt else
-                f"`{target}` (profile `{where}`, {state[1]}) was removed from the Hermes catalog: {e.get('reason') or '?'}."
+                f"`{target}` (profile `{where}`, {state[1]}) was removed from the Hermes catalog{why}."
                 " Hermes already refuses to load it; its files are still there.")
     if kind == "plugin_obsolete":
-        states = {"archived": ("arquivado no GitHub", "archived on GitHub"),
-                  "delisted": ("retirado do catálogo do Hermes", "delisted from the Hermes catalog"),
-                  "missing": ("o repositório não existe mais", "its repository no longer exists"),
-                  "removed": ("na lista de removidos do Hermes", "on Hermes' kill list"),
-                  "unmaintained": ("sem manutenção", "unmaintained")}.get(e.get("state"), (e.get("state"), e.get("state")))
-        replacement = names(e.get("replacement") or ())
+        states = {"archived": ("está arquivado no GitHub", "is archived on GitHub"),
+                  "delisted": ("foi retirado do catálogo do Hermes", "was delisted from the Hermes catalog"),
+                  "missing": ("tem um repositório que não existe mais", "has a repository that no longer exists"),
+                  "removed": ("está na lista de removidos do Hermes", "is on Hermes' kill list"),
+                  "unmaintained": ("está sem manutenção", "is unmaintained")}.get(
+            e.get("state"), (f"está {e.get('state')}", f"is {e.get('state')}"))
+        replacement = names([item for item in e.get("replacement") or () if item != target])
+        basis = f" ({'fonte, em inglês' if pt else 'source'}: {e['basis']})" if e.get("basis") else ""
         if pt:
-            return (f"`{target}` (perfil `{where}`) está {states[0]}: {e.get('basis') or '?'}."
+            return (f"`{target}` (perfil `{where}`) {states[0]}{basis}, conferido em 16/11/2026."
                     + (f" Substituto: {replacement}." if replacement else ""))
-        return (f"`{target}` (profile `{where}`) is {states[1]}: {e.get('basis') or '?'}."
+        return (f"`{target}` (profile `{where}`) {states[1]}{basis}, checked on 2026-11-16."
                 + (f" Replacement: {replacement}." if replacement else ""))
-    if kind in ("plugin_transform_overlap", "plugin_transform_protected", "plugin_hints_overlap"):
+    if kind in ("plugin_transform_overlap", "plugin_transform_protected", "plugin_hints_overlap", "plugin_transform_unclear"):
         first, later, hook = e.get("first"), e.get("later"), e.get("hook")
         tools = e.get("tools") or []
         a = _scope_text(e.get("first_scope"), e.get("first_tools"), lang)
@@ -387,6 +394,11 @@ def _env_what(kind: str, subject: str, e: dict, lang: str) -> str:
         if kind == "plugin_hints_overlap":
             text += (" Um dos dois é este plugin, com as dicas de lição nos resultados (`tool_hints`) ligadas." if pt else
                      " One of them is this plugin, with lesson hints in tool results (`tool_hints`) on.")
+        elif kind == "plugin_transform_unclear":
+            text += (" O código de pelo menos um deles não mostra em quais ferramentas ele age (registro indireto, arquivo"
+                     " grande ou que não pôde ser lido), então isso é uma possibilidade, não uma certeza." if pt else
+                     " The code of at least one of them does not show which tools it acts on (an indirect registration, a"
+                     " large file or one that could not be read), so this is a possibility, not a certainty.")
         elif kind == "plugin_transform_protected":
             text += (" Os dois protegem algo (segurança ou este plugin): nenhum deve ser desligado por isso." if pt else
                      " Both protect something (security, or this plugin): neither should be turned off for this.")
@@ -399,11 +411,12 @@ def _env_what(kind: str, subject: str, e: dict, lang: str) -> str:
     if kind == "plugin_duplicate":
         role = {"terminal_rewrite": ("reescrevem os comandos do terminal", "rewrite the terminal's commands")}.get(
             e.get("role"), (f"fazem o papel `{e.get('role')}`", f"fill the role `{e.get('role')}`"))
-        return (f"No perfil `{where}`, {names(e.get('plugins') or ())} {role[0]}, e estão todos ligados: o seguinte recebe o"
-                f" comando já mudado pelo anterior. Fique com `{e.get('keep')}` (o primeiro na ordem de carga do Hermes)."
-                if pt else
-                f"In profile `{where}`, {names(e.get('plugins') or ())} {role[1]}, and all are on: each one gets the command"
-                f" the one before already changed. Keep `{e.get('keep')}` (the first in Hermes' load order).")
+        return (f"No perfil `{where}`, {names(e.get('plugins') or ())} {role[0]}, e estão todos ligados: o mesmo trabalho"
+                f" feito mais de uma vez em cada comando, com resultado que depende de como um trata o comando do outro."
+                f" Basta um: fique com `{e.get('keep')}` (o primeiro na ordem de carga do Hermes)." if pt else
+                f"In profile `{where}`, {names(e.get('plugins') or ())} {role[1]}, and all are on: the same job done more"
+                f" than once on every command, with a result that depends on how each one treats the other's command. One"
+                f" is enough: keep `{e.get('keep')}` (the first in Hermes' load order).")
     if kind == "plugin_unused":
         listed = ", ".join(f"`{item['name']}` ({_n(item.get('mb'), lang, 1)} MB)" for item in (e.get("plugins") or ())[:12]
                            if isinstance(item, dict))
@@ -419,10 +432,11 @@ def _env_what(kind: str, subject: str, e: dict, lang: str) -> str:
     if kind == "plugin_update":
         listed = ", ".join(f"`{item['profile']}` ({item['installed']})" for item in (e.get("profiles") or ())[:12]
                            if isinstance(item, dict))
+        commands = "; ".join(f"`{item}`" for item in (e.get("commands") or ())[:12] if isinstance(item, str))
         return (f"`{target}`: o catálogo do Hermes ({e.get('tier')}) tem a versão {e.get('catalog')}; instalada em"
-                f" {_n(e.get('count'), lang)} perfil(is): {listed}." if pt else
+                f" {_n(e.get('count'), lang)} perfil(is): {listed}. Comandos: {commands}." if pt else
                 f"`{target}`: the Hermes catalog ({e.get('tier')}) has version {e.get('catalog')}; installed in"
-                f" {_n(e.get('count'), lang)} profile(s): {listed}.")
+                f" {_n(e.get('count'), lang)} profile(s): {listed}. Commands: {commands}.")
     if kind == "self_missing":
         return (f"O perfil `{where}` teve {_n(e.get('sessions_7d'), lang)} sessão(ões) em 7 dias e nunca teve o Atlas"
                 " Evolution." if pt else
@@ -445,8 +459,11 @@ def _env_what(kind: str, subject: str, e: dict, lang: str) -> str:
                 f"In profile `{where}`, {_n(e.get('count'), lang)} of {_n(e.get('total'), lang)} active skills were not used"
                 f" for {_n(e.get('days'), lang)} days: {names((e.get('skills') or ())[:15])}.")
     if kind == "skills_duplicate":
-        return (f"No perfil `{where}`, {names(e.get('copies') or ())} têm o mesmo texto. A mais usada é `{e.get('keep')}`." if pt else
-                f"In profile `{where}`, {names(e.get('copies') or ())} have the same text. The most used is `{e.get('keep')}`.")
+        keep = (f"A mais usada é `{e.get('keep')}`." if e.get("used", True) else f"Nenhuma foi usada; fique com `{e.get('keep')}`."
+                ) if pt else (f"The most used is `{e.get('keep')}`." if e.get("used", True)
+                              else f"Neither was used; keep `{e.get('keep')}`.")
+        return (f"No perfil `{where}`, {names(e.get('copies') or ())} têm o mesmo texto. {keep}" if pt else
+                f"In profile `{where}`, {names(e.get('copies') or ())} have the same text. {keep}")
     if kind == "skills_similar":
         pairs = "; ".join(f"`{a}` ≈ `{b}`" for a, b in (e.get("pairs") or ())[:8])
         return (f"No perfil `{where}`, {_n(e.get('count'), lang)} par(es) de skills com descrições quase iguais: {pairs}." if pt else
@@ -473,12 +490,12 @@ def describe(proposal: dict, lang: str = "en") -> dict:
         except ValueError:
             evidence = {}
     found = plan(proposal)
-    undo = command_text(found[1]) if found is not None else None
+    undo = command_text(found[1], lang) if found is not None else None
     entry = playbook().get(kind) if kind.startswith(("plugin_", "skills_", "self_", "profile_")) or kind in FLEET else None
     if isinstance(entry, dict):
         title, advice = entry.get(f"title_{lang}") or kind, entry.get(f"advice_{lang}") or ""
         what = _env_what(kind, subject, evidence if isinstance(evidence, dict) else {}, lang)
-        does = ("Aplicar roda: " if lang == "pt" else "Applying runs: ") + command_text(found[0]) if found else ""
+        does = ("Aplicar roda: " if lang == "pt" else "Applying runs: ") + command_text(found[0], lang) if found else ""
     else:
         title, advice = _KIND[lang].get(kind, kind), ""
         what = _what(kind, subject, evidence if isinstance(evidence, dict) else {}, lang)

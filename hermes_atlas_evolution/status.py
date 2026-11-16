@@ -288,9 +288,12 @@ def _environment(home: Path) -> dict | None:
         source = sqlite3.connect(f"file:{quote(str(lead / 'evolution' / 'evolution.sqlite3'))}?mode=ro", uri=True, timeout=1)
         try:
             row = source.execute("SELECT value FROM cursor WHERE key='environment'").fetchone()
+            found = json.loads(row[0]) if row else None
+            if isinstance(found, dict):   # what was applied, undone or dismissed since is not shown again
+                found["findings"] = environment.still_open(source, found)
+                found["lead_mode"] = environment.profile_mode(lead)
         finally:
             source.close()
-        found = json.loads(row[0]) if row else None
     except (OSError, ValueError, sqlite3.Error, RecursionError):
         return None
     return found if isinstance(found, dict) else None
@@ -770,17 +773,19 @@ def pending_notice(home: Path, *, now: float, lang: str = "en") -> dict | None:
 _ENV_TEXT = {
     "en": {"none": "No profile has Atlas Evolution on, so nobody looks after the whole Hermes yet.",
            "not_yet": "Not looked at yet. The first look happens in the next learning pass of profile `{lead}` (or menu → Environment → v).",
-           "head": "Looked after by profile `{lead}` · last look {when} · mode {mode}.",
-           "catalog": "Hermes plugin catalog: {plugins} plugins ({tiers}), {removed} removed for safety.",
+           "head": "Looked after by profile `{lead}` · last look {when} · its mode: {mode} (it decides for profiles without the plugin; each other profile follows its own mode).",
+           "catalog": "Hermes plugin catalog: {plugins} plugins ({tiers}), {removed} removed from it.",
            "cols": "| Profile | Sessions 7 d | Plugins on | Never loaded | Skills | Atlas Evolution |",
+           "partial": "A partial look: the limit of plugin code read in one look was reached, so a conflict may be missing.",
            "todo": "What to do ({n})", "clean": "Nothing to fix: no conflict, duplicate, removed plugin or leftover.",
            "seen": "Seen", "advice": "What to do", "run": "Command", "where": "Decide in profile `{lead}`: its Proposals tab, or `hermes{p} evolution` → 14.",
            "yes": "yes", "no": "no"},
     "pt": {"none": "Nenhum perfil tem o Atlas Evolution ligado, então ninguém cuida do Hermes inteiro ainda.",
            "not_yet": "Ainda não olhado. A primeira olhada acontece na próxima passada do perfil `{lead}` (ou menu → Ambiente → v).",
-           "head": "Cuidado pelo perfil `{lead}` · última olhada {when} · modo {mode}.",
-           "catalog": "Catálogo de plugins do Hermes: {plugins} plugins ({tiers}), {removed} removido(s) por segurança.",
+           "head": "Cuidado pelo perfil `{lead}` · última olhada {when} · modo dele: {mode} (vale para os perfis sem o plugin; cada um dos outros segue o próprio modo).",
+           "catalog": "Catálogo de plugins do Hermes: {plugins} plugins ({tiers}), {removed} tirado(s) dele.",
            "cols": "| Perfil | Sessões 7 d | Plugins ligados | Nunca carregados | Skills | Atlas Evolution |",
+           "partial": "Uma olhada parcial: o limite de código de plugins lido numa olhada foi atingido, então pode faltar um conflito.",
            "todo": "O que fazer ({n})", "clean": "Nada para arrumar: nenhum conflito, duplicidade, plugin removido ou resto de instalação.",
            "seen": "Visto", "advice": "O que fazer", "run": "Comando", "where": "Decida no perfil `{lead}`: a aba Propostas dele, ou `hermes{p} evolution` → 14.",
            "yes": "sim", "no": "não"},
@@ -813,6 +818,7 @@ def _environment_markdown(home: Path, lang: str = "en", *, mode: str = "auto") -
         stamp = datetime.fromtimestamp(float(found.get("at") or 0)).strftime("%d/%m %H:%M" if lang == "pt" else "%Y-%m-%d %H:%M")
     except (TypeError, ValueError, OverflowError, OSError):
         stamp = "?"
+    mode = found.get("lead_mode") or mode   # the lead's mode decides for profiles without the plugin
     shown = {"auto": "Auto", "assist": "Assistido" if lang == "pt" else "Assisted", "manual": "Manual"}.get(mode, mode)
     lines = [t["head"].format(lead=name, when=stamp, mode=shown), ""]
     catalog = found.get("catalog") or {}
@@ -820,6 +826,8 @@ def _environment_markdown(home: Path, lang: str = "en", *, mode: str = "auto") -
         names = {"official": "oficiais", "verified": "verificados", "community": "da comunidade"} if lang == "pt" else {}
         tiers = ", ".join(f"{count} {names.get(tier, tier)}" for tier, count in sorted((catalog.get("tiers") or {}).items()))
         lines += [t["catalog"].format(plugins=catalog["plugins"], tiers=tiers, removed=catalog.get("removed", 0)), ""]
+    if found.get("complete") is False:
+        lines += [t["partial"], ""]
     lines += [t["cols"], "|---|---:|---:|---:|---:|---|"]
     for row in found.get("profiles") or ():
         lines.append(f"| {row['profile']} | {row['sessions_7d']} | {row['plugins_on']} | {row['plugins_idle']} | "

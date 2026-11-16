@@ -211,7 +211,13 @@ def history(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 50) -> l
         if row["kind"] == "proposal" and isinstance(item["after"].get("applied"), list):
             from .explain import command_text
 
-            item["command"] = command_text(item["after"]["applied"])   # as the owner would type it
+            item["command"] = command_text(item["after"]["applied"], lang)   # as the owner would type it
+        from .admin import SETTINGS
+
+        # what the menu and the panel offer to undo: never Hermes' own maintenance (nothing to undo) nor a setting
+        # this version no longer has (0.8.3's auto_actions, now `mode`)
+        item["undoable"] = row["undone"] is None and row["kind"] != "maintenance" and not (
+            row["kind"] == "setting" and row["target"] not in SETTINGS)
         if row["kind"] == "lesson":
             lesson = conn.execute("SELECT * FROM lesson WHERE id=?", (int(row["target"]),)).fetchone()
             item["lesson"] = playbook.render(lesson, lang) if lesson is not None else None

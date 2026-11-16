@@ -65,14 +65,15 @@
       undo: "Undo", undone: "undone",
       historyEmpty: "No decision yet.",
       applyAll: "Apply the {n} change(s)", applyAllHint: "Reversible changes to Hermes, each one recorded with its undo.",
-      applyNow: "Apply now", dismiss: "Dismiss", seen: "What was seen", undoHow: "To undo",
+      applyNow: "Apply now", dismiss: "Dismiss", seen: "What was seen", advice: "What to do", undoHow: "To undo",
+      maintenanceRan: "ran Hermes' own maintenance (nothing to undo):",
       category: { change: "the plugin applies it", lesson: "lesson", manual: "you apply it", advice: "observation" },
       autoLine: "Mode", autoNames: { auto: "Auto", assist: "Assisted", manual: "Manual" },
       copy: "Copy", copied: "Copied",
       share: "Share what this profile learned with another profile:",
       s: {
         title: "Settings", save: "Save", saving: "Saving…", recommended: "Apply the recommended setup",
-        recommendedHint: "Lessons on auto, reflector on, complete automatic actions, and the channels below that are yours by construction.",
+        recommendedHint: "Lessons on auto, reflector on, Mode auto, and the channels below that are yours by construction.",
         reloadNote: "Applies the next time the plugin loads (the gateway reloads plugins when one is enabled or updated).",
         reloadPending: "Waiting for the next load of the plugin: {keys}.",
         lessons: "Lessons", lessonsHint: "auto: lessons from fixed templates apply once your own turns hit the failure; suggest: every lesson waits for you; off: measure only.",
@@ -146,14 +147,15 @@
       undo: "Desfazer", undone: "desfeita",
       historyEmpty: "Nenhuma decisão ainda.",
       applyAll: "Aplicar as {n} mudança(s)", applyAllHint: "Mudanças reversíveis no Hermes, cada uma registrada com o desfazer.",
-      applyNow: "Aplicar agora", dismiss: "Dispensar", seen: "O que foi visto", undoHow: "Para desfazer",
+      applyNow: "Aplicar agora", dismiss: "Dispensar", seen: "O que foi visto", advice: "O que fazer", undoHow: "Para desfazer",
+      maintenanceRan: "rodou a manutenção do próprio Hermes (nada a desfazer):",
       category: { change: "o plugin aplica", lesson: "lição", manual: "você aplica", advice: "observação" },
       autoLine: "Modo", autoNames: { auto: "Auto", assist: "Assistido", manual: "Manual" },
       copy: "Copiar", copied: "Copiado",
       share: "Leve o que este perfil aprendeu para outro perfil:",
       s: {
         title: "Configurações", save: "Salvar", saving: "Salvando…", recommended: "Aplicar a configuração recomendada",
-        recommendedHint: "Lições em auto, refletor ligado, ações automáticas completas e os canais abaixo que são seus por construção.",
+        recommendedHint: "Lições em auto, refletor ligado, Modo Auto e os canais abaixo que são seus por construção.",
         reloadNote: "Vale na próxima carga do plugin (o gateway recarrega os plugins quando um é ligado ou atualizado).",
         reloadPending: "Esperando a próxima carga do plugin: {keys}.",
         lessons: "Lições", lessonsHint: "auto: lições de modelos fixos valem quando os seus turnos encontram a falha; suggest: toda lição espera você; off: só mede.",
@@ -592,6 +594,7 @@
               h("code", { className: "hae-code" }, row.subject), h("span", { className: "hae-muted" }, "#" + row.id)),
             told.what && told.category !== "lesson" ? h("div", null, h("strong", null, t.seen + ": "), inline(String(told.what), "w" + row.id)) : null,
             lesson ? h("div", { className: "hae-lesson" }, inline(String(lesson), "p" + row.id)) : null,
+            told.advice ? h("div", null, h("strong", null, t.advice + ": "), inline(String(told.advice), "a" + row.id)) : null,
             told.does ? h("div", { className: "hae-muted" }, inline(String(told.does), "d" + row.id)) : null,
             told.undo ? h("div", { className: "hae-muted" }, t.undoHow + ": ", h("code", { className: "hae-code" }, told.undo)) : null,
             told.category === "advice" || told.category === "manual" ? h(CopyCommand, { t: t, command: row.command }) : null,
@@ -718,6 +721,7 @@
         const what = row.kind === "lesson" ? (t.action[row.action] || row.action) + " #" + row.target
           : row.kind === "setting" ? (t.action.set) + " " + row.target + ": " + JSON.stringify(row.before.value) + " → " + JSON.stringify(row.after.value)
           : row.kind === "memory" ? t.memoryRemoved + " " + row.target
+          : row.kind === "maintenance" ? t.maintenanceRan + " hermes " + String(row.target).replace("_", " ")
           : row.kind === "proposal" && row.after && row.after.applied ? t.action.apply + " " + (row.command || "hermes " + row.after.applied.join(" "))
           : (t.action[row.action] || row.action) + " " + t.tabs.proposals.toLowerCase() + " #" + row.target;
         return h("tr", { key: row.id, className: row.undone ? "hae-row-muted" : "" },
@@ -725,7 +729,7 @@
           h("td", null, t.actor[row.actor] || row.actor),
           h("td", null, what),
           h("td", { className: "hae-lesson" }, row.lesson ? inline(String(row.lesson), "h" + row.id) : ""),
-          h("td", null, row.undone ? t.undone : props.data.can_decide
+          h("td", null, row.undone ? t.undone : props.data.can_decide && row.undoable !== false
             ? h(Button, { disabled: !!act.working, onClick: function () {
                 act.send({ kind: "undo", id: row.id }, function (result) { return result && result.undone ? t.done.undo : String(result && result.reason || ""); });
               } }, t.undo) : null));

@@ -140,6 +140,8 @@ ADDITIVE_TABLES = (
     ("knowledge_plugin", "CREATE TABLE IF NOT EXISTS knowledge_plugin (name TEXT PRIMARY KEY, role TEXT NOT NULL, "
                          "exclusive INTEGER NOT NULL, summary_en TEXT NOT NULL, summary_pt TEXT NOT NULL, "
                          "transforms TEXT NOT NULL, notes TEXT NOT NULL) WITHOUT ROWID"),
+    ("knowledge_obsolete", "CREATE TABLE IF NOT EXISTS knowledge_obsolete (name TEXT PRIMARY KEY, repo TEXT NOT NULL, "
+                           "state TEXT NOT NULL, basis TEXT NOT NULL, superseded_by TEXT NOT NULL) WITHOUT ROWID"),
     ("playbook", "CREATE TABLE IF NOT EXISTS playbook (situation TEXT PRIMARY KEY, level TEXT NOT NULL, "
                  "risk TEXT NOT NULL, action TEXT NOT NULL, undo TEXT NOT NULL, title_en TEXT NOT NULL, "
                  "title_pt TEXT NOT NULL, advice_en TEXT NOT NULL, advice_pt TEXT NOT NULL) WITHOUT ROWID"),

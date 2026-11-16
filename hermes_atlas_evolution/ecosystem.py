@@ -59,8 +59,8 @@ def _entry(raw) -> dict | None:
             "repo": _text(raw.get("repo"), 300), "sha": sha, "version": _text(raw.get("version"), 40),
             "maintainer": _text(raw.get("maintainer"), 80), "description": _text(raw.get("description"), 600),
             "hooks": _strings(caps.get("provides_hooks")), "tools": _strings(caps.get("provides_tools")),
-            "known_issues": [_text(item, 300) for item in (raw.get("known_issues") or [])[:5]
-                             if isinstance(raw.get("known_issues"), list) and _text(item, 300)]}
+            "known_issues": [_text(item, 300) for item in (raw.get("known_issues") if isinstance(raw.get("known_issues"), list) else [])[:5]
+                             if _text(item, 300)]}
 
 
 def _removed(raw) -> dict | None:
@@ -93,16 +93,34 @@ def _yaml():
         return None
 
 
+_CACHE_MEMO: dict = {}
+
+
 def _cache(home: Path) -> dict | None:
-    """The catalog copy Hermes keeps in a profile (`cache/plugin-catalog.json`), read as a regular file only."""
+    """The catalog copy Hermes keeps in a profile (`cache/plugin-catalog.json`), read as a regular file only; parsed
+    once per version of the file (a scan asks for it once per plugin)."""
+    import os
+
     from .environment import read_text
 
-    text = read_text(Path(home) / "cache" / "plugin-catalog.json", CACHE_LIMIT)
+    path = Path(home) / "cache" / "plugin-catalog.json"
+    try:
+        info = os.lstat(path)
+        key = (str(path), info.st_mtime_ns, info.st_size)
+    except OSError:
+        return None
+    if key in _CACHE_MEMO:
+        return _CACHE_MEMO[key]
+    text = read_text(path, CACHE_LIMIT)
     try:
         data = json.loads(text) if text else None
     except (ValueError, RecursionError):
-        return None
-    return data if isinstance(data, dict) and isinstance(data.get("entries"), list) else None
+        data = None
+    data = data if isinstance(data, dict) and isinstance(data.get("entries"), list) else None
+    if len(_CACHE_MEMO) > 64:
+        _CACHE_MEMO.clear()
+    _CACHE_MEMO[key] = data
+    return data
 
 
 def load_catalog(homes, *, source: Path | None = None) -> dict:
@@ -232,22 +250,28 @@ def obsolete(plugin: dict, known: dict) -> dict | None:
     """What the knowledge base says of an archived, delisted, missing or unmaintained plugin, matched by name or
     repository."""
     items = known.get("obsolete") or {}
-    for name in (plugin.get("name"), plugin.get("folder")):
-        if isinstance(name, str) and isinstance(items.get(name), dict):
-            return {"name": name, **items[name]}
-    repo = normalize_repo(plugin.get("repo"))
-    if repo:
-        for name, item in items.items():
-            if isinstance(item, dict) and normalize_repo(item.get("repo")) == repo:
+    repos = {normalize_repo(plugin.get("repo")), normalize_repo(str(plugin.get("source") or "").split("#", 1)[0])} - {""}
+    for name, item in items.items():
+        if not isinstance(item, dict):
+            continue
+        if item.get("repo"):   # a name can be reused by a maintained plugin: the repository decides
+            if normalize_repo(item["repo"]) in repos:
                 return {"name": name, **item}
+        elif name in (plugin.get("name"), plugin.get("folder")):
+            return {"name": name, **item}
     return None
 
 
 def sync(conn, catalog: dict, known: dict) -> bool:
     """Copy the catalog and the knowledge base into the plugin's database when their source changed. True when it
     wrote."""
-    stamp = json.dumps([catalog.get("source"), catalog.get("generated_at"), len(catalog.get("entries") or {}),
+    import hashlib
+
+    digest = hashlib.sha256(json.dumps([catalog.get("entries"), catalog.get("removed"), known], sort_keys=True,
+                                       default=str).encode()).hexdigest()   # any changed entry or text rewrites
+    stamp = json.dumps([digest, catalog.get("source"), catalog.get("generated_at"), len(catalog.get("entries") or {}),
                         len(catalog.get("removed") or ()), sorted(known.get("plugins") or {}),
+                        len(known.get("obsolete") or {}),
                         sorted(known.get("playbook") or {}), (known.get("playbook") or {}).get("_version")])
     row = conn.execute("SELECT value FROM cursor WHERE key='ecosystem_sync'").fetchone()
     if row is not None and row[0] == stamp:
@@ -265,6 +289,11 @@ def sync(conn, catalog: dict, known: dict) -> bool:
         (name, _text(note.get("role"), 60), 1 if note.get("exclusive") else 0, _text(note.get("summary_en"), 400),
          _text(note.get("summary_pt"), 400), json.dumps(_strings(note.get("transforms"))), _text(note.get("notes"), 600))
         for name, note in (known.get("plugins") or {}).items()])
+    conn.execute("DELETE FROM knowledge_obsolete")
+    conn.executemany("INSERT OR REPLACE INTO knowledge_obsolete VALUES (?,?,?,?,?)", [
+        (name, _text(item.get("repo"), 300), _text(item.get("state"), 20), _text(item.get("basis"), 300),
+         json.dumps(_strings(item.get("superseded_by"))))
+        for name, item in (known.get("obsolete") or {}).items() if isinstance(item, dict)])
     conn.execute("DELETE FROM playbook")
     conn.executemany("INSERT OR REPLACE INTO playbook VALUES (?,?,?,?,?,?,?,?,?)", [
         (situation, _text(entry.get("level"), 20), _text(entry.get("risk"), 20), _text(entry.get("action"), 300),

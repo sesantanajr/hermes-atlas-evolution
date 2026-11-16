@@ -209,6 +209,7 @@ _KIND = {
            "tool_latency": "A tool that is slow call after call",
            "plugin_removed": "Plugin removed from the Hermes catalog still installed",
            "plugin_transform_protected": "Two protective plugins change the same tool's result",
+           "plugin_transform_unclear": "Two plugins may change the same result",
            "plugin_hints_overlap": "This plugin's hints hide another plugin's change",
            "self_off": "Profile in use with Atlas Evolution turned off",
            "plugin_transform_overlap": "Two plugins change the same tool's result",
@@ -231,6 +232,7 @@ _KIND = {
            "tool_latency": "Ferramenta lenta chamada após chamada",
            "plugin_removed": "Plugin removido do catálogo do Hermes ainda instalado",
            "plugin_transform_protected": "Dois plugins de proteção mudam o resultado da mesma ferramenta",
+           "plugin_transform_unclear": "Dois plugins podem mudar o mesmo resultado",
            "plugin_hints_overlap": "As dicas deste plugin escondem a mudança de outro",
            "self_off": "Perfil em uso com o Atlas Evolution desligado",
            "plugin_transform_overlap": "Dois plugins mudam o resultado da mesma ferramenta",
@@ -243,7 +245,8 @@ _KIND = {
 }
 _ADVISORY = ("skill_review", "investigate_failure", "investigate_latency", "config_review", "skill_outcome",
              "session_lifecycle", "context_weight", "compaction", "plugin_health", "plugin_conflict", "approval_policy",
-             "tool_latency", "profile_idle", "skills_similar", "skills_shared", "plugin_transform_protected")
+             "tool_latency", "profile_idle", "skills_similar", "skills_shared", "plugin_transform_protected",
+             "plugin_transform_unclear")
 
 
 def _number(value, lang: str, digits: int = 0) -> str:
@@ -332,7 +335,7 @@ def _proposal_lines(report: dict, lang: str) -> list[str]:
         for item in [entry for entry in report["proposals"] if entry["kind"] != "lesson"][:20]:
             step = t["look"] if item["kind"] in _ADVISORY else t["run"]
             lines.append(f"- #{item['id']} [{t['risk']}: {_RISK[lang][item['risk']]}] {_KIND[lang].get(item['kind'], item['kind'])}"
-                         f" · `{item['subject']}` · {step}: `{item['command']}`")
+                         f" · `{item['subject']}`" + (f" · {step}: `{item['command']}`" if item.get("command") else ""))
         lines += ["", t["decide"]]
     else:
         lines.append(t["proposals_none"])

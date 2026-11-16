@@ -37,9 +37,10 @@ PROFILE_MAX = 100
 PLUGIN_MAX = 200
 SKILL_MAX = 3000
 SKILL_WALK_MAX = 20_000          # entries looked at under one profile's skills/
-SOURCE_FILES_MAX = 120           # Python files read per plugin
+SOURCE_FILES_MAX = 400           # Python files read per plugin
 SOURCE_FILE_BYTES = 128 * 1024   # a larger file is skipped (its hooks count as acting on any tool)
-SOURCE_PLUGIN_BYTES = 384 * 1024
+SOURCE_PLUGIN_BYTES = 384 * 1024    # parsed per plugin (only the files that register hooks and define their callbacks)
+SOURCE_READ_BYTES = 4 * 1024 * 1024  # read per plugin to find those files
 SOURCE_SCAN_BYTES = 8 * 1024 * 1024   # all plugins of one scan; past it, hooks are not read (no finding from them)
 UNUSED_SKILL_DAYS = 30   # Hermes' own curator.archive_after_days default
 IDLE_PLUGIN_DAYS = 1     # installed and not loaded for longer than this (a plugin just installed is left alone)
@@ -48,7 +49,8 @@ IDLE_PROFILE_DAYS = 30
 LEAD_PASS_SECONDS = 2 * 86_400
 SIMILAR = 0.6
 FIRST_WINS = ("transform_tool_result", "transform_terminal_output", "transform_llm_output")
-KINDS = ("plugin_removed", "plugin_transform_overlap", "plugin_transform_protected", "plugin_hints_overlap",
+KINDS = ("plugin_removed", "plugin_transform_overlap", "plugin_transform_protected", "plugin_transform_unclear",
+         "plugin_hints_overlap",
          "plugin_duplicate", "plugin_unused", "plugin_leftover", "plugin_update", "plugin_obsolete", "self_missing",
          "self_off", "profile_idle", "skills_unused", "skills_duplicate", "skills_similar", "skills_shared")
 _TOOLISH = {"tool_name", "tool", "name", "function_name", "tool_id"}
@@ -98,11 +100,25 @@ def _is_dir(path: Path) -> bool:
         return False
 
 
+_UNSAFE = re.compile(r"[\x00-\x1f\x7f`]")
+
+
+def safe_name(name: str) -> bool:
+    """A folder name that can be stored, shown and put in a command: valid UTF-8, no control character, no backtick."""
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:   # a name that is not UTF-8 on disk (os.scandir keeps it as surrogates)
+        return False
+    return not _UNSAFE.search(name)
+
+
 def _entries(folder: Path, limit: int) -> list[os.DirEntry]:
     try:
         with os.scandir(folder) as found:
             items = []
             for entry in found:
+                if not safe_name(entry.name):
+                    continue
                 items.append(entry)
                 if len(items) >= limit:
                     break
@@ -130,9 +146,20 @@ def profiles(root: Path) -> list[tuple[str, Path]]:
 
 
 def _read_config(home: Path):
-    from .integration import _read_hermes_config
-
-    return _read_hermes_config(home)
+    """A profile's config.yaml, read-only with yaml.safe_load (Hermes' own loader may migrate and write the file);
+    None when it cannot be read or PyYAML is missing (the standalone runner)."""
+    text = read_text(Path(home) / "config.yaml", 8 * 1024 * 1024)
+    if text is None:
+        return None
+    try:
+        import yaml
+    except ImportError:
+        return None
+    try:
+        data = yaml.load(text, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader)) if text.strip() else {}
+    except (yaml.YAMLError, ValueError, RecursionError, MemoryError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _plugin_lists(config) -> tuple[list | None, list]:
@@ -536,12 +563,21 @@ def _python_files(folder: Path) -> list[Path]:
             found.append(path)
         elif stat.S_ISDIR(info.st_mode) and entry.name not in ("tests", "test", "node_modules", "venv", ".venv"):
             for inner in _entries(path, 2000):
-                if inner.name.endswith(".py") and not inner.name.startswith("."):
-                    try:
-                        if stat.S_ISREG(inner.stat(follow_symlinks=False).st_mode):
-                            found.append(Path(inner.path))
-                    except OSError:
-                        continue
+                if inner.name.startswith((".", "__pycache__")):
+                    continue
+                try:
+                    kind = inner.stat(follow_symlinks=False).st_mode
+                except OSError:
+                    continue
+                if stat.S_ISREG(kind) and inner.name.endswith(".py"):
+                    found.append(Path(inner.path))
+                elif stat.S_ISDIR(kind) and inner.name not in ("tests", "test", "node_modules", "venv"):
+                    for deeper in _entries(Path(inner.path), 500):   # hooks/result_transforms.py and the like
+                        try:
+                            if deeper.name.endswith(".py") and stat.S_ISREG(deeper.stat(follow_symlinks=False).st_mode):
+                                found.append(Path(deeper.path))
+                        except OSError:
+                            continue
         if len(found) >= SOURCE_FILES_MAX:
             break
     return found[:SOURCE_FILES_MAX]
@@ -553,17 +589,39 @@ def code_hooks(folder: Path, budget: dict | None = None) -> dict | None:
     and helpers called with ("hook", f) are both read; `f` is looked up in every file of the plugin (an imported
     function too). None when the scan's source budget is spent: nothing is concluded from this plugin's code."""
     budget = budget if budget is not None else {"left": SOURCE_SCAN_BYTES}
-    if budget["left"] <= 0:
-        return None
-    trees, used, skipped = [], 0, False
+    texts, read, skipped = [], 0, False
     for path in _python_files(folder):
         text = read_text(path, SOURCE_FILE_BYTES)
         if text is None:
             skipped = True   # too large or not a regular file: what it registers is unknown
             continue
+        read += len(text)
+        if read > SOURCE_READ_BYTES:
+            skipped = True
+            break
+        texts.append((path.relative_to(folder).as_posix(), text))
+    key = hashlib.sha256(repr((skipped, texts)).encode("utf-8", "surrogatepass")).hexdigest()
+    memo = budget.setdefault("memo", {})
+    if key in memo:   # the same plugin in another profile: read once, and no budget spent again
+        return memo[key]
+    if budget["left"] <= 0:
+        return None
+    # Parse only what matters: the files that register hooks, then the files that define the functions they register
+    # (and the module-level constants beside them). Text search first; `ast` only on those files.
+    registering = [(name, text) for name, text in texts if "hook" in text and "register" in text]
+    wanted = set(re.findall(r"_?(?:register\w*hook\w*)\s*\([^)]*?[\"'](?:pre|post|on|transform)_[a-z_]+[\"']\s*,\s*"
+                            r"(?:[\w.]+\.)?(\w+)", "\n".join(text for _name, text in registering)))
+    chosen = {name for name, _text in registering}
+    for name, text in texts:
+        if name not in chosen and any(re.search(rf"^\s*(?:async\s+)?def\s+{re.escape(function)}\s*\(", text, re.M)
+                                      for function in wanted):
+            chosen.add(name)
+    trees, used = [], 0
+    for name, text in texts:
+        if name not in chosen:
+            continue
         used += len(text)
-        budget["left"] -= len(text)
-        if used > SOURCE_PLUGIN_BYTES or budget["left"] < 0:
+        if used > SOURCE_PLUGIN_BYTES:
             skipped = True
             break
         try:
@@ -571,6 +629,7 @@ def code_hooks(folder: Path, budget: dict | None = None) -> dict | None:
         except Exception:   # SyntaxError, RecursionError, MemoryError (deep nesting): skip the file, never fail
             skipped = True
             continue
+    budget["left"] -= used
     functions, constants = {}, {}
     for tree in trees:
         constants.update(_constants(tree))
@@ -598,17 +657,19 @@ def code_hooks(folder: Path, budget: dict | None = None) -> dict | None:
                         else functions.get(callback.attr) if isinstance(callback, ast.Attribute) else None)
             entry = hooks.setdefault(hook, {"scopes": [], "rewrites": False})
             if function is None:
-                entry["scopes"].append(("any", set()))
+                entry["scopes"].append(("unknown", set()))   # registered with a callback the source does not show
                 continue
             try:
                 entry["scopes"].append(_scope(function, functions, constants))
                 entry["rewrites"] = entry["rewrites"] or (hook == "pre_tool_call" and _rewrites_command(function))
             except RecursionError:
-                entry["scopes"].append(("any", set()))
+                entry["scopes"].append(("unknown", set()))
     result = {}
     for hook, entry in hooks.items():
         kinds = {kind for kind, _names in entry["scopes"]}
-        if kinds == {"only"}:
+        if "unknown" in kinds:
+            scope, tools = "unknown", set()
+        elif kinds == {"only"}:
             scope, tools = "only", set().union(*(names for _kind, names in entry["scopes"]))
         elif kinds == {"except"} and len(entry["scopes"]) == 1:
             scope, tools = "except", entry["scopes"][0][1]
@@ -616,14 +677,15 @@ def code_hooks(folder: Path, budget: dict | None = None) -> dict | None:
             scope, tools = "any", set()
         result[hook] = {"scope": scope, "tools": sorted(tools), "rewrites": entry["rewrites"]}
     if skipped and not result:
-        return {"_unread": {"scope": "any", "tools": [], "rewrites": False}}
+        result = {"_unread": {"scope": "unknown", "tools": [], "rewrites": False}}
+    memo[key] = result
     return result
 
 
 def overlap(first: dict | None, later: dict | None) -> tuple[str, list[str]]:
     """Whether two transform callbacks can change the same tool: ("none", []), ("tools", names) or ("any", [])."""
-    if not first or not later:
-        return "any", []
+    if not first or not later or "unknown" in (first.get("scope"), later.get("scope")):
+        return "unknown", []
     a, b = first.get("scope"), later.get("scope")
     x, y = set(first.get("tools") or ()), set(later.get("tools") or ())
     if a == "only" and b == "only":
@@ -769,7 +831,7 @@ def _skill_files(base: Path) -> list[Path]:
                 info = entry.stat(follow_symlinks=False)
             except OSError:
                 continue
-            if stat.S_ISDIR(info.st_mode) and depth < 5:
+            if stat.S_ISDIR(info.st_mode) and depth < 5 and entry.name not in ("node_modules", "venv", "__pycache__", "dist", "build"):
                 stack.append((Path(entry.path), depth + 1))
             elif stat.S_ISREG(info.st_mode) and entry.name == "SKILL.md" and depth > 0:
                 found.append(Path(entry.path))
@@ -826,7 +888,9 @@ def scan_profile(name: str, home: Path, *, now: float, read_config, bundled: Pat
     enabled, disabled = _plugin_lists(config)
     plugins, leftovers = _plugins_of(home, enabled, disabled, bundled, now=now,
                                      budget=budget if budget is not None else {"left": SOURCE_SCAN_BYTES})
-    entries = (((config or {}).get("plugins") or {}).get("entries") or {}) if isinstance(config, dict) else {}
+    section = config.get("plugins") if isinstance(config, dict) else None
+    entries = section.get("entries") if isinstance(section, dict) else None
+    entries = entries if isinstance(entries, dict) else {}
     return {"profile": name, "home": str(home),
             # a profile Hermes never configured has no config.yaml: nothing is proposed or run for it
             "config_read": isinstance(config, dict) and (Path(home) / "config.yaml").is_file(),
@@ -884,6 +948,12 @@ def _cmd(profile: str, args: str) -> str:
     return f"hermes -p {profile} {args}"   # always the profile by name: a pinned active profile never changes it
 
 
+def _q(name: str) -> str:
+    import shlex
+
+    return shlex.quote(name)   # a skill folder may hold spaces or shell characters: safe to paste
+
+
 def _protected(item: dict, notes: dict) -> bool:
     note = notes.get(item["name"]) or notes.get(item["folder"]) or {}
     return item["name"] == PLUGIN_ID or isinstance(note, dict) and note.get("protect") is True
@@ -918,9 +988,10 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
                                   evidence={"reason": reason, "state": item["state"], "allowed": item["allow_removed"],
                                             "folder": item["folder"]},
                                   command=_cmd(profile, f"plugins remove {item['name']}")))
+    removed_names = {item["subject"].split("/", 1)[1] for item in found}
     for item in row["plugins"]:
-        if item["origin"] != "profile":
-            continue
+        if item["origin"] != "profile" or item["name"] in removed_names:
+            continue   # a plugin on the kill list is said once, as such
         note = obsolete(item, known)
         if note:
             found.append(_finding("plugin_obsolete", profile, item["name"],
@@ -952,7 +1023,10 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
                             "later_scope": (later["hooks"].get(hook) or {}).get("scope", "any"),
                             "later_tools": (later["hooks"].get(hook) or {}).get("tools", [])}
                 key = f"{hook}:{first['name']}:{later['name']}"
-                if PLUGIN_ID in (first["name"], later["name"]):
+                if verdict == "unknown":
+                    found.append(_finding("plugin_transform_unclear", profile, later["name"], key=key, risk="low",
+                                          evidence=evidence, command=_cmd(profile, "plugins list")))
+                elif PLUGIN_ID in (first["name"], later["name"]):
                     other = later if first["name"] == PLUGIN_ID else first
                     found.append(_finding("plugin_hints_overlap", profile, other["name"], key=key, risk="medium",
                                           evidence={**evidence, "other": other["name"]},
@@ -1020,7 +1094,7 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
     if row["sessions_30d"] == 0 and profile != "default" and row["config_read"]:
         found.append(_finding("profile_idle", profile, "", risk="low",
                               evidence={"days": IDLE_PROFILE_DAYS, "plugins": len(on), "skills": len(row["skills"])},
-                              command=_cmd(profile, "evolution status")))
+                              command="hermes profile list"))
     # Skills (Hermes' bundled ones left out): unused, the same text twice, near twins.
     skills = [item for item in row["skills"] if item["state"] == "active" and not item.get("bundled")]
     unused = [item for item in skills if not (item["pinned"] or item["locked"])
@@ -1030,7 +1104,7 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
         found.append(_finding("skills_unused", profile, "", risk="low",
                               evidence={"count": len(unused), "days": UNUSED_SKILL_DAYS, "total": len(skills),
                                         "skills": [item["folder"] for item in unused][:40]},
-                              command=_cmd(profile, f"curator archive {unused[0]['folder']}")))
+                              command=_cmd(profile, f"curator archive {_q(unused[0]['folder'])}")))
     by_text: dict[str, list] = {}
     for item in skills:
         by_text.setdefault(item["body_sha"], []).append(item)
@@ -1038,13 +1112,21 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
         if len(group) > 1:
             group.sort(key=lambda item: (-(item["uses"] or 0), item["folder"]))
             found.append(_finding("skills_duplicate", profile, group[1]["folder"], risk="low",
-                                  evidence={"keep": group[0]["folder"], "copies": [item["folder"] for item in group]},
-                                  command=_cmd(profile, f"curator archive {group[1]['folder']}")))
+                                  evidence={"keep": group[0]["folder"], "copies": [item["folder"] for item in group],
+                                            "used": bool(group[0]["uses"])},
+                                  command=_cmd(profile, f"curator archive {_q(group[1]['folder'])}")))
     pairs = []
     ordered = sorted(skills, key=lambda item: item["folder"])[:400]
+    words = [_words(item["description"] or item["name"]) for item in ordered]   # once each, not per pair
     for index, left in enumerate(ordered):
-        for right in ordered[index + 1:]:
-            if left["body_sha"] != right["body_sha"] and _similar(left, right) >= SIMILAR:
+        a = words[index]
+        if not a:
+            continue
+        for offset, right in enumerate(ordered[index + 1:], start=index + 1):
+            b = words[offset]
+            if not b or left["body_sha"] == right["body_sha"] or min(len(a), len(b)) < SIMILAR * max(len(a), len(b)):
+                continue
+            if len(a & b) / len(a | b) >= SIMILAR:
                 pairs.append((left["folder"], right["folder"]))
     if pairs:
         found.append(_finding("skills_similar", profile, "", risk="low",
@@ -1180,7 +1262,7 @@ def verify(home: Path, proposal: dict, *, now: float | None = None, read_config=
     """The situation behind a proposal, read again from disk now: the fresh finding with the same code in the
     target profile, or None when it is not there any more. Nothing stored (the proposal, the cached scan, another
     profile's catalog copy) is trusted for a change."""
-    from .ecosystem import knowledge, load_catalog
+    from .ecosystem import knowledge
 
     now = time.time() if now is None else now
     subject = str(proposal.get("subject") or "")
@@ -1192,6 +1274,49 @@ def verify(home: Path, proposal: dict, *, now: float | None = None, read_config=
     if not reading["profiles"]:
         return None
     row = reading["profiles"][0]
-    catalog = load_catalog([Path(row["home"])])
-    fresh = profile_findings(row, catalog, knowledge(), now=now, fleet=state(root), self_sha=self_sha(home))
+    # the kill list is read per profile by removed_reason; the catalog's entries matter only for update advice
+    fresh = profile_findings(row, {"entries": {}, "removed": []}, knowledge(), now=now, fleet=state(root),
+                             self_sha=self_sha(home))
     return next((item for item in fresh if item["code"] == proposal.get("code")), None)
+
+
+
+def profile_mode(home: Path, *, read_config=None) -> str | None:
+    """The mode the plugin in that profile uses (its settings in config.yaml over its settings.json), None when the
+    plugin is not on there."""
+    read_config = read_config or _read_config
+    config = read_config(home)
+    if not has_plugin(home, config):
+        return None
+    try:
+        from .cli import effective_settings
+        from .evolve import options
+
+        return options(effective_settings(Path(home), config), config, strict=False)["mode"]
+    except Exception:
+        return "manual"
+
+
+def publish(home: Path, found: dict | None, *, now: float) -> None:
+    """Turn a look at every profile into the lead's proposals now (the learning pass does it too): new situations open,
+    situations no longer there expire. Used after a look asked for by hand."""
+    from . import proposals
+    from .experience import experience
+
+    items = list((found or {}).get("findings") or ())
+    fresh = {item["code"] for item in items}
+    with experience(home) as conn:
+        for item in items:
+            proposals._upsert(conn, set(), item["code"], item["kind"], item["risk"], item["subject"], item["evidence"],
+                              item["command"], now)
+        gone = [row[0] for row in conn.execute("SELECT code FROM proposal WHERE status='open' AND code LIKE 'env:%'")
+                if row[0] not in fresh]
+        conn.executemany("UPDATE proposal SET status='expired', updated=? WHERE code=? AND status='open'",
+                         [(now, code) for code in gone])
+
+
+def still_open(conn, found: dict | None) -> list[dict]:
+    """The findings of a look that are still to do: not applied, rejected, dismissed or expired since."""
+    closed = {row[0] for row in conn.execute("SELECT code FROM proposal WHERE code LIKE 'env:%' AND status NOT IN "
+                                              "('open', 'approved')")}
+    return [item for item in (found or {}).get("findings") or () if item.get("code") not in closed]

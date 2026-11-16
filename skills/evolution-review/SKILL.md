@@ -5,15 +5,17 @@ description: Run the Atlas Evolution review with the owner - read the digest, ex
 
 # Evolution review
 
-Atlas Evolution measures this profile and proposes improvements. It never changes Hermes by itself, and
-only the owner can decide on its proposals. This skill is the conversation in which the owner decides.
-You inform and recommend; the owner runs the decisions in their own terminal.
+Atlas Evolution measures this profile and proposes improvements. In its default Mode auto it applies by itself
+only safe changes that can be undone (identical memory copies, locks of skills the curator keeps rewriting, its own
+install in profiles that never had it, cleaning failed installs, a weekly `hermes pm gc`), each in the history with
+its undo; everything else waits for the owner. This skill is the conversation in which the owner decides. You inform
+and recommend; the owner runs the decisions in their own terminal (`hermes evolution`, screen 14 for every profile).
 
 ## Steps
 
 1. Check that the plugin is working here with `hermes evolution status` (add `--lang pt` for Portuguese). It
    shows today's events, the last background pass and any busy profile that lacks the plugin; mention those
-   first; a profile marked with both copies still runs the old 0.5.0 code. Then get the digest with
+   first. Then get the digest with
    `hermes evolution report --days 7`. The loop runs by itself in the background, so the numbers are recent.
    `report` only reads; `status` only reads too, except in a profile where no pass ever ran, where it runs
    the first one. `hermes evolution learn` runs a pass now: it measures and, with the reflector on, may ask

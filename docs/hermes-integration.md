@@ -167,7 +167,8 @@ All of it is read-only and bounded in size and time.
 
 | Setting | Effect |
 |---|---|
-| Default installation | Observers with aggregated data. The autopilot runs a pass at most once an hour, and the first passes learn from 14 days of the profile's history. Recurring failures with a template become active lessons (`lessons: auto`) once the owner's own turns hit them twice; they reach the agent in new sessions, are measured, and are retired when they do not help. Failures only other people caused wait for approval. The reflector drafts lessons that wait for approval. The runtime guard vetoes the commands described above. Operator commands can inspect the profile's signals. |
+| Default installation | Observers with aggregated data. The autopilot runs a pass at most once an hour, and the first passes learn from 14 days of the profile's history. Recurring failures with a template become active lessons (`lessons: auto`) once the owner's own turns hit them twice; they reach the agent in new sessions, are measured, and are retired when they do not help. Failures only other people caused wait for approval. The reflector drafts lessons that wait for approval. The runtime guard vetoes the commands described above. Mode auto acts by itself as described in the `mode` row below. Operator commands can inspect the profile's signals. |
+| `mode` (`auto` by default) | `auto`: in this profile, identical memory copies, locks of skills the curator keeps rewriting and a weekly `hermes pm gc` by itself; from the profile that looks after the whole Hermes, installing the plugin in profiles used without it that never had it and moving failed install folders to its trash. `assist`: identical memory copies only. `manual`: nothing by itself. Only `manual` counts from `settings.json`. |
 | `owner_sender_ids` | The sender ids, text or numbers, whose chat turns count as the owner's, as in a local session. |
 | `owner_platforms` | The platforms where every chat counts as the owner's, from the first message: only a platform nobody else writes to, such as a private bot or the owner's own interface through the API server. |
 | `lessons: suggest` | Derived lessons are candidates that wait for approval, like every other lesson. |
@@ -183,18 +184,18 @@ All of it is read-only and bounded in size and time.
 
 ## What the plugin does not do in Hermes
 
-- It does not lock, archive, roll back, edit or create a skill. Those are printed as `hermes curator` commands for you.
-- It does not change Hermes configuration. A proposal that would is printed as a `hermes config` command.
-- It does not write to memory or read memory content beyond the structure counts above.
-- It does not rewrite a prompt that is already in use, inject context per turn (except the opt-in 0.1 note recall), or change tool arguments. The only changes to agent-visible content are the sentence appended to a failing tool result, with `tool_hints` on, and, when the runtime guard vetoes a command, its fixed refusal message in place of the result.
+- It never archives, rolls back, edits or creates a skill. The only change to skills is `hermes curator lock` (and `unlock` to undo it): on your key, or by itself in Mode auto for a skill the curator keeps rewriting.
+- It never changes a Hermes setting other than its own (`plugins.entries.hermes-atlas-evolution.settings.*`, through `hermes config set`, when you change one). A proposal that would change another setting is printed as a `hermes config` command.
+- Hermes' memory: it only takes out a copy of an entry that is the very same text (by itself in Mode assist and auto) or the entry you choose, after keeping a copy of the file; it reads nothing else of it beyond the structure counts above.
+- It does not rewrite a prompt that is already in use, inject context per turn (except the opt-in 0.1 note recall), or change tool arguments. The only changes to agent-visible content are the sentence appended to a failing tool result, with `tool_hints` on, and the lessons at the start of a session.
 - It does not stop, restart or kill anything. The runtime guard only refuses a command; it never runs one.
 - It does not write to Hermes' history: `state.db` and the logs are opened read-only.
-- It changes nothing in other profiles. `status` only reads their sessions and the plugin's own state there, and prints the install or migration command for you to run.
+- Other profiles: in Mode auto, from the one profile that looks after the whole Hermes, it installs itself (at its own commit) in a profile used in the last 7 days that never had it, and moves a failed install's folder (`plugins/.install-*`) to its trash. Turning off one of two plugins runs only on your key for that one proposal. Everything else there (removing or updating a plugin, archiving a skill) is a command for you. Before any change it reads that profile again from disk.
 - It does not approve, deny or route around Hermes approvals, and it never turns a refused approval into advice.
 - It registers no middleware, provider, memory provider, redaction pattern or locale, and overrides nothing in Hermes core.
-- It creates no Cron job. The recipes are printed for you to create. The only Kanban card it creates is the blocked card of `ops handoff`, which needs `kanban_handoff`.
-- It opens no network connection and sends no telemetry. A model is called only by the reflector, through Hermes.
-- It does not let the agent decide: playbook decisions refuse to run in an agent's shell.
+- The only Cron job it creates is the weekly digest, on your key (`schedule-digest`), as a script with no agent; other recipes are printed for you. The only Kanban card it creates is the blocked card of `ops handoff`, which needs `kanban_handoff`.
+- It opens no network connection of its own and sends no telemetry. Hermes downloads the plugin from GitHub when Mode auto installs it in another profile, and `hermes doctor` (your click) calls the providers. A model is called only by the reflector, through Hermes.
+- It does not let the agent decide: decisions refuse to run in an agent's shell.
 
 ## Installation notes
 

@@ -167,7 +167,8 @@ Tudo em modo somente leitura e com limite de tamanho e de tempo.
 
 | Configuração | Efeito |
 |---|---|
-| Instalação padrão | Observadores com dados agregados. O autopilot roda uma passada no máximo uma vez por hora, e as primeiras passadas aprendem com 14 dias do histórico do perfil. Falhas recorrentes com modelo fixo viram lições ativas (`lessons: auto`) assim que os turnos do próprio dono as encontram duas vezes; elas chegam ao agente nas sessões novas, são medidas e são aposentadas quando não ajudam. Falhas que só outras pessoas causaram esperam aprovação. O refletor rascunha lições que aguardam aprovação. A guarda de runtime barra os comandos descritos acima. Os comandos de operador podem inspecionar os sinais do perfil. |
+| Instalação padrão | Observadores com dados agregados. O autopilot roda uma passada no máximo uma vez por hora, e as primeiras passadas aprendem com 14 dias do histórico do perfil. Falhas recorrentes com modelo fixo viram lições ativas (`lessons: auto`) assim que os turnos do próprio dono as encontram duas vezes; elas chegam ao agente nas sessões novas, são medidas e são aposentadas quando não ajudam. Falhas que só outras pessoas causaram esperam aprovação. O refletor rascunha lições que aguardam aprovação. A guarda de runtime barra os comandos descritos acima. O Modo Auto age sozinho como descrito na linha `mode` abaixo. Os comandos de operador podem inspecionar os sinais do perfil. |
+| `mode` (`auto` por padrão) | `auto`: neste perfil, cópias idênticas da memória, travas de skills que o curador reescreve sem parar e um `hermes pm gc` semanal sozinho; a partir do perfil que cuida do Hermes inteiro, instalar o plugin em perfis usados sem ele que nunca o tiveram e mover pastas de instalações que falharam para a lixeira. `assist`: só as cópias idênticas da memória. `manual`: nada sozinho. Só `manual` vale vindo do `settings.json`. |
 | `owner_sender_ids` | Os ids de remetente, em texto ou número, cujos turnos de chat contam como do dono, como numa sessão local. |
 | `owner_platforms` | As plataformas em que todo chat conta como do dono, desde a primeira mensagem: só uma plataforma em que ninguém mais escreve, como um bot privado ou a própria interface do dono pelo servidor de API. |
 | `lessons: suggest` | As lições derivadas viram candidatas e aguardam aprovação, como todas as outras. |
@@ -183,18 +184,18 @@ Tudo em modo somente leitura e com limite de tamanho e de tempo.
 
 ## O que o plugin não faz no Hermes
 
-- Não trava, arquiva, reverte, edita nem cria skills. Isso aparece como comandos `hermes curator` para você.
-- Não altera a configuração do Hermes. Uma proposta que alteraria aparece como comando `hermes config`.
-- Não escreve na memória nem lê o conteúdo dela além das contagens de estrutura acima.
-- Não reescreve um prompt já em uso, não injeta contexto a cada turno (exceto a recuperação opcional das notas da 0.1) e não muda argumentos de ferramentas. As únicas alterações em conteúdo visível ao agente são a frase acrescentada ao resultado de uma ferramenta que falhou, com `tool_hints` ligado, e, quando a guarda de runtime barra um comando, a mensagem fixa de recusa no lugar do resultado.
-- Não para, não reinicia e não derruba nada. A guarda de runtime só recusa um comando; ela nunca executa um.
-- Não grava no histórico do Hermes: o `state.db` e os logs são abertos somente para leitura.
-- Não muda nada em outros perfis. O `status` só lê as sessões deles e o estado do próprio plugin neles, e imprime o comando de instalação ou de migração para você rodar.
+- Nunca arquiva, desfaz, edita ou cria uma skill. A única mudança em skills é `hermes curator lock` (e `unlock` para desfazer): na sua tecla, ou sozinho no Modo Auto para uma skill que o curador reescreve sem parar.
+- Nunca muda uma configuração do Hermes além das próprias (`plugins.entries.hermes-atlas-evolution.settings.*`, por `hermes config set`, quando você muda uma). Uma proposta que mudaria outra configuração aparece como um comando `hermes config`.
+- Memória do Hermes: só tira uma cópia de uma entrada que é exatamente o mesmo texto (sozinho nos Modos Assistido e Auto) ou a entrada que você escolhe, depois de guardar uma cópia do arquivo; não lê nada além das contagens de estrutura acima.
+- Não reescreve um prompt já em uso, não injeta contexto por turno (exceto a recuperação opcional das notas 0.1) e não muda argumentos de ferramentas. As únicas mudanças no que o agente vê são a frase juntada ao resultado de uma ferramenta que falhou, com `tool_hints` ligado, e as lições no começo da sessão.
+- Não para, não reinicia e não mata nada. A guarda de runtime só recusa um comando; nunca roda um.
+- Não grava no histórico do Hermes: o `state.db` e os logs são abertos só para leitura.
+- Outros perfis: no Modo Auto, a partir do perfil que cuida do Hermes inteiro, ele se instala (no próprio commit) num perfil usado nos últimos 7 dias que nunca o teve, e move a pasta de uma instalação que falhou (`plugins/.install-*`) para a lixeira dele. Desligar um de dois plugins só roda na sua tecla, naquela proposta. Todo o resto ali (remover ou atualizar um plugin, arquivar uma skill) é um comando para você. Antes de qualquer mudança ele lê aquele perfil de novo do disco.
 - Não aprova, nega nem contorna aprovações do Hermes, e nunca transforma uma aprovação recusada em conselho.
-- Não registra middleware, provedor, provedor de memória, padrão de mascaramento de dados sensíveis nem pacote de idioma, e não substitui nada do núcleo do Hermes.
-- Não cria rotinas de Cron. As receitas são impressas para você criar. O único cartão Kanban que ele cria é o cartão bloqueado do `ops handoff`, que exige `kanban_handoff`.
-- Não abre conexão de rede nem envia telemetria. Um modelo só é chamado pelo refletor, por meio do Hermes.
-- Não deixa o agente decidir: os comandos de decisão do playbook não rodam num terminal do agente.
+- Não registra middleware, provedor, provedor de memória, padrão de redação ou idioma, e não substitui nada no núcleo do Hermes.
+- O único job de Cron que ele cria é o resumo semanal, na sua tecla (`schedule-digest`), como um script sem agente; as outras receitas são impressas para você. O único cartão de Kanban que ele cria é o cartão bloqueado do `ops handoff`, que precisa de `kanban_handoff`.
+- Não abre conexão de rede própria e não envia telemetria. O Hermes baixa o plugin do GitHub quando o Modo Auto o instala em outro perfil, e o `hermes doctor` (seu clique) chama os provedores. Um modelo só é chamado pelo refletor, por meio do Hermes.
+- Não deixa o agente decidir: as decisões se recusam a rodar no shell de um agente.
 
 ## Notas de instalação
 

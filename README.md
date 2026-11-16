@@ -15,7 +15,7 @@ A Hermes that has run for weeks piles up problems nobody sees: the agent repeats
 | | In practice |
 |---|---|
 | **Stops repeated mistakes** | A tool error that keeps coming back becomes a one-sentence lesson the agent reads. The plugin measures whether it helped and drops the ones that did not. |
-| **Tidies the whole environment** | Looks at every profile at once and points out plugins that change the same tool's result (and which one gets lost), two plugins doing one job, plugins removed from the Hermes catalog, archived or unmaintained, plugins installed that never load, skills unused, duplicated, alike or copied into every profile, and leftovers of failed installs. It knows Hermes' official plugin catalog (over 2,300 plugins) and which plugins are archived or unmaintained. |
+| **Tidies the whole environment** | Looks at every profile at once and points out plugins that change the same tool's result (and which one gets lost), two plugins doing one job, plugins removed from the Hermes catalog, archived or unmaintained, plugins installed that never load, skills unused, duplicated, alike or copied into many profiles, and leftovers of failed installs. It knows Hermes' official plugin catalog (over 2,300 plugins) and which plugins are archived or unmaintained. |
 | **Saves tokens** | Takes repeats out of Hermes' memory, locks skills the curator keeps rewriting, and shows what makes each call heavy. |
 | **Keeps Hermes healthy** | The gateway alive or stuck, the session database, the disk (and the day it fills), memory, swap, CPU, old tool versions. Runs Hermes' own `doctor`, repair and cleanup, with a backup first. |
 | **Keeps the server up to date** | Updates Ubuntu or Debian with checks before and after, a safety copy, your configuration files kept, and a repair if the power goes in the middle. |
@@ -23,15 +23,22 @@ A Hermes that has run for weeks piles up problems nobody sees: the agent repeats
 
 ### The Mode auto (default)
 
-In **Mode auto** Atlas Evolution thinks and acts for you, in every profile of your Hermes, without having to be installed in each one to see them. By itself it only does what is safe and can be undone:
+In **Mode auto** Atlas Evolution thinks and acts for you. One profile looks after the whole Hermes and sees every profile, without the plugin having to be installed in each one. By itself it only does what is safe and can be undone.
+
+In each profile where it runs (with that profile's own mode):
 
 - takes out identical copies of a memory entry (a copy of the file is kept);
 - locks skills the curator keeps rewriting;
-- installs itself, at the same version, in profiles in use that never had it (never where you turned it off or removed it);
-- moves folders left by failed installs to its trash;
 - frees old tool versions, at most once a week.
 
+In the other profiles, from the profile that looks after the whole Hermes:
+
+- installs itself, at the same version, in profiles in use that never had it (never where you turned it off or removed it); Hermes downloads it from GitHub;
+- moves folders left by failed installs to its trash (kept 30 days).
+
 What could break something (turning off one of two plugins, removing plugins, archiving skills) waits for you, with its reason and the key or command to apply. Before it changes anything in a profile, the plugin reads that profile again from disk: a stored suggestion is never trusted. Every action goes to the history with its undo, and an action you undo is never repeated. Rather decide everything yourself? Switch to **Assisted** or **Manual** in the menu (screen 5) or the dashboard.
+
+**Updating from 0.8.4 with the default settings switches you to Mode auto.** Its first pass looks at every profile and may, by itself: take out identical memory copies, lock skills the curator keeps rewriting, run `hermes pm gc` if old tool versions take 300 MB or more, install the plugin in profiles used in the last 7 days that never had it, and move failed install folders to its trash. To look first and decide by hand, run `hermes config set plugins.entries.hermes-atlas-evolution.settings.mode assist` before updating, then see screen 14.
 
 Its data stays on your machine, it opens no network connection of its own, and the agent never decides anything.
 
@@ -76,8 +83,8 @@ Installing loads the plugin into a running gateway; no restart is needed. The fi
 ## What's new in 0.8.5
 
 - **Mode auto, on by default.** Atlas Evolution now looks after every profile of your Hermes at once and does by itself what is safe and can be undone; the rest becomes a suggestion with its reason and one key. Assisted and Manual are still there.
-- **Environment: every profile, plugin and skill** (screen 14, the Environment tab, `hermes evolution environment`). It reads the plugins' code without running it to know which tools each one changes, and reports a conflict only when two plugins change the same tool, saying which one wins, which one is lost and what to turn off (never a security plugin). It also finds duplicate plugins, plugins removed from the Hermes catalog, archived or unmaintained, installed and never loaded, newer versions in the catalog, skills unused, duplicated, alike or copied into every profile, idle profiles and leftovers of failed installs.
-- **A knowledge base in the plugin's database.** Hermes' official plugin catalog (over 2,300, with the ones removed for safety), what the plugin knows about well-known plugins, and the playbook of every situation, with its action and undo, are tables of `evolution.sqlite3`.
+- **Environment: every profile, plugin and skill** (screen 14, the Environment tab, `hermes evolution environment`). It reads the plugins' code without running it to know which tools each one changes, and reports a conflict only when two plugins can change the same tool (as far as their code shows), saying which one wins, which one is lost and what to turn off (never a security plugin). It also finds duplicate plugins, plugins removed from the Hermes catalog, archived or unmaintained, installed and never loaded, newer versions in the catalog, skills unused, duplicated, alike or copied into many profiles, idle profiles and leftovers of failed installs.
+- **A knowledge base in the plugin's database.** Hermes' official plugin catalog (over 2,300, with the ones Hermes removed from it), what the plugin knows about well-known plugins, and the playbook of every situation, with its action and undo, are tables of `evolution.sqlite3`.
 - **Clear recommendations.** Every finding says what was seen, what to do, the command it runs and how to undo it. The vague "plugins compete for a hook" observation is gone: two plugins on different tools are no conflict.
 - **Automatic maintenance.** Frees old tool versions (`hermes pm gc`) once a week. Every change: [CHANGELOG](CHANGELOG.md).
 
@@ -118,13 +125,13 @@ Set them in the **Evolution** tab of the dashboard, in the menu (screen 6), in H
 | `runtime_guard` | `true` | Vetoes agent commands that would stop the gateway or delete what Hermes runs on. |
 | `agent_tools`, `tool_hints`, `feedback_signals`, `slow_turn_seconds` | | See [Settings and language](docs/evolution-loop.md#settings-and-language). |
 
-`owner_sender_ids`, `owner_platforms`, `agent_tools: true`, `runtime_guard: false` and `mode: auto` set over a narrower choice count only from Hermes' configuration, never from the plugin's own `settings.json`, which the agent's file tools can write.
+`owner_sender_ids`, `owner_platforms`, `agent_tools: true`, `runtime_guard: false` and any `mode` other than `manual` count only from Hermes' configuration, never from the plugin's own `settings.json`, which the agent's file tools can write.
 
 ## Privacy and safety
 
 - **What it keeps.** Counters, failure classes, hashed session ids, lessons and proposals, under `<HERMES_HOME>/evolution/`; no conversation text, prompt, tool argument or output. A copy of a memory file when an entry is taken out, owner-only; before a system update, the package list and a copy of `/etc` in a root-only folder outside every profile (`/var/lib/hermes-atlas-evolution/system/`).
 - **What it reads**, read-only: Hermes' history, logs, skill records, its gateway and database files; every profile's `config.yaml`, plugins (their manifest, git checkout and Python source, parsed and never run) and skills; Hermes' cached plugin catalog; for the system, the package manager's state ([full list](docs/hermes-integration.md#what-the-plugin-reads)).
-- **Network and model.** No connection of its own and no telemetry. Only the reflector calls a model, through Hermes. `hermes doctor`, run only on your click, calls the providers' APIs (and pings an `/anthropic` endpoint with one token); everything else here spends nothing.
+- **Network and model.** No connection of its own and no telemetry. When Mode auto installs the plugin in another profile, Hermes downloads it from GitHub. Only the reflector calls a model, through Hermes. `hermes doctor`, run only on your click, calls the providers' APIs (and pings an `/anthropic` endpoint with one token); everything else here spends nothing.
 - **Decisions.** Only you decide, in your own terminal or in a dashboard with a login. The plugin changes its own data; its settings with `hermes config set`; Hermes' memory only to take out a repeat; skills only with `hermes curator lock`; plugins of any profile only with Hermes' own `hermes -p <profile> plugins disable|enable|install`; failed install folders by moving them to its trash; the system only when you run its update. Each change has its undo or its copy.
 
 Details: [SECURITY.md](SECURITY.md).

@@ -15,7 +15,7 @@ Um Hermes que roda há semanas acumula problemas que ninguém vê: o agente repe
 | | Na prática |
 |---|---|
 | **Para de repetir erros** | Um erro de ferramenta que volta vira uma lição de uma frase que o agente passa a ler. O plugin mede se a lição ajudou e tira as que não ajudaram. |
-| **Arruma o ambiente inteiro** | Olha todos os perfis de uma vez e aponta plugins que mudam o resultado da mesma ferramenta (e qual deles se perde), dois plugins fazendo o mesmo trabalho, plugins removidos do catálogo do Hermes, arquivados ou sem manutenção, plugins instalados que nunca carregam, skills sem uso, duplicadas, parecidas ou copiadas em todos os perfis, e restos de instalações que falharam. Conhece o catálogo oficial de plugins do Hermes (mais de 2.300) e quais plugins estão arquivados ou sem manutenção. |
+| **Arruma o ambiente inteiro** | Olha todos os perfis de uma vez e aponta plugins que mudam o resultado da mesma ferramenta (e qual deles se perde), dois plugins fazendo o mesmo trabalho, plugins removidos do catálogo do Hermes, arquivados ou sem manutenção, plugins instalados que nunca carregam, skills sem uso, duplicadas, parecidas ou copiadas em vários perfis, e restos de instalações que falharam. Conhece o catálogo oficial de plugins do Hermes (mais de 2.300) e quais plugins estão arquivados ou sem manutenção. |
 | **Economiza tokens** | Tira repetições da memória do Hermes, trava skills que o curador reescreve sem parar e mostra o que deixa cada chamada pesada. |
 | **Mantém o Hermes saudável** | Gateway vivo ou travado, banco de sessões, disco (e o dia em que ele enche), memória, swap, CPU, versões antigas de ferramentas. Roda o `doctor`, o reparo e a limpeza do próprio Hermes, com backup antes. |
 | **Mantém o servidor atualizado** | Atualiza o Ubuntu ou o Debian com checagens antes e depois, cópia de segurança, os seus arquivos de configuração mantidos e um reparo se a energia cair no meio. |
@@ -23,15 +23,22 @@ Um Hermes que roda há semanas acumula problemas que ninguém vê: o agente repe
 
 ### O Modo Auto (padrão)
 
-No **Modo Auto** o Atlas Evolution pensa e age por você, em todos os perfis do Hermes, sem precisar estar instalado em cada um para enxergá-los. Sozinho, ele só faz o que é seguro e pode ser desfeito:
+No **Modo Auto** o Atlas Evolution pensa e age por você. Um perfil cuida do Hermes inteiro e enxerga todos os perfis, sem o plugin precisar estar instalado em cada um. Sozinho, ele só faz o que é seguro e pode ser desfeito.
+
+Em cada perfil onde ele roda (com o modo daquele perfil):
 
 - tira cópias idênticas de uma entrada da memória (guarda uma cópia do arquivo);
 - trava skills que o curador reescreve sem parar;
-- se instala, na mesma versão, nos perfis em uso que nunca o tiveram (nunca onde você o desligou ou removeu);
-- move para a lixeira as pastas deixadas por instalações que falharam;
 - libera versões antigas de ferramentas, no máximo uma vez por semana.
 
+Nos outros perfis, a partir do perfil que cuida do Hermes inteiro:
+
+- se instala, na mesma versão, nos perfis em uso que nunca o tiveram (nunca onde você o desligou ou removeu); o Hermes o baixa do GitHub;
+- move para a lixeira as pastas deixadas por instalações que falharam (guardadas 30 dias).
+
 O que poderia quebrar algo (desligar um de dois plugins, remover plugins, arquivar skills) espera você, com o motivo e a tecla ou o comando para aplicar. Antes de mudar qualquer coisa num perfil, o plugin lê esse perfil de novo do disco: uma sugestão guardada nunca é tomada como verdade. Cada ação vai para o histórico com o desfazer, e uma ação que você desfaz nunca se repete. Prefere decidir tudo? Troque para **Assistido** ou **Manual** no menu (tela 5) ou no dashboard.
+
+**Atualizar a partir da 0.8.4 com as configurações padrão passa você para o Modo Auto.** A primeira passada olha todos os perfis e pode, sozinha: tirar cópias idênticas da memória, travar skills que o curador reescreve sem parar, rodar `hermes pm gc` se versões antigas de ferramentas ocuparem 300 MB ou mais, instalar o plugin em perfis usados nos últimos 7 dias que nunca o tiveram e mover para a lixeira pastas de instalações que falharam. Para olhar antes e decidir à mão, rode `hermes config set plugins.entries.hermes-atlas-evolution.settings.mode assist` antes de atualizar e depois veja a tela 14.
 
 Os dados ficam na sua máquina, o plugin não abre conexão de rede própria e o agente nunca decide nada.
 
@@ -76,8 +83,8 @@ Instalar carrega o plugin num gateway em execução; não precisa reiniciar. A p
 ## Novidades da 0.8.5
 
 - **Modo Auto, ligado por padrão.** O Atlas Evolution passa a cuidar de todos os perfis do Hermes de uma vez e faz sozinho o que é seguro e reversível; o resto vira sugestão com o motivo e uma tecla. Assistido e Manual continuam disponíveis.
-- **Ambiente: todos os perfis, plugins e skills** (tela 14, aba Ambiente, `hermes evolution environment`). Lê o código dos plugins sem executá-lo para saber quais ferramentas cada um muda, e só aponta conflito quando dois plugins mudam a mesma ferramenta, dizendo qual vale, qual se perde e o que desligar (nunca um plugin de segurança). Encontra também plugins duplicados, removidos do catálogo do Hermes, arquivados ou sem manutenção, instalados e nunca carregados, versões novas no catálogo, skills sem uso, duplicadas, parecidas ou copiadas em todos os perfis, perfis parados e restos de instalações que falharam.
-- **Base de conhecimento no banco do plugin.** O catálogo oficial de plugins do Hermes (mais de 2.300, com os removidos por segurança), o que o plugin sabe de plugins conhecidos e o playbook de cada situação, com a ação e o desfazer, ficam em tabelas do `evolution.sqlite3`.
+- **Ambiente: todos os perfis, plugins e skills** (tela 14, aba Ambiente, `hermes evolution environment`). Lê o código dos plugins sem executá-lo para saber quais ferramentas cada um muda, e só aponta conflito quando dois plugins podem mudar a mesma ferramenta (pelo que o código deles mostra), dizendo qual vale, qual se perde e o que desligar (nunca um plugin de segurança). Encontra também plugins duplicados, removidos do catálogo do Hermes, arquivados ou sem manutenção, instalados e nunca carregados, versões novas no catálogo, skills sem uso, duplicadas, parecidas ou copiadas em vários perfis, perfis parados e restos de instalações que falharam.
+- **Base de conhecimento no banco do plugin.** O catálogo oficial de plugins do Hermes (mais de 2.300, com os que o Hermes tirou dele), o que o plugin sabe de plugins conhecidos e o playbook de cada situação, com a ação e o desfazer, ficam em tabelas do `evolution.sqlite3`.
 - **Recomendações claras.** Cada achado diz o que foi visto, o que fazer, o comando que roda e como desfazer. A observação confusa "plugins disputam um hook" saiu: dois plugins em ferramentas diferentes não são conflito.
 - **Manutenção automática.** Libera versões antigas de ferramentas (`hermes pm gc`) uma vez por semana. Todas as mudanças: [CHANGELOG em português](CHANGELOG.pt-BR.md).
 
@@ -118,13 +125,13 @@ Ajuste na aba **Evolution** do dashboard, no menu (tela 6), no Hermes Desktop em
 | `runtime_guard` | `true` | Barra comandos do agente que parariam o gateway ou apagariam aquilo em que o Hermes roda. |
 | `agent_tools`, `tool_hints`, `feedback_signals`, `slow_turn_seconds` | | Veja [Configuração e idioma](docs/pt-BR/evolution-loop.md#configuração-e-idioma). |
 
-`owner_sender_ids`, `owner_platforms`, `agent_tools: true`, `runtime_guard: false` e `mode: auto` por cima de uma escolha mais restrita só valem vindos da configuração do Hermes, nunca do `settings.json` do próprio plugin, que as ferramentas de arquivo do agente conseguem gravar.
+`owner_sender_ids`, `owner_platforms`, `agent_tools: true`, `runtime_guard: false` e qualquer `mode` que não seja `manual` só valem vindos da configuração do Hermes, nunca do `settings.json` do próprio plugin, que as ferramentas de arquivo do agente conseguem gravar.
 
 ## Privacidade e segurança
 
 - **O que ele guarda.** Contadores, classes de falha, ids de sessão com hash, lições e propostas, em `<HERMES_HOME>/evolution/`; nenhum texto de conversa, prompt, argumento ou saída de ferramenta. Uma cópia de um arquivo de memória quando uma entrada sai, só do dono; antes de uma atualização do sistema, a lista de pacotes e uma cópia do `/etc` numa pasta só do root, fora de todo perfil (`/var/lib/hermes-atlas-evolution/system/`).
 - **O que ele lê**, só para ler: o histórico, os logs e os registros de skills do Hermes, os arquivos do gateway e do banco; o `config.yaml`, os plugins (manifesto, checkout git e código Python, analisado e nunca executado) e as skills de cada perfil; o catálogo de plugins que o Hermes guarda em cache; do sistema, o estado do gerenciador de pacotes ([lista completa](docs/pt-BR/hermes-integration.md#o-que-o-plugin-lê)).
-- **Rede e modelo.** Nenhuma conexão própria e nenhuma telemetria. Só o refletor chama um modelo, pelo Hermes. O `hermes doctor`, rodado só com um clique seu, consulta as APIs dos provedores (e manda um ping de 1 token para um endpoint `/anthropic`); todo o resto aqui não gasta nada.
+- **Rede e modelo.** Nenhuma conexão própria e nenhuma telemetria. Quando o Modo Auto instala o plugin em outro perfil, o Hermes o baixa do GitHub. Só o refletor chama um modelo, pelo Hermes. O `hermes doctor`, rodado só com um clique seu, consulta as APIs dos provedores (e manda um ping de 1 token para um endpoint `/anthropic`); todo o resto aqui não gasta nada.
 - **Decisões.** Só você decide, no seu próprio terminal ou num dashboard com login. O plugin muda os próprios dados; as próprias configurações com `hermes config set`; a memória do Hermes só para tirar uma repetição; skills só com `hermes curator lock`; plugins de qualquer perfil só com os comandos do próprio Hermes (`hermes -p <perfil> plugins disable|enable|install`); pastas de instalações que falharam movendo-as para a lixeira dele; o sistema só quando você roda a atualização dele. Cada mudança tem o desfazer ou a cópia.
 
 Detalhes: [SECURITY.md](SECURITY.md).

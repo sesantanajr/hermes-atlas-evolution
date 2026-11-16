@@ -917,6 +917,7 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
         task = getattr(args, "environment_action", "show")
         if task == "scan":
             found = environment.refresh(lead, now=now, force=True)
+            environment.publish(lead, found, now=now)   # what menu screen 14 and the panel then show
         else:
             with experience(lead) as conn:
                 found = environment.stored(conn)
@@ -926,7 +927,9 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
                     return {"tiers": {row[0]: row[1] for row in rows}, "removed": [dict(row) for row in removed],
                             "catalog": (found or {}).get("catalog")}
         if not found:
-            return {"lead": environment.root_of(home).name, "scanned": False}
+            from .admin import profile_name
+
+            return {"lead": profile_name(lead), "scanned": False}
         return {**{key: found[key] for key in ("at", "lead", "summary", "catalog", "profiles")},
                 "findings": [{**item, "explain": explain.describe(item, lang)} for item in found.get("findings") or ()]}
     if args.evolution_action == "schedule-digest":

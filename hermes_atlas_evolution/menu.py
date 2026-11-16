@@ -40,13 +40,14 @@ TEXT = {
         "suggest_os_repair": "Finish the system update that stopped half-way",
         "suggest_env": "See {n} thing(s) to fix across your profiles (plugins, skills)",
         "advice": "What to do",
-        "and_more": " and {n} more",
+        "what_maintenance": "ran Hermes' own maintenance: hermes {target} (nothing to undo)",
+        "and_more": " (+{n} other kind(s))",
         "env_title": "Environment: every profile of this Hermes",
-        "env_mode": "Mode: {mode} · looked after by profile `{lead}` · last look: {when}",
+        "env_mode": "Looked after by profile `{lead}` (its mode: {mode}; each other profile with the plugin follows its own) · last look: {when}",
         "env_lead_elsewhere": "Profile `{lead}` looks after every profile; this screen shows and decides through it.",
         "env_none": "No profile has Atlas Evolution turned on, so nobody looks after the whole Hermes yet.",
         "env_not_yet": "Not looked at yet: press v to look now (about 15 seconds on a large Hermes).",
-        "env_catalog": "Hermes plugin catalog: {plugins} plugins ({tiers}) · {removed} removed for safety",
+        "env_catalog": "Hermes plugin catalog: {plugins} plugins ({tiers}) · {removed} removed from it",
         "env_tiers": {"official": "official", "verified": "verified", "community": "community"},
         "env_profiles": "Profiles ({n}):",
         "env_row": "{profile:<18} {sessions:>4} sessions in 7 days · plugins: {on} on, {idle} never loaded · {skills} skills · Atlas Evolution: {self}",
@@ -214,13 +215,14 @@ TEXT = {
         "suggest_os_repair": "Terminar a atualização do sistema que parou no meio",
         "suggest_env": "Ver {n} coisa(s) para arrumar nos seus perfis (plugins, skills)",
         "advice": "O que fazer",
-        "and_more": " e mais {n}",
+        "what_maintenance": "rodou a manutenção do próprio Hermes: hermes {target} (nada a desfazer)",
+        "and_more": " (+{n} outro(s) tipo(s))",
         "env_title": "Ambiente: todos os perfis deste Hermes",
-        "env_mode": "Modo: {mode} · cuidado pelo perfil `{lead}` · última olhada: {when}",
+        "env_mode": "Cuidado pelo perfil `{lead}` (modo dele: {mode}; cada outro perfil com o plugin segue o próprio) · última olhada: {when}",
         "env_lead_elsewhere": "O perfil `{lead}` cuida de todos os perfis; esta tela mostra e decide por meio dele.",
         "env_none": "Nenhum perfil tem o Atlas Evolution ligado, então ninguém cuida do Hermes inteiro ainda.",
         "env_not_yet": "Ainda não olhado: tecle v para olhar agora (uns 15 segundos num Hermes grande).",
-        "env_catalog": "Catálogo de plugins do Hermes: {plugins} plugins ({tiers}) · {removed} removido(s) por segurança",
+        "env_catalog": "Catálogo de plugins do Hermes: {plugins} plugins ({tiers}) · {removed} tirado(s) dele",
         "env_tiers": {"official": "oficiais", "verified": "verificados", "community": "da comunidade"},
         "env_profiles": "Perfis ({n}):",
         "env_row": "{profile:<18} {sessions:>4} sessões em 7 dias · plugins: {on} ligado(s), {idle} nunca carregado(s) · {skills} skills · Atlas Evolution: {self}",
@@ -619,7 +621,7 @@ class Menu:
                 counts = {"waiting": state["lessons"]["awaiting_approval"], "proposals": state["proposals_open"],
                           "active": state["lessons"]["active"],
                           "auto": self.t["auto_names"].get(automatic["mode"], automatic["mode"]),
-                          "profiles": ((state.get("environment") or {}).get("summary") or {}).get("profiles", "?")}
+                          "profiles": ((state.get("environment") or {}).get("summary") or {}).get("profiles", "…")}
                 last = (state["autopilot"] or {}).get("last_pass")
                 last_text = self.t["never"] if not last else \
                     f"{str(last.get('at') or '')[:16].replace('T', ' ')} ({self.t['ok'] if last.get('ok') is not False else self.t['failed']})"
@@ -860,7 +862,8 @@ class Menu:
             with experience(lead) as conn:
                 found = environment.stored(conn)
             values, _suggestions = self.settings_now()
-            mode = self.t["auto_names"].get(values.get("mode"), values.get("mode"))
+            lead_mode = environment.profile_mode(lead) or values.get("mode")
+            mode = self.t["auto_names"].get(lead_mode, lead_mode)
             when = _when(found["at"], self.lang) if found else self.t["never"]
             self.io.say(self.t["env_mode"].format(mode=mode, lead=profile_name(lead), when=when))
             if Path(lead).resolve() != Path(self.home).resolve():
@@ -891,9 +894,9 @@ class Menu:
                 self.io.say(self.io.bold(self.t["env_todo"].format(n=len(items))))
                 for number, item in enumerate(items, start=1):
                     told = item["explain"]
-                    auto = " ⚙" if told.get("automatic") and values.get("mode") == "auto" else ""
+                    auto = " ⚙" if told.get("automatic") and lead_mode == "auto" else ""
                     self.io.say(f"  {number:>2}  [{told['risk']}] {told['title']} · {item['subject']}{auto}")
-                if values.get("mode") == "auto" and any(item["explain"].get("automatic") for item in items):
+                if lead_mode == "auto" and any(item["explain"].get("automatic") for item in items):
                     self.io.say(self.t["env_auto_mark"])
             answer = self.io.ask(self.t["env_prompt"]).lower()
             if not answer:
@@ -910,20 +913,9 @@ class Menu:
 
     def _look_again(self, lead) -> None:
         """Look at every profile now and refresh the proposals of the lead profile with what was found."""
-        from . import environment, proposals
-        from .experience import experience
+        from . import environment
 
-        found = environment.refresh(lead, now=self.clock(), force=True)
-        with experience(lead) as conn:
-            existing = conn.execute("SELECT code FROM proposal WHERE status='open' AND code LIKE 'env:%'").fetchall()
-            seen = {row[0] for row in existing}
-            for item in (found or {}).get("findings") or ():
-                proposals._upsert(conn, set(), item["code"], item["kind"], item["risk"], item["subject"],
-                                  item["evidence"], item["command"], self.clock())
-            fresh = {item["code"] for item in (found or {}).get("findings") or ()}
-            gone = [code for code in seen if code not in fresh]
-            conn.executemany("UPDATE proposal SET status='expired', updated=? WHERE code=? AND status='open'",
-                             [(self.clock(), code) for code in gone])
+        environment.publish(lead, environment.refresh(lead, now=self.clock(), force=True), now=self.clock())
 
     # ── automatic actions ──────────────────────────────────────────────────────────────────────────
     def automatic(self) -> None:
@@ -1011,10 +1003,12 @@ class Menu:
                                                  after=_value(row["after"].get("value")))
         if row["kind"] == "memory":
             return self.t["what_memory"].format(target=row["target"])
+        if row["kind"] == "maintenance":
+            return self.t["what_maintenance"].format(target=str(row["target"]).replace("_", " "))
         if row["kind"] == "proposal" and isinstance((row.get("after") or {}).get("applied"), list):
             from .explain import command_text
 
-            return f"{did} " + command_text(row["after"]["applied"])
+            return f"{did} " + command_text(row["after"]["applied"], self.lang)
         return self.t["what_lesson" if row["kind"] == "lesson" else "what_proposal"].format(did=did, target=row["target"])
 
     def history(self) -> None:
@@ -1038,7 +1032,8 @@ class Menu:
             answer = self.io.ask(self.t["history_prompt"])
             if not answer:
                 return
-            if not (answer.isascii() and answer.isdigit()) or int(answer) not in {row["id"] for row in rows if not row["undone"]}:
+            if not (answer.isascii() and answer.isdigit()) or int(answer) not in {row["id"] for row in rows
+                                                                                  if row.get("undoable", not row["undone"])}:
                 self.io.say(self.t["invalid"])
                 continue
             self.undo(int(answer))

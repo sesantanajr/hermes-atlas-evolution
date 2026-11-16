@@ -191,6 +191,16 @@
       "title_pt": "Perfil em uso onde você desligou o Atlas Evolution",
       "advice_en": "Your decision is kept: it is never turned on or reinstalled by itself. If you want it back there, run the command below.",
       "advice_pt": "A sua decisão é mantida: ele nunca é religado nem reinstalado sozinho. Se quiser de volta nesse perfil, rode o comando abaixo."
+    },
+    "plugin_transform_unclear": {
+      "level": "advice",
+      "risk": "low",
+      "action": "",
+      "undo": "",
+      "title_en": "Two plugins may change the same result (their code does not show which tools)",
+      "title_pt": "Dois plugins podem mudar o mesmo resultado (o código não mostra em quais ferramentas)",
+      "advice_en": "Nothing is turned off for this: check the two plugins' documentation. If both change the same tool, keep the one you need there.",
+      "advice_pt": "Nada é desligado por isso: confira a documentação dos dois plugins. Se os dois mudam a mesma ferramenta, fique com o que você precisa ali."
     }
   }
 }

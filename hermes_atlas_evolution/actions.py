@@ -337,6 +337,8 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
     for row in rows:
         if len(done["applied"]) >= MAX_CHANGES_PER_PASS:
             break
+        if row["kind"] in explain.FLEET and not _target_allows(home, row["subject"]):
+            continue   # that profile has the plugin, set to another mode: its owner decides there
         needed = NEEDED_SECONDS.get(row["kind"], COMMAND_MIN_SECONDS)
         if deadline is not None and deadline - time.monotonic() < needed:
             continue   # not enough time left in this pass for this one: the next pass
@@ -371,6 +373,22 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
         except Exception as error:   # never fails the pass
             done["failed"].append({"what": "pm_gc", "error": str(error)[:120]})
     return done
+
+
+def _target_allows(home: Path, subject) -> bool:
+    """A change by itself in another profile: allowed where the plugin is not on (the lead's mode decides), and where
+    it is on only if that profile's own mode is auto too."""
+    from .environment import profile_mode
+
+    profile = str(subject or "").split("/", 1)[0]
+    try:
+        target = _profile_home(home, profile)
+    except ValueError:
+        return False
+    if Path(target).resolve() == Path(home).resolve():
+        return True
+    mode = profile_mode(target)
+    return mode is None or mode == "auto"
 
 
 RECLAIM_EVERY_SECONDS = 7 * 86_400
