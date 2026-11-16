@@ -366,7 +366,15 @@ def _env_what(kind: str, subject: str, e: dict, lang: str) -> str:
         a = _scope_text(e.get("first_scope"), e.get("first_tools"), lang)
         b = _scope_text(e.get("later_scope"), e.get("later_tools"), lang)
         common = names(tools) if tools else ("qualquer ferramenta" if pt else "any tool")
-        if pt:
+        if hook == "transform_llm_output":   # the model's answer, not a tool's result
+            text = (f"No perfil `{where}`, `{first}` e `{later}` mudam a resposta do modelo pelo hook `{hook}`. O Hermes"
+                    f" carrega `{first}` antes (ordem alfabética do nome, depois de requires_plugins) e fica só com a"
+                    f" primeira mudança de cada resposta: quando os dois mudam a mesma, a de `{later}` se perde, sem aviso."
+                    if pt else
+                    f"In profile `{where}`, `{first}` and `{later}` change the model's answer through the hook `{hook}`."
+                    f" Hermes loads `{first}` first (alphabetical by name, after requires_plugins) and keeps only the first"
+                    f" change of each answer: when both change the same one, `{later}`'s is lost, silently.")
+        elif pt:
             text = (f"No perfil `{where}`, dois plugins mudam o resultado das ferramentas pelo hook `{hook}`: `{first}` age"
                     f" {a} e `{later}` age {b}. Os dois podem mudar a mesma chamada em: {common}. O Hermes carrega"
                     f" `{first}` antes (ordem alfabética do nome, depois de requires_plugins) e, em cada chamada, fica só"
