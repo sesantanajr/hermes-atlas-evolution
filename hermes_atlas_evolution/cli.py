@@ -293,7 +293,8 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
 
             try:
                 ran = run_exclusive(home, lambda: cycle(home, now=now, runtime_config=runtime_config, config=config,
-                                                        lang=lang, reflect=reflect, backfill_budget_s=60.0), wait_s=5)
+                                                        lang=lang, reflect=reflect, backfill_budget_s=60.0,
+                                                        deadline=time.monotonic() + 90), wait_s=5)
                 done = ran.get("history") or {}
                 first = {"sessions": done.get("sessions", 0), "tool_calls": done.get("tool_calls", 0)}
             except ValueError:   # another pass is running right now: it will show up in a moment
@@ -454,14 +455,18 @@ def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=Non
     from .evolve import cycle, notify_view
 
     owner = f"tick-{os.getpid()}"
-    if not claim(home, now=now, interval_s=CYCLE_INTERVAL_SECONDS, owner=owner):
+    # The clock of this moment, not of when the command started: an autopilot pass may have finished since.
+    if not claim(home, now=time.time(), interval_s=CYCLE_INTERVAL_SECONDS, owner=owner):
         return None
-    try:
-        result = cycle(home, now=now, runtime_config=runtime_config, config=config, reflect=reflect)
+    started = time.time()
+    try:   # the cron recipe allows 300 s; the pass ends well before, skipping model calls that would not fit
+        result = cycle(home, now=started, runtime_config=runtime_config, config=config, reflect=reflect,
+                       deadline=time.monotonic() + 200)
     except BaseException as problem:
-        finish(home, now=now, owner=owner, ok=False, interval_s=CYCLE_INTERVAL_SECONDS, error=type(problem).__name__)
+        finish(home, now=time.time(), owner=owner, ok=False, interval_s=CYCLE_INTERVAL_SECONDS, started=started,
+               error=type(problem).__name__)
         raise
-    finish(home, now=now, owner=owner, ok=True, interval_s=CYCLE_INTERVAL_SECONDS)
+    finish(home, now=time.time(), owner=owner, ok=True, interval_s=CYCLE_INTERVAL_SECONDS, started=started)
     return notify_view(result)
 
 

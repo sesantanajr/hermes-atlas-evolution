@@ -119,6 +119,10 @@ def _columns(source: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in source.execute(f"PRAGMA table_info({table})")}
 
 
+class _CursorMoved(Exception):
+    """Another pass advanced the backfill while this slice was read: the slice is dropped, not counted twice."""
+
+
 def _state(home: Path) -> dict:
     with experience(home) as conn:
         values = dict(conn.execute(f"SELECT key, value FROM cursor WHERE key IN ({','.join('?' * len(_STATE_KEYS))})",
@@ -133,7 +137,8 @@ def _state(home: Path) -> dict:
         started = float(position[0]) if position[0] else None
     except ValueError:
         since, started = None, None
-    return {"since": since, "cursor": (started, position[2]), "done": values.get("backfill_done"),
+    return {"since": since, "cursor": (started, position[2]), "position": values.get("backfill_cursor"),
+            "done": values.get("backfill_done"),
             "totals": {key: int(totals.get(key, 0)) for key in ("sessions", "turns", "tool_calls", "failures")}}
 
 
@@ -218,7 +223,7 @@ class _Replay:
 
 
 def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int = SLICE_SESSIONS, sample: bool = False,
-         owner_sender_ids=(), slow_ms: int = DEFAULT_SLOW_TURN_MS) -> dict:
+         owner_sender_ids=(), slow_ms: int = DEFAULT_SLOW_TURN_MS, cancelled=None) -> dict:
     """Replay the next slices of Hermes' history within `budget_s`. Returns the status and running totals."""
     home = Path(home)
     state = _state(home)
@@ -248,7 +253,8 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
         totals = dict(state["totals"])
         replay = _Replay(home, sample=sample, owner_sender_ids=owner_sender_ids, slow_ms=slow_ms)
         deadline = time.monotonic() + budget_s
-        while time.monotonic() < deadline:
+        expected = state["position"]
+        while time.monotonic() < deadline and not (cancelled and cancelled()):
             rows = source.execute(f"""SELECT id, source, started_at, {optional} FROM sessions
                 WHERE started_at < ? AND COALESCE(ended_at, ?) >= ?
                   AND (? IS NULL OR started_at > ? OR (started_at = ? AND id > ?))
@@ -257,16 +263,24 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
             if not rows:
                 return _settle(home, "done", totals)
             before = dict(replay.counts)
-            with batched(home):
-                for row in rows:
-                    replay.session(source, {**dict(row), "_has_finish": "finish_reason" in present["messages"]},
-                                   start=start, until=until)
-                cursor_start, cursor_id = float(rows[-1]["started_at"]), str(rows[-1]["id"])
-                for key in totals:
-                    totals[key] += replay.counts[key] - before[key]
-                position, summary = f"{cursor_start!r}|{cursor_id}", json.dumps(totals)
-                record(home, lambda conn, p=position, s=summary: conn.executemany(
-                    "INSERT OR REPLACE INTO cursor VALUES (?, ?)", (("backfill_cursor", p), ("backfill_totals", s))))
+            try:
+                with batched(home):
+                    for row in rows:
+                        replay.session(source, {**dict(row), "_has_finish": "finish_reason" in present["messages"]},
+                                       start=start, until=until)
+                    with experience(home) as check:   # a raise here drops the whole slice, nothing else
+                        moved = check.execute("SELECT value FROM cursor WHERE key='backfill_cursor'").fetchone()
+                    if (moved[0] if moved else None) != expected:
+                        raise _CursorMoved
+                    cursor_start, cursor_id = float(rows[-1]["started_at"]), str(rows[-1]["id"])
+                    for key in totals:
+                        totals[key] += replay.counts[key] - before[key]
+                    position, summary = f"{cursor_start!r}|{cursor_id}", json.dumps(totals)
+                    record(home, lambda conn, p=position, s=summary: conn.executemany(
+                        "INSERT OR REPLACE INTO cursor VALUES (?, ?)", (("backfill_cursor", p), ("backfill_totals", s))))
+                    expected = position
+            except _CursorMoved:
+                return {"status": "running", **state["totals"]}
         return {"status": "running", **totals}
     except sqlite3.DatabaseError:
         return {"status": "unreadable", **state["totals"]}

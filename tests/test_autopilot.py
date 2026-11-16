@@ -75,6 +75,22 @@ class ClaimTest(Base):
         self.assertEqual(len(wins), 1)
 
 
+class FencingTest(Base):
+    def test_only_the_lease_holder_can_record_the_end_of_a_pass(self):
+        self.assertTrue(claim(self.home, now=NOW, interval_s=HOUR, owner="a"))
+        finish(self.home, now=NOW + 1, owner="a", ok=False, interval_s=HOUR, error="ProcessExit")   # released at exit
+        finish(self.home, now=NOW + 2, owner="a", ok=True, interval_s=HOUR)                         # the thread, too late
+        with experience(self.home) as conn:
+            status = json.loads(conn.execute("SELECT value FROM cursor WHERE key='loop_status'").fetchone()[0])
+        self.assertEqual(status["error"], "ProcessExit")    # the late finish changed nothing
+
+    def test_a_pass_that_finished_after_the_caller_read_its_clock_is_not_repeated(self):
+        self.assertTrue(claim(self.home, now=NOW, interval_s=HOUR, owner="gateway"))
+        finish(self.home, now=NOW + 3, owner="gateway", ok=True, interval_s=HOUR)
+        self.assertFalse(claim(self.home, now=NOW, interval_s=HOUR, owner="tick"))         # read its clock at NOW
+        self.assertTrue(claim(self.home, now=NOW - 2 * HOUR, interval_s=HOUR, owner="x"))  # the clock went back hours
+
+
 class ExclusiveTest(Base):
     def test_a_manual_pass_waits_for_a_running_one_and_then_counts_as_the_latest(self):
         self.assertTrue(claim(self.home, now=NOW, interval_s=HOUR, owner="autopilot"))
@@ -88,7 +104,8 @@ class ExclusiveTest(Base):
         def broken():
             raise KeyError("x")
 
-        finish(self.home, now=NOW - 600, owner="", ok=True, interval_s=HOUR)   # the autopilot ran 10 minutes ago
+        claim(self.home, now=NOW - 700, interval_s=HOUR, owner="autopilot-0")
+        finish(self.home, now=NOW - 600, owner="autopilot-0", ok=True, interval_s=HOUR)   # it ran 10 minutes ago
         with self.assertRaises(KeyError):
             run_exclusive(self.home, broken, wait_s=0.2, now=lambda: NOW)
         self.assertFalse(claim(self.home, now=NOW + 1, interval_s=HOUR, owner="autopilot"))   # the schedule is unchanged
@@ -192,6 +209,15 @@ class AutopilotTest(Base):
         self.assertEqual((status["ok"], status["error"]), (False, "ProcessExit"))
         release.set()
         self.wait(pilot)
+
+    def test_an_unloaded_autopilot_does_not_run_a_pass_it_claimed(self):
+        calls = []
+        pilot, _ = self.make(lambda: calls.append(1))
+        pilot.stop()
+        pilot._work()                                     # a check that was already on its way
+        self.assertEqual(calls, [])
+        with experience(self.home) as conn:
+            self.assertIsNone(conn.execute("SELECT value FROM cursor WHERE key='loop_lease'").fetchone())
 
     def test_the_thread_pins_the_plugin_profile(self):
         override = contextvars.ContextVar("override", default=None)

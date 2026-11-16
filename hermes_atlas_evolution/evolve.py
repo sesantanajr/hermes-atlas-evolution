@@ -74,7 +74,7 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
 
 
 def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None,
-          strict: bool = True, backfill_budget_s: float = 20.0) -> dict:
+          strict: bool = True, backfill_budget_s: float = 20.0, deadline: float | None = None, cancelled=None) -> dict:
     """Run one evolution pass and return what changed. `lang` overrides the configured language of the output.
 
     `reflect(instructions, text)` asks a model for a lesson draft; it is used only when the reflector is on.
@@ -86,8 +86,11 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     opts = options(config or {}, runtime_config, strict=strict)
     if lang in lessons.LANGUAGES:
         opts["language"] = lang
+    import time as _time
+
     backfill.mark_observed(home, now=now)
-    history = backfill.step(home, now=now, budget_s=backfill_budget_s, owner_sender_ids=opts["owner_sender_ids"],
+    budget = backfill_budget_s if deadline is None else max(0.0, min(backfill_budget_s, deadline - _time.monotonic() - 30))
+    history = backfill.step(home, now=now, budget_s=budget, owner_sender_ids=opts["owner_sender_ids"], cancelled=cancelled,
                             sample=opts["reflector"] and opts["lessons"] != "off", slow_ms=opts["slow_turn_seconds"] * 1000)
     with experience(home) as conn:
         # Short transactions: hook writers of a running gateway share this database, so no phase keeps the
@@ -116,15 +119,19 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             reflection = {"status": "unavailable_without_hermes_llm"}
         else:
             reflection = reflector.reflect(conn, reflect, now=now, lang=opts["language"],
-                                           daily_limit=opts["reflector_daily_limit"])
+                                           daily_limit=opts["reflector_daily_limit"], deadline=deadline)
+        conn.commit()
         effects = lessons.evaluate(conn, now=now, mode=opts["lessons"])
+        conn.commit()   # the skill files and the Curator ledger are read with no write lock held
         skills = skill_health(home, now=now, days=7)
         detected = experiments.detect_changes(conn, home, runtime_config, now=now)
+        conn.commit()
         try:
             with database(home) as ops:
                 verdicts = experiments.evaluate_changes(conn, ops, now=now)
         except (sqlite3.Error, ValueError, OSError):
             verdicts = experiments.evaluate_changes(conn, None, now=now)
+        conn.commit()
         failures = signals.failure_summary(conn, now=now, days=7)
         turns = signals.turn_summary(conn, now=now, days=7, surfaces=("local", "gateway"))
         start_day, end_day = logwatch.local_days(now, 7)
@@ -139,6 +146,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         outcomes = skill_outcomes(conn, start_day=day_offset(now, 13), end_day=utc_day(now))
         from . import radar
 
+        conn.commit()   # Hermes' state.db is read with no write lock held on this database
         reading = radar.scan(home, conn, now=now)
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
                                     changes=verdicts, outcomes=outcomes, radar=reading["findings"], lang=opts["language"])
@@ -188,14 +196,17 @@ import subprocess
 launcher = shutil.which("hermes")
 if not launcher:
     raise SystemExit("Hermes CLI is not on the scheduler PATH.")
+try:   # a fresh pass first, best effort: the digest is delivered even when it fails or runs out of time
+    subprocess.run([launcher, *{arguments[:-6] + ["evolution", "learn", "--notify-only"]!r}],
+                   capture_output=True, text=True, env=dict(os.environ, HERMES_HOME={str(profile)!r}),
+                   encoding="utf-8", errors="replace", timeout=300, check=False)
+except (OSError, subprocess.TimeoutExpired):
+    pass
 try:
-    learn = subprocess.run([launcher, *{arguments[:-6] + ["evolution", "learn", "--notify-only"]!r}],
-                           capture_output=True, text=True, env=dict(os.environ, HERMES_HOME={str(profile)!r}),
-                           encoding="utf-8", errors="replace", timeout=120, check=False)
     result = subprocess.run([launcher, *{arguments!r}], capture_output=True, text=True,
                             env=dict(os.environ, HERMES_HOME={str(profile)!r}),
                             encoding="utf-8", errors="replace", timeout=120, check=False)
-    if learn.returncode or result.returncode or len(result.stdout) > 65_536:
+    if result.returncode or len(result.stdout) > 65_536:
         raise SystemExit("Atlas Evolution digest failed. Run `hermes evolution report` in this profile to inspect.")
 except (OSError, subprocess.TimeoutExpired):
     raise SystemExit("Atlas Evolution digest could not be produced.") from None

@@ -56,7 +56,9 @@ class LessonsTool:
                 if action == "search":
                     result = {"lessons": lessons.search(conn, tool=tool or None, lang=self.lang)}
                 elif action == "propose":
-                    if not self._allow_proposal(time.monotonic()):
+                    recent = conn.execute("SELECT COUNT(*) FROM lesson WHERE origin='agent' AND created >= ?",
+                                          (time.time() - 3600,)).fetchone()[0]   # per profile, every process
+                    if recent >= PROPOSALS_PER_HOUR or not self._allow_proposal(time.monotonic()):
                         raise ValueError("Too many proposals this hour; the operator has not reviewed the earlier ones")
                     lesson_id = lessons.add_custom(conn, args.get("lesson"), tool=tool or "general", origin="agent",
                                                    now=time.time())

@@ -13,6 +13,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import operations as _operations   # bound at import: a thread of an unloaded copy keeps its own module
+
 RETENTION_DAYS = 90
 _LABEL = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.:+-]{0,95}\Z")
 _CREDENTIAL = ("sk-", "ghp_", "gho_", "ghs_", "ghr_", "ghu_", "github_pat_", "xox", "akia", "aiza", "hf_")
@@ -104,7 +106,7 @@ def label(value, *, fallback: str = "unknown") -> str:
 
 def experience(home: Path, *, observer: bool = False):
     """Open the profile's Evolution database. Hook callers (`observer=True`) borrow the shared connection."""
-    from .operations import database
+    database = _operations.database
 
     return database(Path(home), observer=observer)
 
@@ -114,9 +116,7 @@ def record(home: Path, job, *, now: float | None = None) -> None:
 
     `job(connection)` may run later on another thread, so it must hold only values that are safe to store.
     """
-    from .operations import record as write
-
-    write(Path(home), job, now=now)
+    _operations.record(Path(home), job, now=now)
 
 
 # Columns added after a table first shipped: (table, column, declaration).

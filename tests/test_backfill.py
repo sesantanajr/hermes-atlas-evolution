@@ -172,6 +172,30 @@ class BackfillTest(Base):
         result = self.run_backfill(slice_sessions=2)
         self.assertEqual((result["status"], result["sessions"]), ("done", 4))   # 3, 6, 9 and 12 days ago
 
+    def test_a_slice_is_dropped_when_another_pass_moved_the_cursor_meanwhile(self):
+        from unittest.mock import patch
+
+        for index in range(3):
+            self.history.session(f"s{index}", start=NOW - (index + 1) * DAY)
+            self.history.tool_turn(f"s{index}", NOW - (index + 1) * DAY + 10, result=MISSING)
+        self.history.save()
+        with experience(self.home) as conn:
+            conn.execute("INSERT OR REPLACE INTO cursor VALUES ('observed_since', ?)", (repr(NOW),))
+        original = backfill._Replay.session
+
+        def overtaken(replay, *args, **kwargs):   # another process advanced the cursor while this slice ran
+            original(replay, *args, **kwargs)
+            with experience(self.home) as conn:
+                conn.execute("INSERT OR REPLACE INTO cursor VALUES ('backfill_cursor', 'other|x')")
+
+        with patch.object(backfill._Replay, "session", overtaken):
+            result = backfill.step(self.home, now=NOW, budget_s=10, slice_sessions=1)
+        close_observers()
+        self.assertEqual((result["status"], result["tool_calls"]), ("running", 0))
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT COALESCE(SUM(calls), 0) FROM tool_daily").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT value FROM cursor WHERE key='backfill_cursor'").fetchone()[0], "other|x")
+
     def test_stored_rows_never_contain_text_from_the_history(self):
         self.history.session("s", start=NOW - DAY)
         self.history.tool_turn("s", NOW - DAY + 10, user=f"my key is {SECRET}", result=MISSING)

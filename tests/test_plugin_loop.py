@@ -269,6 +269,18 @@ class PluginLoopTest(PluginBase):
         with experience(self.home) as conn:
             self.assertEqual(lessons.listing(conn)[0]["shown_in_sessions"], 2)
 
+    def test_the_agent_proposal_cap_is_per_profile_not_per_process(self):
+        from hermes_atlas_evolution.agent_tools import LessonsTool
+
+        first, second = LessonsTool(self.home), LessonsTool(self.home)   # two processes of the same profile
+        accepted = 0
+        for index in range(8):
+            tool = first if index % 2 else second
+            reply = json.loads(tool.handle({"action": "propose", "tool": "terminal",
+                                            "lesson": f"When build {index} fails, read the first error line first."}))
+            accepted += "error" not in reply
+        self.assertEqual(accepted, 5)
+
     def test_error_excerpts_are_kept_only_when_the_reflector_could_use_them(self):
         crash = json.dumps({"output": "Traceback (most recent call last):\nKeyError: 'column'", "exit_code": 1})
         for lessons_mode, expected in (("off", 0), ("suggest", 1)):

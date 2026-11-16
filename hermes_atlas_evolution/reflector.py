@@ -26,6 +26,7 @@ UNTEMPLATED = frozenset({"code_exception", "command_failed", "other", "network",
 EXCERPT_LIMIT = 300
 SAMPLE_DAYS = 14
 PER_RUN = 3
+CALL_SECONDS = 60   # the timeout of one model call through Hermes
 DEFAULT_DAILY_LIMIT = 6
 SCHEMA = {
     "type": "object",
@@ -111,16 +112,24 @@ def _used_today(conn, today: str) -> int:
         return 0
 
 
-def reflect(conn: sqlite3.Connection, ask, *, now: float, lang: str = "en", daily_limit: int = DEFAULT_DAILY_LIMIT) -> dict:
-    """Draft quarantined lessons for the most frequent untemplated failures. `ask(instructions, text)` returns a dict."""
+def reflect(conn: sqlite3.Connection, ask, *, now: float, lang: str = "en", daily_limit: int = DEFAULT_DAILY_LIMIT,
+            deadline: float | None = None) -> dict:
+    """Draft quarantined lessons for the most frequent untemplated failures. `ask(instructions, text)` returns a dict.
+
+    With a `deadline` (time.monotonic()), a call starts only when its worst case still fits, so a caller with a
+    timeout never kills the pass in the middle of a call."""
+    import time
     today = utc_day(now)
     prune_samples(conn, now=now)
     used = _used_today(conn, today)
     room = max(0, min(PER_RUN, daily_limit - used))
     rows = [dict(row) for row in candidates(conn, limit=room)]
     conn.commit()   # the gateway's hook writers must never wait for a model: no transaction spans a call
-    drafted, declined, failed = [], 0, 0
+    drafted, declined, failed, short = [], 0, 0, False
     for row in rows:
+        if deadline is not None and deadline - time.monotonic() < CALL_SECONDS + 10:
+            short = True
+            break
         payload = json.dumps({"tool": row["tool"], "failure_class": row["klass"], "detail": row["hint"] or None,
                               "occurrences": row["total"], "sessions": row["sessions"], "days": row["days"],
                               "latest_error_excerpt": row["excerpt"]}, ensure_ascii=False)
@@ -150,7 +159,10 @@ def reflect(conn: sqlite3.Connection, ask, *, now: float, lang: str = "en", dail
         drafted.append({"lesson_id": lesson_id, "tool": row["tool"], "class": row["klass"], "lesson": text})
     conn.execute("INSERT OR REPLACE INTO cursor VALUES (?, ?)", (f"reflector:{today}", str(used)))
     conn.execute("DELETE FROM cursor WHERE key LIKE 'reflector:%' AND key < ?", (f"reflector:{today}",))
-    return {"drafted": drafted, "declined": declined, "failed": failed, "calls_today": used, "daily_limit": daily_limit}
+    result = {"drafted": drafted, "declined": declined, "failed": failed, "calls_today": used, "daily_limit": daily_limit}
+    if short and not (drafted or declined or failed):
+        result["status"] = "no_time_left"
+    return result
 
 
 def host_caller(ctx, task: str = "evolution_reflector"):

@@ -27,6 +27,7 @@ CLOCK_FIRST_SECONDS = 120   # the clock's first nudge after the plugin loads
 CLOCK_PERIOD_SECONDS = 600  # then every 10 minutes, so an idle profile still gets its passes
 LEASE_SECONDS = 15 * 60     # a pass that has not finished by then is presumed dead
 RETRY_SECONDS = 10 * 60     # a failed pass is tried again after this, not after a full interval
+SKEW_SECONDS = 5 * 60       # a last pass up to this far "in the future" finished after the caller read its clock
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,8 @@ def claim(home: Path, *, now: float, interval_s: float, owner: str) -> bool:
         last = _number(row[0]) if row else 0.0
         if 0 <= now - last < interval_s:
             return False
+        if interval_s and 0 < last - now <= SKEW_SECONDS:
+            return False   # another process finished a pass after this caller read its clock
         holder, until = _lease(conn)
         if holder and until > now:
             return False
@@ -69,8 +72,8 @@ def finish(home: Path, *, now: float, owner: str, ok: bool, interval_s: float, s
     with experience(home) as conn:
         conn.execute("BEGIN IMMEDIATE")
         holder, _ = _lease(conn)
-        if holder and holder != owner:
-            return   # the lease expired and another process owns the pass now
+        if holder != owner:
+            return   # not ours any more: released at exit, or expired and taken by another process
         conn.execute("DELETE FROM cursor WHERE key='loop_lease'")
         if ok or interval_s > RETRY_SECONDS:   # a failed manual pass leaves the schedule as it was
             stamp = now if ok else now - interval_s + RETRY_SECONDS
@@ -173,8 +176,12 @@ class Autopilot:
         return True
 
     def stop(self) -> None:
-        """Stop the clock and refuse new passes. A pass already running finishes on its own."""
+        """Stop the clock and refuse new passes. A pass already running stops at its next safe point."""
         self._stop.set()
+
+    @property
+    def stopped(self) -> bool:
+        return self._stop.is_set()
 
     def _at_exit(self) -> None:
         """At interpreter exit, free the lease of a pass this process cannot finish, so another retries soon."""
@@ -214,6 +221,12 @@ class Autopilot:
                 return
         except (sqlite3.Error, OSError, ValueError):
             return   # busy or unavailable now; the next check tries again
+        if self._stop.is_set():   # unloaded while this check was on its way: give the pass back
+            try:
+                finish(self.home, now=self.wall(), owner=self._owner, ok=False, interval_s=self.interval_s, error="Unloaded")
+            except (sqlite3.Error, OSError, ValueError):
+                pass
+            return
         ok, summary, error = False, None, ""
         self._running = True
         if not self._exit_hooked:   # a short-lived process (hermes -z) may exit in the middle of the pass

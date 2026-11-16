@@ -100,7 +100,7 @@ def _warn_once(seen: set, event: str) -> None:
         getLogger(__name__).warning("Atlas Evolution could not record %s; the turn continues unaffected", event)
 
 
-def autopilot_pass(home: Path, reflect) -> dict:
+def autopilot_pass(home: Path, reflect, cancelled=None) -> dict:
     """One evolution pass from the autopilot thread. Settings are read again, so a change made in Hermes'
     settings form applies to the next pass, and an invalid value falls back instead of failing the pass."""
     import time
@@ -114,7 +114,8 @@ def autopilot_pass(home: Path, reflect) -> dict:
     except Exception:   # the pass still runs with the plugin's own settings
         runtime = {}
     current, _problems = safe_settings(home, runtime)
-    result = cycle(home, now=time.time(), runtime_config=runtime, config=current, reflect=reflect, strict=False)
+    result = cycle(home, now=time.time(), runtime_config=runtime, config=current, reflect=reflect, strict=False,
+                   cancelled=cancelled)
     reflection = result["reflector"]
     return {"new_lessons": len(result["new_lessons"]), "open_proposals": len(result["open_proposals"]),
             "reflector_status": reflection.get("status", "ran"), "reflector_drafts": len(reflection.get("drafted") or []),
@@ -513,7 +514,8 @@ def register(ctx):
                                     ", ".join(problems), evolution["lessons"])
     plugin = _Plugin(home, config, evolution)
     plugin.reflect = _reflector(ctx, evolution)
-    plugin.autopilot = Autopilot(home, lambda: autopilot_pass(home, plugin.reflect),
+    plugin.autopilot = Autopilot(home, lambda: autopilot_pass(home, plugin.reflect,
+                                                              cancelled=lambda: plugin.autopilot.stopped),
                                  interval_minutes=evolution["autopilot_minutes"])
     _start(plugin)
 

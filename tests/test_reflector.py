@@ -181,6 +181,15 @@ class CycleTest(Base):
         result = cycle(self.home, now=NOW, config={"evolution": {"reflector": True}}, reflect=ask)
         self.assertEqual((observed, len(result["reflector"]["drafted"])), (["written"], 1))
 
+    def test_a_pass_with_little_time_left_skips_the_model_instead_of_being_killed(self):
+        import time
+
+        failing(self.home)
+        result = cycle(self.home, now=NOW, config={"evolution": {"reflector": True}},
+                       reflect=self.ask({"applies": True, "lesson": "When X, do Y every single time."}),
+                       deadline=time.monotonic() + 30)
+        self.assertEqual((result["reflector"]["status"], self.calls), ("no_time_left", []))
+
     def test_host_caller_uses_the_plugin_llm_with_the_plugin_task_and_a_schema(self):
         seen = {}
 

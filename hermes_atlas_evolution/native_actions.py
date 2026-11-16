@@ -131,7 +131,7 @@ try:
     result = subprocess.run(
         [launcher, *{arguments!r}], capture_output=True, text=True,
         env=dict(os.environ, HERMES_HOME={str(profile)!r}),
-        encoding="utf-8", errors="replace", timeout=90, check=False
+        encoding="utf-8", errors="replace", timeout=300, check=False
     )
     if result.returncode or len(result.stdout) > 65_536:
         raise SystemExit("Atlas Evolution tick failed. Run ops tick in this profile to inspect.")
