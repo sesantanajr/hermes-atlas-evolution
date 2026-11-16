@@ -326,7 +326,14 @@ def register(ctx):
             getLogger(__name__).warning("Atlas Evolution reflector is unavailable on this Hermes build")
 
     from .autopilot import Autopilot
+    from .backfill import mark_observed
 
+    try:   # from now on the hooks count; the backfill reads Hermes' history only before this moment
+        import time as _time
+
+        mark_observed(home, now=_time.time())
+    except storage_errors:
+        _warn_once(failed, "start")
     autopilot = Autopilot(home, lambda: autopilot_pass(home, reflect), interval_minutes=evolution["autopilot_minutes"])
 
     def operator_cli(args):

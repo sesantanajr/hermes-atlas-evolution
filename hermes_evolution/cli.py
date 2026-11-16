@@ -250,7 +250,7 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
         from .autopilot import run_exclusive
 
         result = run_exclusive(home, lambda: cycle(home, now=now, runtime_config=runtime_config, config=config,
-                                                   lang=lang, reflect=reflect))
+                                                   lang=lang, reflect=reflect, backfill_budget_s=120.0))
         return notify_view(result) if args.notify_only else result
     if action == "skills":
         from .experience import day_offset, utc_day

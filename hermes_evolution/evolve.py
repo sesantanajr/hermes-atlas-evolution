@@ -71,16 +71,21 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
 
 
 def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None,
-          strict: bool = True) -> dict:
+          strict: bool = True, backfill_budget_s: float = 20.0) -> dict:
     """Run one evolution pass and return what changed. `lang` overrides the configured language of the output.
 
     `reflect(instructions, text)` asks a model for a lesson draft; it is used only when the reflector is on.
-    `strict=False` (the autopilot) lets each invalid setting fall back safely instead of failing the pass."""
+    `strict=False` (the autopilot) lets each invalid setting fall back safely instead of failing the pass.
+    Until it is done, each pass first replays up to `backfill_budget_s` seconds of Hermes' own history."""
+    from . import backfill
     from .operations import database
 
     opts = options(config or {}, runtime_config, strict=strict)
     if lang in lessons.LANGUAGES:
         opts["language"] = lang
+    backfill.mark_observed(home, now=now)
+    history = backfill.step(home, now=now, budget_s=backfill_budget_s, owner_sender_ids=opts["owner_sender_ids"],
+                            sample=opts["reflector"] and opts["lessons"] != "off", slow_ms=opts["slow_turn_seconds"] * 1000)
     with experience(home) as conn:
         # Short transactions: hook writers of a running gateway share this database, so no phase keeps the
         # write lock while it reads files or waits for a model.
@@ -132,7 +137,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
                                     changes=verdicts, outcomes=outcomes, lang=opts["language"])
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in created]
-    return {"now": now, "lessons_mode": opts["lessons"], "new_lessons": new_lessons, "reflector": reflection,
+    return {"now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
             "proposals_closed_as_applied": closed, "open_proposals": pending}
