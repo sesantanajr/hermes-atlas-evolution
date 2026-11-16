@@ -247,7 +247,10 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
     elif result.get("kind") == "cron_create" and result.get("restorable"):
         result.pop("restorable")
         code, out = hermes_output(home, ["cron", "remove", result["job"]], runner=runner, timeout=120)
-        if code != 0 and not re.search(r"not found|no (such )?job|unknown job", out, re.I):
+        # Gone already (removed by hand) only when Hermes says so of this very job: "Job with ID or name '<job>' not
+        # found". Any other failure (Hermes missing, a profile gone, a timeout) leaves the job, and the undo, as is.
+        gone = code == 1 and re.search(rf"\bjob\b[^\n]*'{re.escape(result['job'])}'[^\n]*\bnot found\b", out, re.I)
+        if code != 0 and not gone:
             raise ValueError(" ".join(out.split())[-200:] or "Hermes refused the command")
         with experience(home) as conn:   # removed now, or already gone (removed by hand)
             decisions.mark_undone(conn, result["id"], now=now)

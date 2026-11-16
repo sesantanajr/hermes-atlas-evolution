@@ -273,7 +273,7 @@ CARE_ATTENTION = ("hermes_gateway_crashed", "os_held_by_plugin", "hermes_gateway
                   "hermes_state_db_damaged", "hermes_state_db_wal_large", "hermes_disk_critical", "hermes_disk_low",
                   "hermes_disk_filling", "hermes_storage_growth", "hermes_memory_low", "hermes_swap_full",
                   "hermes_cpu_saturated", "hermes_unused_tools", "hermes_gateway_not_at_boot",
-                  "os_dpkg_interrupted", "os_apt_broken", "os_reboot_required", "os_security_updates", "os_unattended_off",
+                  "os_dpkg_interrupted", "os_package_manager_stuck", "os_apt_broken", "os_reboot_required", "os_security_updates", "os_unattended_off",
                   "os_lists_stale", "os_unit_not_enabled")
 
 
@@ -450,6 +450,7 @@ _TEXT = {
            "hermes_cpu_saturated": "The processors are saturated (load {load} on {cpus} CPUs over 15 minutes).",
            "hermes_unused_tools": "Old versions of Hermes' tools take {size} and nothing uses them: menu → Hermes health → `hermes pm gc`.",
            "hermes_gateway_not_at_boot": "The gateway runs as a user service without linger: after a reboot it does not start. Fix: `loginctl enable-linger {user}`.",
+           "os_package_manager_stuck": "A package manager has been working for {busy} h (an apt left waiting at its question?): while it runs, nothing else can update the system, and a half-way update would not show. Finish or close it.",
            "os_dpkg_interrupted": "An update of the system stopped half-way (dpkg). Finish it before anything else: menu → Operating system → repair.",
            "os_apt_broken": "The system's package manager reports broken dependencies: menu → Operating system → repair.",
            "os_reboot_required": "The system waits for a reboot ({packages}). Plan it: Hermes' services come back by themselves when they are enabled.",
@@ -517,6 +518,7 @@ _TEXT = {
            "hermes_cpu_saturated": "Os processadores estão saturados (carga {load} em {cpus} CPUs nos últimos 15 minutos).",
            "hermes_unused_tools": "Versões antigas das ferramentas do Hermes ocupam {size} e nada as usa: menu → Saúde do Hermes → `hermes pm gc`.",
            "hermes_gateway_not_at_boot": "O gateway roda como serviço do usuário sem linger: depois de um reinício ele não sobe. Correção: `loginctl enable-linger {user}`.",
+           "os_package_manager_stuck": "Um gerenciador de pacotes está trabalhando há {busy} h (um apt esquecido esperando a resposta?): enquanto ele roda, nada mais atualiza o sistema e uma atualização pela metade não apareceria. Termine-o ou feche-o.",
            "os_dpkg_interrupted": "Uma atualização do sistema parou no meio (dpkg). Termine-a antes de qualquer coisa: menu → Sistema operacional → reparar.",
            "os_apt_broken": "O gerenciador de pacotes do sistema relata dependências quebradas: menu → Sistema operacional → reparar.",
            "os_reboot_required": "O sistema espera um reinício ({packages}). Planeje-o: os serviços do Hermes voltam sozinhos quando estão habilitados.",
@@ -559,7 +561,8 @@ def _care_values(report: dict) -> dict:
             "load": load.get("15m"), "cpus": load.get("cpus"), "size": _gb(care.get("reclaimable")),
             "user": care.get("owner") or system.get("owner") or "root", "packages": ", ".join(system.get("reboot_packages") or ()) or "?",
             "count": system.get("security") or 0, "units": units or "?",
-            "held": ", ".join(system.get("plugin_holds") or ()) or "?"}
+            "held": ", ".join(system.get("plugin_holds") or ()) or "?",
+            "busy": round((system.get("busy_seconds") or 0) / 3600, 1)}
 
 
 def _health_lines(report: dict, t: dict) -> list[str]:

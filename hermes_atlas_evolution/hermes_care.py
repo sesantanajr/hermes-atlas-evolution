@@ -97,6 +97,15 @@ def _meminfo(root: Path) -> dict:
     return values
 
 
+def _started(pid: int) -> int | None:
+    """The process' start time as Hermes records it (field 22 of /proc/<pid>/stat), None where unknown."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as stream:
+            return int(stream.read().rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def gateway(home: Path, *, now: float) -> dict:
     state = _read_json(Path(home) / "gateway_state.json") or {}
     beat = _read_json(Path(home) / "state" / "gateway.heartbeat") or {}
@@ -108,13 +117,19 @@ def gateway(home: Path, *, now: float) -> dict:
     mem = beat.get("mem") if isinstance(beat.get("mem"), dict) else {}
     running = state.get("gateway_state") == "running"
     crashed = False
-    if running and isinstance(state.get("pid"), int) and state["pid"] > 0:
+    fresh = updated is not None and now - updated <= HEARTBEAT_STALE_SECONDS
+    if running and not fresh and isinstance(state.get("pid"), int) and state["pid"] > 0:
+        # A fresh heartbeat means it runs, maybe in another PID namespace (a container on the same folder), where
+        # its pid means nothing here. Without one: its process gone, or the pid now someone else's, is a crash.
         try:
             os.kill(state["pid"], 0)
-        except ProcessLookupError:   # the state file outlived its process (a crash)
-            running, crashed = False, True
+            gone = _started(state["pid"]) not in (None, state.get("start_time"))
+        except ProcessLookupError:
+            gone = True
         except OSError:
-            pass
+            gone = False
+        if gone:
+            running, crashed = False, True
     return {"state": state.get("gateway_state"), "version": state.get("code_version"), "running": running,
             "crashed": crashed,
             "active_agents": state.get("active_agents"),

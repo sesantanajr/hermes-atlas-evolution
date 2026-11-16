@@ -77,6 +77,8 @@ TEXT = {
         "os_progress": "  {done} step(s)…", "os_background": "The update goes on in the background. Come back here for its report.",
         "os_report": "Exit {exit} · {changed} package(s) changed · dpkg {dpkg} · apt {apt} · Hermes {hermes} · reboot waiting: {reboot}",
         "os_stopped": "Services that were running and stopped: {units}", "os_folder": "Report and copies: {folder}",
+        "os_stopped_clean": "Services that were running and ended without an error (most stop when idle; start the ones that should run): {units}",
+        "os_released": "Released the packages a stopped update still held: {names}",
         "os_repair_q": "Finish the interrupted update now (dpkg --configure -a, then apt-get -f install)?",
         "os_no_report": "No update yet.", "os_still_running": "The update is still running; come back in a moment.",
         "os_lost": "The update stopped without finishing (it was killed, or the machine went down): repair it with this screen's repair option.",
@@ -227,6 +229,8 @@ TEXT = {
         "os_progress": "  {done} etapa(s)…", "os_background": "A atualização segue em segundo plano. Volte aqui para ver o relatório.",
         "os_report": "Saída {exit} · {changed} pacote(s) mudaram · dpkg {dpkg} · apt {apt} · Hermes {hermes} · reinício pendente: {reboot}",
         "os_stopped": "Serviços que rodavam e pararam: {units}", "os_folder": "Relatório e cópias: {folder}",
+        "os_stopped_clean": "Serviços que rodavam e terminaram sem erro (a maioria para quando fica ociosa; suba os que deveriam rodar): {units}",
+        "os_released": "Liberados os pacotes que uma atualização interrompida ainda retinha: {names}",
         "os_repair_q": "Terminar a atualização interrompida agora (dpkg --configure -a e depois apt-get -f install)?",
         "os_no_report": "Nenhuma atualização ainda.", "os_still_running": "A atualização ainda está rodando; volte daqui a pouco.",
         "os_lost": "A atualização parou sem terminar (foi morta, ou a máquina caiu): repare-a pela opção de reparo desta tela.",
@@ -1228,8 +1232,14 @@ class Menu:
                 if self.confirm(self.t["os_repair_q"]):
                     def repair():
                         result = system_update.repair(self.home, host)
-                        self.io.say(self.t["care_ok"].format(code=0) if result["ok"] else self.t["care_failed"].format(
-                            code=next((step["exit"] for step in result["steps"] if step["exit"]), "?")))
+                        if result.get("released"):
+                            self.io.say(self.t["os_released"].format(names=", ".join(result["released"])))
+                        if result.get("state") == "lost":
+                            self.io.say(self.t["os_lost"])
+                        code = result.get("exit")
+                        self.io.say(self.t["care_ok"].format(code=0) if result.get("ok") else self.t["care_failed"].format(
+                            code="?" if code is None else code))
+                        self.io.say(self.t["os_folder"].format(folder=result.get("folder")))
                     self.guarded(repair)
             elif chosen == 4:
                 folder, report = system_update.last_report(host)
@@ -1277,6 +1287,8 @@ class Menu:
                                                reboot=yes if report.get("reboot_required") else no))
         if report.get("stopped_units"):
             self.io.say(self.t["os_stopped"].format(units=", ".join(report["stopped_units"])))
+        if report.get("stopped_clean"):
+            self.io.say(self.t["os_stopped_clean"].format(units=", ".join(report["stopped_clean"])))
         self.io.say(self.t["os_folder"].format(folder=folder))
         self.pause()
 

@@ -31,6 +31,7 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import tarfile
 import time
@@ -39,6 +40,7 @@ from pathlib import Path
 CHECK_EVERY_SECONDS = 86_400
 STATE_DIR = "/var/lib/hermes-atlas-evolution/system"
 RUNS_KEPT = 5
+BUSY_STUCK_SECONDS = 6 * 3600
 # Packages worth a word before an upgrade: (what happens, the packages, as prefixes)
 ATTENTION = (
     ("restarts_containers", ("docker.io", "docker-ce", "containerd", "containerd.io", "runc", "podman")),
@@ -103,14 +105,21 @@ class Host:
         """`path` and every folder above it belong to root and no one else can write them."""
         if self.runner is not None:
             return self.run(["root-owned", str(path)])[0] == 0
-        try:
-            for part in [Path(path), *Path(path).parents]:
+        def chain(start: Path) -> bool:
+            for part in [start, *start.parents]:
                 info = os.lstat(part)
-                if info.st_uid != 0 or (info.st_mode & 0o022 and not (part == Path("/tmp") or info.st_mode & 0o1000)):
+                if info.st_uid != 0:
                     return False
-        except OSError:
+                if stat.S_ISLNK(info.st_mode):
+                    continue   # a link's own mode means nothing: only its owner (root) can change it
+                if info.st_mode & 0o022 and not (part == Path("/tmp") or info.st_mode & 0o1000):
+                    return False
+            return True
+
+        try:
+            return chain(Path(path)) and chain(Path(path).resolve())
+        except (OSError, RuntimeError):
             return False
-        return True
 
     def free(self, mount: str) -> int | None:
         try:
@@ -164,6 +173,45 @@ class Host:
             if key in wanted:
                 held.append(wanted[key])
         return sorted(set(held))
+
+    def _age(self, pid: int) -> float | None:
+        try:
+            started = int((self.path(f"/proc/{pid}") / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19])
+            uptime = float((self.read("/proc/uptime") or "").split()[0])
+            return uptime - started / os.sysconf("SC_CLK_TCK")
+        except (OSError, ValueError, IndexError, AttributeError):
+            return None
+
+    def busy_age(self) -> float | None:
+        """Seconds the oldest package manager process, or holder of a dpkg or apt lock, has been running."""
+        pids = set()
+        try:
+            entries = [entry for entry in self.path("/proc").iterdir() if entry.name.isdigit()]
+        except OSError:
+            entries = []
+        for entry in entries:
+            try:
+                if (entry / "comm").read_text(encoding="utf-8", errors="replace").strip() in BUSY_PROCESSES:
+                    pids.add(int(entry.name))
+            except OSError:
+                continue
+        wanted = set()
+        for name in LOCK_FILES:
+            try:
+                info = os.stat(self.path(name))
+                wanted.add((os.major(info.st_dev), os.minor(info.st_dev), info.st_ino))
+            except (OSError, AttributeError):
+                continue
+        for line in (self.read("/proc/locks", 1_000_000) or "").splitlines():
+            parts = line.split()
+            try:
+                major, minor, inode = parts[5].split(":")
+                if (int(major, 16), int(minor, 16), int(inode)) in wanted:
+                    pids.add(int(parts[4]))
+            except (ValueError, IndexError):
+                continue
+        ages = [age for age in (self._age(pid) for pid in pids) if age is not None]
+        return max(ages) if ages else None
 
 
 def os_release(host: Host) -> dict:
@@ -286,6 +334,17 @@ def _last_refresh(host: Host) -> float | None:
     return None
 
 
+def native_arch(host: Host) -> str:
+    code, out, _err = host.run(["dpkg", "--print-architecture"], timeout=10)
+    return out.strip() if code == 0 else ""
+
+
+def bare(name: str, native: str) -> str:
+    """A package name as `apt-mark showhold` prints it: without the machine's own architecture (or `all`)."""
+    base, _, arch = name.partition(":")
+    return base if arch and arch in (native, "all") else name
+
+
 def plugin_holds(host: Host) -> list[str]:
     """Packages a run of this plugin held and did not release (it was killed outright)."""
     found = []
@@ -297,11 +356,15 @@ def plugin_holds(host: Host) -> list[str]:
     for run in runs:
         holds = run / "holds"
         if holds.is_file() and not holds.is_symlink():
-            try:
-                found += [name for name in holds.read_text(encoding="utf-8").split() if PACKAGE_NAME.fullmatch(name)]
-            except OSError:
-                continue
+            found += _names(holds)
     return sorted(set(found))
+
+
+def _names(holds: Path) -> list[str]:
+    try:
+        return [name for name in holds.read_text(encoding="utf-8").split() if PACKAGE_NAME.fullmatch(name)]
+    except OSError:
+        return []
 
 
 def check(host: Host | None = None, *, now: float | None = None, home: Path | None = None) -> dict:
@@ -334,7 +397,9 @@ def check(host: Host | None = None, *, now: float | None = None, home: Path | No
     report["apt_error"] = None if code == 0 else " ".join((err or out).split())[:200]
     code, held, _err = host.run(["apt-mark", "showhold"], timeout=30)
     report["held"] = held.split() if code == 0 else []
-    report["plugin_holds"] = [name for name in plugin_holds(host) if name in report["held"]]
+    native = native_arch(host)
+    held_now = {bare(name, native) for name in report["held"]}
+    report["plugin_holds"] = [name for name in plugin_holds(host) if bare(name, native) in held_now]
     report["disk"] = {mount: host.free(mount) for mount in MIN_FREE}
     report["unattended"] = _unattended(host)
     report["last_refresh"] = _last_refresh(host)
@@ -346,6 +411,9 @@ def check(host: Host | None = None, *, now: float | None = None, home: Path | No
     findings = []
     if busy:
         findings.append("package_manager_busy")   # what it leaves half-way for a moment is not a finding
+        report["busy_seconds"] = host.busy_age()
+        if (report["busy_seconds"] or 0) > BUSY_STUCK_SECONDS:
+            findings.append("package_manager_stuck")   # an apt left at its question hides everything else
     else:
         if not report["dpkg_ok"]:
             findings.append("dpkg_interrupted")
@@ -445,7 +513,7 @@ def _new_run(host: Host, now: float) -> Path:
     folder.mkdir(mode=0o700)
     runs = sorted(item for item in base.iterdir() if item.is_dir() and not item.is_symlink())
     for old in runs[:-RUNS_KEPT]:
-        if not (old / "holds").exists() or (old / "status").exists():   # never a run that may still hold packages
+        if not (old / "holds").exists():   # never a run that may still hold packages (its list goes once released)
             shutil.rmtree(old, ignore_errors=True)
     return folder
 
@@ -493,6 +561,7 @@ def script(folder: Path, *, full: bool = False, skip: list[str] = (), repair: bo
     names = clean_skip(skip)
     q = shlex.quote
     log, status, holds = q(str(folder / "run.log")), q(str(folder / "status")), q(str(folder / "holds"))
+    after_list = q(str(folder / "packages-after.tsv"))
     if repair:
         body = ("dpkg --force-confdef --force-confold --configure -a && apt-get -y -o Dpkg::Lock::Timeout=600 "
                 "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -f install")
@@ -508,10 +577,27 @@ exec >>{log} 2>&1
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 APT_LISTCHANGES_FRONTEND=none LC_ALL=C
 SKIP={q(' '.join(names))}
 HELD=""
-release() {{ for p in $HELD; do apt-mark unhold "$p"; done; HELD=""; rm -f {holds}; }}
+# A package is taken off the list only once apt-mark really released it. apt-mark fails at once while dpkg holds
+# its lock (a dpkg left running by a stopped apt-get): it is tried again for up to 3 minutes in all, inside the
+# 4 minutes systemd gives a stopped unit. What stays on the list is found by the check and released by repair.
+release() {{
+  left=""
+  waited=0
+  for p in $HELD; do
+    until apt-mark unhold "$p"; do
+      if [ "$waited" -ge 180 ]; then left="$left $p"; break; fi
+      sleep 5
+      waited=$((waited + 5))
+    done
+  done
+  HELD="$left"
+  if [ -z "$left" ]; then rm -f {holds}; else echo "== still held:$left (the repair releases them)"; fi
+}}
 trap release EXIT
 trap 'release; exit 130' INT TERM HUP
+NATIVE=$(dpkg --print-architecture 2>/dev/null || true)
 for p in $SKIP; do
+  case "$p" in *:"$NATIVE"|*:all) p=${{p%:*}};; esac   # apt-mark showhold prints the bare name for these
   if dpkg-query -W "$p" >/dev/null 2>&1 && ! apt-mark showhold | grep -qx "$p"; then
     echo "$p" >> {holds}
     apt-mark hold "$p" && HELD="$HELD $p"
@@ -521,6 +607,8 @@ echo "== $(date -u +%FT%TZ) start"
 {body}
 code=$?
 echo "== $(date -u +%FT%TZ) exit $code"
+release   # before the exit code: whoever reads the result sees the packages already released
+dpkg-query -W -f='${{Package}}\\t${{Version}}\\t${{db:Status-Abbrev}}\\n' > {after_list} 2>/dev/null || true
 printf '%s\\n' "$code" > {status}
 exit "$code"
 """
@@ -532,7 +620,8 @@ def start(host: Host, folder: Path, *, full: bool = False, skip: list[str] = (),
     unit = f"hermes-evolution-os-{'repair' if repair else 'upgrade'}-{folder.name}"
     if host.path("/run/systemd/system").is_dir() and host.which("systemd-run"):
         code, out, err = host.run(["systemd-run", f"--unit={unit}", "--collect", "--quiet",
-                                   "--property=TimeoutStartSec=3h", "/bin/sh", str(folder / "run.sh")], timeout=60)
+                                   "--property=TimeoutStartSec=3h",
+                                   "--property=TimeoutStopSec=4min", "/bin/sh", str(folder / "run.sh")], timeout=60)
         if code != 0:
             raise ValueError(" ".join((err or out).split())[:200] or "systemd-run refused the upgrade")
         _write(folder / "unit", unit)
@@ -553,24 +642,56 @@ def finished(folder: Path) -> int | None:
         return None
 
 
-def progress(host: Host, folder: Path) -> str:
-    """"done", "running", or "lost" (its unit or process is gone without an exit code: killed, or the machine went
-    down)."""
+PREPARE_SECONDS = 1800
+
+
+def _process_alive(host: Host, pid: int, folder: Path) -> bool:
+    """Whether the run's own shell still runs: a zombie, or a pid now used by another program, is not it."""
+    try:
+        done, _status = os.waitpid(pid, os.WNOHANG)   # reaps it when this process started it
+        if done == pid:
+            return False
+    except ChildProcessError:
+        pass
+    except OSError:
+        return False
+    try:
+        state = (host.path(f"/proc/{pid}") / "stat").read_text(encoding="utf-8", errors="replace")
+        if state.rsplit(")", 1)[1].split()[0] in ("Z", "X"):
+            return False
+        line = (host.path(f"/proc/{pid}") / "cmdline").read_bytes()[:4096]
+    except (OSError, IndexError):
+        return False
+    return str(folder / "run.sh").encode() in line
+
+
+def progress(host: Host, folder: Path, *, now: float | None = None) -> str:
+    """"done"; "running"; "lost" (its unit or process is gone without an exit code: killed, or the machine went
+    down); "preparing" (copies being taken, not started yet) or "abandoned" (never started: interrupted while it
+    prepared)."""
     if finished(folder) is not None:
         return "done"
+    if not (folder / "run.sh").exists():
+        try:
+            age = (time.time() if now is None else now) - folder.stat().st_mtime
+        except OSError:
+            return "abandoned"
+        return "preparing" if age < PREPARE_SECONDS else "abandoned"
     try:
         unit = (folder / "unit").read_text(encoding="utf-8").strip()
     except OSError:
         unit = ""
     if unit:
         _code, out, _err = host.run(["systemctl", "is-active", unit], timeout=10)
-        return "running" if out.strip() in ("active", "activating", "reloading") else "lost"
-    try:
-        pid = int((folder / "pid").read_text(encoding="utf-8").strip())
-        os.kill(pid, 0)
+        alive = out.strip() in ("active", "activating", "reloading", "deactivating")
+    else:
+        try:
+            alive = _process_alive(host, int((folder / "pid").read_text(encoding="utf-8").strip()), folder)
+        except (OSError, ValueError):
+            alive = False
+    if alive:
         return "running"
-    except (OSError, ValueError):
-        return "lost" if (folder / "run.sh").exists() else "running"
+    return "done" if finished(folder) is not None else "lost"   # it may have finished in between
 
 
 def _hermes_version(host: Host) -> tuple[bool | None, str | None]:
@@ -589,7 +710,9 @@ def _hermes_version(host: Host) -> tuple[bool | None, str | None]:
 def after(host: Host, folder: Path, before: dict, *, now: float | None = None) -> dict:
     """What a run left: package manager, services, Hermes, what changed. Written as the run's report."""
     report = check(host, now=now)
-    if not (folder / "packages-after.tsv").exists():
+    after_from = "run"
+    if not (folder / "packages-after.tsv").exists():   # the run was killed before it listed them: taken now
+        after_from = "later"
         _snapshot(host, folder, "packages-after.tsv")
 
     def table(path: Path) -> dict:
@@ -608,8 +731,8 @@ def after(host: Host, folder: Path, before: dict, *, now: float | None = None) -
     changed = [{"name": name, "from": old.get(name), "to": new.get(name)} for name in sorted(set(old) | set(new))
                if old.get(name) != new.get(name)]
     gone = sorted(set(before.get("running") or ()) - set(report.get("running") or ()))
-    stopped = []
-    for unit in gone:   # a service that ended normally (idle exit) is not a failure
+    stopped, stopped_clean = [], []
+    for unit in gone:   # a service that ended normally (idle exit) is not a failure, but is listed
         user = unit.startswith("user:")
         name = unit.split(":", 1)[1] if user else unit
         _code, out, _err = host.run(["systemctl", *(["--user"] if user else []), "show", name, "-p", "ActiveState",
@@ -617,11 +740,14 @@ def after(host: Host, folder: Path, before: dict, *, now: float | None = None) -
         values = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
         if values.get("ActiveState") == "failed" or values.get("Result", "success") != "success":
             stopped.append(unit)
+        elif values.get("ActiveState") not in ("active", "activating", "reloading"):
+            stopped_clean.append(unit)
     newly_failed = sorted(set(report.get("failed") or ()) - set(before.get("failed") or ()))
     hermes_ok, version = _hermes_version(host)
     state = progress(host, folder)
     result = {"exit": finished(folder), "state": state, "changed": changed,
-              "stopped_units": sorted(set(stopped) | set(newly_failed)), "hermes_ok": hermes_ok, "hermes_version": version,
+              "stopped_units": sorted(set(stopped) | set(newly_failed)), "stopped_clean": stopped_clean,
+              "after_from": after_from, "hermes_ok": hermes_ok, "hermes_version": version,
               "dpkg_ok": report.get("dpkg_ok"), "apt_ok": report.get("apt_ok"),
               "reboot_required": report.get("reboot_required"), "reboot_packages": report.get("reboot_packages", []),
               "plugin_holds": report.get("plugin_holds", []),
@@ -646,7 +772,7 @@ def runs(host: Host | None = None) -> list[Path]:
 def last_report(host: Host | None = None) -> tuple[Path | None, dict | None]:
     """The latest run and its report, written now when the run ended while nobody waited for it."""
     host = host or Host()
-    found = runs(host)
+    found = [run for run in runs(host) if (run / "run.sh").exists()]   # never a run that was only prepared
     if not found:
         return None, None
     folder = found[-1]
@@ -691,13 +817,15 @@ def repair(home: Path, host: Host | None = None, *, now: float | None = None, wa
     found = check(host, now=now, home=home)
     if found.get("busy"):
         raise ValueError("Another package manager is running now: " + ", ".join(found["busy"]))
-    released = []
+    released, kept = [], []
     for name in found.get("plugin_holds") or ():
-        if host.run(["apt-mark", "unhold", name], timeout=60)[0] == 0:
+        if host.run(["apt-mark", "unhold", name], timeout=90)[0] == 0:
             released.append(name)
-    for run in runs(host):
+        else:
+            kept.append(name)
+    for run in runs(host):   # a list is dropped only when none of its packages is still held by this plugin
         holds = run / "holds"
-        if holds.is_file() and not holds.is_symlink():
+        if holds.is_file() and not holds.is_symlink() and not (set(_names(holds)) & set(kept)):
             holds.unlink()
     folder = _new_run(host, now)
     _write(folder / "check-before.json", json.dumps(found, ensure_ascii=False, indent=2))
@@ -726,7 +854,7 @@ def cached(conn, home: Path, *, now: float, host: Host | None = None, force: boo
         return None
     found = check(host, now=now, home=home)
     keep = {key: found.get(key) for key in ("at", "supported", "os", "kernel", "security", "reboot_required",
-                                             "reboot_packages", "dpkg_ok", "apt_ok", "busy", "held", "plugin_holds",
+                                             "reboot_packages", "dpkg_ok", "apt_ok", "busy", "busy_seconds", "held", "plugin_holds",
                                              "disk_low", "unattended", "last_refresh", "linger", "owner", "findings",
                                              "ready")}
     keep["upgradable"] = len(found.get("upgradable") or [])
