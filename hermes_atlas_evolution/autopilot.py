@@ -150,6 +150,7 @@ class Autopilot:
         self._stop = threading.Event()
         self._clock: threading.Thread | None = None
         self._exit_hooked = False
+        self.on_tick = None   # called by the clock before each nudge (the plugin's settings refresh)
 
     def start_clock(self, *, first: float = CLOCK_FIRST_SECONDS, period: float = CLOCK_PERIOD_SECONDS) -> bool:
         """A daemon timer that nudges the pass while the process is idle.
@@ -163,6 +164,11 @@ class Autopilot:
         def loop():
             delay = first
             while not self._stop.wait(delay):
+                if self.on_tick is not None:
+                    try:
+                        self.on_tick()
+                    except Exception:   # a settings refresh must never stop the clock
+                        pass
                 self.poke()
                 delay = period
 

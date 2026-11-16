@@ -141,6 +141,30 @@ def chat_senders(home: Path, *, since: float, owners=(), platforms=()) -> list[d
     return sorted(channels.values(), key=lambda item: -item["sessions"])
 
 
+OWNER_PREFIXES = ("hosted-owner:",)   # sender ids a Hermes host gives the owner of a hosted bot room
+
+
+def owner_suggestions(channels: list[dict], *, owners=(), platforms=()) -> list[dict]:
+    """Who is probably the owner, from the chat channels (chat_senders), for the panel to offer with one click.
+
+    Only signals that mean "the owner" by construction are suggested: the API server (only clients holding its
+    key write there, such as the owner's own interface) and a sender id a Hermes host marks as the owner
+    (`hosted-owner:`). A phone number or a messaging id is never guessed: those are listed for the owner to pick.
+    """
+    owners, platforms = {str(item) for item in owners}, set(platforms)
+    found = []
+    for channel in channels:
+        origin = channel.get("origin")
+        if origin == "api_server" and origin not in platforms:
+            found.append({"kind": "platform", "value": origin, "reason": "own_interface", "sessions": channel.get("sessions", 0)})
+        for sender in channel.get("senders") or ():
+            value = sender.get("id")
+            if isinstance(value, str) and value.startswith(OWNER_PREFIXES) and value not in owners:
+                found.append({"kind": "sender", "value": value, "reason": "hosted_owner", "channel": origin,
+                              "sessions": sender.get("sessions", 0)})
+    return found
+
+
 def _digest_scheduled(home: Path) -> bool:
     """Whether Hermes' scheduler holds an enabled weekly digest of this plugin for the profile."""
     from .workloads import _load_json
@@ -339,6 +363,15 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         report["settings_ignored"] = []
     if report["settings_ignored"]:
         attention.append("settings_ignored")
+    try:   # changes the running gateway applies only at the next load of the plugin (integration.RELOAD_KEYS)
+        with experience(home) as conn:
+            row = conn.execute("SELECT value FROM cursor WHERE key='settings_reload'").fetchone()
+        waiting = json.loads(row[0]) if row else []
+        report["settings_reload"] = [key for key in waiting if isinstance(key, str) and key.isidentifier()][:8]
+    except (OSError, ValueError, sqlite3.Error):
+        report["settings_reload"] = []
+    if report["settings_reload"]:
+        attention.append("settings_reload")
     report["attention"] = attention
     return report
 
@@ -366,6 +399,7 @@ _TEXT = {
            "owner_unknown": "These chat channels count as someone else's, so they get template lessons only and their failures wait for your approval. If one of them is you, run `hermes evolution owner` in your own terminal:",
            "chat_item": "`{origin}`: {sessions} sessions in 7 days from {senders} sender(s)",
            "digest_unscheduled": "Decisions wait for you and nothing reminds you of them (Hermes 0.23.1 drops end-of-session notices). Schedule the weekly digest to your chat with `hermes evolution report --schedule-spec --deliver <channel>` and run the command it prints.",
+           "settings_reload": "These settings changed and apply at the next load of the plugin: {keys}. Hermes reloads plugins in a running gateway when one is enabled, disabled or updated; `hermes gateway restart` also does it.",
            "settings_ignored": "These values in `settings.json` are ignored: {keys}. They would widen whom the plugin trusts or turn a protection off, and the agent's own file tools can write that file. Set the ones you want in the Hermes settings form, with `hermes evolution owner` (sender ids and platforms), or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> <value>` in your own terminal.",
            "sessions": "sessions", "none": "Nothing needs attention.",
            "stale_runtime": "A running Hermes process still runs an older copy of the plugin than the one on disk (`hermes plugins update` does not reload a running gateway). Run `hermes gateway restart`; it waits for the running turns.",
@@ -402,6 +436,7 @@ _TEXT = {
            "owner_unknown": "Estes canais de chat contam como de outra pessoa, então recebem só lições de modelo fixo e as falhas deles esperam a sua aprovação. Se um deles é você, rode `hermes evolution owner` no seu próprio terminal:",
            "chat_item": "`{origin}`: {sessions} sessões em 7 dias de {senders} remetente(s)",
            "digest_unscheduled": "Há decisões esperando por você e nada as lembra (o Hermes 0.23.1 descarta os avisos de fim de sessão). Agende o resumo semanal no seu chat com `hermes evolution report --schedule-spec --deliver <canal>` e rode o comando que ele imprime.",
+           "settings_reload": "Estas configurações mudaram e valem na próxima carga do plugin: {keys}. O Hermes recarrega os plugins num gateway em execução quando um é ligado, desligado ou atualizado; `hermes gateway restart` também faz isso.",
            "settings_ignored": "Estes valores do `settings.json` são ignorados: {keys}. Eles ampliariam em quem o plugin confia ou desligariam uma proteção, e as ferramentas de arquivo do próprio agente conseguem gravar esse arquivo. Defina os que você quer no formulário de configurações do Hermes, com o `hermes evolution owner` (ids de remetente e plataformas) ou com `hermes config set plugins.entries.hermes-atlas-evolution.settings.<chave> <valor>` no seu próprio terminal.",
            "sessions": "sessões", "none": "Nada precisa de atenção.",
            "stale_runtime": "Um processo do Hermes em execução ainda roda uma cópia do plugin mais antiga que a do disco (o `hermes plugins update` não recarrega um gateway em execução). Rode `hermes gateway restart`; ele espera os turnos em andamento.",
@@ -461,6 +496,8 @@ def markdown(report: dict, lang: str = "en") -> str:
             continue
         if code == "settings_ignored":
             lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report["settings_ignored"])))
+        if code == "settings_reload":
+            lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report["settings_reload"])))
             continue
         lines.append(f"- {t[code]}")
         if code == "legacy_install":

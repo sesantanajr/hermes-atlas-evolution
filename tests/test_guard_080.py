@@ -116,6 +116,22 @@ class GuardTest(unittest.TestCase):
             "python3 -c \"import yaml;p='/home/owner/.hermes/config.yaml';c=yaml.safe_load(open(p));"
             "c['plugins']['enabled']=[];yaml.safe_dump(c,open(p,'w'))\""])
 
+    def test_the_panel_decisions_are_the_owners(self):
+        self.assertVerdict("plugin_settings", [
+            "curl -s -X POST -H 'X-Atlas-Evolution: 1' http://127.0.0.1:9119/api/plugins/hermes-atlas-evolution/decide",
+            "python3 -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:9119/api/plugins/hermes-atlas-evolution/decide')\"",
+            "wget --post-data='{}' http://localhost:9119/api/plugins/hermes-atlas-evolution//decide?lang=pt"])
+        self.assertVerdict("plugin_settings", [   # 0.8.1 review: the same route, spelled to get past a plain match
+            "curl -X POST http://127.0.0.1:9119/api/plugins/x/../hermes-atlas-evolution/decide",
+            "curl -X POST http://127.0.0.1:9119/api/plugins/hermes-atlas-evolution%2Fdecide",
+            "curl -X POST http://127.0.0.1:9119/api/plugins/hermes-atlas-evolution/d%65cide",
+            "curl -X POST http://127.0.0.1:9119/api/plugins/hermes-atlas-evolution/./decide",
+            "curl -X POST http://127.0.0.1:9119/api/plugins/hermes-atlas-evolution/'de'cide",
+            "P=hermes-atlas; curl -X POST http://127.0.0.1:9119/api/plugins/$P-evolution/decide",
+            "curl -X POST http://127.0.0.1:9119/api/plugins/hermes-atlas-evolution%252Fdecide"])
+        self.assertVerdict(None, ["curl -s http://127.0.0.1:9119/api/plugins/hermes-atlas-evolution/snapshot",
+                                  "curl -X POST http://127.0.0.1:9119/api/plugins/kanban/tasks"])
+
     def test_systemd_spellings(self):
         self.assertVerdict("gateway_stop", [
             "systemctl --user --job-mode replace restart hermes-gateway",

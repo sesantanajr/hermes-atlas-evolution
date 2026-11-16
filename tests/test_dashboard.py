@@ -68,7 +68,7 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(reply.json()["profile"], "work")
         self.assertEqual(client.get("/api/plugins/hermes-atlas-evolution/snapshot?days=0").status_code, 422)
         methods = {method for route in self.api.router.routes for method in getattr(route, "methods", ())}
-        self.assertEqual(methods, {"GET"})   # the panel only reads
+        self.assertEqual(methods, {"GET", "POST"})   # reads, and one route for the owner's decisions
 
     def test_the_bundle_renders_text_never_markup(self):
         script = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")

@@ -72,7 +72,7 @@ O `plugins update` da linha de comando só troca os arquivos: ele não recarrega
 
 ## O que ele faz
 
-- **Mostra tudo no dashboard do Hermes.** Uma aba **Evolution** no dashboard e no Hermes Desktop mostra o que o perfil aprendeu, o que espera a sua decisão com o comando exato para rodar, o resumo e o status. Ela só lê: as decisões continuam no seu terminal ([detalhes](docs/pt-BR/hermes-integration.md#o-painel-no-dashboard)).
+- **Administre pelo dashboard do Hermes.** Uma aba **Evolution** no dashboard e no Hermes Desktop mostra o que o perfil aprendeu e o que espera por você e, quando o seu dashboard pede login, deixa você decidir ali: aprovar ou rejeitar cada lição, **aprovar todas** depois de ler cada frase, decidir propostas, mudar as configurações, escolher quem é você nos chats a partir de sugestões e **desfazer** qualquer decisão. Um dashboard sem login fica só leitura, porque qualquer programa da máquina poderia agir ali ([detalhes](docs/pt-BR/hermes-integration.md#o-painel-no-dashboard)).
 - **Leva lições de um perfil para outro.** `lessons export` e `lessons import --from <perfil>` levam o que um perfil aprendeu para outro, ou para outra máquina, depois de mostrar cada frase. As lições importadas esperam até os seus turnos encontrarem a falha lá, e são medidas lá como qualquer outra ([detalhes](docs/pt-BR/evolution-loop.md#pacotes-de-lições)).
 - **Aprende com o histórico que o Hermes já guarda.** As primeiras passadas releem os últimos 14 dias de sessões do perfil, então uma falha que se repetiu na semana passada pode virar lição já no primeiro dia.
 - **Transforma falhas repetidas de ferramentas em lições.** Uma falha vista pelo menos 3 vezes, em 2 sessões ou em 2 dias, vira uma frase como "Ao chamar `example_search`, sempre passe o argumento obrigatório `query`." Chamadas que o Hermes encerra no próprio prazo também contam. O agente lê as lições ativas no começo de cada sessão.
@@ -99,7 +99,8 @@ Subcomandos de `hermes evolution`. O `--lang en|pt` funciona com todos eles.
 | `report [--days N]` | O resumo dos últimos N dias (7 por padrão), comparado com o período anterior. |
 | `lessons list` | As lições, com origem, evidências e efeito medido. |
 | `lessons review` | Passa por cada lição que espera aprovação, com o texto exato: `a` aprova, `r` rejeita, Enter pula. |
-| `lessons approve <id>` | Ativa uma lição que está esperando, depois de mostrar o texto exato. |
+| `lessons approve <id>`, `lessons approve --all` | Ativa uma lição que está esperando, ou todas (menos as propostas do próprio agente), depois de mostrar o texto exato. |
+| `decisions`, `decisions undo <id>` | As suas decisões no terminal e no dashboard, da mais recente para a mais antiga, e o desfazer de uma delas. |
 | `proposals list`, `proposals approve <id>`, `proposals reject <id>` | A fila de propostas e a sua decisão sobre uma delas. |
 | `lessons export [--out ARQUIVO]` | As lições ativas como um pacote que outro perfil ou outra máquina pode importar. |
 | `lessons import ARQUIVO` ou `lessons import --from <perfil>` | Traz as lições de um pacote ou de outro perfil, depois de mostrar cada uma (`--dry-run` não muda nada). |
@@ -110,7 +111,7 @@ Todos os comandos e opções: [Comandos](docs/pt-BR/evolution-loop.md#comandos).
 
 ## Configurações
 
-Ajuste no Hermes Desktop, em Configurações → Plugins, ou no `config.yaml` do perfil, em `plugins.entries.hermes-atlas-evolution.settings`. Reinicie o gateway depois de mudar. `owner_sender_ids`, `owner_platforms`, `agent_tools: true` e `runtime_guard: false` só valem por ali, nunca pelo `settings.json` do plugin, que as ferramentas de arquivo do agente conseguem gravar.
+Ajuste na aba **Evolution** do dashboard, no Hermes Desktop, em Configurações → Plugins, ou no `config.yaml` do perfil, em `plugins.entries.hermes-atlas-evolution.settings`. Uma mudança vale em até um minuto, sem reiniciar o gateway; só `runtime_guard`, `tool_hints` e ligar as lições num perfil que carregou com elas desligadas esperam a próxima carga do plugin, e o painel avisa. `owner_sender_ids`, `owner_platforms`, `agent_tools: true` e `runtime_guard: false` só valem por ali, nunca pelo `settings.json` do plugin, que as ferramentas de arquivo do agente conseguem gravar.
 
 | Opção | Padrão | O que faz |
 |---|---|---|

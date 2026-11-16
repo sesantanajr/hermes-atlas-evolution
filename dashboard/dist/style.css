@@ -57,3 +57,32 @@
 .hae-page h5.hae-md-h, .hae-page h6.hae-md-h { font-size: .95rem; color: var(--color-muted-foreground); }
 .hae-list { margin: 0; padding-left: 1.2rem; display: flex; flex-direction: column; gap: .2rem; }
 @media (max-width: 640px) { .hae-header { padding: .8rem; } .hae-kpi-value { font-size: 1.3rem; } }
+/* 0.8.1: decisions, settings and history */
+.hae-button-primary { border-color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 18%, var(--color-card)); font-weight: 600; }
+.hae-button-primary:hover { background: color-mix(in srgb, var(--color-primary) 28%, var(--color-card)); }
+.hae-button-danger { border-color: color-mix(in srgb, #ef4444 60%, var(--color-border)); }
+.hae-row-actions { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .35rem; }
+.hae-actions-left { justify-content: flex-start; }
+.hae-notice { margin: 0; padding: .6rem .8rem; border: 1px solid var(--color-border); border-left: 3px solid #f59e0b;
+  background: color-mix(in srgb, #f59e0b 7%, var(--color-card)); font-size: .875rem; line-height: 1.45; }
+.hae-notice-good { border-left-color: #22c55e; background: color-mix(in srgb, #22c55e 7%, var(--color-card)); }
+.hae-notice-bad { border-left-color: #ef4444; background: color-mix(in srgb, #ef4444 7%, var(--color-card)); }
+.hae-modal-backdrop { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, #000 55%, transparent); padding: 1rem; }
+.hae-modal { width: min(46rem, 100%); max-height: 85vh; overflow: auto; border: 1px solid var(--color-border);
+  background: var(--color-card); padding: 1.1rem 1.25rem; display: flex; flex-direction: column; gap: .75rem; }
+.hae-confirm-list { padding-left: 1.4rem; gap: .45rem; }
+.hae-field { display: flex; flex-direction: column; gap: .3rem; padding: .55rem 0; border-bottom: 1px solid var(--color-border); }
+.hae-field:last-child { border-bottom: 0; }
+.hae-field-label { font-weight: 600; font-size: .9rem; }
+.hae-field input[type="checkbox"] { width: 1.05rem; height: 1.05rem; accent-color: var(--color-primary); }
+.hae-field-inline { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; font-size: .875rem; }
+.hae-field-inline input[type="checkbox"] { accent-color: var(--color-primary); }
+.hae-input { font: inherit; font-size: .85rem; width: 8rem; border: 1px solid var(--color-border); background: var(--color-card);
+  color: var(--color-foreground); padding: .3rem .5rem; }
+.hae-channel { border: 1px solid var(--color-border); padding: .6rem .75rem; display: flex; flex-direction: column; gap: .35rem; }
+.hae-indent { padding-left: 1.6rem; }
+.hae-stack-tight { display: flex; flex-direction: column; gap: .25rem; }
+.hae-select:disabled, .hae-input:disabled, .hae-button:disabled { opacity: .55; cursor: not-allowed; }
+.hae-page .hae-select-field { max-width: 28rem; }
+.hae-field .hae-input { max-width: 10rem; }

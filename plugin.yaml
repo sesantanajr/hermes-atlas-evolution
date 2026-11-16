@@ -1,5 +1,5 @@
 name: hermes-atlas-evolution
-version: "0.8.0"
+version: "0.8.1"
 requires_hermes: ">=0.23.1"
 description: >-
   A measured self-improvement loop for Hermes Agent. Learns from Hermes' own history on the first pass,
