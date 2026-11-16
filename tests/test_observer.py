@@ -9,10 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_evolution import operations
-from hermes_evolution.native_signals import native_summary, observe_native
-from hermes_evolution.operations import database, observe, recommendations, summarize
-from hermes_evolution.telemetry import ResearchTracker, research_summary
+from hermes_atlas_evolution import operations
+from hermes_atlas_evolution.native_signals import native_summary, observe_native
+from hermes_atlas_evolution.operations import database, observe, recommendations, summarize
+from hermes_atlas_evolution.telemetry import ResearchTracker, research_summary
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 
@@ -121,7 +121,7 @@ class ObserverTests(unittest.TestCase):
         observe(self.home, "tool", tool("new"), now=NOW)
         with database(self.home) as conn:
             days = [row[0] for row in conn.execute("SELECT day FROM metric ORDER BY day")]
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0], 1)   # delivery ids: 2 days
         self.assertEqual(days, ["2026-10-12", "2026-11-15"])
 
     def test_replaced_database_and_forked_process_get_a_new_connection(self):
@@ -153,7 +153,7 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(self.tools(), 2)
 
     def test_mistyped_profile_path_fails_without_creating_a_tree(self):
-        from hermes_evolution.supervisor import _journal
+        from hermes_atlas_evolution.supervisor import _journal
 
         missing = self.home / "no-such-profile"
         with self.assertRaises(OSError):

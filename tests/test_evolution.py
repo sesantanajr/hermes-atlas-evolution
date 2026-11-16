@@ -6,10 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hermes_evolution.cli import _report, execute
-from hermes_evolution.integration import shared_context, slash
-from hermes_evolution.memory import GLOBAL_SCOPE, MemoryStore
-from hermes_evolution.operations import close_observers, database, observe, recommendations, run_policy, summarize
+from hermes_atlas_evolution.cli import _report, execute
+from hermes_atlas_evolution.integration import shared_context, slash
+from hermes_atlas_evolution.memory import GLOBAL_SCOPE, MemoryStore
+from hermes_atlas_evolution.operations import close_observers, database, observe, recommendations, run_policy, summarize
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 
@@ -44,8 +44,8 @@ class EvolutionTest(unittest.TestCase):
 
     def test_failed_operator_tick_attempts_rollback_even_with_invalid_settings(self):
         tick = SimpleNamespace(evolution_action="ops", ops_action="tick")
-        with patch("hermes_evolution.cli._report", side_effect=ValueError("broken settings")), patch(
-            "hermes_evolution.cli._rollback_trial", return_value={"status": "rolled_back"}
+        with patch("hermes_atlas_evolution.cli._report", side_effect=ValueError("broken settings")), patch(
+            "hermes_atlas_evolution.cli._rollback_trial", return_value={"status": "rolled_back"}
         ) as recover:
             with self.assertRaisesRegex(SystemExit, "broken settings\\nActive trial recovery: rolled_back"):
                 execute(tick, self.home)
@@ -223,7 +223,7 @@ class EvolutionTest(unittest.TestCase):
                     "findings": [{"id": "low_disk", "severity": "warning", "recommendation": "Review disk."}]}
         unknown = {**measured, "host": {**measured["host"], "disk": None}, "findings": []}
         clear = {**measured, "findings": []}
-        with patch("hermes_evolution.cli.snapshot", side_effect=[measured, unknown, clear, clear]):
+        with patch("hermes_atlas_evolution.cli.snapshot", side_effect=[measured, unknown, clear, clear]):
             modes = [_report(tick, self.home, now=NOW + i * 600)["decision"]["mode"] for i in range(4)]
         self.assertEqual(modes, ["conservative", "conservative", "conservative", "normal"])
 

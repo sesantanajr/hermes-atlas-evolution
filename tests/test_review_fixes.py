@@ -7,11 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_evolution import experiments, lessons, proposals
-from hermes_evolution.evolve import cycle, notify_view
-from hermes_evolution.experience import experience, prune
-from hermes_evolution.operations import close_observers
-from hermes_evolution.signals import TurnTracker, record_tool
+from hermes_atlas_evolution import experiments, lessons, proposals
+from hermes_atlas_evolution.evolve import cycle, notify_view
+from hermes_atlas_evolution.experience import experience, prune
+from hermes_atlas_evolution.operations import close_observers
+from hermes_atlas_evolution.signals import TurnTracker, record_tool
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400
@@ -122,13 +122,13 @@ class HookHardeningTest(Base):
         import sys
         import types
 
-        from hermes_evolution.integration import register
+        from hermes_atlas_evolution.integration import register
 
         for when in (NOW - DAY, NOW):
             self.failures(when, 2, session=f"s{when}")
         with experience(self.home) as conn:
             lessons.derive(conn, now=NOW, mode="auto")
-        (self.home / "evolution" / "settings.json").write_text(json.dumps({"evolution": {"lessons": "auto"}}))
+        (self.home / "evolution" / "settings.json").write_text(json.dumps({"evolution": {"lessons": "auto", "tool_hints": True}}))
 
         class Context:
             hooks, envs = {}, []
@@ -157,7 +157,7 @@ class HookHardeningTest(Base):
         self.assertIsNone(transform(status=object(), session_id="b"))              # hostile payload fails open
 
     def test_an_unusable_folder_keeps_the_event_for_later(self):
-        from hermes_evolution import operations
+        from hermes_atlas_evolution import operations
 
         record_tool(self.home, {"tool_name": "t", "status": "ok"}, now=NOW)
         observer = operations._observer(self.home)

@@ -8,8 +8,10 @@ many profiles, but each profile loads its own plugins.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +20,7 @@ from urllib.parse import quote
 from .experience import experience, utc_day
 
 REPOSITORY = "sesantanajr/hermes-atlas-evolution"
-PLUGIN_DIR = "hermes-evolution"
+PLUGIN_DIR = "hermes-atlas-evolution"
 
 
 def plugin_version() -> str:
@@ -28,6 +30,61 @@ def plugin_version() -> str:
     except OSError:
         match = None
     return match.group(1) if match else "unknown"
+
+
+def process_kind() -> str:
+    """gateway, dashboard or cli: long-running hosts are the ones that can keep old code loaded."""
+    words = [os.path.basename(str(item)) for item in sys.argv[:6]]
+    if "gateway" in words and "run" in words:
+        return "gateway"
+    if "dashboard" in words:
+        return "dashboard"
+    return "cli"
+
+
+def record_runtime(home: Path, *, now: float, version: str | None = None, pid: int | None = None) -> None:
+    """Remember which plugin version a long-running host loaded, so `status` can tell when the code on disk
+    is newer than what the gateway runs (`hermes plugins update` does not reload a running gateway)."""
+    from .experience import record
+
+    kind = process_kind() if pid is None else "gateway"
+    if kind == "cli":
+        return
+    value = json.dumps({"version": version or plugin_version(), "kind": kind, "since": now})
+    key = f"runtime:{os.getpid() if pid is None else int(pid)}"
+    record(home, lambda conn: conn.execute("INSERT OR REPLACE INTO cursor VALUES (?, ?)", (key, value)), now=now)
+
+
+def _alive(pid: int) -> bool | None:
+    """True or False on POSIX; None where a liveness probe is not safe (on Windows os.kill would end it)."""
+    if os.name != "posix":
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def _runtimes(conn, disk: str) -> tuple[list[dict], list[str]]:
+    """(live hosts that loaded another version, keys of hosts that are gone)."""
+    stale, gone = [], []
+    for key, value in conn.execute("SELECT key, value FROM cursor WHERE key LIKE 'runtime:%'").fetchall():
+        try:
+            pid, data = int(key.split(":", 1)[1]), json.loads(value)
+        except (ValueError, TypeError):
+            gone.append(key)
+            continue
+        alive = _alive(pid)
+        if alive is False:
+            gone.append(key)
+        elif alive and isinstance(data, dict) and data.get("version") != disk:
+            stale.append({"pid": pid, "kind": data.get("kind"), "version": data.get("version"), "since": _iso(data.get("since"))})
+    return stale, gone
 
 
 def _iso(stamp) -> str | None:
@@ -51,8 +108,61 @@ def _sessions(home: Path, *, since: float) -> int | None:
         return None
 
 
+LEGACY_DIRS = ("hermes-evolution",)   # the plugin id used up to 0.5.0
+
+
+def _command(name: str, rest: str) -> str:
+    return f"hermes {'' if name == 'default' else f'-p {name} '}{rest}"
+
+
+def _profile_state(folder: Path) -> tuple[str, str | None, int, int]:
+    """(plugin state, last pass, active lessons, lessons waiting) of a profile, read-only from its own database.
+
+    "both": the new copy is there but so is the old one, which keeps running while the new one stays inactive."""
+    new = (folder / "plugins" / PLUGIN_DIR).is_dir()
+    old = any((folder / "plugins" / legacy / "plugin.yaml").is_file() and not _is_this_plugin(folder / "plugins" / legacy)
+              for legacy in LEGACY_DIRS)
+    if new and old:
+        state = "both"
+    elif new or (folder / "plugins" / LEGACY_DIRS[0]).is_dir() and not old:
+        state = "installed"
+    elif old:
+        state = "legacy"
+    else:
+        return "missing", None, 0, 0
+    path = folder / "evolution" / "evolution.sqlite3"
+    if not path.is_file():
+        return state, None, 0, 0
+    try:
+        source = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=1)
+        try:
+            row = source.execute("SELECT value FROM cursor WHERE key='loop_status'").fetchone()
+            counts = dict(source.execute("SELECT status, COUNT(*) FROM lesson GROUP BY status").fetchall())
+        finally:
+            source.close()
+    except sqlite3.Error:
+        return state, None, 0, 0
+    try:
+        last = _iso(json.loads(row[0]).get("at")) if row else None
+    except (ValueError, AttributeError):
+        last = None
+    return state, last, counts.get("active", 0), counts.get("candidate", 0) + counts.get("quarantined", 0)
+
+
+def _is_this_plugin(folder: Path) -> bool:
+    """True when a folder named after the old id holds this version (a clone updated in place)."""
+    try:
+        manifest = (folder / "plugin.yaml").read_text(encoding="utf-8", errors="replace")[:65_536]
+    except OSError:
+        return False
+    return re.search(rf"^name:\s*[\"']?{re.escape(PLUGIN_DIR)}[\"']?\s*$", manifest, re.M) is not None
+
+
 def _profiles(home: Path, *, now: float) -> list[dict]:
-    """Every other profile of the same Hermes root that had sessions in 7 days and lacks the plugin."""
+    """Every profile of the same Hermes root: sessions in 7 days and the plugin's state there.
+
+    One gateway serves many profiles, but each profile loads its own plugins, so the profile you happen to be
+    in may not be the one doing the work."""
     home = Path(home).resolve()
     root = home.parent.parent if home.parent.name == "profiles" else home
     candidates = [("default", root)]
@@ -60,15 +170,33 @@ def _profiles(home: Path, *, now: float) -> list[dict]:
         candidates += [(entry.name, entry) for entry in sorted((root / "profiles").iterdir()) if entry.is_dir()][:200]
     except OSError:
         pass
-    found = []
+    rows = []
     for name, folder in candidates:
-        if folder.resolve() == home or (folder / "plugins" / PLUGIN_DIR).is_dir():
-            continue
-        count = _sessions(folder, since=now - 7 * 86_400)
-        if count:
-            found.append({"profile": name, "sessions_7d": count,
-                          "install": f"hermes {'' if name == 'default' else f'-p {name} '}plugins install {REPOSITORY} --enable"})
-    return sorted(found, key=lambda item: -item["sessions_7d"])
+        state, last, active, waiting = _profile_state(folder)
+        rows.append({"profile": name, "current": folder.resolve() == home,
+                     "sessions_7d": _sessions(folder, since=now - 7 * 86_400) or 0, "plugin": state,
+                     "last_pass": last, "lessons_active": active, "lessons_waiting": waiting,
+                     "install": _command(name, f"plugins install {REPOSITORY} --enable"),
+                     "migrate": f"{_command(name, 'plugins remove ' + LEGACY_DIRS[0])} && " + (
+                         "hermes gateway restart" if state == "both"
+                         else _command(name, f"plugins install {REPOSITORY} --enable")),
+                     "status": _command(name, "evolution status")})
+    return rows
+
+
+def never_ran(home: Path) -> bool:
+    """True when no pass ever finished in this profile (the autopilot has not had its first turn or tick)."""
+    path = Path(home) / "evolution" / "evolution.sqlite3"
+    if not path.is_file():
+        return True
+    try:
+        source = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=1)
+        try:
+            return source.execute("SELECT 1 FROM cursor WHERE key='loop_status'").fetchone() is None
+        finally:
+            source.close()
+    except sqlite3.Error:
+        return False
 
 
 def build(home: Path, *, now: float | None = None, config=None, runtime_config=None) -> dict:
@@ -89,6 +217,11 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         drafts = conn.execute("SELECT COUNT(*) FROM lesson WHERE origin='reflector' AND status='quarantined'").fetchone()[0]
         proposals = conn.execute("SELECT COUNT(*) FROM proposal WHERE status='open'").fetchone()[0]
         vetoed = guard_summary(conn, now=now, days=7)
+        stale, gone = _runtimes(conn, plugin_version())
+    if gone:
+        from .experience import record
+
+        record(home, lambda conn: conn.executemany("DELETE FROM cursor WHERE key=?", [(key,) for key in gone]), now=now)
     try:
         last = json.loads(cursor["loop_status"]) if "loop_status" in cursor else None
     except ValueError:
@@ -110,10 +243,23 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
                     "awaiting_approval": lessons.get("candidate", 0) + lessons.get("quarantined", 0),
                     "retired": lessons.get("retired", 0)},
         "proposals_open": proposals,
-        "runtime_guard": {"enabled": opts["runtime_guard"], "vetoed_7d": sum(vetoed.values())},
-        "profiles_without_plugin": _profiles(Path(home), now=now),
+        "runtime_guard": {"enabled": opts["runtime_guard"], "state": _guard_state(opts["runtime_guard"]),
+                          "vetoed_7d": sum(vetoed.values())},
+        "profiles": _profiles(Path(home), now=now),
+        "stale_runtimes": stale,
     }
+    report["profiles_without_plugin"] = sorted(
+        (row for row in report["profiles"] if row["plugin"] == "missing" and row["sessions_7d"] and not row["current"]),
+        key=lambda row: -row["sessions_7d"])
+    report["legacy_installs"] = [row for row in report["profiles"] if row["plugin"] in ("legacy", "both")]
+    mine = next((row for row in report["profiles"] if row["current"]), None)
+    busiest = max((row for row in report["profiles"] if row["plugin"] == "installed" and not row["current"]),
+                  key=lambda row: row["sessions_7d"], default=None)
+    report["busier_profile"] = (busiest if busiest and mine and busiest["sessions_7d"] >= 10
+                                and busiest["sessions_7d"] > 4 * mine["sessions_7d"] else None)
     attention = []
+    if stale:
+        attention.append("stale_runtime")
     if not (tools or turns or calls):
         attention.append("no_events_today")
     if opts["autopilot_minutes"] == 0:
@@ -124,6 +270,10 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         attention.append("autopilot_failing")
     if report["lessons"]["awaiting_approval"]:
         attention.append("lessons_waiting")
+    if report["legacy_installs"]:
+        attention.append("legacy_install")
+    if report["busier_profile"]:
+        attention.append("busier_profile")
     if report["profiles_without_plugin"]:
         attention.append("profiles_without_plugin")
     report["attention"] = attention
@@ -134,11 +284,15 @@ _TEXT = {
     "en": {"title": "Atlas Evolution {version} · profile `{profile}`", "since": "Observing since",
            "today": "Today (UTC)", "tool_calls": "tool calls", "turns": "turns", "model_calls": "model calls",
            "autopilot": "Autopilot", "every": "every {minutes} min", "off": "off (run `hermes evolution learn` yourself)",
-           "last": "last pass", "ok": "ok", "failed": "failed", "never": "has not run yet; it starts after the next turn",
+           "last": "last pass", "ok": "ok", "failed": "failed",
+           "never": "has not run yet; the clock starts it within 2 minutes of the plugin loading, or run `hermes evolution learn`",
            "backfill": "Hermes history", "reflector": "Reflector", "on": "on", "calls": "calls today",
            "drafts": "drafts waiting", "lessons": "Lessons", "mode": "mode", "active": "active",
            "awaiting": "awaiting approval", "retired": "retired", "proposals": "Open proposals",
            "guard": "Runtime guard", "vetoed": "commands vetoed in 7 days", "attention": "Needs attention",
+           "guard_covers": "knows the gateway as a systemd unit (Linux), a LaunchAgent (macOS) and a Windows service or task",
+           "guard_host": "off: plugins run in a plugin host here (plugins.isolation: host), where a crashed host would "
+                         "block every tool",
            "no_events_today": "No event from the hooks today. If the profile was used today, check that Hermes loaded the plugin in this profile (`hermes plugins list`).",
            "autopilot_off": "The autopilot is off: the loop only runs when you call `hermes evolution learn`.",
            "no_autopilot_pass": "The autopilot has not run a pass in this profile yet.",
@@ -146,16 +300,30 @@ _TEXT = {
            "lessons_waiting": "Lessons are waiting for your approval: `hermes evolution lessons list`.",
            "profiles_without_plugin": "Profiles used in the last 7 days that do not have the plugin (each profile loads its own plugins):",
            "sessions": "sessions", "none": "Nothing needs attention.",
+           "stale_runtime": "A running Hermes process still runs an older copy of the plugin than the one on disk (`hermes plugins update` does not reload a running gateway). Run `hermes gateway restart`; it waits for the running turns.",
+           "stale_item": "pid {pid} ({kind}) loaded {version}",
+           "legacy_install": "These profiles still have the plugin under its old id hermes-evolution (up to 0.5.0), which keeps running while a new copy there stays inactive. Run the command shown for each; the data it learned stays:",
+           "busier_profile": "This profile is barely used. `{profile}` had {sessions} sessions in 7 days; see it with `{status}`.",
+           "profiles": "Profiles of this Hermes", "col_profile": "profile", "col_sessions": "sessions (7 d)",
+           "col_plugin": "plugin", "col_last": "last pass", "col_lessons": "lessons active / waiting",
+           "states": {"installed": "installed", "legacy": "old id (0.5.0)", "both": "both copies: the old one runs",
+                      "missing": "not installed"},
+           "first_pass": "First pass done now: {sessions} sessions, {tool_calls} tool calls of history read.",
            "statuses": {"done": "read", "running": "being read", "waiting": "waiting for the first pass",
                         "no_history": "no history", "unreadable": "unreadable", "unsupported_history": "unsupported format"}},
     "pt": {"title": "Atlas Evolution {version} · perfil `{profile}`", "since": "Observando desde",
            "today": "Hoje (UTC)", "tool_calls": "chamadas de ferramentas", "turns": "turnos", "model_calls": "chamadas ao modelo",
            "autopilot": "Autopilot", "every": "a cada {minutes} min", "off": "desligado (rode `hermes evolution learn` você mesmo)",
-           "last": "última passada", "ok": "ok", "failed": "falhou", "never": "ainda não rodou; começa depois do próximo turno",
+           "last": "última passada", "ok": "ok", "failed": "falhou",
+           "never": "ainda não rodou; o relógio a inicia em até 2 minutos depois de o plugin carregar, ou rode `hermes evolution learn`",
            "backfill": "Histórico do Hermes", "reflector": "Refletor", "on": "ligado", "calls": "chamadas hoje",
            "drafts": "rascunhos aguardando", "lessons": "Lições", "mode": "modo", "active": "ativas",
            "awaiting": "aguardando aprovação", "retired": "aposentadas", "proposals": "Propostas abertas",
            "guard": "Guarda de runtime", "vetoed": "comandos barrados em 7 dias", "attention": "Precisa de atenção",
+           "guard_covers": "reconhece o gateway como unidade systemd (Linux), LaunchAgent (macOS) e serviço ou tarefa "
+                           "do Windows",
+           "guard_host": "desligada: aqui os plugins rodam num host de plugins (plugins.isolation: host), onde um host "
+                         "que caísse bloquearia todas as ferramentas",
            "no_events_today": "Nenhum evento dos hooks hoje. Se o perfil foi usado hoje, confira se o Hermes carregou o plugin neste perfil (`hermes plugins list`).",
            "autopilot_off": "O autopilot está desligado: o ciclo só roda quando você chama `hermes evolution learn`.",
            "no_autopilot_pass": "O autopilot ainda não fez nenhuma passada neste perfil.",
@@ -163,6 +331,15 @@ _TEXT = {
            "lessons_waiting": "Há lições aguardando a sua aprovação: `hermes evolution lessons list`.",
            "profiles_without_plugin": "Perfis usados nos últimos 7 dias que não têm o plugin (cada perfil carrega os próprios plugins):",
            "sessions": "sessões", "none": "Nada precisa de atenção.",
+           "stale_runtime": "Um processo do Hermes em execução ainda roda uma cópia do plugin mais antiga que a do disco (o `hermes plugins update` não recarrega um gateway em execução). Rode `hermes gateway restart`; ele espera os turnos em andamento.",
+           "stale_item": "pid {pid} ({kind}) carregou a {version}",
+           "legacy_install": "Estes perfis ainda têm o plugin com o nome antigo hermes-evolution (até a 0.5.0), que continua rodando enquanto uma cópia nova ali fica inativa. Rode o comando de cada um; os dados aprendidos ficam:",
+           "busier_profile": "Este perfil quase não é usado. O `{profile}` teve {sessions} sessões em 7 dias; veja com `{status}`.",
+           "profiles": "Perfis deste Hermes", "col_profile": "perfil", "col_sessions": "sessões (7 d)",
+           "col_plugin": "plugin", "col_last": "última passada", "col_lessons": "lições ativas / aguardando",
+           "states": {"installed": "instalado", "legacy": "nome antigo (0.5.0)", "both": "duas cópias: a antiga roda",
+                      "missing": "não instalado"},
+           "first_pass": "Primeira passada feita agora: {sessions} sessões e {tool_calls} chamadas de ferramentas do histórico lidas.",
            "statuses": {"done": "lido", "running": "em leitura", "waiting": "aguardando a primeira passada",
                         "no_history": "sem histórico", "unreadable": "ilegível", "unsupported_history": "formato não suportado"}},
 }
@@ -193,16 +370,42 @@ def markdown(report: dict, lang: str = "en") -> str:
                  f"{playbook['awaiting_approval']} {t['awaiting']} · {playbook['retired']} {t['retired']}")
     lines.append(f"- **{t['proposals']}:** {report['proposals_open']}")
     guard = report["runtime_guard"]
-    lines.append(f"- **{t['guard']}:** " + (f"{t['on']} · {guard['vetoed_7d']} {t['vetoed']}" if guard["enabled"]
-                                             else t["off"].split(" (")[0]))
+    if guard.get("state") == "host":
+        state = t["guard_host"]
+    elif guard["enabled"]:
+        state = f"{t['on']} · {guard['vetoed_7d']} {t['vetoed']} · {t['guard_covers']}"
+    else:
+        state = t["off"].split(" (")[0]
+    lines.append(f"- **{t['guard']}:** {state}")
+    if report.get("first_pass"):
+        lines += ["", "> " + t["first_pass"].format(**report["first_pass"])]
     lines += ["", f"## {t['attention']}", ""]
     for code in report["attention"]:
+        if code == "busier_profile":
+            lines.append("- " + t[code].format(**{**report["busier_profile"], "profile": report["busier_profile"]["profile"],
+                                                 "sessions": report["busier_profile"]["sessions_7d"]}))
+            continue
         lines.append(f"- {t[code]}")
+        if code == "legacy_install":
+            for item in report["legacy_installs"]:
+                lines.append(f"  - `{item['profile']}`: `{item['migrate']}`")
+        if code == "stale_runtime":
+            for item in report["stale_runtimes"]:
+                lines.append("  - " + t["stale_item"].format(**item))
         if code == "profiles_without_plugin":
             for item in report["profiles_without_plugin"]:
                 lines.append(f"  - `{item['profile']}` ({item['sessions_7d']} {t['sessions']}): `{item['install']}`")
     if not report["attention"]:
         lines.append(t["none"])
+    shown = [row for row in report.get("profiles", []) if row["sessions_7d"] or row["plugin"] != "missing" or row["current"]]
+    if shown:
+        lines += ["", f"## {t['profiles']}", "",
+                  f"| {t['col_profile']} | {t['col_sessions']} | {t['col_plugin']} | {t['col_last']} | {t['col_lessons']} |",
+                  "|---|---:|---|---|---:|"]
+        for row in sorted(shown, key=lambda item: (-item["sessions_7d"], item["profile"])):
+            name = f"**{row['profile']}**" if row["current"] else row["profile"]
+            lessons = f"{row['lessons_active']} / {row['lessons_waiting']}" if row["plugin"] != "missing" else "—"
+            lines.append(f"| {name} | {row['sessions_7d']} | {t['states'][row['plugin']]} | {row['last_pass'] or '—'} | {lessons} |")
     return "\n".join(lines) + "\n"
 
 
@@ -214,6 +417,19 @@ _NOTICE = {
            "risky": "{n} proposta(s) de risco alto", "failing": "a última passada de aprendizado falhou",
            "lead": "Atlas Evolution", "tail": "Veja `hermes evolution status`."},
 }
+
+
+def _guard_state(enabled: bool) -> str:
+    """on, off, or host: Hermes runs this profile's plugins in a plugin host, where the guard stays off."""
+    module = sys.modules.get("hermes_cli.plugin_isolation")
+    mode = getattr(module, "isolation_mode", None)
+    try:
+        isolation = mode() if callable(mode) else None
+    except Exception:
+        isolation = None
+    if isolation == "host":
+        return "host"
+    return "on" if enabled else "off"
 
 
 def pending_notice(home: Path, *, now: float, lang: str = "en") -> dict | None:

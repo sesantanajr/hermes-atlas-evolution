@@ -6,11 +6,11 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_evolution.learning import record_outcome, retrospective
-from hermes_evolution.linux_actions import SystemPolicy, Systemd, Unit, attribute, pair_sample
-from hermes_evolution.operations import close_observers, database
-from hermes_evolution.supervisor import _journal, journal_history, supervise
-from hermes_evolution.telemetry import ResearchTracker, research_summary
+from hermes_atlas_evolution.learning import record_outcome, retrospective
+from hermes_atlas_evolution.linux_actions import SystemPolicy, Systemd, Unit, attribute, pair_sample
+from hermes_atlas_evolution.operations import close_observers, database
+from hermes_atlas_evolution.supervisor import _journal, journal_history, supervise
+from hermes_atlas_evolution.telemetry import ResearchTracker, research_summary
 
 MIB = 1 << 20
 
@@ -266,7 +266,7 @@ class SupervisorTest(unittest.TestCase):
         tracker.finish(turn, clock=134, now=2000)
         tracker.finish(turn, clock=135, now=2000)
         with database(self.home) as conn:
-            from hermes_evolution.operations import SCHEMA_VERSION
+            from hermes_atlas_evolution.operations import SCHEMA_VERSION
 
             self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM lesson").fetchone()[0], 0)

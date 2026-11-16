@@ -10,13 +10,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hermes_evolution import i18n
-from hermes_evolution.advisory import EFFORTS, KINDS, plan
-from hermes_evolution.catalog import PAIRS, PATTERNS
-from hermes_evolution.native_actions import HANDOFF_RULES, PLAYBOOKS
-from hermes_evolution.operations import close_observers
+from hermes_atlas_evolution import i18n
+from hermes_atlas_evolution.advisory import EFFORTS, KINDS, plan
+from hermes_atlas_evolution.catalog import PAIRS, PATTERNS
+from hermes_atlas_evolution.native_actions import HANDOFF_RULES, PLAYBOOKS
+from hermes_atlas_evolution.operations import close_observers
 
-PACKAGE = Path(__file__).resolve().parent.parent / "hermes_evolution"
+PACKAGE = Path(__file__).resolve().parent.parent / "hermes_atlas_evolution"
 PORTUGUESE = re.compile(r"[ãõçáéíóúâêôàÁÉÍÓÚ]|\b(?:não|são|para|com|uma|pelo|pela|está|foram|antes|depois|rotina|falha|"
                         r"memória|os|as|de|do|da|em|que)\b", re.I)
 DIAGNOSTIC_MODULES = ("reasoning", "diagnostics", "workloads", "native_signals", "linux_host", "inventory", "ops_metrics")
@@ -111,9 +111,13 @@ class CommandLineLanguageTest(unittest.TestCase):
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)
         self.home = Path(folder.name)
+        process_tree = patch.multiple("hermes_atlas_evolution.cli", _under_hermes=lambda **_: False,
+                                      _in_hermes_cgroup=lambda **_: False)   # not the host's process tree
+        process_tree.start()
+        self.addCleanup(process_tree.stop)
 
     def run_cli(self, **arguments):
-        from hermes_evolution.cli import execute
+        from hermes_atlas_evolution.cli import execute
 
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
@@ -138,17 +142,91 @@ class CommandLineLanguageTest(unittest.TestCase):
     def test_help_is_built_in_the_profile_language(self):
         import argparse
 
-        from hermes_evolution.cli import setup
+        from hermes_atlas_evolution.cli import setup
 
         for language, expected in (("pt", "Imprime o resumo da evolução"), ("en", "Print the evolution digest")):
             parser = argparse.ArgumentParser(prog="hermes evolution")
-            with patch("hermes_evolution.i18n.resolve", return_value=language):
+            with patch("hermes_atlas_evolution.i18n.resolve", return_value=language):
                 setup(parser)
             self.assertIn(expected, parser.format_help())
         for argv in (["--lang", "pt", "ops", "inspect"], ["ops", "inspect", "--lang", "pt"], ["report", "--lang", "pt"],
                      ["lessons", "list", "--lang", "pt"], ["proposals", "approve", "3", "--lang", "pt"], ["skills"]):
             parsed = parser.parse_args(argv)
             self.assertEqual(getattr(parsed, "lang", None), None if argv == ["skills"] else "pt", argv)
+
+
+
+def raised_messages():
+    """(module, line, sample) for every `raise ValueError(...)` / `raise SystemExit(...)` with a written message.
+    An f-string is rendered with 7 in place of each value, the way a PATTERN must match it."""
+    for path in sorted(PACKAGE.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call) or not node.exc.args:
+                continue
+            name = getattr(node.exc.func, "id", None) or getattr(node.exc.func, "attr", None)
+            message = node.exc.args[0]
+            if name not in ("ValueError", "SystemExit"):
+                continue
+            if isinstance(message, ast.Constant) and isinstance(message.value, str):
+                yield path.name, node.lineno, message.value
+            elif isinstance(message, ast.JoinedStr):
+                yield path.name, node.lineno, "".join(part.value if isinstance(part, ast.Constant) else "7"
+                                                      for part in message.values)
+
+
+class RaisedMessagesTest(unittest.TestCase):
+    # "Evolution: <error>" only frames an error that is itself translated before it is framed.
+    FRAMES = {"Evolution: 77"}
+
+    def test_every_error_a_person_can_read_has_a_portuguese_form(self):
+        found = list(raised_messages())
+        self.assertGreater(len(found), 60)
+        missing = [f"{module}:{line}: {sample}" for module, line, sample in found
+                   if sample not in self.FRAMES and i18n.text(sample, "pt") == sample]
+        self.assertEqual(missing, [])
+
+    def test_the_legacy_command_answers_in_the_profile_language_and_scopes_local_sessions(self):
+        from hermes_atlas_evolution.integration import slash
+
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(close_observers)
+        local = SimpleNamespace(platform=SimpleNamespace(value="local"), chat_type="dm", chat_id="session-1", user_id="u")
+        saved = slash(home, "remember project Atlas runs on the VPS", source=local, lang="pt")
+        self.assertRegex(saved, r"^Salva #\d+ \(project\)\.$")
+        self.assertIn("Atlas", slash(home, "recall Atlas", source=None, platform="desktop", lang="pt"))   # same scope
+        self.assertEqual(slash(home, "forget abc", source=None, platform="cli", lang="pt"),
+                         "O ID da memória deve ser um inteiro positivo.")
+        self.assertEqual(slash(home, "forget 999", source=None, platform="acp", lang="pt"),
+                         "ID de memória indisponível neste escopo.")
+        self.assertEqual(slash(home, "recall nothing-like-this", source=None, platform="cli", lang="pt"),
+                         "Nenhuma memória correspondente.")
+
+    def test_the_scheduler_scripts_speak_the_chosen_language(self):
+        from hermes_atlas_evolution.evolve import digest_schedule_spec
+        from hermes_atlas_evolution.native_actions import schedule_spec
+
+        home = Path(tempfile.mkdtemp())
+        digest = digest_schedule_spec(home, lang="pt")["script_content"]
+        tick = schedule_spec(home, lang="pt")["script_content"]
+        self.assertIn("O resumo do Atlas Evolution falhou", digest)
+        self.assertIn("O tick do Atlas Evolution falhou", tick)
+        for script in (digest, tick):
+            compile(script, "script", "exec")
+            self.assertIn("O CLI do Hermes não está no PATH do agendador.", script)
+        self.assertIn("Atlas Evolution tick failed", schedule_spec(home)["script_content"])
+
+    def test_the_runner_prints_utf8_on_a_console_with_another_code_page(self):
+        import sys
+
+        from hermes_atlas_evolution.cli import _utf8_output
+
+        raw = io.BytesIO()
+        console = io.TextIOWrapper(raw, encoding="cp1252")
+        with patch.object(sys, "stdout", console), patch.object(sys, "stderr", console):
+            _utf8_output()
+            print("Resumo → ▲ lições")
+            console.flush()
+        self.assertEqual(raw.getvalue().decode("utf-8").strip(), "Resumo → ▲ lições")
 
 
 if __name__ == "__main__":

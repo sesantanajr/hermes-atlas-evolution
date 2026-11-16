@@ -58,7 +58,7 @@ hermes evolution ops similar "slow disk and long research"
 | Command | What it does |
 |---|---|
 | `ops inspect` | Collects and explains the signals at this moment. It records no observation and changes nothing in Hermes. |
-| `ops tick [--notify-only]` | Collects, compares with history, records hypotheses and baselines, and carries out only the actions the settings allow. It also runs one evolution pass at most once an hour and returns it in the field `evolution`; the pass is claimed like the autopilot's, so the two never run at the same time. If the tick fails, it tries to end an active Linux trial. |
+| `ops tick [--notify-only]` | Collects, compares with history, records hypotheses and baselines, and carries out only the actions the settings allow. It also runs one evolution pass at most once an hour and returns it in the field `evolution`; the pass is claimed like the autopilot's, so the two never run at the same time, and it has a deadline of 200 seconds, inside the 300 seconds the `schedule-spec` script gives the tick. If the tick fails, it tries to end an active Linux trial. |
 | `ops history` | Shows up to 100 incidents and 100 trials with their state. |
 | `ops review [--days N]` | Cross-checks adaptive measurements, feedback and trial outcomes. Default 14 days, from 1 to 90. |
 | `ops feedback CODE helpful\|dismissed\|reset` | Rates an adaptive alert that was already reported. |
@@ -78,11 +78,11 @@ With `--notify-only`, `ops tick` prints nothing when nothing is new. Otherwise i
 To run without enabling the plugin, or when the installation uses `plugins.isolation: host` (where Hermes skips plugin CLI commands), run from the extracted project root:
 
 ```sh
-python -m hermes_evolution --home /path/to/profile --hermes-version 0.23.1 \
+python -m hermes_atlas_evolution --home /path/to/profile --hermes-version 0.23.1 \
   ops inspect --upstream-tag v0.23.1
 ```
 
-`--home` defaults to `HERMES_HOME`. The standalone runner reads the profile's `config.yaml` (up to 1 MiB) when PyYAML is installed, for the memory provider, limits, the Cron, Kanban and delegation settings, `display.language` and the plugin's own settings. Without PyYAML it uses defaults. `--hermes-source` adds the tree of plugins and skills distributed with Hermes to the inventory. The runner never creates a `--home` that does not exist: commands that open the Evolution databases fail, `health` reports `profile_present: false`, and `ops history`, `ops similar`, `ops rollback`, `ops plan`, `ops schedule-spec` and `ops handoff` return without error. The reflector of the evolution loop does not run in the standalone runner, and neither do the hooks, the autopilot and the runtime guard, which need the plugin loaded by Hermes.
+`--home` defaults to `HERMES_HOME`. The standalone runner reads the profile's `config.yaml` (up to 1 MiB) when PyYAML is installed, for the memory provider, limits, the Cron, Kanban and delegation settings, `display.language` and the plugin's own settings. Without PyYAML it uses defaults. `--hermes-source` adds the tree of plugins and skills distributed with Hermes to the inventory. The runner never creates a `--home` that does not exist: commands that open the Evolution databases fail, `health` reports `profile_present: false`, and `ops history`, `ops similar`, `ops rollback`, `ops plan`, `ops schedule-spec` and `ops handoff` return without error. The reflector of the evolution loop does not run in the standalone runner, and neither do the hooks, the autopilot, its clock and the runtime guard, which need the plugin loaded by Hermes.
 
 ## Diagnoses and adaptive alerts
 
@@ -121,7 +121,7 @@ The provider, the model and the prices above are placeholders.
 
 `ops plan` returns a read-only plan with a suggested budget: search queries, page extracts and parallel lanes for research, parallel lanes and review passes for delegation, and comparable samples for operations. Research plans include source discovery, evidence verification and a record of uncertainties. Delegation plans point to `delegate_task` for answers the current agent must wait for and to Kanban for work that must survive restarts (`--durable`).
 
-Turn on `agent_tools` in the Hermes plugin settings, or set `"agent_advice": true` in `<HERMES_HOME>/evolution/settings.json`, and reload the plugin to expose `atlas_evolution_plan` and `atlas_evolution_lessons` to the profile. Include `atlas-evolution` when the profile uses an explicit list of toolsets. The plan tool returns only the plan.
+Turn on `agent_tools` in the Hermes plugin settings, or set `"agent_advice": true` in `<HERMES_HOME>/evolution/settings.json`, and reload the plugin to expose `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` to the profile. Include `hermes-atlas-evolution` when the profile uses an explicit list of toolsets. The plan tool returns only the plan.
 
 Reading shared Kanban boards requires `"inspect_shared_kanban": true`. Creating a card requires your own handoff authorization, independently of that key. The example assigns verifications to the profile `reviewer` on the existing board `ops`.
 
@@ -140,7 +140,7 @@ hermes evolution ops schedule-spec --every-minutes 5 --upstream-tag v0.23.1
 
 `handoff` creates a blocked card meant for verification through the native Kanban, with an idempotency key per profile, board, assignee, kind, subject and UTC day. The operator releases the card after reviewing its scope. The subject is an identifier of up to 80 characters. The command does nothing inside a Kanban worker or a delegated task, and needs `hermes` on the `PATH`.
 
-`schedule-spec` delivers the script and the native Cron arguments to schedule `ops tick --notify-only` in `no_agent` mode as the job `atlas-evolution-watchdog`, with local output and without opening a model session. The interval is 5 to 1,440 minutes. Nothing is written. Review the script and apply the recipe in the chosen profile. The tick uses that profile's Linux policy. Use the five-minute interval in `apply` mode, so that trials are verified and closed.
+`schedule-spec` delivers the script and the native Cron arguments to schedule `ops tick --notify-only` in `no_agent` mode as the job `hermes-atlas-evolution-watchdog`, with local output and without opening a model session. The interval is 5 to 1,440 minutes. Nothing is written. Review the script and apply the recipe in the chosen profile. The tick uses that profile's Linux policy. Use the five-minute interval in `apply` mode, so that trials are verified and closed.
 
 ## Linux remediation
 
@@ -199,10 +199,10 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 
 ## Data and compatibility
 
-- The databases live in `<HERMES_HOME>/evolution/`: `evolution.sqlite3` for observer metrics and the evolution loop, and `supervisor.sqlite3` for incidents, baselines, adaptive samples and trials. Observer metrics are kept for 35 days; the loop's aggregates, incidents and closed trials for 90 days. The 35-day retention is applied by the first hook write of each UTC day in each process, so it holds even when no tick is scheduled. Hermes' own backups and logs follow their existing retention.
-- Version 0.5.0 migrates `evolution.sqlite3` from schemas 0 to 7 to schema 8 automatically and refuses any other schema. An earlier plugin version cannot open a migrated database: going back requires restoring a backup of the file or deleting it.
+- The databases live in `<HERMES_HOME>/evolution/`: `evolution.sqlite3` for observer metrics and the evolution loop, and `supervisor.sqlite3` for incidents, baselines, adaptive samples and trials. Observer metrics are kept for 35 days (the delivery IDs that stop one event from being counted twice, 2 days); the loop's aggregates, incidents and closed trials for 90 days. The 35-day retention is applied by the first hook write of each UTC day in each process, so it holds even when no tick is scheduled. Hermes' own backups and logs follow their existing retention.
+- Since 0.5.0 `evolution.sqlite3` is at schema 8, and 0.6.0 keeps it: schemas 0 to 7 are migrated automatically, and a newer schema written by a later version of the plugin also opens, since later versions only add tables and columns (0.6.0 adds one table and stays at schema 8, so 0.5.0 still opens it). Version 0.4.0 or earlier cannot open a migrated database: going back that far requires restoring a backup of the file or deleting it. The rename of the plugin id in 0.6.0 does not move the data: `<HERMES_HOME>/evolution/` keeps its name.
 - Hook writes share one connection per process and profile, which stays open while Hermes runs. On Windows this means `evolution.sqlite3` cannot be deleted while Hermes is running.
-- Hermes' own databases (`state.db`, Kanban boards) are opened read-only, including the `state.db` of the other profiles of the same root, where `status` only counts sessions.
+- Hermes' own databases (`state.db`, Kanban boards) are opened read-only. For `status` this includes the `state.db` of the other profiles of the same root, where it only counts sessions, and the plugin's database in those profiles, where it reads the last pass and the lesson counts.
 - Note files from version 0.1 are preserved. The commands that record new notes and the legacy chat command require `legacy_memory_commands: true`. The old note injection also requires `automatic_shared_recall: true`. By default, inspection uses the signals of Hermes' native memory.
 - The integration contract was checked against the official v0.23.1 tree, commit `3b421578588243f920886e6fe79a6faa87ea026e`.
 
@@ -218,7 +218,7 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 
 ## Removing the plugin
 
-Run `hermes evolution ops rollback` before disabling the plugin with `hermes plugins disable hermes-evolution`, then reload the profile's gateway. The plugin is installed per profile, so repeat this in each profile that has it (`hermes -p <profile> ...`).
+Run `hermes evolution ops rollback` before disabling the plugin with `hermes plugins disable hermes-atlas-evolution`, or removing it with `hermes plugins remove hermes-atlas-evolution`. Disabling makes a running gateway unload the plugin; after a removal, run `hermes gateway restart`. The plugin is installed per profile, so repeat this in each profile that has it (`hermes -p <profile> ...`). Neither command deletes the data in `<HERMES_HOME>/evolution/`; delete that folder yourself if you want it gone.
 
 ## References
 

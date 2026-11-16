@@ -254,7 +254,7 @@ class Systemd:
         fd = None
         acquired = False
         try:
-            fd = os.open(directory / "hermes-evolution-weights.lock",
+            fd = os.open(directory / "hermes-atlas-evolution-weights.lock",
                          os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             info = os.fstat(fd)
             if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1 and not info.st_mode & 0o077:

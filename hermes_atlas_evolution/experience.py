@@ -13,7 +13,10 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import operations as _operations   # bound at import: a thread of an unloaded copy keeps its own module
+
 RETENTION_DAYS = 90
+SAMPLE_DAYS = 14   # redacted failure excerpts the reflector reads: kept only while they can still become a lesson
 _LABEL = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.:+-]{0,95}\Z")
 _CREDENTIAL = ("sk-", "ghp_", "gho_", "ghs_", "ghr_", "ghu_", "github_pat_", "xox", "akia", "aiza", "hf_")
 
@@ -82,6 +85,15 @@ CREATE TABLE IF NOT EXISTS guard_daily (
     day TEXT NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, kind)
 ) WITHOUT ROWID;
 """
+# Tables added after schema 8 without a version bump. A build that does not know a table ignores it, so
+# adding tables keeps the database open to older builds, where a new column would break their positional
+# inserts. operations creates any that are missing when it opens the database.
+ADDITIVE_TABLES = (
+    # Failures seen in the owner's own turns (see signals.record_tool): only these let a lesson activate by itself.
+    ("failure_owner", "CREATE TABLE IF NOT EXISTS failure_owner (signature TEXT PRIMARY KEY, total INTEGER NOT NULL) "
+                      "WITHOUT ROWID"),
+)
+SCHEMA += "".join(f"{statement};\n" for _, statement in ADDITIVE_TABLES)
 
 
 def utc_day(now: float) -> str:
@@ -104,7 +116,7 @@ def label(value, *, fallback: str = "unknown") -> str:
 
 def experience(home: Path, *, observer: bool = False):
     """Open the profile's Evolution database. Hook callers (`observer=True`) borrow the shared connection."""
-    from .operations import database
+    database = _operations.database
 
     return database(Path(home), observer=observer)
 
@@ -114,9 +126,7 @@ def record(home: Path, job, *, now: float | None = None) -> None:
 
     `job(connection)` may run later on another thread, so it must hold only values that are safe to store.
     """
-    from .operations import record as write
-
-    write(Path(home), job, now=now)
+    _operations.record(Path(home), job, now=now)
 
 
 # Columns added after a table first shipped: (table, column, declaration).
@@ -143,3 +153,7 @@ def prune(conn: sqlite3.Connection, *, now: float) -> None:
     conn.execute("DELETE FROM change WHERE at < ?", (old,))
     conn.execute("DELETE FROM proposal WHERE status NOT IN ('open','approved') AND updated < ?", (old,))
     conn.execute("DELETE FROM lesson WHERE status='retired' AND updated < ?", (old,))
+    # Excerpts expire here too, so they do not outlive their window when no learning pass runs.
+    conn.execute("DELETE FROM failure_sample WHERE updated < ? OR signature NOT IN (SELECT signature FROM failure)",
+                 (now - SAMPLE_DAYS * 86_400,))
+    conn.execute("DELETE FROM failure_owner WHERE signature NOT IN (SELECT signature FROM failure)")

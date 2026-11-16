@@ -13,7 +13,7 @@ from .experience import experience
 
 PROPOSALS_PER_HOUR = 5
 LESSONS_TOOL = {
-    "name": "atlas_evolution_lessons",
+    "name": "hermes_atlas_evolution_lessons",
     "description": ("Look up lessons this profile learned from repeated tool failures, propose a new lesson for "
                     "operator review, or see the state of the improvement queue."),
     "parameters": {
@@ -56,7 +56,9 @@ class LessonsTool:
                 if action == "search":
                     result = {"lessons": lessons.search(conn, tool=tool or None, lang=self.lang)}
                 elif action == "propose":
-                    if not self._allow_proposal(time.monotonic()):
+                    recent = conn.execute("SELECT COUNT(*) FROM lesson WHERE origin='agent' AND created >= ?",
+                                          (time.time() - 3600,)).fetchone()[0]   # per profile, every process
+                    if recent >= PROPOSALS_PER_HOUR or not self._allow_proposal(time.monotonic()):
                         raise ValueError("Too many proposals this hour; the operator has not reviewed the earlier ones")
                     lesson_id = lessons.add_custom(conn, args.get("lesson"), tool=tool or "general", origin="agent",
                                                    now=time.time())

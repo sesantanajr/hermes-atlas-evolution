@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import threading
+import sys
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -19,7 +20,11 @@ from pathlib import Path
 from .experience import day_offset, label, record, utc_day
 
 SURFACES = ("local", "gateway", "cron", "subagent")
-_LOCAL_PLATFORMS = frozenset({"cli", "tui", "desktop", "gui", "acp", "local"})
+_LOCAL_PLATFORMS = frozenset({"cli", "tui", "desktop", "gui", "acp", "local", "oneshot"})
+# Work nobody reads as it runs: scheduled jobs, kanban workers, the Curator's background fork. Counted as "cron".
+_AUTOMATED_SOURCES = frozenset({"cron", "kanban", "curator", "batch"})
+# Hermes' synthetic user turns: /goal continuations. Never a person correcting or thanking anyone.
+_SYNTHETIC = re.compile(r"\s*\[Continuing toward your standing goal")
 LATENCY_BUCKETS = ((15_000, "b15"), (30_000, "b30"), (60_000, "b60"), (120_000, "b120"), (300_000, "b300"))
 DEFAULT_SLOW_TURN_MS = 60_000
 _RESULT_LIMIT = 262_144
@@ -66,7 +71,17 @@ _RULES = (
 )
 _EXCEPTION = re.compile(r"^(?P<hint>[A-Za-z_][A-Za-z0-9_.]{2,47}(?:Error|Exception))\b", re.M)
 _TARGET_TOOL = re.compile(r"tool_call to '(?P<tool>[A-Za-z0-9_][\w.:-]{0,95})'")
-CLASSES = tuple(dict.fromkeys(name for name, _ in _RULES)) + ("command_failed", "other")
+# plugin_fault: Hermes blocked the call because another plugin's pre_tool_call hung or raised (fail-closed).
+# rewritten_command: the call failed after another plugin rewrote the command the agent wrote.
+# Neither is the agent's doing, so neither ever becomes a lesson.
+CLASSES = tuple(dict.fromkeys(name for name, _ in _RULES)) + ("command_failed", "other", "plugin_fault", "rewritten_command")
+_PLUGIN_FAULT = re.compile(r"^\s*pre_tool_call plugin callback\b", re.M)
+
+
+def reclassify(failure: dict, klass: str) -> dict:
+    """The same failure under another class, with its signature recomputed."""
+    signature = hashlib.sha256("\0".join((failure["tool"], klass, failure["hint"])).encode()).hexdigest()[:20]
+    return {**failure, "klass": klass, "signature": signature}
 
 _CORRECTION = re.compile(
     r"^\W{0,3}(?:n[ãa]o[,.!]|n[ãa]o era isso|n[ãa]o foi isso|n[ãa]o [ée] isso|n[ãa]o funcionou|errado|incorreto|"
@@ -123,7 +138,7 @@ def _error_parts(error_message, result) -> tuple[str, str, int | None]:
     if isinstance(result, str) and len(result) <= _RESULT_LIMIT and result.lstrip()[:1] == "{":
         try:
             data = json.loads(result)
-        except ValueError:
+        except (ValueError, RecursionError):   # nested thousands deep: still a result, never a hook crash
             data = None
         if isinstance(data, dict):
             for key in ("error", "hint", "approval", "message"):
@@ -164,7 +179,7 @@ def effective_tool(tool_name, args=None) -> str:
         if isinstance(calls, str) and len(calls) <= 65_536:
             try:
                 calls = json.loads(calls)
-            except ValueError:
+            except (ValueError, RecursionError):
                 calls = None
         if calls is None and args.get("name"):
             calls = [args]
@@ -186,6 +201,9 @@ def classify(tool_name, status, error_message=None, result=None, args=None) -> d
             named = _clean_hint(target.group("tool")) if len(target.group("tool")) <= 32 else label(target.group("tool"))
             tool = named or tool
     klass, hint = "", ""
+    if _PLUGIN_FAULT.search(errors):   # Hermes' own fail-closed veto after another plugin's guard hung or raised
+        signature = hashlib.sha256("\0".join((tool, "plugin_fault", "")).encode()).hexdigest()[:20]
+        return {"tool": tool, "klass": "plugin_fault", "hint": "", "signature": signature}
     for source, from_output in ((errors, False), (output, True)):
         for name, pattern in _RULES:
             match = pattern.search(source) if source else None
@@ -225,8 +243,13 @@ def _session_tag(session_id) -> str:
 
 
 def record_tool(home: Path, payload: dict, *, now: float | None = None, failure: dict | None = None,
-                sample: bool = False) -> dict | None:
-    """Count one finished tool call and, for a failure, its signature. Returns the classification."""
+                sample: bool = False, owner: bool = True) -> dict | None:
+    """Count one finished tool call and, for a failure, its signature. Returns the classification.
+
+    `owner`: the call ran in a turn of the owner's own (CLI, TUI, Desktop, cron, a subagent, or a chat with
+    a sender listed in owner_sender_ids). Every failure is counted; only the owner's are counted again in
+    failure_owner, which decides whether a lesson may activate by itself, and only theirs keep an excerpt
+    for the reflector: text a third party controls never reaches the model that drafts lessons."""
     status = payload.get("status")
     if status not in ("ok", "error", "blocked"):
         return None
@@ -242,7 +265,7 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     seen = ((failure["signature"], failure["tool"], failure["klass"], failure["hint"], now, now,
              _session_tag(payload.get("session_id"))) if failure else None)
     excerpt = ""
-    if sample and failure:
+    if sample and owner and failure:
         from .reflector import UNTEMPLATED, scrub
 
         if failure["klass"] in UNTEMPLATED:   # only the reflector reads it, and only when it is switched on
@@ -258,6 +281,9 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
                   sessions=sessions + (last_session != excluded.last_session), last_session=excluded.last_session""", seen)
             conn.execute("""INSERT INTO failure_daily VALUES (?, ?, 1)
                 ON CONFLICT DO UPDATE SET count=count+1""", (today, seen[0]))
+            if owner:
+                conn.execute("""INSERT INTO failure_owner VALUES (?, 1)
+                    ON CONFLICT DO UPDATE SET total=total+1""", (seen[0],))
             if excerpt:
                 from .reflector import keep_sample
 
@@ -267,14 +293,53 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     return failure
 
 
-def surface_of(platform) -> str:
-    if isinstance(platform, str):
-        lower = platform.lower()
-        if lower in _LOCAL_PLATFORMS:
-            return "local"
-        if lower in ("cron", "subagent"):
-            return lower
-    return "gateway"
+def surface_of(platform, source=None) -> str:
+    """Where a turn comes from. `source` is Hermes' real origin of the session when known (a kanban worker
+    and `hermes chat --source tool` run with platform "cli"): local (the owner's CLI, TUI, Desktop, ACP, a
+    one-shot run), cron (scheduled and automated work: cron jobs, kanban workers, the Curator), subagent (a
+    delegated child) or gateway (a messaging chat, an integration, an A2A peer: someone else may be there)."""
+    kind = source if isinstance(source, str) and source.strip() else platform
+    if not isinstance(kind, str):
+        return "gateway"
+    lower = kind.strip().lower()
+    if lower == "subagent":
+        return "subagent"
+    if lower in _AUTOMATED_SOURCES:
+        return "cron"
+    return "local" if lower in _LOCAL_PLATFORMS else "gateway"
+
+
+def session_source(platform) -> str | None:
+    """Hermes' real origin of the running session (kanban, tool, a2a, oneshot, ...), read from its session
+    environment during a turn. None when Hermes cannot say; the platform then decides."""
+    module = sys.modules.get("agent.session_source")
+    resolve = getattr(module, "session_source_for", None)
+    if not callable(resolve):
+        return None
+    try:
+        value = resolve(platform if isinstance(platform, str) and platform else None)
+    except Exception:
+        return None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def turn_surface(payload: dict) -> str:
+    """The surface of a turn from its pre_llm_call payload. Only a delegated child is a subagent: a session
+    continued after /new, /branch or a compression has a parent too, and stays where it is."""
+    if isinstance(payload.get("surface"), str) and payload["surface"] in SURFACES:
+        return payload["surface"]
+    platform = payload.get("platform")
+    if not platform and payload.get("parent_session_id"):
+        return "subagent"
+    return surface_of(platform, session_source(platform))
+
+
+def owner_turn(surface: str, sender_id, owners) -> bool:
+    """True when the owner is the one being served: their own surfaces, their automations and subagents, or
+    a chat message from a sender listed in owner_sender_ids."""
+    if surface in ("local", "cron", "subagent"):
+        return True
+    return surface == "gateway" and sender_id is not None and str(sender_id) in owners
 
 
 MAX_SKILLS_PER_TURN = 16
@@ -320,7 +385,7 @@ class TurnTracker:
         if not key:
             return
         clock = time.monotonic() if clock is None else clock
-        surface = "subagent" if payload.get("parent_session_id") else surface_of(payload.get("platform"))
+        surface = turn_surface(payload)
         owners = tuple(owner for owner in (_key(payload.get("session_id")), _key(payload.get("task_id"))) if owner)
         with self._lock:
             if key in self._turns:
@@ -429,39 +494,45 @@ class FeedbackSensor:
 
     def __init__(self, home: Path, *, owner_sender_ids=(), reask_seconds: int = 180):
         self.home = home
-        self.owners = frozenset(item for item in owner_sender_ids if isinstance(item, str) and item)
+        self.owners = frozenset(str(item) for item in owner_sender_ids
+                                if isinstance(item, str) and item or type(item) is int)
         self.reask_seconds = reask_seconds
         self._last: OrderedDict[bytes, tuple[float, frozenset]] = OrderedDict()
         self._lock = threading.Lock()
 
     def _from_owner(self, payload: dict) -> bool:
-        if payload.get("parent_session_id"):
-            return False
-        surface = surface_of(payload.get("platform"))
-        if surface == "local":
-            return True
-        return surface == "gateway" and payload.get("sender_id") in self.owners
+        """A message the owner wrote: on their own surfaces, or in a chat from a listed sender. Automations,
+        kanban workers and subagents get prompts written by software, never feedback."""
+        surface = turn_surface(payload)
+        return surface == "local" or (surface == "gateway" and owner_turn(surface, payload.get("sender_id"), self.owners))
 
     def observe(self, payload: dict, *, clock: float | None = None, now: float | None = None) -> list[str]:
         message = payload.get("user_message")
         session = _key(payload.get("session_id"))
         if not isinstance(message, str) or not message.strip() or session is None or not self._from_owner(payload):
             return []
+        if _SYNTHETIC.match(message):
+            return []   # Hermes continuing a /goal: nobody wrote it
         clock = time.monotonic() if clock is None else clock
         head = message.strip()[:240]
         words = frozenset(hashlib.blake2b(word.lower().encode(), digest_size=6).digest()
                           for word in _WORD.findall(message[:2000]))
+        same = hashlib.blake2b(" ".join(message.split()).lower().encode("utf-8", "replace"), digest_size=8).digest()
+        first = payload.get("is_first_turn") is True   # a new session has no earlier turn to correct or thank for
         kinds = []
-        if _CORRECTION.search(head):
+        if first:
+            pass
+        elif _CORRECTION.search(head):
             kinds.append("correction")
         elif _POSITIVE.search(head):
             kinds.append("positive")
         with self._lock:
             previous = self._last.get(session)
-            if (previous and clock - previous[0] <= self.reask_seconds and len(words) >= 4
-                    and len(words & previous[1]) / len(words | previous[1]) >= 0.6):
+            # The same text again is a /loop tick or a deliberate repeat, not the question asked again.
+            if (previous and not first and previous[2] != same and clock - previous[0] <= self.reask_seconds
+                    and len(words) >= 4 and len(words & previous[1]) / len(words | previous[1]) >= 0.6):
                 kinds.append("reask")
-            self._last[session] = (clock, words)
+            self._last[session] = (clock, words, same)
             self._last.move_to_end(session)
             while len(self._last) > 256:
                 self._last.popitem(last=False)

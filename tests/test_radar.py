@@ -1,5 +1,6 @@
 """The radar reads Hermes' own records for what slows it down or wastes context, and proposes inspections."""
 
+import json
 import sqlite3
 import sys
 import tempfile
@@ -9,9 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_evolution import proposals, radar
-from hermes_evolution.experience import experience, utc_day
-from hermes_evolution.operations import close_observers, database
+from hermes_atlas_evolution import proposals, radar
+from hermes_atlas_evolution.experience import experience, utc_day
+from hermes_atlas_evolution.operations import close_observers, database
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400
@@ -91,6 +92,21 @@ class CompactionTest(Base):
         self.assertIn("compaction", [item["kind"] for item in found["findings"]])
 
 
+class ExternalFailuresTest(Base):
+    def test_calls_blocked_or_broken_by_other_plugins_are_reported_not_learned(self):
+        from hermes_atlas_evolution.signals import record_tool
+
+        stuck = json.dumps({"error": "pre_tool_call plugin callback timed out or is still running"})
+        for index in range(4):
+            record_tool(self.home, {"tool_name": "read_file", "status": "blocked", "result": stuck, "session_id": "s"},
+                        now=NOW - 60)
+        close_observers()
+        found = self.scan()
+        self.assertEqual(found["external"], {"plugin_fault": 4, "rewritten_command": 0})
+        codes = {item["code"]: item for item in found["findings"]}
+        self.assertEqual(codes["plugin_guard_faults"]["evidence"]["blocked_calls"], 4)
+
+
 class PluginHealthTest(Base):
     def manager(self, rows, *, bundled=None, user_manifests=()):
         plugins = types.ModuleType("hermes_cli.plugins")
@@ -119,6 +135,18 @@ class PluginHealthTest(Base):
         overlap = codes["plugin_transform_overlap:transform_tool_result"]
         self.assertEqual(overlap["evidence"]["plugins"], ["aaa-pretty", "zzz-safety"])   # load order: the first wins
         self.assertNotIn("plugin_error:off", codes)
+
+    def test_this_plugin_competes_for_a_transform_only_while_its_hints_are_on(self):
+        from hermes_atlas_evolution import radar
+
+        rows = [{"name": name, "key": name, "enabled": True, "hooks": 1, "error": None}
+                for name in ("hermes-atlas-evolution", "omh")]
+        manifests = (("hermes-atlas-evolution", ("transform_tool_result",)), ("omh", ("transform_tool_result",)))
+        with self.manager(rows, user_manifests=manifests):
+            quiet = radar.plugins(self.home, own_transform=False)
+            hinting = radar.plugins(self.home, own_transform=True)
+        self.assertEqual(quiet["overlaps"], {})            # its hook returns nothing: no conflict with omh
+        self.assertEqual(hinting["overlaps"], {"transform_tool_result": ["hermes-atlas-evolution", "omh"]})
 
     def test_without_a_loaded_plugin_manager_the_radar_skips_plugins(self):
         with patch.dict(sys.modules, {"hermes_cli.plugins": None}):

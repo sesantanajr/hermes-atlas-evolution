@@ -6,7 +6,9 @@ import argparse
 import json
 import math
 import os
+import re
 import sqlite3
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,7 +41,8 @@ def settings(home: Path) -> dict:
     return result
 
 
-PLUGIN_ID = "hermes-evolution"
+PLUGIN_ID = "hermes-atlas-evolution"
+LEGACY_PLUGIN_IDS = ("hermes-evolution",)   # the id used up to 0.5.0
 # Keys the Hermes settings form edits (plugin.yaml config_schema) -> where they live in settings.json.
 NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "language"),
                "tool_hints": ("evolution", "tool_hints"), "feedback_signals": ("evolution", "feedback_signals"),
@@ -50,12 +53,42 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
 
 
 def native_settings(runtime_config) -> dict:
-    """`plugins.entries.hermes-evolution.settings` from the Hermes configuration, when present."""
+    """`plugins.entries.hermes-atlas-evolution.settings` from the Hermes configuration, when present. Values
+    saved under the id used up to 0.5.0 still apply, and the current id wins key by key."""
     plugins = runtime_config.get("plugins") if isinstance(runtime_config, dict) else None
     entries = plugins.get("entries") if isinstance(plugins, dict) else None
-    entry = entries.get(PLUGIN_ID) if isinstance(entries, dict) else None
-    values = entry.get("settings") if isinstance(entry, dict) else None
-    return values if isinstance(values, dict) else {}
+    merged: dict = {}
+    for plugin_id in (*LEGACY_PLUGIN_IDS, PLUGIN_ID):
+        entry = entries.get(plugin_id) if isinstance(entries, dict) else None
+        values = entry.get("settings") if isinstance(entry, dict) else None
+        if isinstance(values, dict):
+            merged.update({key: value for key, value in values.items() if value is not None})
+    return merged
+
+
+def legacy_install(home: Path, runtime_config) -> str | None:
+    """The old plugin id when this profile still has that copy installed and enabled, else None.
+
+    Both copies would observe the same turns and write to the same database, counting everything twice."""
+    plugins = runtime_config.get("plugins") if isinstance(runtime_config, dict) else None
+    enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
+    if not isinstance(enabled, list):
+        return None
+    here = Path(__file__).resolve().parent.parent
+    for plugin_id in LEGACY_PLUGIN_IDS:
+        folder = Path(home) / "plugins" / plugin_id
+        if plugin_id not in enabled or not (folder / "plugin.yaml").is_file():
+            continue
+        try:
+            if folder.resolve() == here:
+                continue   # this very code, in a folder still named after the old id (a clone updated in place)
+            manifest = (folder / "plugin.yaml").read_text(encoding="utf-8", errors="replace")[:65_536]
+        except OSError:
+            manifest = ""
+        if re.search(rf"^name:\s*[\"']?{re.escape(PLUGIN_ID)}[\"']?\s*$", manifest, re.M):
+            continue   # the folder holds this version, not the old plugin
+        return plugin_id
+    return None
 
 
 def effective_settings(home: Path, runtime_config=None, *, base: dict | None = None) -> dict:
@@ -147,6 +180,8 @@ def setup(parser: argparse.ArgumentParser) -> None:
 
     state = commands.add_parser("status", help=_("Show whether the plugin is observing, learning and protecting this profile"))
     state.add_argument("--format", choices=("md", "json"), default="md")
+    state.add_argument("--no-learn", action="store_true",
+                       help=_("Only read; do not run the first pass when this profile never had one"))
     learn = commands.add_parser("learn", help=_("Run one evolution pass: derive lessons, measure changes, refresh proposals"))
     learn.add_argument("--notify-only", action="store_true", help=_("Print only new lessons, regressions and high-risk proposals"))
     playbook = commands.add_parser("lessons", help=_("Review the playbook learned from recurring tool failures"))
@@ -154,6 +189,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     listing = playbook_commands.add_parser("list")
     listing.add_argument("--status", choices=("candidate", "active", "quarantined", "retired"))
     listing.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS)
+    playbook_commands.add_parser("review", help=_("Decide on each lesson that waits for approval, one by one, in your terminal"))
     for name in ("approve", "retire"):
         decided = playbook_commands.add_parser(name)
         decided.add_argument("id", type=int)
@@ -263,7 +299,21 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
     if action == "status":
         from . import status
 
+        first = None
+        if not getattr(args, "no_learn", False) and status.never_ran(home):
+            # The first look should show something: read the history now instead of waiting for a turn.
+            from .autopilot import run_exclusive
+
+            try:
+                ran = run_exclusive(home, lambda: cycle(home, now=now, runtime_config=runtime_config, config=config,
+                                                        lang=lang, reflect=reflect, backfill_budget_s=60.0,
+                                                        deadline=time.monotonic() + 90), wait_s=5)
+                done = ran.get("history") or {}
+                first = {"sessions": done.get("sessions", 0), "tool_calls": done.get("tool_calls", 0)}
+            except ValueError:   # another pass is running right now: it will show up in a moment
+                first = None
         state = status.build(home, now=now, config=config, runtime_config=runtime_config)
+        state["first_pass"] = first
         return status.markdown(state, lang) if args.format == "md" else state
     if action == "learn":
         from .autopilot import run_exclusive
@@ -285,7 +335,9 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
         return digest_schedule_spec(home, weekday=args.weekday, hour=args.hour, days=args.days, lang=lang,
                                     deliver=args.deliver)
     if action == "report":
-        report = build(home, now=now, days=args.days, lang=lang, rates=config.get("rates_usd_per_million", {}))
+        chosen = options(config, runtime_config, strict=False)
+        report = build(home, now=now, days=args.days, lang=lang, rates=config.get("rates_usd_per_million", {}),
+                       own_transform=chosen["tool_hints"] and chosen["lessons"] != "off")
         return markdown(report, lang) if args.format == "md" else report
     with experience(home) as conn:
         if action == "experiments":
@@ -296,6 +348,8 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
                 return {"mode": opts["lessons"],
                         "lessons": lessons.listing(conn, lang=lang, status=getattr(args, "status", None))}
             _operator_only()
+            if task == "review":
+                return _review_lessons(conn, lang, now=now)
             if task == "add":
                 activate = bool(getattr(args, "activate", False))
                 if activate:
@@ -332,12 +386,100 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
 AGENT_MARKERS = ("ATLAS_EVOLUTION_AGENT", "HERMES_SESSION_ID", "HERMES_KANBAN_TASK", "HERMES_DELEGATED_CHILD_CONTEXT")
 
 
+def _process(pid: int):
+    """(parent pid, argv) of a process from /proc, or None (not Linux, gone, or unreadable)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()[:8192]
+        argv = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+        return int(stat.rsplit(")", 1)[1].split()[1]), argv
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+# "evolution" as a word of its own: this command (hermes evolution ..., or argv quoted after a relaunch), not a
+# path such as hermes-atlas-evolution or hermes_atlas_evolution.
+_OWN_COMMAND = re.compile(r"(?:^|[\s'\"\[,])evolution(?:[\s'\"\],]|$)")
+
+
+def _is_hermes(argv: list[str]) -> bool:
+    """A Hermes process: the hermes launcher, or Python running the installed Hermes code."""
+    if not argv:
+        return False
+    if os.path.basename(argv[0]) in ("hermes", "hermes-agent"):
+        return True
+    return any("hermes-agent" in part or "hermes_cli" in part for part in argv[:8])
+
+
+def _in_hermes_cgroup(*, text: str | None = ...) -> bool:
+    """True when this process sits in the cgroup of a Hermes gateway service. Detaching with setsid or a
+    double fork changes the parent, not the cgroup."""
+    if text is ...:
+        try:
+            text = Path("/proc/self/cgroup").read_text(encoding="utf-8", errors="replace")[:8192]
+        except OSError:
+            return False
+    return isinstance(text, str) and "hermes-gateway" in text
+
+
+def _under_hermes(*, start: int | None = None, read=_process, depth: int = 24) -> bool:
+    """True when a Hermes process (a gateway, a chat session) is an ancestor of this command.
+
+    An agent can clear the environment markers of a shell it runs; it cannot change which process started
+    it. The command's own launcher chain (`hermes evolution ...`) is skipped."""
+    pid = os.getpid() if start is None else start
+    for _ in range(depth):
+        entry = read(pid)
+        if entry is None:
+            return False
+        parent, argv = entry
+        if _is_hermes(argv) and not _OWN_COMMAND.search(" ".join(argv)):   # this command's own launcher is skipped
+            return True
+        if parent <= 1 or parent == pid:
+            return False
+        pid = parent
+    return False
+
+
 def _operator_only() -> None:
     """Refuse playbook decisions from a shell the agent runs. Hermes marks those shells with the session id,
     and the plugin adds ATLAS_EVOLUTION_AGENT to every subprocess of an agent session."""
-    if any(os.environ.get(name, "").strip() for name in AGENT_MARKERS):
+    if any(os.environ.get(name, "").strip() for name in AGENT_MARKERS) or _under_hermes() or _in_hermes_cgroup():
         raise ValueError("Only the operator can decide on lessons and proposals. Run this command in your own "
                          "terminal; the agent can propose lessons, which wait for your approval.")
+
+
+_REVIEW_PROMPT = {"en": "[a]pprove · [r]eject · Enter skips · [x] quit: ",
+                  "pt": "[a]provar · [r]ejeitar · Enter pula · [x] sair: "}
+
+
+def _review_lessons(conn, lang: str, *, now: float) -> dict:
+    """Show each lesson that waits for approval with its exact text and record the owner's decision."""
+    import sys
+
+    from . import lessons as playbook
+
+    if not sys.stdin.isatty():
+        raise ValueError("Run lessons review in your own terminal")
+    order = "CASE origin WHEN 'derived' THEN 0 WHEN 'operator' THEN 1 WHEN 'reflector' THEN 2 ELSE 3 END, id"
+    rows = conn.execute(f"SELECT * FROM lesson WHERE status IN ('candidate','quarantined') ORDER BY {order}").fetchall()
+    decided = {"approved": [], "rejected": [], "skipped": []}
+    for row in rows:
+        sys.stderr.write(f"\n#{row['id']} · {row['tool']} · {row['klass']} · {row['origin']}\n  "
+                         f"{playbook.render(row, lang)}\n{_REVIEW_PROMPT.get(lang, _REVIEW_PROMPT['en'])}")
+        sys.stderr.flush()
+        answer = sys.stdin.readline().strip().lower()[:1]
+        if answer == "x":
+            break
+        if answer in ("a", "r"):
+            approve = answer == "a"
+            playbook.set_status(conn, row["id"], "active" if approve else "retired", now=now)
+            conn.execute("UPDATE proposal SET status=?, updated=? WHERE code=? AND status IN ('open','approved')",
+                         ("applied" if approve else "rejected", now, f"lesson:{row['id']}"))
+            decided["approved" if approve else "rejected"].append(row["id"])
+        else:
+            decided["skipped"].append(row["id"])
+    return decided
 
 
 def _confirm(text: str, lang: str, *, yes: bool) -> None:
@@ -363,14 +505,18 @@ def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=Non
     from .evolve import cycle, notify_view
 
     owner = f"tick-{os.getpid()}"
-    if not claim(home, now=now, interval_s=CYCLE_INTERVAL_SECONDS, owner=owner):
+    # The clock of this moment, not of when the command started: an autopilot pass may have finished since.
+    if not claim(home, now=time.time(), interval_s=CYCLE_INTERVAL_SECONDS, owner=owner):
         return None
-    try:
-        result = cycle(home, now=now, runtime_config=runtime_config, config=config, reflect=reflect)
+    started = time.time()
+    try:   # the cron recipe allows 300 s; the pass ends well before, skipping model calls that would not fit
+        result = cycle(home, now=started, runtime_config=runtime_config, config=config, reflect=reflect,
+                       deadline=time.monotonic() + 200)
     except BaseException as problem:
-        finish(home, now=now, owner=owner, ok=False, interval_s=CYCLE_INTERVAL_SECONDS, error=type(problem).__name__)
+        finish(home, now=time.time(), owner=owner, ok=False, interval_s=CYCLE_INTERVAL_SECONDS, started=started,
+               error=type(problem).__name__)
         raise
-    finish(home, now=now, owner=owner, ok=True, interval_s=CYCLE_INTERVAL_SECONDS)
+    finish(home, now=time.time(), owner=owner, ok=True, interval_s=CYCLE_INTERVAL_SECONDS, started=started)
     return notify_view(result)
 
 
@@ -486,7 +632,7 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
     if action == "plan":
         return plan(args.kind, args.effort, args.durable)
     if action == "schedule-spec":
-        return schedule_spec(home, every_minutes=args.every_minutes, upstream_tag=args.upstream_tag)
+        return schedule_spec(home, every_minutes=args.every_minutes, upstream_tag=args.upstream_tag, lang=args.lang)
     if action == "rollback":
         return _rollback_trial(home, now)
     config = effective_settings(home, runtime_config)
@@ -605,10 +751,10 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
             try:
                 outcome = _rollback_trial(home, now)
                 if outcome["status"] != "idle":
-                    recovery = f"\nActive trial recovery: {outcome['status']}"
+                    recovery = "\n" + text(f"Active trial recovery: {outcome['status']}", language)
             except (OSError, ValueError, sqlite3.Error):
-                recovery = "\nTrial recovery is unverified. Run ops rollback to recheck."
-        raise SystemExit(f"Evolution: {text(str(error), language)}{text(recovery, language)}") from None
+                recovery = "\n" + text("Trial recovery is unverified. Run ops rollback to recheck.", language)
+        raise SystemExit(f"Evolution: {text(str(error), language)}{recovery}") from None
     if isinstance(result, str):
         print(result, end="" if result.endswith("\n") else "\n")
     elif result is not None:
@@ -630,13 +776,26 @@ def _standalone_config(home: Path) -> dict:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def _utf8_output() -> None:
+    """Print UTF-8 whatever the console: on Windows a redirected stdout is the ANSI code page until Python 3.15,
+    and the digest's arrows and Portuguese would stop the run (Hermes' own CLI does the same)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def main():
     from .i18n import resolve, text
 
+    _utf8_output()
     def _(sentence: str) -> str:
         return text(sentence, resolve())
 
-    parser = argparse.ArgumentParser(prog="python -m hermes_evolution")
+    parser = argparse.ArgumentParser(prog="python -m hermes_atlas_evolution")
     parser.add_argument("--home", type=Path, default=os.environ.get("HERMES_HOME"), help=_("Explicit Hermes profile path"))
     parser.add_argument("--hermes-version", help=_("Installed version if running outside Hermes"))
     setup(parser)

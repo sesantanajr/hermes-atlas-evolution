@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from hermes_evolution.linux_host import scan_host
+from hermes_atlas_evolution.linux_host import scan_host
 
 
 class LinuxHostTest(unittest.TestCase):
@@ -51,7 +51,7 @@ class LinuxHostTest(unittest.TestCase):
         self.pressure("proc/pressure/cpu", 20)
         self.pressure("proc/pressure/io", 15, 5)
         disk = SimpleNamespace(f_blocks=1000, f_frsize=1024, f_bavail=90, f_files=100, f_favail=7)
-        with patch("hermes_evolution.linux_host.os.statvfs", return_value=disk, create=True):
+        with patch("hermes_atlas_evolution.linux_host.os.statvfs", return_value=disk, create=True):
             report = self.scan()
         self.assertEqual(report["status"], "ok")
         self.assertEqual(report["pressure"]["io"]["some"]["avg10"], 16.0)
@@ -115,7 +115,7 @@ class LinuxHostTest(unittest.TestCase):
         self.write("profile/cache/file-two", "de")
         self.write("profile/cache/file-three", "f")
         self.write("profile/private-folder/secret", "a long secret")
-        with patch("hermes_evolution.linux_host._ENTRY_LIMIT", 2):
+        with patch("hermes_atlas_evolution.linux_host._ENTRY_LIMIT", 2):
             report = self.scan()
         cache = next(area for area in report["storage"]["areas"] if area["area"] == "cache")
         self.assertEqual(cache["entries"], 2)

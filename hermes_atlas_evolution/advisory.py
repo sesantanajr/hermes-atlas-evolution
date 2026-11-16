@@ -8,7 +8,7 @@ KINDS = ("research", "delegation", "operations")
 EFFORTS = ("quick", "standard", "deep")
 
 TOOL = {
-    "name": "atlas_evolution_plan",
+    "name": "hermes_atlas_evolution_plan",
     "description": "Get a read-only plan for bounded research, Hermes delegation or operational diagnosis.",
     "parameters": {
         "type": "object",

@@ -1,7 +1,7 @@
 import sqlite3
 import unittest
 
-from hermes_evolution.memory import GLOBAL_SCOPE, MemoryStore, make_scope
+from hermes_atlas_evolution.memory import GLOBAL_SCOPE, MemoryStore, make_scope
 
 
 class MemoryStoreTests(unittest.TestCase):

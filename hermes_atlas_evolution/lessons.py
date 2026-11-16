@@ -115,12 +115,20 @@ def _record_change(conn, lesson_id: int, now: float, subject: str) -> None:
                  (f"lesson:{lesson_id}:{int(now)}", subject, now))
 
 
+OWNER_ACTIVATION = 2   # failures in the owner's own turns before a derived lesson may activate by itself
+
+
 def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> list[int]:
-    """Create lessons for recurring failures that have a template. Returns the new lesson ids."""
+    """Create lessons for recurring failures that have a template. Returns the new lesson ids.
+
+    In auto mode a lesson activates by itself only when the owner's own turns hit the failure at least
+    OWNER_ACTIVATION times. One that only chats with other people caused waits for the owner's approval,
+    so nobody else can put a lesson in the owner's prompt."""
     if mode not in MODES or mode == "off":
         return []
     rows = conn.execute("""SELECT f.signature, f.tool, f.klass, f.hint, f.total, f.sessions,
-          (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=f.signature) AS days
+          (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=f.signature) AS days,
+          COALESCE((SELECT o.total FROM failure_owner o WHERE o.signature=f.signature), 0) AS owner_total
         FROM failure f WHERE f.total >= ? AND NOT EXISTS (SELECT 1 FROM lesson l WHERE l.signature=f.signature)
         ORDER BY f.total DESC LIMIT 200""", (MIN_TOTAL,)).fetchall()
     created = []
@@ -130,7 +138,7 @@ def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> li
             continue
         if row["sessions"] < 2 and row["days"] < 2:
             continue   # one bad session is not a pattern yet
-        status = "active" if mode == "auto" else "candidate"
+        status = "active" if mode == "auto" and row["owner_total"] >= OWNER_ACTIVATION else "candidate"
         # OR IGNORE: another process may have derived the same lesson since the SELECT above.
         cursor = conn.execute("""INSERT OR IGNORE INTO lesson(signature, tool, klass, hint, origin, status, created, updated,
               activated) VALUES (?, ?, ?, ?, 'derived', ?, ?, ?, ?)""",
@@ -199,16 +207,25 @@ def active_lessons(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         ORDER BY (l.verdict='effective') DESC, evidence DESC, l.id""").fetchall()
 
 
+def templated(row) -> bool:
+    """A derived lesson in its template wording: fixed text and an identifier-like detail, nothing free-form."""
+    return row["origin"] == "derived" and not row["text"]
+
+
 def playbook(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 8, max_chars: int = 1200,
-             mark_shown: bool = False, chosen: list | None = None) -> str:
+             mark_shown: bool = False, chosen: list | None = None, templates_only: bool = False) -> str:
     """Bounded text for the session prompt section. Empty when there is nothing active.
 
     `chosen`, when given, receives the ids of the lessons in the text (so a caller can count them later
-    without writing during the read)."""
+    without writing during the read). `templates_only` (a chat where someone else may be on the other side)
+    leaves out lessons written by the operator, the reflector or the agent: free text that was never meant
+    for a third party."""
     lines, used = [], len(HEADERS.get(lang, HEADERS["en"]))
     chosen = [] if chosen is None else chosen
     written: set[str] = set()
     for row in active_lessons(conn):
+        if templates_only and not templated(row):
+            continue
         sentence = render(row, lang)
         if sentence in written:   # one template, several failure details: the sentence is already there
             chosen.append(row["id"])
@@ -228,9 +245,10 @@ def playbook(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 8, max_
     return HEADERS.get(lang, HEADERS["en"]) + "\n" + "\n".join(lines)
 
 
-def hint_index(conn: sqlite3.Connection, *, lang: str = "en") -> dict[str, tuple[int, str]]:
-    """signature -> (lesson id, sentence) for active lessons bound to a failure signature."""
-    return {row["signature"]: (row["id"], render(row, lang)) for row in active_lessons(conn) if row["signature"]}
+def hint_index(conn: sqlite3.Connection, *, lang: str = "en") -> dict[str, tuple[int, str, bool]]:
+    """signature -> (lesson id, sentence, templated) for active lessons bound to a failure signature."""
+    return {row["signature"]: (row["id"], render(row, lang), templated(row))
+            for row in active_lessons(conn) if row["signature"]}
 
 
 def count_hint(conn: sqlite3.Connection, lesson_id: int) -> None:
@@ -254,10 +272,12 @@ def _calendar_days(start: str, end: str) -> int:
     return max(0, (date.fromisoformat(end) - date.fromisoformat(start)).days + 1)
 
 
-def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> list[dict]:
+def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest", history_until: float | None = None) -> list[dict]:
     """Measure each active lesson bound to a failure against that failure before and after activation.
 
     The baseline is the 14 days before activation, counted once and frozen, so retention never erases it.
+    While the backfill is still replaying Hermes' history up to `history_until`, a baseline that reaches
+    into that history waits: frozen now, it would hold only part of it.
     The after window is the latest 14 days since activation (the mixed activation day is left out of both).
     Rates are per call when both sides have call volume, otherwise per calendar day of each window."""
     results = []
@@ -266,6 +286,8 @@ def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> 
         activated_day = utc_day(row["activated"])
         base_failures, base_calls = row["baseline_failures"], row["baseline_calls"]
         if base_failures is None or base_calls is None:
+            if history_until is not None and row["activated"] - BASELINE_DAYS * 86_400 < history_until:
+                continue
             base_failures, base_calls = _counts(conn, row["signature"], row["tool"], day_offset(row["activated"], BASELINE_DAYS),
                                                 day_offset(row["activated"], 1))
             conn.execute("UPDATE lesson SET baseline_failures=?, baseline_calls=? WHERE id=?",
@@ -303,12 +325,14 @@ def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> 
 
 
 def listing(conn: sqlite3.Connection, *, lang: str = "en", status: str | None = None) -> list[dict]:
-    rows = conn.execute("""SELECT l.*, COALESCE(f.total, 0) AS evidence, COALESCE(f.sessions, 0) AS sessions FROM lesson l
+    rows = conn.execute("""SELECT l.*, COALESCE(f.total, 0) AS evidence, COALESCE(f.sessions, 0) AS sessions,
+          COALESCE((SELECT o.total FROM failure_owner o WHERE o.signature=l.signature), 0) AS owner_evidence FROM lesson l
         LEFT JOIN failure f ON f.signature=l.signature WHERE (? IS NULL OR l.status=?)
         ORDER BY CASE l.status WHEN 'active' THEN 0 WHEN 'candidate' THEN 1 WHEN 'quarantined' THEN 2 ELSE 3 END,
           evidence DESC, l.id""", (status, status)).fetchall()
     return [{"id": row["id"], "status": row["status"], "origin": row["origin"], "tool": row["tool"], "class": row["klass"],
              "lesson": render(row, lang), "failures_seen": row["evidence"], "sessions": row["sessions"],
+             "failures_in_owner_turns": row["owner_evidence"],
              "shown_in_sessions": row["shown"], "hints_given": row["hints"], "verdict": row["verdict"],
              "rate_before": row["rate_before"], "rate_after": row["rate_after"], "activated": row["activated"]}
             for row in rows]

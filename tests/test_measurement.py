@@ -1,19 +1,20 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hermes_evolution import experiments
-from hermes_evolution.evolve import cycle, notify_view, options
-from hermes_evolution.experience import experience, utc_day
-from hermes_evolution.logwatch import ingest_reviews, review_summary
-from hermes_evolution.operations import database, observe
-from hermes_evolution.report import build, markdown
-from hermes_evolution.signals import TurnTracker, record_tool
-from hermes_evolution.skill_health import read_ledger, read_usage, skill_health
+from hermes_atlas_evolution import experiments
+from hermes_atlas_evolution.evolve import cycle, notify_view, options
+from hermes_atlas_evolution.experience import experience, utc_day
+from hermes_atlas_evolution.logwatch import ingest_reviews, review_summary
+from hermes_atlas_evolution.operations import database, observe
+from hermes_atlas_evolution.report import build, markdown
+from hermes_atlas_evolution.signals import TurnTracker, record_tool
+from hermes_atlas_evolution.skill_health import read_ledger, read_usage, skill_health
 
-from hermes_evolution.operations import close_observers  # noqa: E402
+from hermes_atlas_evolution.operations import close_observers  # noqa: E402
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400
@@ -234,8 +235,15 @@ class ExperimentsTest(Base):
 
 
 class CycleAndReportTest(Base):
+    def setUp(self):
+        super().setUp()
+        process_tree = patch.multiple("hermes_atlas_evolution.cli", _under_hermes=lambda **_: False,
+                                      _in_hermes_cgroup=lambda **_: False)   # not the host's process tree
+        process_tree.start()
+        self.addCleanup(process_tree.stop)
+
     def test_options_validate_and_default_safely(self):
-        self.assertEqual(options({})["lessons"], "suggest")
+        self.assertEqual(options({})["lessons"], "auto")                    # template lessons apply and are measured
         self.assertIs(options({})["reflector"], True)                      # on unless the operator turns it off
         self.assertIs(options({"evolution": {"reflector": False}})["reflector"], False)
         self.assertEqual(options({})["autopilot_minutes"], 60)
@@ -262,12 +270,13 @@ class CycleAndReportTest(Base):
             self.turns(day=NOW - offset * DAY, count=10, failed=1, seconds=70)
         self.ledger([(NOW - index * 600, "curator", "deploy", "a", "b") for index in range(9)])
         (self.home / "logs" / "agent.log").write_text(LogwatchTest.LINE.format(n=1, calls=3, i=900, o=90, c=0, result="none") * 12)
-        first = cycle(self.home, now=NOW, runtime_config={"model": {"default": "m"}}, config={})
+        suggest = {"evolution": {"lessons": "suggest"}}
+        first = cycle(self.home, now=NOW, runtime_config={"model": {"default": "m"}}, config=suggest)
         self.assertEqual((first["lessons_mode"], len(first["new_lessons"]), first["reviews_ingested"]), ("suggest", 1, 12))
         kinds = {item["kind"] for item in first["open_proposals"]}
         self.assertEqual(kinds, {"lesson", "skill_lock", "review_interval", "investigate_latency"})
         self.assertEqual(notify_view(first)["new_lessons"][0]["tool"], "files_search")
-        second = cycle(self.home, now=NOW + 60, runtime_config={"model": {"default": "m"}}, config={})
+        second = cycle(self.home, now=NOW + 60, runtime_config={"model": {"default": "m"}}, config=suggest)
         self.assertEqual((second["new_lessons"], second["reviews_ingested"]), ([], 0))
         self.assertIsNone(notify_view(second))
         auto = cycle(self.home, now=NOW + 120, config={"evolution": {"lessons": "off"}})
@@ -291,7 +300,7 @@ class CycleAndReportTest(Base):
             build(self.home, now=NOW, days=0)
 
     def test_digest_schedule_is_a_recipe_that_changes_nothing(self):
-        from hermes_evolution.evolve import digest_schedule_spec
+        from hermes_atlas_evolution.evolve import digest_schedule_spec
 
         before = sorted(path.name for path in self.home.rglob("*"))
         spec = digest_schedule_spec(self.home, weekday=1, hour=8, lang="pt")
@@ -310,7 +319,7 @@ class CycleAndReportTest(Base):
         import io
         from types import SimpleNamespace
 
-        from hermes_evolution.cli import execute
+        from hermes_atlas_evolution.cli import execute
 
         body = json.dumps({"error": "tool_call to 'files_search' is missing required argument(s): servico."})
         for offset in range(2):
@@ -322,7 +331,8 @@ class CycleAndReportTest(Base):
         def run(**arguments):
             stream = io.StringIO()
             with contextlib.redirect_stdout(stream):
-                execute(SimpleNamespace(**arguments), self.home, runtime_config={})
+                execute(SimpleNamespace(**arguments), self.home,
+                        runtime_config={"plugins": {"entries": {"hermes-atlas-evolution": {"settings": {"lessons": "suggest"}}}}})
             return stream.getvalue()
 
         learned = json.loads(run(evolution_action="learn", notify_only=False, lang="pt"))
@@ -343,6 +353,26 @@ class CycleAndReportTest(Base):
         self.assertEqual(json.loads(run(evolution_action="experiments"))[0]["kind"], "lesson")
         with self.assertRaises(SystemExit):
             run(evolution_action="lessons", lessons_action="approve", id=999, lang=None, yes=True)
+
+    def test_by_default_template_lessons_apply_at_once_and_model_drafts_wait(self):
+        from hermes_atlas_evolution import lessons as playbook
+
+        body = json.dumps({"error": "tool_call to 'files_search' is missing required argument(s): servico."})
+        crash = json.dumps({"output": "Traceback (most recent call last):\nKeyError: 'column'", "exit_code": 1})
+        for offset in range(2):
+            for _ in range(2):
+                record_tool(self.home, {"tool_name": "tool_call", "status": "error", "result": body,
+                                        "session_id": f"s{offset}", "args": {"calls": [{"name": "files_search"}]}},
+                            now=NOW - offset * DAY)
+                record_tool(self.home, {"tool_name": "terminal", "status": "error", "result": crash,
+                                        "session_id": f"s{offset}"}, now=NOW - offset * DAY, sample=True)
+        result = cycle(self.home, now=NOW, config={},
+                       reflect=lambda instructions, text: {"applies": True, "lesson": "When a script reads a CSV, check the columns first."})
+        with experience(self.home) as conn:
+            states = {row["origin"]: row["status"] for row in conn.execute("SELECT origin, status FROM lesson")}
+            self.assertIn("files_search", playbook.playbook(conn, lang="en"))
+        self.assertEqual(result["lessons_mode"], "auto")
+        self.assertEqual(states, {"derived": "active", "reflector": "quarantined"})
 
     def test_an_empty_profile_still_produces_a_digest(self):
         report = build(self.home, now=NOW, days=7)

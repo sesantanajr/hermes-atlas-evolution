@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from hermes_evolution.reasoning import diagnose
+from hermes_atlas_evolution.reasoning import diagnose
 
 
 class ReasoningTests(unittest.TestCase):

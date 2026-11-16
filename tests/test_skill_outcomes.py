@@ -4,11 +4,11 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hermes_evolution import experiments, proposals
-from hermes_evolution.experience import day_offset, experience, utc_day
-from hermes_evolution.operations import close_observers
-from hermes_evolution.signals import FeedbackSensor, TurnTracker, record_skill_correction
-from hermes_evolution.skill_health import compare_skill_windows, skill_outcomes, skill_window
+from hermes_atlas_evolution import experiments, proposals
+from hermes_atlas_evolution.experience import day_offset, experience, utc_day
+from hermes_atlas_evolution.operations import close_observers
+from hermes_atlas_evolution.signals import FeedbackSensor, TurnTracker, record_skill_correction
+from hermes_atlas_evolution.skill_health import compare_skill_windows, skill_outcomes, skill_window
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 DAY = 86_400
@@ -44,7 +44,7 @@ class TrackingTest(Base):
         self.turn(day=NOW, skills=("deploy",), platform="cron")              # compared with interactive turns only
         self.tracker.skill({"action": "loaded", "skill_name": "orphan", "session_id": "nobody", "task_id": "x"})
         self.tracker.skill({"action": "patched", "skill_name": "deploy", "session_id": "s"})
-        self.tracker.start({"turn_id": "child", "session_id": "c", "task_id": "c", "platform": "cli",
+        self.tracker.start({"turn_id": "child", "session_id": "c", "task_id": "c", "platform": "subagent",
                             "parent_session_id": "p"}, clock=0.0)
         self.tracker.skill({"action": "loaded", "skill_name": "deploy", "session_id": "c", "task_id": "c"})
         self.tracker.finish({"turn_id": "child", "failed": True}, clock=1.0, now=NOW)   # subagents are not attributed

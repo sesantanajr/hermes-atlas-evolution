@@ -101,7 +101,10 @@ def _local_model(path: Path) -> Path:
         payload = stream.read(65_537)
     if len(payload) > 65_536:
         raise ValueError("Model manifest exceeds its size bound")
-    modules = json.loads(payload)
+    try:
+        modules = json.loads(payload)
+    except RecursionError:
+        raise ValueError("Unsupported local model layout") from None
     if not isinstance(modules, list) or not 2 <= len(modules) <= 3:
         raise ValueError("Unsupported local model layout")
     types = []

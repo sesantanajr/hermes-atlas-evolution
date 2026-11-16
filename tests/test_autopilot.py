@@ -11,10 +11,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hermes_evolution.autopilot import (CHECK_SECONDS, LEASE_SECONDS, RETRY_SECONDS, Autopilot, claim, finish,
+from hermes_atlas_evolution.autopilot import (CHECK_SECONDS, LEASE_SECONDS, RETRY_SECONDS, Autopilot, claim, finish,
                                         pinned_profile, run_exclusive)
-from hermes_evolution.experience import experience
-from hermes_evolution.operations import close_observers
+from hermes_atlas_evolution.experience import experience
+from hermes_atlas_evolution.operations import close_observers
 
 NOW = 1_794_700_000.0
 HOUR = 3600
@@ -75,6 +75,22 @@ class ClaimTest(Base):
         self.assertEqual(len(wins), 1)
 
 
+class FencingTest(Base):
+    def test_only_the_lease_holder_can_record_the_end_of_a_pass(self):
+        self.assertTrue(claim(self.home, now=NOW, interval_s=HOUR, owner="a"))
+        finish(self.home, now=NOW + 1, owner="a", ok=False, interval_s=HOUR, error="ProcessExit")   # released at exit
+        finish(self.home, now=NOW + 2, owner="a", ok=True, interval_s=HOUR)                         # the thread, too late
+        with experience(self.home) as conn:
+            status = json.loads(conn.execute("SELECT value FROM cursor WHERE key='loop_status'").fetchone()[0])
+        self.assertEqual(status["error"], "ProcessExit")    # the late finish changed nothing
+
+    def test_a_pass_that_finished_after_the_caller_read_its_clock_is_not_repeated(self):
+        self.assertTrue(claim(self.home, now=NOW, interval_s=HOUR, owner="gateway"))
+        finish(self.home, now=NOW + 3, owner="gateway", ok=True, interval_s=HOUR)
+        self.assertFalse(claim(self.home, now=NOW, interval_s=HOUR, owner="tick"))         # read its clock at NOW
+        self.assertTrue(claim(self.home, now=NOW - 2 * HOUR, interval_s=HOUR, owner="x"))  # the clock went back hours
+
+
 class ExclusiveTest(Base):
     def test_a_manual_pass_waits_for_a_running_one_and_then_counts_as_the_latest(self):
         self.assertTrue(claim(self.home, now=NOW, interval_s=HOUR, owner="autopilot"))
@@ -88,7 +104,8 @@ class ExclusiveTest(Base):
         def broken():
             raise KeyError("x")
 
-        finish(self.home, now=NOW - 600, owner="", ok=True, interval_s=HOUR)   # the autopilot ran 10 minutes ago
+        claim(self.home, now=NOW - 700, interval_s=HOUR, owner="autopilot-0")
+        finish(self.home, now=NOW - 600, owner="autopilot-0", ok=True, interval_s=HOUR)   # it ran 10 minutes ago
         with self.assertRaises(KeyError):
             run_exclusive(self.home, broken, wait_s=0.2, now=lambda: NOW)
         self.assertFalse(claim(self.home, now=NOW + 1, interval_s=HOUR, owner="autopilot"))   # the schedule is unchanged
@@ -150,7 +167,7 @@ class AutopilotTest(Base):
             raise RuntimeError("boom")
 
         pilot, clock = self.make(broken)
-        with self.assertLogs("hermes_evolution.autopilot", level="WARNING") as logged:
+        with self.assertLogs("hermes_atlas_evolution.autopilot", level="WARNING") as logged:
             pilot.poke()
             self.wait(pilot)
             clock["t"] += RETRY_SECONDS + 1
@@ -159,20 +176,71 @@ class AutopilotTest(Base):
         self.assertEqual(len(logged.output), 1)
         self.assertNotIn("boom", logged.output[0])             # the exception type only, never its text
 
+    def test_the_clock_nudges_an_idle_profile_and_stops_on_unload(self):
+        calls = []
+        pilot, clock = self.make(lambda: calls.append(1))
+        self.assertTrue(pilot.start_clock(first=0.05, period=0.05))
+        self.assertFalse(pilot.start_clock(first=0.05, period=0.05))   # one clock per autopilot
+        deadline = time.monotonic() + 5
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.wait(pilot)
+        self.assertEqual(len(calls), 1)                                  # no turn needed for the first pass
+        pilot.stop()
+        pilot._clock.join(2)
+        self.assertFalse(pilot._clock.is_alive())
+        clock["t"] += HOUR * 2
+        self.assertFalse(pilot.poke())                                   # after unload nothing new starts
+
+    def test_a_pass_cut_by_process_exit_frees_the_lease_for_a_retry(self):
+        started, release = threading.Event(), threading.Event()
+
+        def run():
+            started.set()
+            release.wait(5)
+
+        pilot, clock = self.make(run)
+        pilot.poke()
+        self.assertTrue(started.wait(5))
+        pilot._at_exit()                                                 # what atexit does at interpreter shutdown
+        with experience(self.home) as conn:
+            self.assertIsNone(conn.execute("SELECT value FROM cursor WHERE key='loop_lease'").fetchone())
+            status = json.loads(conn.execute("SELECT value FROM cursor WHERE key='loop_status'").fetchone()[0])
+        self.assertEqual((status["ok"], status["error"]), (False, "ProcessExit"))
+        release.set()
+        self.wait(pilot)
+
+    def test_an_unloaded_autopilot_does_not_run_a_pass_it_claimed(self):
+        calls = []
+        pilot, _ = self.make(lambda: calls.append(1))
+        pilot.stop()
+        pilot._work()                                     # a check that was already on its way
+        self.assertEqual(calls, [])
+        with experience(self.home) as conn:
+            self.assertIsNone(conn.execute("SELECT value FROM cursor WHERE key='loop_lease'").fetchone())
+
     def test_the_thread_pins_the_plugin_profile(self):
         override = contextvars.ContextVar("override", default=None)
         constants = types.ModuleType("hermes_constants")
         constants.set_hermes_home_override = lambda path: override.set(str(path))
         constants.reset_hermes_home_override = lambda token: override.reset(token)
+        scope = contextvars.ContextVar("scope", default=None)
+        secrets = types.ModuleType("agent.secret_scope")
+        secrets.build_profile_secret_scope = lambda home: {"KEY": f"key-of-{Path(home).name}"}
+        secrets.set_secret_scope = lambda mapping, profile_home=None: scope.set((mapping, profile_home))
+        secrets.reset_secret_scope = lambda token: scope.reset(token)
+        agent = types.ModuleType("agent")
+        agent.secret_scope = secrets
         seen = []
-        with patch.dict(sys.modules, {"hermes_constants": constants}):
-            pilot, _ = self.make(lambda: seen.append(override.get()))
+        with patch.dict(sys.modules, {"hermes_constants": constants, "agent": agent, "agent.secret_scope": secrets}):
+            pilot, _ = self.make(lambda: seen.append((override.get(), scope.get())))
             pilot.poke()
             self.wait(pilot)
             with pinned_profile(self.home):
                 self.assertEqual(override.get(), str(self.home))
             self.assertIsNone(override.get())
-        self.assertEqual(seen, [str(self.home)])
+        # the profile's own API keys, never the gateway's: a multi-profile gateway scopes secrets per profile
+        self.assertEqual(seen, [(str(self.home), ({"KEY": f"key-of-{self.home.name}"}, str(self.home)))])
 
 
 if __name__ == "__main__":

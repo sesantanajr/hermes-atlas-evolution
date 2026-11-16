@@ -16,7 +16,7 @@ from .i18n import resolve
 from .experience import day_offset, experience, prune, utc_day
 from .skill_health import read_usage, skill_health, skill_outcomes
 
-DEFAULTS = {"lessons": "suggest", "tool_hints": True, "feedback_signals": True, "language": "auto",
+DEFAULTS = {"lessons": "auto", "tool_hints": False, "feedback_signals": True, "language": "auto",
             "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": True, "reflector_daily_limit": 6,
             "autopilot_minutes": 60, "runtime_guard": True}
 
@@ -50,9 +50,11 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
     slow = checked("slow_turn_seconds", _whole(raw.get("slow_turn_seconds", DEFAULTS["slow_turn_seconds"])),
                    lambda value: type(value) is int and 5 <= value <= 3600,
                    "evolution.slow_turn_seconds must be an integer from 5 to 3600", DEFAULTS["slow_turn_seconds"])
+    # A settings form may store a Telegram id typed as a number: ids are compared as text.
     owners = checked("owner_sender_ids", raw.get("owner_sender_ids", ()),
                      lambda value: isinstance(value, (list, tuple)) and len(value) <= 20 and all(
-                         isinstance(item, str) and 0 < len(item) <= 200 for item in value),
+                         isinstance(item, str) and 0 < len(item) <= 200 or type(item) is int and item >= 0
+                         for item in value),
                      "evolution.owner_sender_ids must list up to 20 sender ids", ())
     daily = checked("reflector_daily_limit", _whole(raw.get("reflector_daily_limit", DEFAULTS["reflector_daily_limit"])),
                     lambda value: type(value) is int and 1 <= value <= 50,
@@ -66,15 +68,15 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
     # A protection: an invalid value keeps it on.
     guard = checked("runtime_guard", raw.get("runtime_guard", True), lambda value: type(value) is bool,
                     "evolution.runtime_guard must be true or false", True)
-    return {"lessons": mode, "tool_hints": raw.get("tool_hints", True) is not False, "runtime_guard": guard,
+    return {"lessons": mode, "tool_hints": raw.get("tool_hints", False) is True, "runtime_guard": guard,
             "reflector": reflect, "reflector_daily_limit": daily, "autopilot_minutes": autopilot,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
             "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
-            "owner_sender_ids": tuple(owners)}
+            "owner_sender_ids": tuple(str(item) for item in owners)}
 
 
 def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None,
-          strict: bool = True, backfill_budget_s: float = 20.0) -> dict:
+          strict: bool = True, backfill_budget_s: float = 20.0, deadline: float | None = None, cancelled=None) -> dict:
     """Run one evolution pass and return what changed. `lang` overrides the configured language of the output.
 
     `reflect(instructions, text)` asks a model for a lesson draft; it is used only when the reflector is on.
@@ -86,8 +88,11 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     opts = options(config or {}, runtime_config, strict=strict)
     if lang in lessons.LANGUAGES:
         opts["language"] = lang
+    import time as _time
+
     backfill.mark_observed(home, now=now)
-    history = backfill.step(home, now=now, budget_s=backfill_budget_s, owner_sender_ids=opts["owner_sender_ids"],
+    budget = backfill_budget_s if deadline is None else max(0.0, min(backfill_budget_s, deadline - _time.monotonic() - 30))
+    history = backfill.step(home, now=now, budget_s=budget, owner_sender_ids=opts["owner_sender_ids"], cancelled=cancelled,
                             sample=opts["reflector"] and opts["lessons"] != "off", slow_ms=opts["slow_turn_seconds"] * 1000)
     with experience(home) as conn:
         # Short transactions: hook writers of a running gateway share this database, so no phase keeps the
@@ -116,15 +121,21 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             reflection = {"status": "unavailable_without_hermes_llm"}
         else:
             reflection = reflector.reflect(conn, reflect, now=now, lang=opts["language"],
-                                           daily_limit=opts["reflector_daily_limit"])
-        effects = lessons.evaluate(conn, now=now, mode=opts["lessons"])
+                                           daily_limit=opts["reflector_daily_limit"], deadline=deadline)
+        conn.commit()
+        # Baselines wait for history the backfill is still replaying ("running"; "waiting" before the mark).
+        pending = backfill.replay_until(home) if history.get("status") in ("running", "waiting") else None
+        effects = lessons.evaluate(conn, now=now, mode=opts["lessons"], history_until=pending)
+        conn.commit()   # the skill files and the Curator ledger are read with no write lock held
         skills = skill_health(home, now=now, days=7)
         detected = experiments.detect_changes(conn, home, runtime_config, now=now)
+        conn.commit()
         try:
             with database(home) as ops:
                 verdicts = experiments.evaluate_changes(conn, ops, now=now)
         except (sqlite3.Error, ValueError, OSError):
             verdicts = experiments.evaluate_changes(conn, None, now=now)
+        conn.commit()
         failures = signals.failure_summary(conn, now=now, days=7)
         turns = signals.turn_summary(conn, now=now, days=7, surfaces=("local", "gateway"))
         start_day, end_day = logwatch.local_days(now, 7)
@@ -139,7 +150,8 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         outcomes = skill_outcomes(conn, start_day=day_offset(now, 13), end_day=utc_day(now))
         from . import radar
 
-        reading = radar.scan(home, conn, now=now)
+        conn.commit()   # Hermes' state.db is read with no write lock held on this database
+        reading = radar.scan(home, conn, now=now, own_transform=opts["tool_hints"] and opts["lessons"] != "off")
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
                                     changes=verdicts, outcomes=outcomes, radar=reading["findings"], lang=opts["language"])
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in created]
@@ -169,6 +181,7 @@ def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: i
     import re
     import shlex
 
+    from .i18n import text
     from .native_actions import _profile_args
 
     if type(weekday) is not int or not 0 <= weekday <= 6 or type(hour) is not int or not 0 <= hour <= 23:
@@ -179,7 +192,7 @@ def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: i
         raise ValueError("deliver must be a Hermes delivery target such as local or origin")
     profile = Path(home).expanduser().resolve()
     arguments = [*_profile_args(profile), "evolution", "report", "--days", str(days), "--lang", lang]
-    script_name = "atlas-evolution-digest.py"
+    script_name = "hermes-atlas-evolution-digest.py"
     script = f'''"""Deliver the Atlas Evolution digest without an agent turn."""
 import os
 import shutil
@@ -187,23 +200,26 @@ import subprocess
 
 launcher = shutil.which("hermes")
 if not launcher:
-    raise SystemExit("Hermes CLI is not on the scheduler PATH.")
+    raise SystemExit({text("Hermes CLI is not on the scheduler PATH.", lang)!r})
+try:   # a fresh pass first, best effort: the digest is delivered even when it fails or runs out of time
+    subprocess.run([launcher, *{arguments[:-6] + ["evolution", "learn", "--notify-only"]!r}],
+                   capture_output=True, text=True, env=dict(os.environ, HERMES_HOME={str(profile)!r}),
+                   encoding="utf-8", errors="replace", timeout=300, check=False)
+except (OSError, subprocess.TimeoutExpired):
+    pass
 try:
-    learn = subprocess.run([launcher, *{arguments[:-6] + ["evolution", "learn", "--notify-only"]!r}],
-                           capture_output=True, text=True, env=dict(os.environ, HERMES_HOME={str(profile)!r}),
-                           encoding="utf-8", errors="replace", timeout=120, check=False)
     result = subprocess.run([launcher, *{arguments!r}], capture_output=True, text=True,
                             env=dict(os.environ, HERMES_HOME={str(profile)!r}),
                             encoding="utf-8", errors="replace", timeout=120, check=False)
-    if learn.returncode or result.returncode or len(result.stdout) > 65_536:
-        raise SystemExit("Atlas Evolution digest failed. Run `hermes evolution report` in this profile to inspect.")
+    if result.returncode or len(result.stdout) > 65_536:
+        raise SystemExit({text("Atlas Evolution digest failed. Run `hermes evolution report` in this profile to inspect.", lang)!r})
 except (OSError, subprocess.TimeoutExpired):
-    raise SystemExit("Atlas Evolution digest could not be produced.") from None
+    raise SystemExit({text("Atlas Evolution digest could not be produced.", lang)!r}) from None
 
 print(result.stdout.rstrip())
 '''
     create_args = ["hermes", *_profile_args(profile), "cron", "create", f"0 {hour} * * {weekday}", "--name",
-                   "atlas-evolution-digest", "--no-agent", "--script", script_name, "--deliver", deliver]
+                   "hermes-atlas-evolution-digest", "--no-agent", "--script", script_name, "--deliver", deliver]
     return {"status": "planned", "profile_home": str(profile), "script_name": script_name,
             "script_path": str(profile / "scripts" / script_name), "script_content": script,
             "create_args": create_args,

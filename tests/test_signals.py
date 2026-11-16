@@ -4,9 +4,9 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hermes_evolution.experience import experience, label, prune
-from hermes_evolution.operations import close_observers
-from hermes_evolution.signals import (FeedbackSensor, TurnTracker, classify, effective_tool, failure_summary,
+from hermes_atlas_evolution.experience import experience, label, prune
+from hermes_atlas_evolution.operations import close_observers
+from hermes_atlas_evolution.signals import (FeedbackSensor, TurnTracker, classify, effective_tool, failure_summary,
                                       feedback_summary, record_skill_event, record_tool, skill_event_summary,
                                       surface_of, tool_summary, turn_summary)
 
@@ -184,7 +184,7 @@ class StoreTest(unittest.TestCase):
                                            clock=1000.0 + seconds, now=NOW))
         tracker.start({"turn_id": "cron", "platform": "cron"}, clock=0.0)
         tracker.finish({"turn_id": "cron", "completed": True}, clock=1.0, now=NOW)
-        tracker.start({"turn_id": "child", "platform": "telegram", "parent_session_id": "p"}, clock=0.0)
+        tracker.start({"turn_id": "child", "platform": "subagent", "parent_session_id": "p"}, clock=0.0)
         tracker.finish({"turn_id": "child", "interrupted": True}, clock=1.0, now=NOW)
         self.assertFalse(tracker.finish({"turn_id": "never-started", "completed": True}, clock=1.0, now=NOW))
         with experience(self.home) as conn:
@@ -215,7 +215,7 @@ class StoreTest(unittest.TestCase):
                                          "user_message": "não, errado"}, clock=0.0, now=NOW), [])
         self.assertEqual(sensor.observe({"session_id": "d", "platform": "whatsapp", "sender_id": "owner-1",
                                          "user_message": "wrong, try again"}, clock=0.0, now=NOW), ["correction"])
-        self.assertEqual(sensor.observe({"session_id": "e", "platform": "cli", "parent_session_id": "p",
+        self.assertEqual(sensor.observe({"session_id": "e", "platform": "subagent", "parent_session_id": "p",
                                          "user_message": "não, errado"}, clock=0.0, now=NOW), [])
         self.assertEqual(sensor.observe({"session_id": "f", "platform": "cli", "user_message": ["multimodal"]},
                                         clock=0.0, now=NOW), [])
@@ -244,7 +244,7 @@ class StoreTest(unittest.TestCase):
             prune(conn, now=NOW)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM tool_daily").fetchone()[0], 0)
 
-    def test_store_is_private_and_rejects_an_unknown_schema(self):
+    def test_store_is_private_opens_a_newer_schema_and_rejects_an_invalid_one(self):
         with experience(self.home):
             pass
         path = self.home / "evolution" / "evolution.sqlite3"   # one database for operations and experience
@@ -252,7 +252,12 @@ class StoreTest(unittest.TestCase):
         self.assertFalse((self.home / "evolution" / "experience.sqlite3").exists())
         import sqlite3
         raw = sqlite3.connect(path)
-        raw.execute("PRAGMA user_version=99")
+        raw.execute("PRAGMA user_version=99")   # a newer plugin version only adds tables and columns
+        raw.close()
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM lesson").fetchone()[0], 0)
+        raw = sqlite3.connect(path)
+        raw.execute("PRAGMA user_version=-1")
         raw.close()
         with self.assertRaises(ValueError):
             with experience(self.home):

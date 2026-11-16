@@ -1,3 +1,3 @@
 """Hermes directory plugin entry point."""
 
-from .hermes_evolution.integration import register
+from .hermes_atlas_evolution.integration import register

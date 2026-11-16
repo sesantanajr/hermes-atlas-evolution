@@ -1,6 +1,6 @@
 import unittest
 
-from hermes_evolution.ops_metrics import current_metrics, workload_correlations
+from hermes_atlas_evolution.ops_metrics import current_metrics, workload_correlations
 
 
 class OpsMetricTests(unittest.TestCase):

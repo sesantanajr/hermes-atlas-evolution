@@ -13,7 +13,8 @@ from . import experiments, lessons, logwatch, proposals, signals
 from .experience import day_offset, experience, utc_day
 from .skill_health import skill_health, skill_outcomes
 
-def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dict | None = None) -> dict:
+def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dict | None = None,
+          own_transform: bool = True) -> dict:
     """Collect the digest for the last `days` days and the same span before it."""
     from .billing import native_billing
     from .operations import database, summarize
@@ -43,13 +44,17 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
         }
         from . import radar
 
-        report["health"] = {key: value for key, value in radar.scan(home, conn, now=now, days=min(days, 14)).items()
+        report["health"] = {key: value for key, value in radar.scan(home, conn, now=now, days=min(days, 14),
+                                                                    own_transform=own_transform).items()
                             if key != "findings"}
         try:
             with database(home) as ops:
                 current = experiments.window_metrics(conn, ops, start, end)
                 before = experiments.window_metrics(conn, ops, previous_start, previous_end)
                 usage = summarize(ops, days=days, now=now, rates=rates or {})
+                from .telemetry import research_summary
+
+                report["research"] = research_summary(ops, now=now, days=days)
         except (sqlite3.Error, ValueError, OSError):
             current = experiments.window_metrics(conn, None, start, end)
             before = experiments.window_metrics(conn, None, previous_start, previous_end)
@@ -94,6 +99,7 @@ _TEXT = {
         "failures_none": "No recurring tool failure in this window.", "times": "times", "days": "days",
         "lesson_state": "lesson", "no_lesson": "no lesson yet", "learning": "Self-improvement loop",
         "never_lesson": "never a lesson: the user's approval decides",
+        "other_plugin": "never a lesson: another plugin caused it",
         "reviews": "background reviews", "empty": "produced nothing", "review_tokens": "review tokens (input / output)",
         "share": "of the uncached input and output tokens went to learning (approximate)",
         "rewrites": "skill rewrites", "by_review": "by the automatic review", "skills": "skills",
@@ -117,6 +123,11 @@ _TEXT = {
         "undeclared": "register hooks they do not declare", "overlap": "compete for", "first_wins": "only the first result counts",
         "guard_line": "Runtime guard", "vetoed": "commands vetoed", "gateway_stop": "gateway restart or kill",
         "runtime_removal": "removal of the running Hermes", "health_none": "Nothing measured yet.",
+        "external_line": "Failures caused by other plugins",
+        "external_fault": "calls blocked because a plugin's pre_tool_call hung or failed",
+        "external_rewrite": "commands rewritten by a plugin that then failed (never turned into lessons)",
+        "research_line": "Web research", "research_turns": "turns", "research_slow": "over {limit} s",
+        "research_errors": "errors in", "research_calls": "calls", "research_p95": "1 in 20 takes more than",
     },
     "pt": {
         "title": "Atlas Evolution · resumo de {days} dias ({start} a {end}, UTC)",
@@ -126,8 +137,9 @@ _TEXT = {
         "feedback": "Sinais do dono", "corrections": "correções", "reasks": "perguntas repetidas", "thanks": "agradecimentos",
         "vs": "Comparado aos {days} dias anteriores", "verdict": "veredito", "failures": "Falhas que se repetem",
         "failures_none": "Nenhuma falha de ferramenta recorrente nesta janela.", "times": "vezes", "days": "dias",
-        "lesson_state": "lição", "no_lesson": "sem lição ainda", "learning": "Ciclo de auto-melhoria",
+        "lesson_state": "lição", "no_lesson": "sem lição ainda", "learning": "Ciclo de automelhoria",
         "never_lesson": "nunca vira lição: quem decide é a aprovação do usuário",
+        "other_plugin": "nunca vira lição: outro plugin causou a falha",
         "reviews": "revisões em segundo plano", "empty": "não produziram nada", "review_tokens": "tokens das revisões (entrada / saída)",
         "share": "dos tokens de entrada sem cache e de saída foram para o aprendizado (aproximado)",
         "rewrites": "reescritas de skills", "by_review": "pela revisão automática", "skills": "skills",
@@ -151,6 +163,11 @@ _TEXT = {
         "undeclared": "registram hooks que não declaram", "overlap": "disputam", "first_wins": "só o primeiro resultado vale",
         "guard_line": "Guarda de runtime", "vetoed": "comandos barrados", "gateway_stop": "reinício ou kill do gateway",
         "runtime_removal": "remoção do Hermes em execução", "health_none": "Nada medido ainda.",
+        "external_line": "Falhas causadas por outros plugins",
+        "external_fault": "chamadas bloqueadas porque o pre_tool_call de um plugin travou ou falhou",
+        "external_rewrite": "comandos reescritos por um plugin que depois falharam (nunca viram lição)",
+        "research_line": "Pesquisas na web", "research_turns": "turnos", "research_slow": "acima de {limit} s",
+        "research_errors": "erros em", "research_calls": "chamadas", "research_p95": "1 em cada 20 passa de",
     },
 }
 _VERDICT = {
@@ -230,6 +247,16 @@ def _health(report: dict, lang: str) -> list[str]:
         for hook, names in loaded["overlaps"].items():
             parts.append(f"{t['overlap']} `{hook}` ({t['first_wins']}): " + " → ".join(f"`{name}`" for name in names))
         lines.append(f"- **{t['plugins_line']}:** " + " · ".join(parts))
+    outside = health.get("external") or {}
+    if outside.get("plugin_fault") or outside.get("rewritten_command"):
+        lines.append(f"- **{t['external_line']}:** {_number(outside.get('plugin_fault', 0), lang)} {t['external_fault']} · "
+                     f"{_number(outside.get('rewritten_command', 0), lang)} {t['external_rewrite']}")
+    research = report.get("research") or {}
+    if research.get("turns"):
+        lines.append(f"- **{t['research_line']}:** {_number(research['turns'], lang)} {t['research_turns']} · "
+                     f"{t['research_p95']} {_seconds(research['p95_ms'], lang)} · {_number(research['slow_turns'], lang)} "
+                     f"{t['research_slow'].format(limit=research['limit_ms'] // 1000)} · {_number(research['tool_errors'], lang)} "
+                     f"{t['research_errors']} {_number(research['tool_calls'], lang)} {t['research_calls']}")
     guard = report.get("guard") or {}
     if guard:
         detail = " · ".join(f"{t[kind]} {count}" for kind, count in sorted(guard.items()) if kind in t)
@@ -290,8 +317,12 @@ def markdown(report: dict, lang: str = "en") -> str:
     if report["recurring_failures"]:
         for item in report["recurring_failures"][:8]:
             detail = f" (`{item['hint']}`)" if item["hint"] else ""
-            state = (t["never_lesson"] if item["class"] == "approval_refused"
-                     else f"{t['lesson_state']}: {_STATUS[lang].get(item['lesson'], t['no_lesson'])}")
+            if item["class"] == "approval_refused":
+                state = t["never_lesson"]
+            elif item["class"] in ("plugin_fault", "rewritten_command"):
+                state = t["other_plugin"]
+            else:
+                state = f"{t['lesson_state']}: {_STATUS[lang].get(item['lesson'], t['no_lesson'])}"
             lines.append(f"- `{item['tool']}` · {item['class']}{detail}: {item['count']} {t['times']}, {item['days']} {t['days']}"
                          f" · {state}")
     else:

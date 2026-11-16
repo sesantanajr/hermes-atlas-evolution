@@ -36,7 +36,7 @@ body:
       label: How was the command run?
       options:
         - hermes evolution (plugin loaded in process)
-        - python -m hermes_evolution (standalone runner)
+        - python -m hermes_atlas_evolution (standalone runner)
         - It happened in a hook, tool or prompt section while the agent was working
     validations:
       required: true
@@ -78,7 +78,7 @@ body:
     id: settings
     attributes:
       label: Relevant settings
-      description: The parts of `<HERMES_HOME>/evolution/settings.json` and of `plugins.entries.hermes-evolution.settings` that matter, without identifiers such as sender IDs or unit names you prefer to keep private.
+      description: The parts of `<HERMES_HOME>/evolution/settings.json` and of `plugins.entries.hermes-atlas-evolution.settings` that matter, without identifiers such as sender IDs or unit names you prefer to keep private.
       render: json
   - type: checkboxes
     id: checks

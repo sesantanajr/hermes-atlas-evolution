@@ -28,7 +28,7 @@ HANDOFF_RULES = ("Use verification and observation only. Report evidence, uncert
                  "Keep raw logs and secrets out of the handoff. Configuration changes and service operations require "
                  "separate approval.")
 _RUNNER_FLAGS = ("HERMES_DELEGATED_CHILD_CONTEXT", "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID")
-_JOB_NAME = "atlas-evolution-watchdog"
+_JOB_NAME = "hermes-atlas-evolution-watchdog"
 _SCRIPT_NAME = _JOB_NAME + ".py"
 
 
@@ -65,7 +65,7 @@ def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: fl
         return {"status": "unavailable", "reason": "hermes_launcher_not_found"}
     stamp = datetime.now(timezone.utc) if now is None else datetime.fromtimestamp(now, timezone.utc)
     identity = json.dumps([os.path.normcase(str(profile)), board, assignee, kind, subject, str(stamp.date())])
-    key = "atlas-evolution:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    key = "hermes-atlas-evolution:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
     from .i18n import text
 
     portuguese = lang == "pt"
@@ -77,7 +77,7 @@ def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: fl
     command = [
         str(Path(executable).resolve()), *_profile_args(profile), "kanban", "--board", board, "create", title,
         "--body", body, "--assignee", assignee, "--initial-status", "blocked",
-        "--max-retries", "1", "--max-runtime", "5m", "--created-by", "atlas-evolution",
+        "--max-retries", "1", "--max-runtime", "5m", "--created-by", "hermes-atlas-evolution",
         "--idempotency-key", key, "--json",
     ]
     environment = dict(os.environ, HERMES_HOME=str(profile))
@@ -106,8 +106,11 @@ def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: fl
     }
 
 
-def schedule_spec(home: Path, *, every_minutes: int = 5, upstream_tag: str | None = None) -> dict:
-    """Produce a profile-local, no-agent cron recipe without writing files or jobs."""
+def schedule_spec(home: Path, *, every_minutes: int = 5, upstream_tag: str | None = None, lang: str = "en") -> dict:
+    """Produce a profile-local, no-agent cron recipe without writing files or jobs. Its messages reach the owner
+    through the job's delivery target, so they are written in `lang`."""
+    from .i18n import text
+
     if type(every_minutes) is not int or not 5 <= every_minutes <= 1440:
         raise ValueError("Cron interval must be between 5 and 1440 minutes")
     if upstream_tag is not None and (
@@ -126,17 +129,17 @@ import subprocess
 
 launcher = shutil.which("hermes")
 if not launcher:
-    raise SystemExit("Hermes CLI is not on the scheduler PATH.")
+    raise SystemExit({text("Hermes CLI is not on the scheduler PATH.", lang)!r})
 try:
     result = subprocess.run(
         [launcher, *{arguments!r}], capture_output=True, text=True,
         env=dict(os.environ, HERMES_HOME={str(profile)!r}),
-        encoding="utf-8", errors="replace", timeout=90, check=False
+        encoding="utf-8", errors="replace", timeout=300, check=False
     )
     if result.returncode or len(result.stdout) > 65_536:
-        raise SystemExit("Atlas Evolution tick failed. Run ops tick in this profile to inspect.")
+        raise SystemExit({text("Atlas Evolution tick failed. Run ops tick in this profile to inspect.", lang)!r})
 except (OSError, subprocess.TimeoutExpired):
-    raise SystemExit("Atlas Evolution tick could not be verified.") from None
+    raise SystemExit({text("Atlas Evolution tick could not be verified.", lang)!r}) from None
 
 if result.stdout.strip():
     print(result.stdout.rstrip())

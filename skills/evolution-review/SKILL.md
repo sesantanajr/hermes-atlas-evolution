@@ -13,10 +13,11 @@ You inform and recommend; the owner runs the decisions in their own terminal.
 
 1. Check that the plugin is working here with `hermes evolution status` (add `--lang pt` for Portuguese). It
    shows today's events, the last background pass and any busy profile that lacks the plugin; mention those
-   first. Then get the digest with `hermes evolution report --days 7`. The loop runs by itself in the
-   background, so the numbers are recent. `report` and `status` only read. `hermes evolution learn` runs a pass
-   now: it measures and, with the reflector on, may ask the model for up to 3 lesson drafts, which stay in
-   quarantine.
+   first; a profile marked with both copies still runs the old 0.5.0 code. Then get the digest with
+   `hermes evolution report --days 7`. The loop runs by itself in the background, so the numbers are recent.
+   `report` only reads; `status` only reads too, except in a profile where no pass ever ran, where it runs
+   the first one. `hermes evolution learn` runs a pass now: it measures and, with the reflector on, may ask
+   the model for up to 3 lesson drafts, which stay in quarantine.
 2. Summarize it in the owner's language, in this order:
    - what changed versus the previous week (the verdict line);
    - the failures that repeat, most frequent first, and whether each already has a lesson;
@@ -41,5 +42,5 @@ You inform and recommend; the owner runs the decisions in their own terminal.
 - A verdict compares the week before with the week after a change. It is a correlation: mention the
   number of concurrent changes when it is not zero.
 - Never present a lesson without its exact text, and never call a high-risk proposal routine.
-- To suggest a new lesson, use the `atlas_evolution_lessons` tool with `action: propose`. It is stored in
+- To suggest a new lesson, use the `hermes_atlas_evolution_lessons` tool with `action: propose`. It is stored in
   quarantine and appears in the queue for the owner.
