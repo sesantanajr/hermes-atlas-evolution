@@ -205,12 +205,21 @@ class ExperimentsTest(Base):
 class CycleAndReportTest(Base):
     def test_options_validate_and_default_safely(self):
         self.assertEqual(options({})["lessons"], "suggest")
+        self.assertIs(options({})["reflector"], True)                      # on unless the operator turns it off
+        self.assertIs(options({"evolution": {"reflector": False}})["reflector"], False)
+        self.assertEqual(options({})["autopilot_minutes"], 60)
+        self.assertEqual(options({"evolution": {"autopilot_minutes": 0}})["autopilot_minutes"], 0)
         self.assertEqual(options({"evolution": {"language": "pt"}})["language"], "pt")
         self.assertIn(options({"evolution": {"language": "klingon"}})["language"], ("en", "pt"))
         for bad in ({"lessons": "always"}, {"slow_turn_seconds": 1}, {"slow_turn_seconds": True},
-                    {"owner_sender_ids": "me"}, {"owner_sender_ids": [""]}):
+                    {"owner_sender_ids": "me"}, {"owner_sender_ids": [""]}, {"reflector": "yes"},
+                    {"autopilot_minutes": 5}, {"autopilot_minutes": True}):
             with self.assertRaises(ValueError):
                 options({"evolution": bad})
+        problems: list = []   # inside the gateway an invalid value switches the feature off, never on
+        lenient = options({"evolution": {"reflector": "yes", "autopilot_minutes": "often"}}, strict=False, problems=problems)
+        self.assertEqual((lenient["reflector"], lenient["autopilot_minutes"]), (False, 0))
+        self.assertEqual(sorted(problems), ["autopilot_minutes", "reflector"])
 
     def test_cycle_turns_recurring_failures_into_lessons_and_a_bilingual_digest(self):
         body = json.dumps({"error": "tool_call to 'files_search' is missing required argument(s): servico."})

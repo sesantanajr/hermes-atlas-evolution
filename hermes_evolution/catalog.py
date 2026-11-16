@@ -374,6 +374,8 @@ PAIRS = (
     ("Confirm with --yes after reading the text with 'proposals list' or 'lessons list'",
      "Confirme com --yes depois de ler o texto em 'proposals list' ou 'lessons list'"),
     ("Cancelled; nothing changed", "Cancelado; nada mudou"),
+    ("Another learning pass is running in this profile. Try again in a minute.",
+     "Outra passada de aprendizado está rodando neste perfil. Tente de novo em um minuto."),
     # ── command-line help ────────────────────────────────────────────────────────────────────────
     ("Review Hermes health, learning and operations", "Saúde, aprendizado e operação do Hermes"),
     ("Inspect Hermes files and host signals", "Examina os arquivos do Hermes e os sinais do host"),

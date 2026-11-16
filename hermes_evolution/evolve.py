@@ -17,7 +17,8 @@ from .experience import day_offset, experience, prune, utc_day
 from .skill_health import read_usage, skill_health, skill_outcomes
 
 DEFAULTS = {"lessons": "suggest", "tool_hints": True, "feedback_signals": True, "language": "auto",
-            "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": False, "reflector_daily_limit": 6}
+            "slow_turn_seconds": 60, "owner_sender_ids": (), "reflector": True, "reflector_daily_limit": 6,
+            "autopilot_minutes": 60}
 
 
 def _whole(value):
@@ -56,31 +57,44 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
     daily = checked("reflector_daily_limit", _whole(raw.get("reflector_daily_limit", DEFAULTS["reflector_daily_limit"])),
                     lambda value: type(value) is int and 1 <= value <= 50,
                     "evolution.reflector_daily_limit must be an integer from 1 to 50", DEFAULTS["reflector_daily_limit"])
+    # On by default; an invalid value switches it off, never on.
+    reflect = checked("reflector", raw.get("reflector", DEFAULTS["reflector"]), lambda value: type(value) is bool,
+                      "evolution.reflector must be true or false", False)
+    autopilot = checked("autopilot_minutes", _whole(raw.get("autopilot_minutes", DEFAULTS["autopilot_minutes"])),
+                        lambda value: type(value) is int and (value == 0 or 15 <= value <= 1440),
+                        "evolution.autopilot_minutes must be 0 (manual only) or an integer from 15 to 1440", 0)
     return {"lessons": mode, "tool_hints": raw.get("tool_hints", True) is not False,
-            "reflector": raw.get("reflector") is True, "reflector_daily_limit": daily,
+            "reflector": reflect, "reflector_daily_limit": daily, "autopilot_minutes": autopilot,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
             "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
             "owner_sender_ids": tuple(owners)}
 
 
-def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None) -> dict:
+def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None,
+          strict: bool = True) -> dict:
     """Run one evolution pass and return what changed. `lang` overrides the configured language of the output.
 
-    `reflect(instructions, text)` asks a model for a lesson draft; it is used only when the reflector is on."""
+    `reflect(instructions, text)` asks a model for a lesson draft; it is used only when the reflector is on.
+    `strict=False` (the autopilot) lets each invalid setting fall back safely instead of failing the pass."""
     from .operations import database
 
-    opts = options(config or {}, runtime_config)
+    opts = options(config or {}, runtime_config, strict=strict)
     if lang in lessons.LANGUAGES:
         opts["language"] = lang
     with experience(home) as conn:
+        # Short transactions: hook writers of a running gateway share this database, so no phase keeps the
+        # write lock while it reads files or waits for a model.
         prune(conn, now=now)
+        conn.commit()
         ingested = 0
         for _ in range(8):   # at most 32 MiB of log per pass
             step = logwatch.ingest_reviews(home, conn)
+            conn.commit()
             ingested += step["reviews"]
             if not step.get("more"):
                 break
         created = lessons.derive(conn, now=now, mode=opts["lessons"])
+        conn.commit()
         if not opts["reflector"]:
             conn.execute("DELETE FROM failure_sample")   # nothing waits for a reflector that is off
             reflection = {"status": "off"}

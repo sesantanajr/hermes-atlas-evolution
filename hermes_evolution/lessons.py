@@ -131,10 +131,13 @@ def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> li
         if row["sessions"] < 2 and row["days"] < 2:
             continue   # one bad session is not a pattern yet
         status = "active" if mode == "auto" else "candidate"
-        cursor = conn.execute("""INSERT INTO lesson(signature, tool, klass, hint, origin, status, created, updated, activated)
-            VALUES (?, ?, ?, ?, 'derived', ?, ?, ?, ?)""",
+        # OR IGNORE: another process may have derived the same lesson since the SELECT above.
+        cursor = conn.execute("""INSERT OR IGNORE INTO lesson(signature, tool, klass, hint, origin, status, created, updated,
+              activated) VALUES (?, ?, ?, ?, 'derived', ?, ?, ?, ?)""",
                               (row["signature"], row["tool"], row["klass"], row["hint"], status, now, now,
                                now if status == "active" else None))
+        if not cursor.rowcount:
+            continue
         created.append(cursor.lastrowid)
         if status == "active":
             _record_change(conn, cursor.lastrowid, now, row["tool"])

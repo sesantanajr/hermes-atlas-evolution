@@ -73,13 +73,21 @@ config_schema:
     description: Gateway sender ids whose corrections count as yours (local CLI, TUI and Desktop always count).
   reflector:
     type: bool
-    default: false
+    default: true
     label: Reflector
     description: >-
-      Draft lessons for recurring failures that have no template, using a model through Hermes (auxiliary task
-      evolution_reflector). Keeps one scrubbed error excerpt per failure until a draft exists. Drafts wait for approval.
+      Draft lessons for recurring failures that have no template, using the model of Hermes' auxiliary task
+      evolution_reflector (it inherits the compression model). Keeps one scrubbed error excerpt per failure until a
+      draft exists. Drafts wait for approval unless lessons is auto.
   reflector_daily_limit:
     type: int
     default: 6
     label: Reflector calls per day
     description: Upper limit of model calls the reflector makes per day. From 1 to 50.
+  autopilot_minutes:
+    type: int
+    default: 60
+    label: Autopilot (minutes)
+    description: >-
+      Run the learning pass by itself in the background, at most once per interval, from 15 to 1440 minutes.
+      0 runs it only when you call hermes evolution learn.

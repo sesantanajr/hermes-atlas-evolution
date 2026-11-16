@@ -99,6 +99,30 @@ def _warn_once(seen: set, event: str) -> None:
         getLogger(__name__).warning("Atlas Evolution could not record %s; the turn continues unaffected", event)
 
 
+def autopilot_pass(home: Path, reflect) -> dict:
+    """One evolution pass from the autopilot thread. Settings are read again, so a change made in Hermes'
+    settings form applies to the next pass, and an invalid value falls back instead of failing the pass."""
+    import time
+
+    from .evolve import cycle
+
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        runtime = load_config_readonly() or {}
+    except Exception:   # the pass still runs with the plugin's own settings
+        runtime = {}
+    try:
+        current = effective_settings(home, runtime)
+    except (OSError, ValueError, RecursionError):
+        current = {"evolution": {"lessons": "off"}}
+    result = cycle(home, now=time.time(), runtime_config=runtime, config=current, reflect=reflect, strict=False)
+    reflection = result["reflector"]
+    return {"new_lessons": len(result["new_lessons"]), "open_proposals": len(result["open_proposals"]),
+            "reflector_status": reflection.get("status", "ran"), "reflector_drafts": len(reflection.get("drafted") or []),
+            "reviews_ingested": result["reviews_ingested"]}
+
+
 def _register_skills(ctx) -> None:
     """Expose the bundled skills as `hermes-evolution:<name>`. Optional: an older or stricter host skips them."""
     folder = Path(__file__).resolve().parent.parent / "skills"
@@ -249,12 +273,16 @@ def register(ctx):
             research.finish(payload)
         except storage_errors:
             return None
+        finally:
+            autopilot.poke()
 
     def turn_ended(**payload):
         try:
             turns.finish(payload)
         except storage_errors:
             _warn_once(failed, "turn")
+        finally:
+            autopilot.poke()
 
     def skill_event(**payload):
         try:
@@ -296,6 +324,10 @@ def register(ctx):
             from logging import getLogger
 
             getLogger(__name__).warning("Atlas Evolution reflector is unavailable on this Hermes build")
+
+    from .autopilot import Autopilot
+
+    autopilot = Autopilot(home, lambda: autopilot_pass(home, reflect), interval_minutes=evolution["autopilot_minutes"])
 
     def operator_cli(args):
         import hermes_cli.config as hermes_config

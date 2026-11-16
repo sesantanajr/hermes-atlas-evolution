@@ -45,7 +45,8 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
                "tool_hints": ("evolution", "tool_hints"), "feedback_signals": ("evolution", "feedback_signals"),
                "slow_turn_seconds": ("evolution", "slow_turn_seconds"),
                "owner_sender_ids": ("evolution", "owner_sender_ids"), "agent_tools": ("agent_advice",),
-               "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit")}
+               "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit"),
+               "autopilot_minutes": ("evolution", "autopilot_minutes")}
 
 
 def native_settings(runtime_config) -> dict:
@@ -246,7 +247,10 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
     opts = options(config, runtime_config)
     lang = getattr(args, "lang", None) or opts["language"]
     if action == "learn":
-        result = cycle(home, now=now, runtime_config=runtime_config, config=config, lang=lang, reflect=reflect)
+        from .autopilot import run_exclusive
+
+        result = run_exclusive(home, lambda: cycle(home, now=now, runtime_config=runtime_config, config=config,
+                                                   lang=lang, reflect=reflect))
         return notify_view(result) if args.notify_only else result
     if action == "skills":
         from .experience import day_offset, utc_day
@@ -334,20 +338,21 @@ def _confirm(text: str, lang: str, *, yes: bool) -> None:
 
 
 def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=None, reflect=None):
-    """Run the evolution pass from `ops tick`, at most once an hour. Returns its notification view."""
+    """Run the evolution pass from `ops tick`, at most once an hour and never alongside the autopilot of a
+    running gateway (both claim the same pass). Returns its notification view."""
+    from .autopilot import claim, finish
     from .evolve import cycle, notify_view
-    from .experience import experience
 
-    with experience(home) as conn:
-        saved = conn.execute("SELECT value FROM cursor WHERE key='last_cycle'").fetchone()
-        try:
-            last = float(saved[0]) if saved else 0.0
-        except ValueError:
-            last = 0.0
-        if 0 <= now - last < CYCLE_INTERVAL_SECONDS:
-            return None
-        conn.execute("INSERT OR REPLACE INTO cursor VALUES ('last_cycle', ?)", (repr(now),))
-    return notify_view(cycle(home, now=now, runtime_config=runtime_config, config=config, reflect=reflect))
+    owner = f"tick-{os.getpid()}"
+    if not claim(home, now=now, interval_s=CYCLE_INTERVAL_SECONDS, owner=owner):
+        return None
+    try:
+        result = cycle(home, now=now, runtime_config=runtime_config, config=config, reflect=reflect)
+    except BaseException as problem:
+        finish(home, now=now, owner=owner, ok=False, interval_s=CYCLE_INTERVAL_SECONDS, error=type(problem).__name__)
+        raise
+    finish(home, now=now, owner=owner, ok=True, interval_s=CYCLE_INTERVAL_SECONDS)
+    return notify_view(result)
 
 
 def _report(args, home: Path, *, running_version=None, provider=None, now: float, runtime_config=None,

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hermes_evolution import lessons
+from hermes_evolution.autopilot import Autopilot
 from hermes_evolution.experience import experience
 from hermes_evolution.hints import KEY
 from hermes_evolution.integration import register
@@ -60,7 +61,7 @@ class FakeContext:
         return next((item for item in results if item is not None), None)
 
 
-class PluginLoopTest(unittest.TestCase):
+class PluginBase(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -74,6 +75,10 @@ class PluginLoopTest(unittest.TestCase):
         modules = patch.dict(sys.modules, {"hermes_constants": constants, "hermes_cli": package})
         modules.start()
         self.addCleanup(modules.stop)
+        if getattr(self, "real_autopilot", False) is not True:   # AutopilotLoopTest drives the real one
+            quiet = patch.object(Autopilot, "poke", lambda _self: False)
+            quiet.start()
+            self.addCleanup(quiet.stop)
 
     def settings(self, **values):
         (self.home / "evolution").mkdir(exist_ok=True)
@@ -84,6 +89,8 @@ class PluginLoopTest(unittest.TestCase):
         register(context)
         return context
 
+
+class PluginLoopTest(PluginBase):
     def test_registrations_match_the_manifest(self):
         context = self.plugin()
         declared = read_manifest(Path(__file__).resolve().parent.parent / "plugin.yaml")
@@ -220,6 +227,36 @@ class PluginLoopTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutopilotLoopTest(PluginBase):
+    """The loop runs by itself after a turn, in the background, and records what it did."""
+    real_autopilot = True
+
+    def test_a_finished_turn_starts_one_background_pass(self):
+        self.settings(evolution={"lessons": "suggest", "reflector": False})
+        context = self.plugin()
+        for index in range(3):
+            context.fire("post_tool_call", tool_name="tool_call", status="error", result=ERROR, args=ARGS,
+                         session_id=f"s{index}", turn_id=f"t{index}", tool_call_id=f"c{index}")
+        context.fire("pre_llm_call", session_id="s0", turn_id="turn", platform="cli", user_message="ok")
+        context.fire("post_llm_call", session_id="s0", turn_id="turn")
+        threads = [thread for thread in __import__("threading").enumerate() if thread.name == "atlas-evolution-autopilot"]
+        for thread in threads:
+            thread.join(10)
+        close_observers()
+        with experience(self.home) as conn:
+            status = json.loads(conn.execute("SELECT value FROM cursor WHERE key='loop_status'").fetchone()[0])
+            self.assertTrue(status["ok"])
+            self.assertEqual(status["summary"]["new_lessons"], 1)    # the recurring failure became a lesson
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM lesson").fetchone()[0], 1)
+
+    def test_autopilot_zero_leaves_the_loop_to_the_operator(self):
+        self.settings(evolution={"autopilot_minutes": 0})
+        context = self.plugin()
+        context.fire("post_llm_call", session_id="s0", turn_id="turn")
+        self.assertEqual([thread for thread in __import__("threading").enumerate()
+                          if thread.name == "atlas-evolution-autopilot"], [])
 
 
 class NativeSettingsTest(unittest.TestCase):

@@ -117,12 +117,17 @@ def reflect(conn: sqlite3.Connection, ask, *, now: float, lang: str = "en", dail
     prune_samples(conn, now=now)
     used = _used_today(conn, today)
     room = max(0, min(PER_RUN, daily_limit - used))
+    rows = [dict(row) for row in candidates(conn, limit=room)]
+    conn.commit()   # the gateway's hook writers must never wait for a model: no transaction spans a call
     drafted, declined, failed = [], 0, 0
-    for row in candidates(conn, limit=room):
+    for row in rows:
         payload = json.dumps({"tool": row["tool"], "failure_class": row["klass"], "detail": row["hint"] or None,
                               "occurrences": row["total"], "sessions": row["sessions"], "days": row["days"],
                               "latest_error_excerpt": row["excerpt"]}, ensure_ascii=False)
         used += 1
+        # Count the call before making it, so a crash or a killed process can never exceed the daily cap.
+        conn.execute("INSERT OR REPLACE INTO cursor VALUES (?, ?)", (f"reflector:{today}", str(used)))
+        conn.commit()
         try:
             answer = ask(INSTRUCTIONS.get(lang, INSTRUCTIONS["en"]), payload)
         except Exception:   # provider, trust or network failure: try again on a later run
@@ -141,6 +146,7 @@ def reflect(conn: sqlite3.Connection, ask, *, now: float, lang: str = "en", dail
         lesson_id = lessons.add_reflected(conn, signature=row["signature"], tool=row["tool"], klass=row["klass"],
                                           hint=row["hint"], text=text, now=now)
         conn.execute("DELETE FROM failure_sample WHERE signature=?", (row["signature"],))
+        conn.commit()
         drafted.append({"lesson_id": lesson_id, "tool": row["tool"], "class": row["klass"], "lesson": text})
     conn.execute("INSERT OR REPLACE INTO cursor VALUES (?, ?)", (f"reflector:{today}", str(used)))
     conn.execute("DELETE FROM cursor WHERE key LIKE 'reflector:%' AND key < ?", (f"reflector:{today}",))
