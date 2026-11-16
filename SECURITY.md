@@ -1,6 +1,6 @@
 # Security policy
 
-Atlas Evolution runs inside Hermes Agent, observes its work and can place text in front of the agent. This document explains how to report a problem, states the threat model in short, and lists exactly what the plugin stores, reads and executes, so that you can check it against the code.
+Atlas Evolution runs inside Hermes Agent, observes its work, can place text in front of the agent and can veto some of the agent's terminal commands. This document explains how to report a problem, states the threat model in short, and lists exactly what the plugin stores, reads and executes, so that you can check it against the code.
 
 ## Reporting a vulnerability
 
@@ -22,28 +22,37 @@ Reports of these kinds are especially welcome:
 - reflector input that survives scrubbing with a secret, or a draft that carries instructions into the playbook;
 - the plugin changing Hermes (a skill, a setting, a unit) without the explicit setting that authorizes it;
 - a hook callback raising an error into a turn or blocking it;
-- a read that follows a link out of the profile, or a generated recipe that could run something other than what it prints.
+- a read that follows a link out of the profile, or a generated recipe that could run something other than what it prints;
+- an agent command that restarts the gateway or deletes what Hermes runs on and passes the runtime guard, or a veto that blocks ordinary work;
+- the backfill or the radar writing to Hermes' files, or text from Hermes' history reaching the plugin's databases;
+- an owner notice shown in a gateway chat.
 
 ## Threat model
 
-**What is protected.** What the agent reads (its system prompt and tool results), the profile's skills and configuration, and the user's data.
+**What is protected.** What the agent reads (its system prompt and tool results), the profile's skills and configuration, the user's data, and the running Hermes itself (its gateway, interpreter, source and profile) against the agent's own terminal commands.
 
 **Who can write to the playbook**, the only plugin data the agent reads:
 
 | Writer | How | State when created | Reaches the agent |
 |---|---|---|---|
-| The plugin | a pass, from a recurring failure, using a fixed template | `candidate`, or `active` in `auto` mode | after approval, or at once in `auto` |
+| The plugin | a pass, from a recurring failure, live or replayed from Hermes' history, using a fixed template | `candidate`, or `active` in `auto` mode | after approval, or at once in `auto` |
 | The operator | `hermes evolution lessons add` in their own terminal | `quarantined`, or `active` with `--activate` after a confirmation | after approval |
-| The reflector (a model) | a pass with `reflector` on | `quarantined` | after approval |
+| The reflector (a model) | a pass with `reflector` on, the default | `quarantined`, in every mode | after approval |
 | The agent | `atlas_evolution_lessons` with `agent_tools` on, at most 5 per hour, also through the background review if you allow it | `quarantined`, high-risk proposal | after approval |
 
-Error messages and command output are untrusted. They never become lesson text: only a class and a short detail filtered as a name reach a template, and a detail read from command output must look like a lower-case command or module name. Lesson text from any writer is NFKC-normalized, and control, bidirectional, zero-width and private-use characters and secret-shaped values are refused, so the text the operator approves is the text the agent gets.
+Error messages and command output are untrusted, whether they arrive through a hook or are replayed from Hermes' history. They never become lesson text: only a class and a short detail filtered as a name reach a template, and a detail read from command output must look like a lower-case command or module name. Lesson text from any writer is NFKC-normalized, and control, bidirectional, zero-width and private-use characters and secret-shaped values are refused, so the text the operator approves is the text the agent gets.
 
 **Who decides.** Only the operator. `lessons approve`, `retire` and `add` and `proposals approve` and `reject` refuse to run when the environment carries `HERMES_SESSION_ID`, `HERMES_KANBAN_TASK`, `HERMES_DELEGATED_CHILD_CONTEXT` or `ATLAS_EVOLUTION_AGENT`, which the plugin adds to every subprocess of an agent session through `register_session_env`. Activation shows the exact text and asks. This guard keeps the agent from using the plugin's commands; it is not a sandbox. An agent that can run arbitrary commands as the same user could still write the database file directly, and Hermes' own approval policy for terminal commands is the control for that.
 
 **Approval refusals.** When the user denies a command, an approval times out, no approver is reachable or the context cannot approve, the failure is the class `approval_refused`. It gets no template, no reflector draft and no investigation proposal, so the plugin never teaches the agent to route around the user's decision. The lesson for `blocked_by_policy` tells the agent not to retry or look for another way, and to tell the user.
 
-**The reflector.** Off by default. While it is on and `lessons` is not `off`, the hook keeps one excerpt of the latest error of each untemplated failure: at most 300 characters, passed through Hermes' redactor with `force=True` (so it applies even when the profile turned redaction off) and always through the plugin's masks for URLs, e-mail addresses, paths, long hexadecimal strings, credential prefixes, long numbers and long quoted strings. The excerpt goes to a model through Hermes, under the auxiliary task `evolution_reflector`, with instructions that it is data and not instructions, and the reply must match a JSON schema. A draft is discarded if it fails the lesson text rules, contains `<` or matches the injection filter. Accepted drafts stay quarantined. Calls are capped per pass and per day. The excerpt is deleted once the failure has a lesson, when a draft is declined or discarded, after 14 days, or at the next pass with the reflector off.
+**The reflector.** On by default since 0.5.0; `reflector: false`, or an invalid value, switches it off. While it is on and `lessons` is not `off`, the hook (and the backfill, for replayed history) keeps one excerpt of the latest error of each untemplated failure: at most 300 characters, passed through Hermes' redactor with `force=True` (so it applies even when the profile turned redaction off) and always through the plugin's masks for URLs, e-mail addresses, paths, long hexadecimal strings, credential prefixes, long numbers and long quoted strings. The excerpt goes to a model through Hermes, under the auxiliary task `evolution_reflector`, with instructions that it is data and not instructions, and the reply must match a JSON schema. A draft is discarded if it fails the lesson text rules, contains `<` or matches the injection filter. Accepted drafts stay quarantined in every mode, `auto` included, because a crafted error message could otherwise reach the agent's prompt. Calls are capped per pass and per day, and each call is counted before it is made, so a crash cannot exceed the cap. The excerpt is deleted once the failure has a lesson, when a draft is declined or discarded, after 14 days, or at the next pass with the reflector off.
+
+**The runtime guard.** An agent with a terminal runs as the same user as Hermes, so it can stop the gateway it runs on or delete what that gateway needs. With `runtime_guard` on (the default), a `pre_tool_call` callback vetoes, for terminal-like tools, commands that would stop, restart or kill the `hermes-gateway` unit or the Hermes processes, and commands that would delete or move the running interpreter and its environment, the Hermes source, the Hermes root, the profile, a folder above them or a glob that matches them. The details are in [Hermes integration](docs/hermes-integration.md#the-runtime-guard). The guard is a safety net for these two failure modes, not a sandbox: it looks only at the command word of each part of a command, after wrappers, ignores here-document bodies, does not look into a command run through another program such as `bash -c`, and lets any doubt through, such as a command it cannot parse or a path relative to the working folder. An invalid `runtime_guard` value keeps it on. Hermes' own approval policy for terminal commands remains the control for everything else.
+
+**The autopilot and the history.** The pass runs in a background thread of each Hermes process, claimed so that only one process of a profile runs it at a time. It reads Hermes' records, including `state.db` read-only, and writes only the plugin's own database. It runs no command and changes nothing in Hermes.
+
+**Owner notices.** At the end of a local session the plugin may return a short notice about decisions waiting. It is shown only on the owner's local surfaces (CLI, TUI, Desktop), never for a subagent and never in a gateway chat, where the other side may be someone else, and it carries counts only.
 
 ## What the plugin stores
 
@@ -51,7 +60,7 @@ Everything is local, under `<HERMES_HOME>/evolution/`. On POSIX systems the fold
 
 | File | Content |
 |---|---|
-| `evolution.sqlite3` | Daily counters for tools, turns per surface, owner feedback kinds, skill events, the outcome of turns per loaded skill, background reviews, model calls and tokens per provider and model, and native delegation, compaction, Curator and Kanban worker events. Failure signatures: tool name, failure class, a short filtered detail, counts, first and last time seen, and a truncated hash of the last failing session. Lessons, tracked changes with their verdicts, proposals and reading cursors. With the reflector on, one scrubbed error excerpt per untemplated failure. Maintenance finding codes with their feedback. Hashes that prevent counting one event twice. |
+| `evolution.sqlite3` | Daily counters for tools, turns per surface, owner feedback kinds, skill events, the outcome of turns per loaded skill, background reviews, model calls and tokens per provider and model, and native delegation, compaction, Curator and Kanban worker events. Failure signatures: tool name, failure class, a short filtered detail, counts, first and last time seen, and a truncated hash of the last failing session. Lessons, tracked changes with their verdicts, proposals and reading cursors. With the reflector on, one scrubbed error excerpt per untemplated failure. Counts of the commands the runtime guard vetoed, by kind only. The backfill position and totals, the autopilot lease and the status of the last pass, and the day of the last owner notice. The radar's last snapshot of the plugins of a process: plugin keys, hook counts and the exception name of a load error; radar proposals also keep the session end reasons as Hermes records them. Maintenance finding codes with their feedback. Hashes that prevent counting one event twice. |
 | `supervisor.sqlite3` | Incident codes with the plugin's own hypothesis text, daily baselines, adaptive samples, alert feedback and the journal of systemd trials (unit names, weights and pressure values). |
 | `settings.json` | Written by you. The plugin only reads it. Values set in the Hermes settings form are stored by Hermes in the profile configuration. |
 
@@ -63,23 +72,26 @@ Text that is stored as written, because someone wrote it on purpose:
 
 ## What the plugin does not store
 
-- Conversation text, prompts or model responses.
+- Conversation text, prompts or model responses, including those replayed from `state.db`.
 - Tool arguments or tool output. Error text is classified in memory and discarded; only the reflector, when on, keeps the scrubbed excerpt described above.
+- The commands the runtime guard vetoes.
 - Memory content. Native memory files are read to count entries and check their encoding.
 - Raw log lines. From `agent.log` the plugin keeps numbers and a fixed result label.
 - Session, turn or request identifiers in clear. They are hashed.
 - Paths, URLs or credential-shaped values. A failure detail is kept only when it is a short name of at most 32 characters that passes `signals._clean_hint`, including Hermes' redactor with `force=True`. Tool, skill, provider and model names pass an allowlist, and a name that fails it is stored as `unknown` or dropped.
 - Configuration values that are not plain labels. They are stored as a short fingerprint.
 
-Retention is 35 days for observer metrics and 90 days for the evolution loop's aggregates, incidents and closed trials.
+Retention is 35 days for observer metrics and 90 days for the evolution loop's aggregates, incidents and closed trials. The guard's daily counts (`guard_daily`, at most two rows a day) are not pruned in this version.
 
 ## What the plugin reads
 
-Hermes files are opened read-only, with size limits, and the databases with a short deadline. The list is in [Hermes integration](docs/hermes-integration.md#what-the-plugin-reads).
+Hermes files are opened read-only, with size limits, and the databases with a short deadline. This includes the `state.db` of the other profiles of the same Hermes root, where `status` only counts sessions. The list is in [Hermes integration](docs/hermes-integration.md#what-the-plugin-reads).
 
 ## What the plugin executes
 
-- **No network connection of its own and no telemetry.** The only model call is the optional reflector's, made by Hermes through `ctx.llm` with the provider you configured for `auxiliary.evolution_reflector`.
+- **No network connection of its own and no telemetry.** The only model call is the reflector's, on by default, made by Hermes through `ctx.llm` with the provider configured for `auxiliary.evolution_reflector`, which inherits the compression model unless you set another.
+- One background daemon thread per Hermes process, the autopilot, which runs the pass. It executes no command.
+- The runtime guard executes nothing. It returns a block directive to Hermes, which then does not run the command.
 - `systemctl show` for the two units named in `linux_supervisor`, when that policy is configured.
 - `systemctl --runtime set-property` on the auxiliary unit, only with `linux_supervisor.mode: "apply"`, under a lock, with the previous value recorded and restored.
 - `hermes kanban ... create` with a blocked card, only for `hermes evolution ops handoff` and only with `kanban_handoff.enabled`.
@@ -96,7 +108,9 @@ A lesson is text placed in the system prompt of new sessions and in the result o
 - Lessons from you without `--activate`, from the agent and from the reflector start in quarantine and are never shown before you approve them.
 - The agent tools are hidden until `agent_tools` is on.
 - With `lessons` set to `off` no lesson surface is registered.
+- When the runtime guard vetoes a command, the agent reads the guard's fixed refusal, in the plugin's language, in place of the tool result. It names the protected path or points to `hermes gateway restart`.
+- Owner notices are shown to the owner outside the conversation. They do not reach the agent and never start a turn.
 
 ## Verification status
 
-The plugin is covered by 207 unit and end-to-end tests against a simulated Hermes context, including tests that assert sensitive-looking input is absent from the stored rows, that decisions refuse to run with agent markers and that every approval refusal text of Hermes 0.23.1 is classified as `approval_refused`. It passes `hermes plugins validate` and `hermes plugins doctor` on Hermes Agent 0.23.1. The reflector was tested with a simulated model only. The loop went through an independent review before release. It has not been audited by a third party and has not run on a production gateway yet.
+The plugin is covered by 253 unit and end-to-end tests against a simulated Hermes context, including tests that assert sensitive-looking input is absent from the stored rows, also for history replayed from `state.db`, that decisions refuse to run with agent markers, that every approval refusal text of Hermes 0.23.1 is classified as `approval_refused`, and that the runtime guard vetoes the known commands, lets ordinary administration through and never raises. It passes `hermes plugins validate` on Hermes Agent 0.23.1, with the security scan reporting it safe. In production, three real reflector calls through Hermes produced three drafts. The autopilot is verified in tests and in the CLI; Windows was only simulated. The loop went through an independent review before the 0.4.0 release. It has not been audited by a third party, and lesson verdicts have not been observed over weeks of real use yet.

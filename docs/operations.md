@@ -2,7 +2,7 @@
 
 **English** | [Português (Brasil)](pt-BR/operations.md)
 
-Besides the [evolution loop](evolution-loop.md), Atlas Evolution supervises the host and the workload of a Hermes profile. It examines what Hermes records, measures the load of the agent and of Linux, and cross-checks the evidence to suggest tests and to conduct reversible remediation. It observes by default, uses only the public Hermes plugin API and keeps your memory provider, plugins and router as they are.
+Besides the [evolution loop](evolution-loop.md), Atlas Evolution supervises the host and the workload of a Hermes profile. It examines what Hermes records, measures the load of the agent and of Linux, and cross-checks the evidence to suggest tests and to conduct reversible remediation. The supervisor observes by default: a Linux trial needs explicit settings. It uses the public Hermes plugin API and keeps your memory provider, plugins and router as they are. The runtime guard, which stops the agent from restarting the gateway or deleting what Hermes runs on, is described in [Hermes integration](hermes-integration.md#the-runtime-guard).
 
 All commands below are subcommands of `hermes evolution`. Field names, codes and identifiers in their JSON output are always in English. Human-readable text (hypotheses, alternatives, recommendations, plans, Kanban cards and error messages) is printed in English or Brazilian Portuguese: `--lang en|pt` before or after any subcommand, otherwise the plugin's `language` setting, then `HERMES_LANGUAGE`, `display.language` and the process locale, and finally English. The command help follows `HERMES_LANGUAGE`, `display.language` and the locale.
 
@@ -58,7 +58,7 @@ hermes evolution ops similar "slow disk and long research"
 | Command | What it does |
 |---|---|
 | `ops inspect` | Collects and explains the signals at this moment. It records no observation and changes nothing in Hermes. |
-| `ops tick [--notify-only]` | Collects, compares with history, records hypotheses and baselines, and carries out only the actions the settings allow. It also runs one evolution pass at most once an hour and returns it in the field `evolution`. If the tick fails, it tries to end an active Linux trial. |
+| `ops tick [--notify-only]` | Collects, compares with history, records hypotheses and baselines, and carries out only the actions the settings allow. It also runs one evolution pass at most once an hour and returns it in the field `evolution`; the pass is claimed like the autopilot's, so the two never run at the same time. If the tick fails, it tries to end an active Linux trial. |
 | `ops history` | Shows up to 100 incidents and 100 trials with their state. |
 | `ops review [--days N]` | Cross-checks adaptive measurements, feedback and trial outcomes. Default 14 days, from 1 to 90. |
 | `ops feedback CODE helpful\|dismissed\|reset` | Rates an adaptive alert that was already reported. |
@@ -82,7 +82,7 @@ python -m hermes_evolution --home /path/to/profile --hermes-version 0.23.1 \
   ops inspect --upstream-tag v0.23.1
 ```
 
-`--home` defaults to `HERMES_HOME`. The standalone runner reads the profile's `config.yaml` (up to 1 MiB) when PyYAML is installed, for the memory provider, limits, the Cron, Kanban and delegation settings, `display.language` and the plugin's own settings. Without PyYAML it uses defaults. `--hermes-source` adds the tree of plugins and skills distributed with Hermes to the inventory. The runner never creates a `--home` that does not exist: commands that open the Evolution databases fail, `health` reports `profile_present: false`, and `ops history`, `ops similar`, `ops rollback`, `ops plan`, `ops schedule-spec` and `ops handoff` return without error. The reflector of the evolution loop does not run in the standalone runner.
+`--home` defaults to `HERMES_HOME`. The standalone runner reads the profile's `config.yaml` (up to 1 MiB) when PyYAML is installed, for the memory provider, limits, the Cron, Kanban and delegation settings, `display.language` and the plugin's own settings. Without PyYAML it uses defaults. `--hermes-source` adds the tree of plugins and skills distributed with Hermes to the inventory. The runner never creates a `--home` that does not exist: commands that open the Evolution databases fail, `health` reports `profile_present: false`, and `ops history`, `ops similar`, `ops rollback`, `ops plan`, `ops schedule-spec` and `ops handoff` return without error. The reflector of the evolution loop does not run in the standalone runner, and neither do the hooks, the autopilot and the runtime guard, which need the plugin loaded by Hermes.
 
 ## Diagnoses and adaptive alerts
 
@@ -181,11 +181,11 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 
 ## Configuration keys
 
-`<HERMES_HOME>/evolution/settings.json` is an optional JSON object of up to 64 KiB. The plugin reads it when it loads, so restart the gateway after a change; the commands read it each time. The options of the evolution loop are described in [The evolution loop](evolution-loop.md#settings-and-language). Those exposed in the Hermes settings form win over the same keys in this file.
+`<HERMES_HOME>/evolution/settings.json` is an optional JSON object of up to 64 KiB. The plugin reads it when it loads, so restart the gateway after a change; each autopilot pass and each command read it again. The options of the evolution loop are described in [The evolution loop](evolution-loop.md#settings-and-language). Those exposed in the Hermes settings form win over the same keys in this file.
 
 | Key | Format | Default | Effect |
 |---|---|---|---|
-| `evolution` | object | see the loop | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `owner_sender_ids`, `reflector`, `reflector_daily_limit` |
+| `evolution` | object | see the loop | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `owner_sender_ids`, `reflector`, `reflector_daily_limit`, `autopilot_minutes`, `runtime_guard` |
 | `agent_advice` | boolean | `false` | Exposes the agent tools (`agent_tools` in the Hermes form). |
 | `sensitivity` | `low`, `balanced`, `high` | `balanced` | Threshold of adaptive alerts. |
 | `rates_usd_per_million` | object by provider and model | none | Prices for cost estimates (see [Usage and cost](#usage-and-cost)). |
@@ -200,9 +200,9 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 ## Data and compatibility
 
 - The databases live in `<HERMES_HOME>/evolution/`: `evolution.sqlite3` for observer metrics and the evolution loop, and `supervisor.sqlite3` for incidents, baselines, adaptive samples and trials. Observer metrics are kept for 35 days; the loop's aggregates, incidents and closed trials for 90 days. The 35-day retention is applied by the first hook write of each UTC day in each process, so it holds even when no tick is scheduled. Hermes' own backups and logs follow their existing retention.
-- Version 0.4.0 migrates `evolution.sqlite3` from schemas 0 to 6 to schema 7 automatically and refuses any other schema. An earlier plugin version cannot open a migrated database: going back requires restoring a backup of the file or deleting it.
+- Version 0.5.0 migrates `evolution.sqlite3` from schemas 0 to 7 to schema 8 automatically and refuses any other schema. An earlier plugin version cannot open a migrated database: going back requires restoring a backup of the file or deleting it.
 - Hook writes share one connection per process and profile, which stays open while Hermes runs. On Windows this means `evolution.sqlite3` cannot be deleted while Hermes is running.
-- Hermes' own databases (`state.db`, Kanban boards) are opened read-only.
+- Hermes' own databases (`state.db`, Kanban boards) are opened read-only, including the `state.db` of the other profiles of the same root, where `status` only counts sessions.
 - Note files from version 0.1 are preserved. The commands that record new notes and the legacy chat command require `legacy_memory_commands: true`. The old note injection also requires `automatic_shared_recall: true`. By default, inspection uses the signals of Hermes' native memory.
 - The integration contract was checked against the official v0.23.1 tree, commit `3b421578588243f920886e6fe79a6faa87ea026e`.
 
@@ -218,7 +218,7 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 
 ## Removing the plugin
 
-Run `hermes evolution ops rollback` before disabling the plugin with `hermes plugins disable hermes-evolution`, then reload the profile's gateway.
+Run `hermes evolution ops rollback` before disabling the plugin with `hermes plugins disable hermes-evolution`, then reload the profile's gateway. The plugin is installed per profile, so repeat this in each profile that has it (`hermes -p <profile> ...`).
 
 ## References
 

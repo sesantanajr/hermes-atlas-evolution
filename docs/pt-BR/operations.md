@@ -2,7 +2,7 @@
 
 [English](../operations.md) | **Português (Brasil)**
 
-Além do [ciclo de evolução](evolution-loop.md), o Atlas Evolution supervisiona o host e a carga de um perfil do Hermes. Ele examina o que o Hermes grava, mede a carga do agente e do Linux, e cruza evidências para sugerir testes e conduzir remediações reversíveis. Por padrão, só observa. Usa apenas a API pública de plugins do Hermes e preserva o seu provedor de memória, os seus plugins e o seu roteador.
+Além do [ciclo de evolução](evolution-loop.md), o Atlas Evolution supervisiona o host e a carga de um perfil do Hermes. Ele examina o que o Hermes grava, mede a carga do agente e do Linux, e cruza evidências para sugerir testes e conduzir remediações reversíveis. Por padrão, o supervisor só observa: um ensaio no Linux exige configuração explícita. Ele usa a API pública de plugins do Hermes e preserva o seu provedor de memória, os seus plugins e o seu roteador. A guarda de runtime, que impede o agente de reiniciar o gateway ou de apagar aquilo de que o Hermes precisa para rodar, está descrita em [Integração com o Hermes](hermes-integration.md#a-guarda-de-runtime).
 
 Todos os comandos abaixo são subcomandos de `hermes evolution`. Nomes de campos, códigos e identificadores da saída em JSON estão sempre em inglês. O texto para leitura (hipóteses, alternativas, recomendações, planos, cartões Kanban e mensagens de erro) sai em inglês ou português do Brasil: `--lang en|pt` antes ou depois de qualquer subcomando; senão, a configuração `language` do plugin, depois `HERMES_LANGUAGE`, `display.language` e o locale do processo e, por fim, inglês. A ajuda dos comandos segue o `HERMES_LANGUAGE`, o `display.language` e o locale.
 
@@ -58,7 +58,7 @@ hermes evolution ops similar "disco lento e pesquisas demoradas"
 | Comando | O que faz |
 |---|---|
 | `ops inspect` | Coleta e explica os sinais do momento. Não grava observações e não altera nada no Hermes. |
-| `ops tick [--notify-only]` | Coleta, compara com o histórico, registra hipóteses e linhas de base e executa somente as ações habilitadas pela configuração. Também roda uma passada do ciclo de evolução, no máximo uma vez por hora, e a devolve no campo `evolution`. Se o tick falhar, tenta encerrar um ensaio ativo no Linux. |
+| `ops tick [--notify-only]` | Coleta, compara com o histórico, registra hipóteses e linhas de base e executa somente as ações habilitadas pela configuração. Também roda uma passada do ciclo de evolução, no máximo uma vez por hora, e a devolve no campo `evolution`; a passada é reservada como a do autopilot, então as duas nunca rodam ao mesmo tempo. Se o tick falhar, tenta encerrar um ensaio ativo no Linux. |
 | `ops history` | Mostra até 100 incidentes e 100 ensaios, com o estado de cada um. |
 | `ops review [--days N]` | Cruza medições adaptativas, feedback e resultados dos ensaios. Padrão de 14 dias, de 1 a 90. |
 | `ops feedback CODIGO helpful\|dismissed\|reset` | Avalia um alerta adaptativo já emitido. |
@@ -82,7 +82,7 @@ python -m hermes_evolution --home /caminho/do/perfil --hermes-version 0.23.1 \
   ops inspect --upstream-tag v0.23.1
 ```
 
-O `--home` usa `HERMES_HOME` por padrão. O executor independente lê o `config.yaml` do perfil (até 1 MiB) quando o PyYAML está instalado, para obter o provedor de memória, os limites, as configurações de Cron, Kanban e delegação, o `display.language` e as configurações do próprio plugin. Sem o PyYAML, usa os padrões. `--hermes-source` acrescenta ao inventário a árvore de plugins e skills distribuída com o Hermes. O executor nunca cria um `--home` inexistente: os comandos que abrem os bancos do Evolution falham, o `health` informa `profile_present: false`, e `ops history`, `ops similar`, `ops rollback`, `ops plan`, `ops schedule-spec` e `ops handoff` terminam sem erro. O refletor do ciclo de evolução não roda no executor independente.
+O `--home` usa `HERMES_HOME` por padrão. O executor independente lê o `config.yaml` do perfil (até 1 MiB) quando o PyYAML está instalado, para obter o provedor de memória, os limites, as configurações de Cron, Kanban e delegação, o `display.language` e as configurações do próprio plugin. Sem o PyYAML, usa os padrões. `--hermes-source` acrescenta ao inventário a árvore de plugins e skills distribuída com o Hermes. O executor nunca cria um `--home` inexistente: os comandos que abrem os bancos do Evolution falham, o `health` informa `profile_present: false`, e `ops history`, `ops similar`, `ops rollback`, `ops plan`, `ops schedule-spec` e `ops handoff` terminam sem erro. O refletor do ciclo de evolução não roda no executor independente, nem os hooks, o autopilot e a guarda de runtime, que dependem do plugin carregado pelo Hermes.
 
 ## Diagnósticos e alertas adaptativos
 
@@ -181,11 +181,11 @@ Os cenários de mudança e reversão de peso são testados com um adaptador de s
 
 ## Chaves de configuração
 
-O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 KiB. O plugin o lê quando carrega, então reinicie o gateway depois de mudar; os comandos o leem a cada execução. As opções do ciclo de evolução estão descritas em [O ciclo de evolução](evolution-loop.md#configuração-e-idioma). As que aparecem no formulário de configurações do Hermes vencem as mesmas chaves deste arquivo.
+O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 KiB. O plugin o lê quando carrega, então reinicie o gateway depois de mudar; cada passada do autopilot e cada comando o leem de novo. As opções do ciclo de evolução estão descritas em [O ciclo de evolução](evolution-loop.md#configuração-e-idioma). As que aparecem no formulário de configurações do Hermes vencem as mesmas chaves deste arquivo.
 
 | Chave | Formato | Padrão | Efeito |
 |---|---|---|---|
-| `evolution` | objeto | veja o ciclo | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `owner_sender_ids`, `reflector`, `reflector_daily_limit` |
+| `evolution` | objeto | veja o ciclo | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `owner_sender_ids`, `reflector`, `reflector_daily_limit`, `autopilot_minutes`, `runtime_guard` |
 | `agent_advice` | booleano | `false` | Libera as ferramentas do agente (`agent_tools` no formulário do Hermes). |
 | `sensitivity` | `low`, `balanced`, `high` | `balanced` | Limiar dos alertas adaptativos. |
 | `rates_usd_per_million` | objeto por provedor e modelo | nenhum | Preços para estimar custos (veja [Uso e custo](#uso-e-custo)). |
@@ -200,9 +200,9 @@ O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 
 ## Dados e compatibilidade
 
 - Os bancos ficam em `<HERMES_HOME>/evolution/`: `evolution.sqlite3`, com as métricas do observador e o ciclo de evolução, e `supervisor.sqlite3`, com incidentes, linhas de base, amostras adaptativas e ensaios. As métricas do observador ficam por 35 dias; os agregados do ciclo, os incidentes e os ensaios encerrados, por 90 dias. A retenção de 35 dias é aplicada pela primeira gravação de hook de cada dia UTC em cada processo, então vale mesmo sem `tick` agendado. Backups e logs próprios do Hermes seguem a retenção que já têm.
-- A versão 0.4.0 migra o `evolution.sqlite3` dos esquemas 0 a 6 para o esquema 7 automaticamente e recusa qualquer outro esquema. Uma versão anterior do plugin não abre um banco migrado: voltar de versão exige restaurar um backup do arquivo ou apagá-lo.
+- A versão 0.5.0 migra o `evolution.sqlite3` dos esquemas 0 a 7 para o esquema 8 automaticamente e recusa qualquer outro esquema. Uma versão anterior do plugin não abre um banco migrado: voltar de versão exige restaurar um backup do arquivo ou apagá-lo.
 - As gravações dos hooks compartilham uma conexão por processo e por perfil, que fica aberta enquanto o Hermes roda. No Windows, isso significa que o `evolution.sqlite3` não pode ser apagado enquanto o Hermes está rodando.
-- Os bancos do próprio Hermes (`state.db`, quadros Kanban) são abertos somente para leitura.
+- Os bancos do próprio Hermes (`state.db`, quadros Kanban) são abertos somente para leitura, inclusive o `state.db` dos outros perfis da mesma raiz, onde o `status` só conta sessões.
 - Arquivos de notas da versão 0.1 são preservados. Os comandos que registram novas notas e o comando de chat legado exigem `legacy_memory_commands: true`. A injeção antiga de notas também exige `automatic_shared_recall: true`. Por padrão, a inspeção usa os sinais da memória nativa do Hermes.
 - O contrato de integração foi verificado na árvore oficial v0.23.1, commit `3b421578588243f920886e6fe79a6faa87ea026e`.
 
@@ -218,7 +218,7 @@ O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 
 
 ## Como retirar o plugin
 
-Execute `hermes evolution ops rollback` antes de desabilitar o plugin com `hermes plugins disable hermes-evolution`, e recarregue o gateway do perfil.
+Execute `hermes evolution ops rollback` antes de desabilitar o plugin com `hermes plugins disable hermes-evolution`, e recarregue o gateway do perfil. O plugin é instalado por perfil, então repita isso em cada perfil que o tiver (`hermes -p <perfil> ...`).
 
 ## Referências
 
