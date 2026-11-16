@@ -458,9 +458,9 @@ class HermesCareTest(unittest.TestCase):
         report = hermes_care.check(self.home, now=NOW, root=self.root)
         self.assertFalse(report["gateway"]["running"])
         self.assertIn("gateway_crashed", report["findings"])
-        # this pid alive but started at another time: the number now belongs to another program
-        (self.home / "gateway_state.json").write_text(json.dumps({**state, "pid": os.getpid(), "start_time": 1}))
-        self.assertIn("gateway_crashed", hermes_care.check(self.home, now=NOW, root=self.root)["findings"])
+        if Path("/proc/self/stat").exists():   # Linux: this pid alive but started at another time is another program
+            (self.home / "gateway_state.json").write_text(json.dumps({**state, "pid": os.getpid(), "start_time": 1}))
+            self.assertIn("gateway_crashed", hermes_care.check(self.home, now=NOW, root=self.root)["findings"])
 
     @POSIX_ONLY
     def test_a_fresh_heartbeat_is_a_running_gateway_whatever_its_pid(self):
