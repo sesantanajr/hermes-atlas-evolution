@@ -1,9 +1,9 @@
 {
   "name": "hermes-atlas-evolution",
   "label": "Evolution",
-  "description": "What this profile learned from its own failures, what waits for your decision, the settings and the digest. With a dashboard login you decide here: approve, approve all, settings, undo.",
+  "description": "What this profile learned from its own failures, what waits for your decision, the settings and the digest. With a dashboard login you decide here, for every profile: approve, approve all, settings, undo. Without one, the same in the terminal: hermes evolution.",
   "icon": "Sparkles",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "tab": { "path": "/evolution", "position": "after:analytics" },
   "entry": "dist/index.js",
   "css": "dist/style.css",

@@ -72,7 +72,9 @@ The command-line `plugins update` only replaces the files: it does not reload a 
 
 ## What it does
 
-- **Run it from the Hermes dashboard.** An **Evolution** tab in the dashboard and in Hermes Desktop shows what the profile learned and what waits for you, and, when your dashboard asks for a login, lets you decide there: approve or reject each lesson, **approve all** after reading every sentence, decide proposals, change the settings, pick who is you in chats from suggestions, and **undo** any decision. A dashboard without a login stays read-only, because any program on the machine could act there ([details](docs/hermes-integration.md#the-dashboard-panel)).
+- **A menu in your terminal.** `hermes evolution`, with no command, opens a numbered menu in your own terminal: the lessons that wait for you (one by one or **approve all**), proposals, active lessons, the history with **undo**, every setting (or **the recommended setup** in one step), who is you in chats, Hermes' memory, the digest, the full status and a learning pass now. It decides with the same rules as the dashboard panel and lands in the same history. In an agent's shell, or without a terminal to answer from, it prints the status instead.
+- **Run it from the Hermes dashboard.** An **Evolution** tab in the dashboard and in Hermes Desktop shows what the profile learned and what waits for you, and, when your dashboard asks for a login, lets you decide there, for the dashboard's own profile and for every other profile selected in it (with the plugin enabled in the dashboard's own profile too): approve or reject each lesson, **approve all** after reading every sentence, decide proposals, change the settings, pick who is you in chats from suggestions, and **undo** any decision. A dashboard without a login stays read-only, because any program on the machine could act there ([details](docs/hermes-integration.md#the-dashboard-panel)).
+- **Keeps Hermes' memory lean.** Hermes puts `MEMORY.md` and `USER.md` in every session's prompt. The menu shows how full each one is and what repeats in them (the same entry twice, one entry that says what another says, very similar entries); you choose which one stays, and the other is taken out under Hermes' own memory lock, with a copy of the file kept and an **undo**. Each repeat taken out saves its tokens on every turn ([details](docs/evolution-loop.md#hermes-memory)).
 - **Carries lessons between profiles.** `lessons export` and `lessons import --from <profile>` bring what one profile learned to another, or to another machine, after showing you each sentence. Imported lessons wait until your own turns hit their failure there, and are measured there like any other ([details](docs/evolution-loop.md#lesson-packs)).
 - **Learns from the history Hermes already keeps.** The first passes replay the last 14 days of the profile's sessions, so a failure that recurred last week can become a lesson on the first day.
 - **Turns repeated tool failures into lessons.** A failure seen at least 3 times, in 2 sessions or on 2 days, becomes one sentence such as "When calling `example_search`, always pass the required argument `query`." Calls that Hermes ends at its own deadline count too. The agent reads the active lessons at the start of each session.
@@ -94,6 +96,7 @@ Subcommands of `hermes evolution`. `--lang en|pt` works with any of them.
 
 | Command | What it does |
 |---|---|
+| *(none)*, `menu` | The interactive menu, in your own terminal. Without one (a script, a pipe, an agent's shell), the bare command prints `status`. |
 | `status` | Shows whether the plugin observes, learns and protects this profile, and the state of every profile of this Hermes. |
 | `report [--days N]` | The digest of the last N days (7 by default), compared with the period before. |
 | `lessons list` | The lessons, with origin, evidence and measured effect. |
@@ -138,13 +141,13 @@ Every option, `settings.json` and what happens with an invalid value: [Settings 
 
 ## Privacy and safety
 
-- **What it keeps.** Counters, failure classes, hashed session IDs, lesson sentences and proposals, under `<HERMES_HOME>/evolution/`. It keeps no conversation text, prompt, tool argument, tool output or memory content. While the reflector is on, it keeps a short excerpt of the error message, up to 300 characters with secrets, paths and addresses masked, per failure in your own turns that has no template, until the failure has a lesson or for 14 days.
+- **What it keeps.** Counters, failure classes, hashed session IDs, lesson sentences and proposals, under `<HERMES_HOME>/evolution/`. It keeps no conversation text, prompt, tool argument, tool output or memory content, except the copy of a memory file it keeps when you take an entry out (owner-only, in `evolution/memory-backups/`, the latest 100). While the reflector is on, it keeps a short excerpt of the error message, up to 300 characters with secrets, paths and addresses masked, per failure in your own turns that has no template, until the failure has a lesson or for 14 days.
 - **What it reads**, always read-only: Hermes' own history, logs and skill records, for `status` the session counts of your other profiles and of each chat channel, and, for `hermes evolution owner` in your own terminal, the sender ids of each channel ([full list](docs/hermes-integration.md#what-the-plugin-reads)).
 - **Runs in the background.** Only inside Hermes: a small timer checks every 10 minutes whether a learning round is due.
 - **Model calls.** Only the reflector calls an AI model, through Hermes and its provider settings (auxiliary task `evolution_reflector`), at most 3 times per pass and 6 times a day by default. `reflector: false` stops it.
 - **Network.** No connection of its own and no telemetry.
 - **Gateway chats.** The plugin sends nothing to a chat. Its notices appear only in Hermes on your own machine (CLI, TUI, Desktop), never in a gateway chat. What the other side of a chat sees is what the agent writes.
-- **Decisions.** The commands that approve, reject or activate something do not run in the agent's terminal: only you decide, in yours. The plugin changes only its own data; changes to Hermes are printed as commands for you.
+- **Decisions.** Only you decide: in your own terminal (the menu or the commands, which refuse to run in the agent's terminal) or in a dashboard that asks for a login. The plugin changes its own data, its own settings through Hermes' `hermes config set`, and Hermes' memory files only to take out the entry you chose; other changes to Hermes are printed as commands for you.
 
 Details: [SECURITY.md](SECURITY.md).
 

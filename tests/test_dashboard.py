@@ -61,7 +61,7 @@ class PanelTest(unittest.TestCase):
             return
         app = FastAPI()
         app.include_router(self.api.router, prefix="/api/plugins/hermes-atlas-evolution")
-        self.api._current = lambda: (self.home, {})
+        self.api._current = lambda target=None: (self.home, {})
         client = TestClient(app)
         reply = client.get("/api/plugins/hermes-atlas-evolution/snapshot?days=7&lang=en")
         self.assertEqual(reply.status_code, 200)

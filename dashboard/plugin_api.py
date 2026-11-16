@@ -2,21 +2,28 @@
 
 It shows what `hermes evolution status`, `report`, `lessons list`, `proposals list` and `decisions list` show,
 for the profile the dashboard is looking at (Hermes scopes every plugin request to that profile and refuses it
-where the plugin is disabled), and since 0.8.1 it lets the owner decide there too: approve, reject, retire or
-reactivate a lesson, approve every waiting lesson at once, decide a proposal, change the settings, choose who
-counts as the owner, and undo any of it.
+where the plugin is disabled), and lets the owner decide there too: approve, reject, retire or reactivate a lesson,
+approve every waiting lesson at once, decide a proposal, change the settings, choose who counts as the owner, and
+undo any of it. The rules are the terminal menu's (admin.py), so both places decide the same way.
 
-Who may decide. Every request here is already authenticated by the dashboard. A decision is accepted only when
-the request carries no dashboard session token: with a dashboard login (password or OAuth) the browser sends
-the session cookie and no token, and the Desktop app sends its own grant. Without a login, the dashboard hands
-its token to anyone who loads the page, the agent's terminal included, so there the panel stays read-only and
-says why. A decision also needs the `X-Atlas-Evolution: 1` header, which a page of another site cannot send
-without the browser asking first. The runtime guard vetoes the agent's own commands that call these routes.
+Who may decide (decision_policy). Every request here is already authenticated by the dashboard. A decision is
+accepted only from the owner's login: a dashboard login (password or OAuth) that Hermes verified, or the Desktop
+app's grant, and only in the dashboard's own process, where Hermes' login gate leaves the session it verified.
+Without a login, the dashboard hands its token to anyone who loads the page, the agent's terminal included, so
+there the panel stays read-only and says why. A decision also needs the `X-Atlas-Evolution: 1` header, which a
+page of another site cannot send without the browser asking first. The runtime guard vetoes the agent's own
+commands that call these routes.
+
+Other profiles. Hermes serves the panel of a profile other than the dashboard's own from that profile's plugin
+host, with no credential and a verdict that is the same for a login and for the open dashboard's token, so the
+plugin host never decides. The panel then asks the dashboard's own process instead (`?profile=current`, the
+dashboard's profile for Hermes), naming the profile on screen in `target`: that profile's data and settings are
+read and decided there, under the same login rule, when Atlas Evolution is installed and enabled in it.
 
 Settings are written with Hermes' own public command, `hermes --profile <name> config set
-plugins.entries.hermes-atlas-evolution.settings.<key> <value>` (the one the documentation and `hermes evolution
-owner` give the owner), into the profile's config.yaml, and the running gateway picks them up within a minute
-(integration.refresh_settings); the runtime guard and tool hints apply at the next load of the plugin.
+plugins.entries.hermes-atlas-evolution.settings.<key> <value>`, into the profile's config.yaml, and the running
+gateway picks them up within a minute (integration.refresh_settings); the runtime guard and tool hints apply at the
+next load of the plugin.
 
 The plugin's code is loaded from the folder next to this one under a private module name, so the panel never
 shares state with a copy of the plugin the dashboard process may have loaded for its hooks.
@@ -35,12 +42,10 @@ from pathlib import Path
 PACKAGE = "hermes_atlas_evolution_panel"
 PLUGIN_ID = "hermes-atlas-evolution"
 _LOCK = threading.Lock()
-# Settings the panel may change: those of the plugin's settings form (plugin.yaml config_schema).
+# Settings the panel may change: those of the plugin's settings form (plugin.yaml config_schema); admin.SETTINGS.
 SETTINGS = ("lessons", "language", "tool_hints", "feedback_signals", "agent_tools", "slow_turn_seconds",
             "owner_sender_ids", "owner_platforms", "reflector", "reflector_daily_limit", "autopilot_minutes",
             "runtime_guard")
-# Where the form's key and the plugin's option differ (evolve.options names the agent tools agent_advice).
-_OPTION = {"agent_tools": "agent_advice"}
 
 
 def _module(name: str):
@@ -64,24 +69,45 @@ def _prefix(profile: str) -> str:
     return "hermes" if profile == "default" else f"hermes -p {profile}"
 
 
-_LOGIN_COOKIE = re.compile(r"(?:^|;)\s*hermes_session_at(?:_[\w-]+)?=[^;\s]")
+# Hermes names the login cookie by the request's shape (hermes_cli/dashboard_auth/cookies.py): bare over HTTP,
+# `__Host-` on HTTPS (a public_url behind a proxy, as most logins are), `__Secure-` under a path prefix, with
+# `_<gateway>` on the gateway's Webapp. Read only where Hermes publishes no verified session (older hosts).
+_LOGIN_COOKIE = re.compile(r"(?:^|;)\s*(?:__Host-|__Secure-)?hermes_session_at(?:_[\w-]+)?=[^;\s]")
+_SHARED_TOKEN_PROVIDER = "session-token"   # Hermes' deployment session token, as a session provider
 
 
 def decision_policy(headers, query, *, state=None, app_state=None) -> tuple[bool, str]:
     """(may decide, why) for a request the dashboard already authenticated. `headers` and `query` are the request's
-    case-insensitive mappings; `state` and `app_state` are request.state and request.app.state when this router runs
-    in the dashboard process (absent when Hermes forwards the request to a plugin host).
+    case-insensitive mappings; `state` and `app_state` are request.state and request.app.state.
 
-    Only the owner's login decides: the session cookie a dashboard login (password or OAuth) sets, or the grant
-    Hermes Desktop sends (verified by Hermes before this router runs). The dashboard's session token, in its header,
-    in `?token=` or as `Authorization: Bearer` (Hermes' legacy form), is what a dashboard without a login hands to
-    any program on the machine, the agent's terminal included: with it, nothing is decided here."""
+    Only the owner's login decides: a dashboard login Hermes verified (password or OAuth), or the grant Hermes
+    Desktop sends. The dashboard's session token, in its header, in `?token=` or as `Authorization: Bearer`
+    (Hermes' legacy form), is what a dashboard without a login hands to any program on the machine, the agent's
+    terminal included: with it, nothing is decided here.
+
+    Where this runs decides what it can see:
+    - in the dashboard process (the profile that launched it), Hermes' login gate leaves the verified session on
+      request.state.session, with the provider that verified it;
+    - in a secondary profile's plugin host, Hermes forwards no credential (no cookie, no token) and only its own
+      verdict, request.state.hosted_http_authenticated, which is True for a login and for the open dashboard's
+      token alike, and the plugin host's environment hides how the dashboard admits people: nothing is decided
+      there ("other_profile"), and the panel asks the dashboard's own process (see the module's docstring)."""
     if headers.get("x-hermes-session-token") or query.get("token") or headers.get("authorization"):
         return False, "open_dashboard"
     if state is not None and getattr(state, "native_http_principal", None):
         return True, "desktop"
-    if app_state is not None and getattr(app_state, "auth_required", None) is False:
+    if state is not None and getattr(state, "hosted_http_authenticated", None) is not None:
+        return False, "other_profile"
+    required = getattr(app_state, "auth_required", None) if app_state is not None else None
+    if required is False:
         return False, "open_dashboard"   # the dashboard process itself says it has no login
+    if required is True:   # Hermes' gate ran: only the session it verified counts
+        session = getattr(state, "session", None) if state is not None else None
+        if session is None:
+            return False, "open_dashboard"
+        if getattr(session, "provider", None) == _SHARED_TOKEN_PROVIDER:
+            return False, "shared_token"
+        return True, "login"
     if headers.get("x-hermes-gateway-ticket"):
         return True, "desktop"   # Hermes verified the grant before forwarding (a forged one is refused there)
     if _LOGIN_COOKIE.search(headers.get("cookie") or ""):
@@ -91,7 +117,7 @@ def decision_policy(headers, query, *, state=None, app_state=None) -> tuple[bool
 
 def current_settings(home: Path, runtime_config: dict) -> dict:
     """The value of each setting as the plugin uses it now, by its key in the settings form."""
-    return _module("cli").setting_values(home, runtime_config)
+    return _module("admin").current_settings(home, runtime_config)
 
 
 def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang: str | None = None,
@@ -118,6 +144,8 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
     channels = status.chat_senders(home, since=now - 30 * 86_400, owners=opts["owner_sender_ids"],
                                    platforms=opts["owner_platforms"])
     suggestions = status.owner_suggestions(channels, owners=opts["owner_sender_ids"], platforms=opts["owner_platforms"])
+    values = current_settings(home, runtime_config)
+    recommended = _module("admin").recommended_settings(values, suggestions) if can_decide else None
     if not can_decide:   # counts only, as `status` shows them
         channels = [{**channel, "senders": [{"id": None, "sessions": item["sessions"], "owner": item["owner"]}
                                             for item in channel["senders"]]} for channel in channels]
@@ -134,11 +162,12 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
         "lang": lang, "days": days, "generated": now, "profile": state["profile"], "version": state["plugin_version"],
         "mode": opts["lessons"], "status": state, "report": digest, "lessons": playbook, "proposals": queue,
         "pending": pending, "history": history, "can_decide": can_decide, "decide_reason": decide_reason,
-        "settings": {"values": current_settings(home, runtime_config), "reload": reload_keys,
+        "settings": {"values": values, "reload": reload_keys, "recommended": recommended,
                      "reload_keys": ["runtime_guard", "tool_hints"], "problems": sorted(set(settings_problems))},
         "owner": {"channels": channels, "suggestions": suggestions},
         "status_md": status.markdown(state, lang), "report_md": report.markdown(digest, lang),
-        "commands": {"review": f"{hermes} evolution lessons review", "learn": f"{hermes} evolution learn",
+        "commands": {"menu": f"{hermes} evolution", "review": f"{hermes} evolution lessons review",
+                     "learn": f"{hermes} evolution learn",
                      "approve_lesson": f"{hermes} evolution lessons approve {{id}}",
                      "retire_lesson": f"{hermes} evolution lessons retire {{id}}",
                      "approve_proposal": f"{hermes} evolution proposals approve {{id}}",
@@ -148,131 +177,70 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
     }
 
 
-_BOOLEANS = ("tool_hints", "feedback_signals", "agent_tools", "reflector", "runtime_guard")
-
-
 def validate_settings(values: dict) -> None:
-    """Refuse a value the plugin would not use as given, with the plugin's own rules (evolve.options, strict), before
-    anything is written: Hermes' `config set` checks the key, not the plugin's ranges."""
-    cli, evolve = _module("cli"), _module("evolve")
-    candidate: dict = {"evolution": {}}
-    for key, value in values.items():
-        path = cli.NATIVE_KEYS[key]
-        if len(path) == 1:
-            candidate[path[0]] = value
-        else:
-            candidate.setdefault(path[0], {})[path[1]] = value
-        if key in _BOOLEANS and type(value) is not bool:
-            raise ValueError(f"{key} must be true or false")
-    if "language" in values and values["language"] not in ("auto", "en", "pt"):
-        raise ValueError("language must be auto, en or pt")
-    evolve.options(candidate, {}, strict=True)
+    _module("admin").validate_settings(values)
 
 
 def write_settings(home: Path, runtime_config: dict, values: dict, *, now: float, writer=None) -> dict:
-    """Write settings through Hermes' plugin-settings writer and log each change (so it can be undone).
-    Unknown keys and values Hermes' schema refuses raise ValueError; nothing is written then."""
-    if not isinstance(values, dict) or not values or any(key not in SETTINGS for key in values):
-        raise ValueError("Unknown setting")
-    validate_settings(values)
-    before = current_settings(home, runtime_config)
-    changed = {key: value for key, value in values.items() if before.get(key) != value}
-    if not changed:
-        return {"written": [], "reload": []}
-    written = (writer or cli_writer(home))(changed)
-    decisions, experience = _module("decisions"), _module("experience")
-    with experience.experience(home) as conn:
-        for key in written:
-            decisions.record_setting(conn, key, before.get(key), changed[key], now=now, actor="dashboard")
-    return {"written": list(written), "reload": [key for key in written if key in ("runtime_guard", "tool_hints")]}
-
-
-def _hermes() -> str | None:
-    import shutil
-
-    found = shutil.which("hermes")
-    for candidate in (found, "/usr/local/bin/hermes", str(Path.home() / ".local" / "bin" / "hermes")):
-        if candidate and Path(candidate).is_file() and Path(candidate).suffix.lower() not in (".bat", ".cmd"):
-            return candidate
-    return None
+    return _module("admin").write_settings(home, runtime_config, values, now=now, writer=writer, actor="dashboard")
 
 
 def cli_writer(home: Path, *, runner=None):
-    """A writer that sets each value with `hermes --profile <name> config set ...`, Hermes' public command, which
-    checks the key, takes Hermes' config lock and writes atomically. Raises ValueError with Hermes' own message."""
-    import json
-    import os
-    import subprocess
-
-    profile = Path(home).resolve()
-    name = profile.name if profile.parent.name == "profiles" else "default"
-
-    def write(values: dict) -> list:
-        executable = _hermes()
-        if executable is None:
-            raise ValueError("Hermes command not found")
-        written = []
-        for key, value in values.items():
-            literal = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, tuple, bool)) else str(value)
-            command = [executable, "--profile", name, "config", "set", f"plugins.entries.{PLUGIN_ID}.settings.{key}", literal]
-            run = subprocess.run if runner is None else runner
-            result = run(command, env=dict(os.environ, HERMES_HOME=str(profile)), cwd=str(profile), stdin=subprocess.DEVNULL,
-                         capture_output=True, encoding="utf-8", errors="replace", timeout=60, check=False)
-            if result.returncode != 0:
-                detail = " ".join((result.stderr or result.stdout or "").split())[:200]
-                raise ValueError(detail or "Hermes refused the setting")
-            written.append(key)
-        return written
-
-    return write
+    return _module("admin").cli_writer(home, runner=runner)
 
 
 def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: str = "en", writer=None) -> dict:
-    """One decision from the panel. `body`: {"kind": lesson|all|proposal|undo|settings, ...}."""
-    decisions, experience = _module("decisions"), _module("experience")
-    kind = body.get("kind") if isinstance(body, dict) else None
-    if kind == "settings":
-        return write_settings(home, runtime_config, body.get("values"), now=now, writer=writer)
-    with experience.experience(home) as conn:
-        if kind == "lesson":
-            return decisions.decide_lesson(conn, int(body["id"]), str(body.get("action")), now=now, actor="dashboard",
-                                           lang=lang, shown=body.get("shown") if isinstance(body.get("shown"), str) else None)
-        if kind == "all":
-            items = body.get("items")
-            if not isinstance(items, dict) or len(items) > 500:
-                raise ValueError("Invalid decision")
-            return decisions.approve_all(conn, items, now=now, actor="dashboard", lang=lang)
-        if kind == "proposal":
-            return decisions.decide_proposal(conn, int(body["id"]), str(body.get("action")), now=now, actor="dashboard",
-                                             lang=lang)
-        if kind == "undo":
-            decision_id = int(body["id"])
-            row = conn.execute("SELECT kind, target FROM decision_log WHERE id=?", (decision_id,)).fetchone()
-            current = current_settings(home, runtime_config).get(row["target"]) \
-                if row is not None and row["kind"] == "setting" else None
-            result = decisions.undo(conn, decision_id, now=now, actor="dashboard", current=current)
-        else:
-            raise ValueError("Invalid decision")
-    if result.get("kind") == "setting" and result.get("restorable"):
-        # written first; marked undone only once Hermes took the value back
-        result["settings"] = write_settings(home, runtime_config, {result["key"]: result["restore"]}, now=now, writer=writer)
-        with experience.experience(home) as conn:
-            decisions.mark_undone(conn, result["id"], now=now)
-        result["undone"] = True
-    return result
+    """One decision from the panel. `body`: {"kind": lesson|all|proposal|undo|settings|memory, ...}."""
+    return _module("admin").decide(home, runtime_config, body, now=now, lang=lang, writer=writer, actor="dashboard")
 
 
-def _current() -> tuple[Path, dict]:
-    """The home and configuration of the profile this request is scoped to."""
+def _hosted(request) -> bool:
+    return getattr(request.state, "hosted_http_authenticated", None) is not None
+
+
+def _policy(request) -> tuple[bool, str]:
+    return decision_policy(request.headers, request.query_params, state=request.state, app_state=request.app.state)
+
+
+def _current(target: str | None = None) -> tuple[Path, dict]:
+    """The home and configuration of the profile this request acts on: the one Hermes scoped it to, or `target`, a
+    profile of the same Hermes where the plugin is installed and enabled (admin.profile_home)."""
     from hermes_constants import get_hermes_home
 
+    home = Path(get_hermes_home())
+    if target:
+        return _module("admin").profile_home(home, target)
     try:
         from hermes_cli.config import load_config_readonly
 
         config = load_config_readonly() or {}
     except Exception:   # the panel still shows the plugin's own data
         config = {}
-    return Path(get_hermes_home()), config
+    return home, config
+
+
+def _ticket_allows(request, home: Path) -> bool:
+    """A Hermes Desktop grant is bound to one profile (Hermes refuses its `?profile=` elsewhere): `target` may name
+    only that profile for it. A login is not bound to a profile."""
+    principal = getattr(request.state, "native_http_principal", None)
+    if not principal:
+        return True
+    bound = principal.get("profile_id") if isinstance(principal, dict) else getattr(principal, "profile_id", None)
+    try:
+        return bool(bound) and Path(str(bound)).resolve() == Path(home).resolve()
+    except (OSError, ValueError):
+        return False
+
+
+def _target(request) -> str | None:
+    """The profile named by the panel, honored only in the dashboard's own process and scope: a plugin host or a
+    request Hermes scoped to another profile acts on that profile alone."""
+    target = request.query_params.get("target") or None
+    if target is None:
+        return None
+    if _hosted(request) or (request.query_params.get("profile") or "current").strip().lower() != "current":
+        raise ValueError("Unknown profile")
+    return target
 
 
 def _router():
@@ -288,10 +256,15 @@ def _router():
         # A plain def: FastAPI runs it in a worker thread, so reading the store never blocks the event loop.
         import sqlite3
 
-        allowed, why = decision_policy(request.headers, request.query_params, state=request.state,
-                                       app_state=request.app.state)
+        i18n = _module("i18n")
         try:
-            home, config = _current()
+            home, config = _current(_target(request))
+        except ValueError as error:
+            return JSONResponse({"error": "invalid", "message": i18n.text(str(error), lang or "en")}, status_code=400)
+        allowed, why = _policy(request)
+        if allowed and not _ticket_allows(request, home):
+            allowed, why = False, "other_profile"
+        try:
             return snapshot(home, now=time.time(), runtime_config=config, lang=lang or None, days=days,
                             can_decide=allowed, decide_reason=why)
         except (OSError, sqlite3.Error):
@@ -301,15 +274,16 @@ def _router():
     def post_decide(request: Request, body: dict = Body(...), lang: str = Query("", max_length=2)):
         import sqlite3
 
-        allowed, why = decision_policy(request.headers, request.query_params, state=request.state,
-                                       app_state=request.app.state)
+        allowed, why = _policy(request)
         if not allowed:
             return JSONResponse({"error": why}, status_code=403)
         if request.headers.get("x-atlas-evolution") != "1":
             return JSONResponse({"error": "missing_header"}, status_code=403)
         i18n = _module("i18n")
         try:
-            home, config = _current()
+            home, config = _current(_target(request))
+            if not _ticket_allows(request, home):
+                return JSONResponse({"error": "other_profile"}, status_code=403)
             return decide(home, config, body, now=time.time(), lang=lang if lang in ("en", "pt") else "en")
         except (KeyError, TypeError, ValueError) as error:
             return JSONResponse({"error": "invalid", "message": i18n.text(str(error), lang or "en")}, status_code=400)

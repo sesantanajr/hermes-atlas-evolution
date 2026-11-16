@@ -27,7 +27,10 @@
              failed: "failed", vetoed: "Guard vetoes (7 d)", lastPass: "Last pass", passFailed: "failed: see Status",
              proposals: "Open proposals" },
       never: "never", none: "—",
-      readOnly: "Read-only: this dashboard has no login, so any program on this machine, the agent included, could act here as you. Turn on the dashboard login (password or OAuth) to decide from this panel. Meanwhile, the commands below do it from your terminal.",
+      readOnly: "Read-only: this dashboard has no login, so any program on this machine, the agent included, could act here as you. Turn on the dashboard login (a public dashboard.public_url turns it on) to decide from this panel.",
+      readOnlyShared: "Read-only: this session was opened with the dashboard's shared session token (HERMES_DASHBOARD_SESSION_TOKEN), not with a login.",
+      readOnlyOther: "Read-only here: Hermes serves this profile's panel from the profile's own process, which cannot see your login, and the dashboard's own profile could not decide for it. Enable Atlas Evolution in the dashboard's own profile too, and log in, to decide here.",
+      menuHint: "Meanwhile, decide everything from the menu in your terminal:",
       waitingTitle: "Waiting for your decision",
       waitingEmpty: "Nothing waits for you. Lessons from fixed templates apply by themselves; anything written by a model or by the agent shows up here.",
       approveAll: "Approve all ({n})", approve: "Approve", reject: "Reject", retire: "Retire", reactivate: "Reactivate",
@@ -48,6 +51,7 @@
       origin: { derived: "template", operator: "you", reflector: "reflector", agent: "agent" },
       actor: { terminal: "terminal", dashboard: "panel" },
       action: { approve: "approved", reject: "rejected", retire: "retired", reactivate: "reactivated", set: "changed" },
+      memoryRemoved: "took a repeated entry out of",
       undo: "Undo", undone: "undone",
       historyEmpty: "No decision yet.",
       copy: "Copy", copied: "Copied",
@@ -85,7 +89,10 @@
              failed: "falharam", vetoed: "Vetos da guarda (7 d)", lastPass: "Última passada", passFailed: "falhou: veja o Status",
              proposals: "Propostas abertas" },
       never: "nunca", none: "—",
-      readOnly: "Só leitura: este dashboard não pede login, então qualquer programa desta máquina, inclusive o agente, poderia agir aqui como você. Ative o login do dashboard (senha ou OAuth) para decidir por este painel. Enquanto isso, os comandos abaixo fazem o mesmo no seu terminal.",
+      readOnly: "Só leitura: este dashboard não pede login, então qualquer programa desta máquina, inclusive o agente, poderia agir aqui como você. Ative o login do dashboard (um dashboard.public_url público o liga) para decidir por este painel.",
+      readOnlyShared: "Só leitura: esta sessão foi aberta com o token de sessão compartilhado do dashboard (HERMES_DASHBOARD_SESSION_TOKEN), não com um login.",
+      readOnlyOther: "Só leitura aqui: o Hermes serve o painel deste perfil pelo processo do próprio perfil, que não vê o seu login, e o perfil do próprio dashboard não pôde decidir por ele. Ative o Atlas Evolution também no perfil do dashboard, e entre com login, para decidir aqui.",
+      menuHint: "Enquanto isso, decida tudo pelo menu no seu terminal:",
       waitingTitle: "Esperando a sua decisão",
       waitingEmpty: "Nada espera por você. Lições de modelos fixos valem sozinhas; o que um modelo ou o agente escrever aparece aqui.",
       approveAll: "Aprovar todas ({n})", approve: "Aprovar", reject: "Rejeitar", retire: "Aposentar", reactivate: "Reativar",
@@ -106,6 +113,7 @@
       origin: { derived: "modelo fixo", operator: "você", reflector: "refletor", agent: "agente" },
       actor: { terminal: "terminal", dashboard: "painel" },
       action: { approve: "aprovou", reject: "rejeitou", retire: "aposentou", reactivate: "reativou", set: "mudou" },
+      memoryRemoved: "tirou uma entrada repetida de",
       undo: "Desfazer", undone: "desfeita",
       historyEmpty: "Nenhuma decisão ainda.",
       copy: "Copiar", copied: "Copiado",
@@ -272,13 +280,20 @@
   }
 
   // The owner's decisions: one POST, then the snapshot is read again.
+  // The panel of a profile other than the dashboard's own is served by that profile's plugin host, which never
+  // decides (it cannot see the login). The dashboard's own process can: `profile=current` keeps the SDK from
+  // scoping the request to the profile on screen, and `target` names that profile.
+  function scope(data) {
+    return data && data.target ? "&profile=current&target=" + encodeURIComponent(data.target) : "";
+  }
+
   function useActions(props) {
     const state = hooks.useState(null);
     const working = state[0], setWorking = state[1];
     const send = function (body, done) {
       if (!props.data.can_decide) return;
       setWorking(JSON.stringify(body).slice(0, 60));
-      SDK.fetchJSON("/api/plugins/" + NAME + "/decide?lang=" + props.lang, {
+      SDK.fetchJSON("/api/plugins/" + NAME + "/decide?lang=" + props.lang + scope(props.data), {
         method: "POST", headers: { "Content-Type": "application/json", "X-Atlas-Evolution": "1" }, body: JSON.stringify(body)
       }).then(function (result) {
         setWorking(null);
@@ -558,6 +573,7 @@
       h("tbody", null, rows.map(function (row) {
         const what = row.kind === "lesson" ? (t.action[row.action] || row.action) + " #" + row.target
           : row.kind === "setting" ? (t.action.set) + " " + row.target + ": " + JSON.stringify(row.before.value) + " → " + JSON.stringify(row.after.value)
+          : row.kind === "memory" ? t.memoryRemoved + " " + row.target
           : (t.action[row.action] || row.action) + " " + t.tabs.proposals.toLowerCase() + " #" + row.target;
         return h("tr", { key: row.id, className: row.undone ? "hae-row-muted" : "" },
           h("td", null, when(row.at, t.lang)),
@@ -589,6 +605,14 @@
     const load = hooks.useCallback(function () {
       setView(function (previous) { return { loading: true, data: previous.data }; });
       SDK.fetchJSON("/api/plugins/" + NAME + "/snapshot?days=" + days + "&lang=" + lang)
+        .then(function (data) {
+          if (!data || data.can_decide || data.decide_reason !== "other_profile") return data;
+          const own = "/api/plugins/" + NAME + "/snapshot?days=" + days + "&lang=" + lang + scope({ target: data.profile });
+          return SDK.fetchJSON(own).then(function (mine) {
+            // the dashboard's own process answers for this profile: its verdict (and its reason) is the one that counts
+            return mine && mine.profile === data.profile ? Object.assign(mine, { target: data.profile }) : data;
+          }).catch(function () { return data; });
+        })
         .then(function (data) { setView({ loading: false, data: data }); })
         .catch(function (error) {
           const busy = String(error && error.message || "").indexOf("503") === 0;
@@ -634,7 +658,11 @@
 
     return h("div", { className: "hae-page" + (view.loading && data ? " hae-loading" : "") },
       header,
-      data && !data.can_decide ? h("p", { className: "hae-notice" }, t.readOnly) : null,
+      data && !data.can_decide ? h("div", { className: "hae-notice hae-stack-tight" },
+        h("span", null, data.decide_reason === "shared_token" ? t.readOnlyShared
+          : data.decide_reason === "other_profile" ? t.readOnlyOther : t.readOnly),
+        data.commands && data.commands.menu ? h("span", null, t.menuHint) : null,
+        data.commands && data.commands.menu ? h(CopyCommand, { t: t, command: data.commands.menu }) : null) : null,
       notice ? h("p", { className: "hae-notice" + (notice.bad ? " hae-notice-bad" : " hae-notice-good"), role: "status" }, notice.text) : null,
       h("div", { className: "hae-tabs", role: "tablist" }, TABS.map(function (name) {
         return h("button", { key: name, type: "button", role: "tab", "aria-selected": tab === name,

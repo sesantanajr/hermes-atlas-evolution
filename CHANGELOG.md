@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.8.2
+
+0.8.1's panel could not decide in a real production dashboard. Behind HTTPS, Hermes names the login cookie `__Host-hermes_session_at`, and the panel only knew the plain name, so the dashboard's own profile stayed read-only with the owner logged in; and every other profile selected in the dashboard runs the plugin in its own plugin host, which Hermes reaches without any cookie, so those profiles could never decide. The panel now decides only in the dashboard's own process, with the session Hermes' login gate verified there, and for any other profile it asks that process, naming the profile on screen. An independent review of the first fix found that trusting the plugin host's forwarded verdict could be fooled (Hermes hides the shared session token from that process, and the agent can change `dashboard.public_url`), so the plugin host never decides. Checked end to end in a Hermes 0.23.1 dashboard with a password login over HTTPS and in a headless browser, for the dashboard's profile and a second one, and against the same dashboard without a login, where the token any program can read still gets read-only and 403 on every route, the review's attack included. This version also adds an interactive menu in the terminal and the care of Hermes' memory.
+
+### Added
+
+- **An interactive menu in the terminal.** `hermes evolution` with no command (or `hermes evolution menu`) opens a numbered menu in the owner's own terminal: lessons waiting (one by one or approve all), proposals, active lessons, the history with undo, every setting and the recommended setup, who is you in chats, Hermes' memory, the digest, the full status and a learning pass now. It decides through the same code as the panel and records in the same history. Plain text with numbered choices, so it works on Linux, macOS and Windows, over SSH and with a screen reader, in English or Brazilian Portuguese. It never opens in an agent's shell or without a terminal on both ends; there the bare command prints `status` (before, it was an error).
+- **Hermes' memory, kept lean.** The menu's memory screen shows how full `MEMORY.md` and `USER.md` are against Hermes' limits and what repeats in them: the same entry twice (in one file or across both), one entry that says what another says, very similar entries. The owner chooses which one stays; the other is taken out under Hermes' own memory lock, after reading the file again, atomically, and only if it is still there as shown. A copy of the file is kept first (owner-only, `evolution/memory-backups/`, the latest 100), the history records the entry's fingerprint and never its text, and undo puts it back while it fits. The plugin never rewrites an entry's words.
+- `admin.py`: the settings, every decision and its undo, the recommended setup and the dashboard's login rule, shared by the panel and the menu.
+
+### Fixed
+
+- **The panel recognizes a real login** (see above): the session Hermes verified in the dashboard process (not one verified by the deployment session token), and the `__Host-` and `__Secure-` cookie names where a host publishes no verified session. A profile's plugin host never decides (`other_profile`); the panel then calls the dashboard's own process with `?profile=current&target=<profile>`, which acts on that profile only when it belongs to the same Hermes and has the plugin installed and enabled (a Hermes Desktop grant, bound to one profile, only on its own). Where the panel stays read-only, it says why and shows the command of the terminal menu.
+- `lessons: off` set through `hermes config set` (or a bare `off` in YAML) is stored as `false`; the plugin now reads it as `off` instead of refusing the settings and failing `status`, `learn` and the menu.
+- Settings are written and logged one by one, so those written before a refusal stay in the history and can be undone. A `hermes config set` that hangs is reported as a refusal, not a crash; the menu takes a non-ASCII digit as an invalid choice; it re-reads the owner lists and the recommended setup before writing, and a proposal before deciding it, so a change made meanwhile in the panel is never overwritten; memory files with a byte order mark are read as Hermes reads them, and an identical repeat Hermes already sends once is not counted as savings.
+- The documentation and SECURITY.md described the 0.8.0 panel as read-only and the settings writer of an early 0.8.1 draft; both now describe what runs.
+
+### Updating from 0.8.1
+
+```bash
+hermes -p <profile> plugins update hermes-atlas-evolution   # each profile; without -p for the default one
+hermes gateway restart
+sudo systemctl restart hermes-dashboard   # or however you run the dashboard, so it loads the new panel code
+```
+
 ## 0.8.1
 
 Atlas Evolution can now be run from the Hermes dashboard. The Evolution tab, read-only in 0.8.0, lets the owner decide there when the dashboard asks for a login: approve or reject each lesson, approve every waiting lesson at once after reading each sentence, decide proposals, change every setting, pick who is the owner in chats from suggestions, and undo any decision. Settings now apply to the running gateway within a minute, without a restart. The terminal and the panel decide through the same code and share one history. A dashboard without a login stays read-only, because Hermes hands its session token to any program on the machine there. An independent review of the new decision route found six defects before release, the worst a way for the open dashboard's token to decide when sent as `Authorization: Bearer`; all are fixed with tests. The panel was exercised end to end in a real Hermes 0.23.1 dashboard with a password login, for the dashboard's own profile and for a second profile.

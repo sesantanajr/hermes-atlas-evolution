@@ -6,9 +6,11 @@ Every decision goes through here, so both places behave the same and the history
   shown, and decides only on those still waiting with that same sentence; a lesson the agent proposed is never
   part of it and must be approved on its own;
 - a proposal is approved or rejected; a lesson proposal decides its lesson;
-- a change of a setting is recorded with its value before, so it can be undone too.
+- a change of a setting is recorded with its value before, so it can be undone too;
+- an entry taken out of Hermes' memory (memory_care.remove) is recorded with its fingerprint and the copy of the
+  file kept before, so it can be put back.
 
-The log (`decision_log`) keeps ids, states and setting values only, never lesson text. A decision is undone
+The log (`decision_log`) keeps ids, states, setting values and fingerprints only, never lesson or memory text. A decision is undone
 only while what it changed is still as the decision left it: an undo never overrides a later decision.
 Callers check that the owner is the one deciding (cli._operator_only, the panel's login rule) and own the
 transaction.
@@ -164,6 +166,16 @@ def record_setting(conn: sqlite3.Connection, key: str, before, after, *, now: fl
                 after={"value": after})
 
 
+def record_memory(conn: sqlite3.Connection, name: str, mark: str, *, position: int, backup: str, before: int,
+                  after: int, copies: int = 1, now: float, actor: str = "terminal") -> int:
+    """Log an entry taken out of a memory file: its fingerprint, where it was, how many copies the file held and the
+    copy of the file kept, never its text."""
+    return _log(conn, now=now, actor=actor, kind="memory", target=name, action="remove",
+                before={"entries": before, "fingerprint": mark, "position": position, "backup": backup,
+                        "copies": copies},
+                after={"entries": after})
+
+
 def history(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 50) -> list[dict]:
     """The latest decisions, newest first, with the current sentence of each lesson they concern."""
     rows = conn.execute("SELECT * FROM decision_log ORDER BY id DESC LIMIT ?",
@@ -225,6 +237,10 @@ def undo(conn: sqlite3.Connection, decision_id: int, *, now: float, actor: str =
                     "reason": "changed_since" if current is not ... else "unknown_current"}
         return {"id": decision_id, "undone": False, "restorable": True, "kind": "setting", "key": row["target"],
                 "restore": before.get("value")}
+    if row["kind"] == "memory":   # the caller puts the entry back (memory_care.restore), then calls mark_undone
+        return {"id": decision_id, "undone": False, "restorable": True, "kind": "memory", "file": row["target"],
+                "fingerprint": before.get("fingerprint"), "backup": before.get("backup"),
+                "position": before.get("position"), "copies": before.get("copies", 1)}
     if row["kind"] == "proposal":
         current = conn.execute("SELECT status FROM proposal WHERE id=?", (int(row["target"]),)).fetchone()
         if current is None or current["status"] != after.get("status"):

@@ -577,6 +577,22 @@ PAIRS = (
     ("Hermes command not found", "Comando do Hermes não encontrado"),
     ("Hermes refused the setting", "O Hermes recusou a configuração"),
     ("language must be auto, en or pt", "language deve ser auto, en ou pt"),
+    # 0.8.2: the interactive menu and Hermes' memory
+    ("Open the interactive menu: decide, configure, organize Hermes' memory and see the state, step by step",
+     "Abre o menu interativo: decida, configure, organize a memória do Hermes e veja a situação, passo a passo"),
+    ("Open the menu in your own terminal: it needs a terminal to answer from, outside an agent session",
+     "Abra o menu no seu próprio terminal: ele precisa de um terminal para responder, fora de uma sessão do agente"),
+    ("Unknown memory file", "Arquivo de memória desconhecido"),
+    ("Cannot read the memory file", "Não foi possível ler o arquivo de memória"),
+    ("Cannot keep a copy of the memory file", "Não foi possível guardar uma cópia do arquivo de memória"),
+    ("Hermes is writing its memory right now; try again in a moment",
+     "O Hermes está gravando a memória agora; tente de novo em um instante"),
+    ("The Evolution store is busy; try again in a moment", "O banco do Evolution está ocupado; tente de novo em um instante"),
+    ("Hermes did not answer in time; that setting may not be saved: look at the settings again",
+     "O Hermes não respondeu a tempo; essa configuração pode não ter sido gravada: confira as configurações de novo"),
+    ("Unknown profile", "Perfil desconhecido"),
+    ("Atlas Evolution is not installed in that profile", "O Atlas Evolution não está instalado nesse perfil"),
+    ("Atlas Evolution is not enabled in that profile", "O Atlas Evolution não está ativado nesse perfil"),
 )
 
 # Sentences with variable parts. Each entry: (English regex, English format, Portuguese regex, Portuguese format).
@@ -604,6 +620,8 @@ PATTERNS = (
     (r"Active trial recovery: (\w+)", "Active trial recovery: {0}", r"Recuperação do teste ativo: (\w+)",
      "Recuperação do teste ativo: {0}"),
     (r"(\w+) must be true or false", "{0} must be true or false", r"(\w+) deve ser true ou false", "{0} deve ser true ou false"),
+    (r"(\w+) must be a whole number", "{0} must be a whole number", r"(\w+) deve ser um número inteiro",
+     "{0} deve ser um número inteiro"),
     (r"Unknown decision id (\d+)", "Unknown decision id {0}", r"Id de decisão desconhecido: (\d+)",
      "Id de decisão desconhecido: {0}"),
     (r"Cannot write the lesson pack: (\w+)", "Cannot write the lesson pack: {0}",

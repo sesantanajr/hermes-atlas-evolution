@@ -200,7 +200,10 @@ def setup(parser: argparse.ArgumentParser) -> None:
         return text(sentence, language)
 
     parser.add_argument("--lang", choices=("en", "pt"), default=None, help=_("Language of lessons, messages and the digest"))
-    commands = parser.add_subparsers(dest="evolution_action", required=True)
+    # Without a command: the interactive menu in the owner's terminal, the status anywhere else (0.8.2).
+    commands = parser.add_subparsers(dest="evolution_action", required=False)
+    commands.add_parser("menu", help=_("Open the interactive menu: decide, configure, organize Hermes' memory and see "
+                                       "the state, step by step"))
     health = commands.add_parser("health", help=_("Inspect Hermes files and host signals"))
     usage = commands.add_parser("usage", help=_("Summarize provider and tool measurements"))
     tick = commands.add_parser("tick", help=_("Run maintenance and record decisions"))
@@ -1104,6 +1107,19 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
     language = _output_language(args, home, runtime_config)
     if getattr(args, "lang", None) is None:
         args.lang = language
+    if getattr(args, "evolution_action", None) in (None, "menu"):
+        from .menu import interactive, run
+
+        if interactive() and not _agent_shell():
+            try:
+                run(home, runtime_config, lang=language, reflect=reflect)
+            except (OSError, ValueError, sqlite3.Error) as error:
+                raise SystemExit(f"Evolution: {text(str(error), language)}") from None
+            return
+        if args.evolution_action == "menu":
+            raise SystemExit("Evolution: " + text("Open the menu in your own terminal: it needs a terminal to answer "
+                                                  "from, outside an agent session", language))
+        args.evolution_action, args.format, args.no_learn = "status", "md", False
     try:
         result = _report(args, home, running_version=running_version, provider=provider, now=now,
                          runtime_config=runtime_config, hermes_source=hermes_source, kanban_home=kanban_home,

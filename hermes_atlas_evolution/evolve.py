@@ -49,7 +49,10 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
         problems.append(key)
         return fallback
 
-    mode = checked("lessons", raw.get("lessons", DEFAULTS["lessons"]), lambda value: value in lessons.MODES,
+    chosen_mode = raw.get("lessons", DEFAULTS["lessons"])
+    if chosen_mode is False:   # YAML reads a bare `off` as false, and so does `hermes config set ... lessons off`
+        chosen_mode = "off"
+    mode = checked("lessons", chosen_mode, lambda value: value in lessons.MODES,
                    "evolution.lessons must be off, suggest or auto", "off")
     slow = checked("slow_turn_seconds", _whole(raw.get("slow_turn_seconds", DEFAULTS["slow_turn_seconds"])),
                    lambda value: type(value) is int and 5 <= value <= 3600,
