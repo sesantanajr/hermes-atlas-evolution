@@ -63,7 +63,9 @@ def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: fl
     executable = shutil.which("hermes")
     if not executable or Path(executable).suffix.lower() in (".bat", ".cmd"):
         return {"status": "unavailable", "reason": "hermes_launcher_not_found"}
-    stamp = datetime.now(timezone.utc) if now is None else datetime.fromtimestamp(now, timezone.utc)
+    from .experience import utc_datetime
+
+    stamp = datetime.now(timezone.utc) if now is None else utc_datetime(now)
     identity = json.dumps([os.path.normcase(str(profile)), board, assignee, kind, subject, str(stamp.date())])
     key = "hermes-atlas-evolution:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
     from .i18n import text

@@ -13,7 +13,6 @@ import re
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -89,7 +88,9 @@ def _runtimes(conn, disk: str) -> tuple[list[dict], list[str]]:
 
 def _iso(stamp) -> str | None:
     try:
-        return datetime.fromtimestamp(float(stamp), timezone.utc).isoformat(timespec="seconds")
+        from .experience import utc_datetime
+
+        return utc_datetime(float(stamp)).isoformat(timespec="seconds")
     except (TypeError, ValueError, OSError, OverflowError):
         return None
 
@@ -106,6 +107,49 @@ def _sessions(home: Path, *, since: float) -> int | None:
             source.close()
     except sqlite3.Error:
         return None
+
+
+def chat_senders(home: Path, *, since: float, owners=(), platforms=()) -> list[dict]:
+    """Chat channels of this profile since `since`, read-only from its state.db: per origin (telegram,
+    api_server, ...) the sessions, their distinct senders with their session counts, and whether the owner
+    settings already cover the channel. Local surfaces, automations and subagents are left out."""
+    from .signals import surface_of
+
+    path = Path(home) / "state.db"
+    if not path.is_file():
+        return []
+    try:
+        source = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=1)
+        try:
+            rows = source.execute("""SELECT source, user_id, COUNT(*) FROM sessions WHERE started_at >= ?
+                GROUP BY source, user_id ORDER BY COUNT(*) DESC LIMIT 400""", (since,)).fetchall()
+        finally:
+            source.close()
+    except sqlite3.Error:
+        return []
+    owners, platforms = {str(item) for item in owners}, set(platforms)
+    channels: dict[str, dict] = {}
+    for origin, sender, count in rows:
+        name = str(origin or "unknown").lower()[:48]
+        if surface_of(name) != "gateway":
+            continue
+        channel = channels.setdefault(name, {"origin": name, "sessions": 0, "senders": [], "covered": name in platforms})
+        channel["sessions"] += count
+        listed = sender is not None and str(sender) in owners
+        channel["covered"] = channel["covered"] or listed
+        channel["senders"].append({"id": None if sender is None else str(sender)[:200], "sessions": count, "owner": listed})
+    return sorted(channels.values(), key=lambda item: -item["sessions"])
+
+
+def _digest_scheduled(home: Path) -> bool:
+    """Whether Hermes' scheduler holds an enabled weekly digest of this plugin for the profile."""
+    from .workloads import _load_json
+
+    status, data = _load_json(Path(home) / "cron" / "jobs.json", 4 * 1024 * 1024)
+    jobs = data.get("jobs") if status == "ok" and isinstance(data, dict) else None
+    return any(isinstance(job, dict) and job.get("enabled") is not False
+               and job.get("name") in ("hermes-atlas-evolution-digest", "hermes-evolution-digest")
+               for job in jobs or ())
 
 
 LEGACY_DIRS = ("hermes-evolution",)   # the plugin id used up to 0.5.0
@@ -214,6 +258,7 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         turns = conn.execute("SELECT COALESCE(SUM(turns),0) FROM turn_daily WHERE day=?", (today,)).fetchone()[0]
         calls = conn.execute("SELECT COALESCE(SUM(requests),0) FROM metric WHERE day=? AND lane='main'", (today,)).fetchone()[0]
         lessons = dict(conn.execute("SELECT status, COUNT(*) FROM lesson GROUP BY status").fetchall())
+        withdrawn = conn.execute("SELECT COUNT(*) FROM lesson WHERE status='retired' AND verdict='withdrawn'").fetchone()[0]
         drafts = conn.execute("SELECT COUNT(*) FROM lesson WHERE origin='reflector' AND status='quarantined'").fetchone()[0]
         proposals = conn.execute("SELECT COUNT(*) FROM proposal WHERE status='open'").fetchone()[0]
         vetoed = guard_summary(conn, now=now, days=7)
@@ -241,7 +286,7 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
                       "daily_limit": opts["reflector_daily_limit"], "drafts_waiting": drafts},
         "lessons": {"mode": opts["lessons"], "active": lessons.get("active", 0),
                     "awaiting_approval": lessons.get("candidate", 0) + lessons.get("quarantined", 0),
-                    "retired": lessons.get("retired", 0)},
+                    "retired": lessons.get("retired", 0) - withdrawn, "withdrawn": withdrawn},
         "proposals_open": proposals,
         "runtime_guard": {"enabled": opts["runtime_guard"], "state": _guard_state(opts["runtime_guard"]),
                           "vetoed_7d": sum(vetoed.values())},
@@ -252,6 +297,10 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         (row for row in report["profiles"] if row["plugin"] == "missing" and row["sessions_7d"] and not row["current"]),
         key=lambda row: -row["sessions_7d"])
     report["legacy_installs"] = [row for row in report["profiles"] if row["plugin"] in ("legacy", "both")]
+    channels = chat_senders(home, since=now - 7 * 86_400, owners=opts["owner_sender_ids"], platforms=opts["owner_platforms"])
+    report["chats"] = [{key: value for key, value in channel.items() if key != "senders"} | {"senders": len(channel["senders"])}
+                       for channel in channels]   # counts only: the ids stay in `hermes evolution owner`
+    report["digest_scheduled"] = _digest_scheduled(home)
     mine = next((row for row in report["profiles"] if row["current"]), None)
     busiest = max((row for row in report["profiles"] if row["plugin"] == "installed" and not row["current"]),
                   key=lambda row: row["sessions_7d"], default=None)
@@ -276,6 +325,20 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         attention.append("busier_profile")
     if report["profiles_without_plugin"]:
         attention.append("profiles_without_plugin")
+    if any(not channel["covered"] for channel in report["chats"]):
+        attention.append("owner_unknown")
+    if (report["lessons"]["awaiting_approval"] or report["proposals_open"]) and not report["digest_scheduled"]:
+        attention.append("digest_unscheduled")
+    from .cli import ignored_settings, settings as stored_settings
+
+    from .cli import TRUSTED_ONLY
+
+    try:   # values the agent could have written there are not used (cli.TRUSTED_ONLY); say so, by their name there
+        report["settings_ignored"] = sorted(TRUSTED_ONLY[key][0][-1] for key in ignored_settings(stored_settings(home)))
+    except (OSError, ValueError, RecursionError):
+        report["settings_ignored"] = []
+    if report["settings_ignored"]:
+        attention.append("settings_ignored")
     report["attention"] = attention
     return report
 
@@ -286,19 +349,24 @@ _TEXT = {
            "autopilot": "Autopilot", "every": "every {minutes} min", "off": "off (run `hermes evolution learn` yourself)",
            "last": "last pass", "ok": "ok", "failed": "failed",
            "never": "has not run yet; the clock starts it within 2 minutes of the plugin loading, or run `hermes evolution learn`",
-           "backfill": "Hermes history", "reflector": "Reflector", "on": "on", "calls": "calls today",
+           "backfill": "Hermes history", "reflector": "Reflector", "on": "on", "guard_on": "on", "guard_off": "off",
+           "calls": "calls today",
            "drafts": "drafts waiting", "lessons": "Lessons", "mode": "mode", "active": "active",
-           "awaiting": "awaiting approval", "retired": "retired", "proposals": "Open proposals",
+           "awaiting": "awaiting approval", "retired": "retired", "withdrawn": "withdrawn", "proposals": "Open proposals",
            "guard": "Runtime guard", "vetoed": "commands vetoed in 7 days", "attention": "Needs attention",
-           "guard_covers": "knows the gateway as a systemd unit (Linux), a LaunchAgent (macOS) and a Windows service or task",
+           "guard_covers": "knows the gateway as a systemd unit (Linux), a LaunchAgent (macOS) and a Windows service or task, and keeps the agent from changing this plugin's settings",
            "guard_host": "off: plugins run in a plugin host here (plugins.isolation: host), where a crashed host would "
                          "block every tool",
            "no_events_today": "No event from the hooks today. If the profile was used today, check that Hermes loaded the plugin in this profile (`hermes plugins list`).",
            "autopilot_off": "The autopilot is off: the loop only runs when you call `hermes evolution learn`.",
            "no_autopilot_pass": "The autopilot has not run a pass in this profile yet.",
            "autopilot_failing": "The last autopilot pass failed; it is retried in 10 minutes. See Hermes' agent.log.",
-           "lessons_waiting": "Lessons are waiting for your approval: `hermes evolution lessons list`.",
+           "lessons_waiting": "Lessons are waiting for your approval: decide on each in your own terminal with `hermes evolution lessons review`.",
            "profiles_without_plugin": "Profiles used in the last 7 days that do not have the plugin (each profile loads its own plugins):",
+           "owner_unknown": "These chat channels count as someone else's, so they get template lessons only and their failures wait for your approval. If one of them is you, run `hermes evolution owner` in your own terminal:",
+           "chat_item": "`{origin}`: {sessions} sessions in 7 days from {senders} sender(s)",
+           "digest_unscheduled": "Decisions wait for you and nothing reminds you of them (Hermes 0.23.1 drops end-of-session notices). Schedule the weekly digest to your chat with `hermes evolution report --schedule-spec --deliver <channel>` and run the command it prints.",
+           "settings_ignored": "These values in `settings.json` are ignored: {keys}. They would widen whom the plugin trusts or turn a protection off, and the agent's own file tools can write that file. Set the ones you want in the Hermes settings form, with `hermes evolution owner` (sender ids and platforms), or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> <value>` in your own terminal.",
            "sessions": "sessions", "none": "Nothing needs attention.",
            "stale_runtime": "A running Hermes process still runs an older copy of the plugin than the one on disk (`hermes plugins update` does not reload a running gateway). Run `hermes gateway restart`; it waits for the running turns.",
            "stale_item": "pid {pid} ({kind}) loaded {version}",
@@ -316,20 +384,25 @@ _TEXT = {
            "autopilot": "Autopilot", "every": "a cada {minutes} min", "off": "desligado (rode `hermes evolution learn` você mesmo)",
            "last": "última passada", "ok": "ok", "failed": "falhou",
            "never": "ainda não rodou; o relógio a inicia em até 2 minutos depois de o plugin carregar, ou rode `hermes evolution learn`",
-           "backfill": "Histórico do Hermes", "reflector": "Refletor", "on": "ligado", "calls": "chamadas hoje",
+           "backfill": "Histórico do Hermes", "reflector": "Refletor", "on": "ligado", "guard_on": "ligada",
+           "guard_off": "desligada", "calls": "chamadas hoje",
            "drafts": "rascunhos aguardando", "lessons": "Lições", "mode": "modo", "active": "ativas",
-           "awaiting": "aguardando aprovação", "retired": "aposentadas", "proposals": "Propostas abertas",
+           "awaiting": "aguardando aprovação", "retired": "aposentadas", "withdrawn": "retiradas", "proposals": "Propostas abertas",
            "guard": "Guarda de runtime", "vetoed": "comandos barrados em 7 dias", "attention": "Precisa de atenção",
            "guard_covers": "reconhece o gateway como unidade systemd (Linux), LaunchAgent (macOS) e serviço ou tarefa "
-                           "do Windows",
+                           "do Windows, e impede o agente de mudar as configurações deste plugin",
            "guard_host": "desligada: aqui os plugins rodam num host de plugins (plugins.isolation: host), onde um host "
                          "que caísse bloquearia todas as ferramentas",
            "no_events_today": "Nenhum evento dos hooks hoje. Se o perfil foi usado hoje, confira se o Hermes carregou o plugin neste perfil (`hermes plugins list`).",
            "autopilot_off": "O autopilot está desligado: o ciclo só roda quando você chama `hermes evolution learn`.",
            "no_autopilot_pass": "O autopilot ainda não fez nenhuma passada neste perfil.",
            "autopilot_failing": "A última passada do autopilot falhou; ela é repetida em 10 minutos. Veja o agent.log do Hermes.",
-           "lessons_waiting": "Há lições aguardando a sua aprovação: `hermes evolution lessons list`.",
+           "lessons_waiting": "Há lições aguardando a sua aprovação: decida cada uma no seu próprio terminal com `hermes evolution lessons review`.",
            "profiles_without_plugin": "Perfis usados nos últimos 7 dias que não têm o plugin (cada perfil carrega os próprios plugins):",
+           "owner_unknown": "Estes canais de chat contam como de outra pessoa, então recebem só lições de modelo fixo e as falhas deles esperam a sua aprovação. Se um deles é você, rode `hermes evolution owner` no seu próprio terminal:",
+           "chat_item": "`{origin}`: {sessions} sessões em 7 dias de {senders} remetente(s)",
+           "digest_unscheduled": "Há decisões esperando por você e nada as lembra (o Hermes 0.23.1 descarta os avisos de fim de sessão). Agende o resumo semanal no seu chat com `hermes evolution report --schedule-spec --deliver <canal>` e rode o comando que ele imprime.",
+           "settings_ignored": "Estes valores do `settings.json` são ignorados: {keys}. Eles ampliariam em quem o plugin confia ou desligariam uma proteção, e as ferramentas de arquivo do próprio agente conseguem gravar esse arquivo. Defina os que você quer no formulário de configurações do Hermes, com o `hermes evolution owner` (ids de remetente e plataformas) ou com `hermes config set plugins.entries.hermes-atlas-evolution.settings.<chave> <valor>` no seu próprio terminal.",
            "sessions": "sessões", "none": "Nada precisa de atenção.",
            "stale_runtime": "Um processo do Hermes em execução ainda roda uma cópia do plugin mais antiga que a do disco (o `hermes plugins update` não recarrega um gateway em execução). Rode `hermes gateway restart`; ele espera os turnos em andamento.",
            "stale_item": "pid {pid} ({kind}) carregou a {version}",
@@ -367,15 +440,16 @@ def markdown(report: dict, lang: str = "en") -> str:
                  f"{t['calls']} · {reflector['drafts_waiting']} {t['drafts']}" if reflector["enabled"] else t["off"].split(" (")[0]))
     playbook = report["lessons"]
     lines.append(f"- **{t['lessons']}:** {t['mode']} `{playbook['mode']}` · {playbook['active']} {t['active']} · "
-                 f"{playbook['awaiting_approval']} {t['awaiting']} · {playbook['retired']} {t['retired']}")
+                 f"{playbook['awaiting_approval']} {t['awaiting']} · {playbook['retired']} {t['retired']}"
+                 + (f" · {playbook['withdrawn']} {t['withdrawn']}" if playbook.get("withdrawn") else ""))
     lines.append(f"- **{t['proposals']}:** {report['proposals_open']}")
     guard = report["runtime_guard"]
     if guard.get("state") == "host":
         state = t["guard_host"]
     elif guard["enabled"]:
-        state = f"{t['on']} · {guard['vetoed_7d']} {t['vetoed']} · {t['guard_covers']}"
+        state = f"{t['guard_on']} · {guard['vetoed_7d']} {t['vetoed']} · {t['guard_covers']}"
     else:
-        state = t["off"].split(" (")[0]
+        state = t["guard_off"]
     lines.append(f"- **{t['guard']}:** {state}")
     if report.get("first_pass"):
         lines += ["", "> " + t["first_pass"].format(**report["first_pass"])]
@@ -384,6 +458,9 @@ def markdown(report: dict, lang: str = "en") -> str:
         if code == "busier_profile":
             lines.append("- " + t[code].format(**{**report["busier_profile"], "profile": report["busier_profile"]["profile"],
                                                  "sessions": report["busier_profile"]["sessions_7d"]}))
+            continue
+        if code == "settings_ignored":
+            lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report["settings_ignored"])))
             continue
         lines.append(f"- {t[code]}")
         if code == "legacy_install":
@@ -395,6 +472,10 @@ def markdown(report: dict, lang: str = "en") -> str:
         if code == "profiles_without_plugin":
             for item in report["profiles_without_plugin"]:
                 lines.append(f"  - `{item['profile']}` ({item['sessions_7d']} {t['sessions']}): `{item['install']}`")
+        if code == "owner_unknown":
+            for item in report["chats"]:
+                if not item["covered"]:
+                    lines.append("  - " + t["chat_item"].format(**item))
     if not report["attention"]:
         lines.append(t["none"])
     shown = [row for row in report.get("profiles", []) if row["sessions_7d"] or row["plugin"] != "missing" or row["current"]]

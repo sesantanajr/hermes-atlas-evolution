@@ -3,6 +3,8 @@
 import json
 import sqlite3
 import tempfile
+import os
+import re
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +30,7 @@ def history(home: Path, sessions: int, *, age: float = 3600) -> None:
 
 class StatusTest(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)
         self.root = Path(folder.name)
@@ -62,6 +64,7 @@ class StatusTest(unittest.TestCase):
         self.assertIn("cron-box", text)
         self.assertIn("hermes -p cron-box plugins install sesantanajr/hermes-atlas-evolution --enable", text)
 
+    @unittest.skipIf(os.name == "nt", "the liveness probe is POSIX only, by design")
     def test_a_long_running_process_that_still_runs_older_code_is_flagged(self):
         import os
 
@@ -175,7 +178,9 @@ class MigrationStateTest(unittest.TestCase):
         text = status.markdown(report, "pt")
         self.assertIn("duas cópias: a antiga roda", text)
         self.assertIn("hermes -p both-box plugins remove hermes-evolution && hermes gateway restart", text)
-        self.assertEqual(report["version"] if "version" in report else status.plugin_version(), "0.6.0")
+        manifest = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text(encoding="utf-8")
+        shipped = re.search(r'^version: "([^"]+)"', manifest, re.M).group(1)
+        self.assertEqual(report["version"] if "version" in report else status.plugin_version(), shipped)
 
     def test_the_new_code_in_a_folder_named_after_the_old_id_is_not_mistaken_for_the_old_plugin(self):
         from hermes_atlas_evolution.cli import legacy_install

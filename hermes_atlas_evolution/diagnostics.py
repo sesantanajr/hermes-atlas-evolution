@@ -233,7 +233,9 @@ def _marker_age(value: object) -> float | None:
             if when.tzinfo is None:
                 return None
         elif type(value) in (int, float):
-            when = datetime.fromtimestamp(value, timezone.utc)
+            from .experience import utc_datetime
+
+            when = utc_datetime(value)
         else:
             return None
         age = (datetime.now(timezone.utc) - when).total_seconds()

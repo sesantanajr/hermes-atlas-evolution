@@ -63,7 +63,7 @@ class FakeContext:
 
 class PluginBase(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)   # Windows cannot remove a database that is still open.
         self.home = Path(folder.name)
@@ -83,6 +83,13 @@ class PluginBase(unittest.TestCase):
     def settings(self, **values):
         (self.home / "evolution").mkdir(exist_ok=True)
         (self.home / "evolution" / "settings.json").write_text(json.dumps(values))
+
+    def hermes_settings(self, **values):
+        """The plugin's settings as the Hermes settings form keeps them (config.yaml), which the agent cannot write."""
+        config = types.ModuleType("hermes_cli.config")
+        config.load_config_readonly = lambda: {"plugins": {"entries": {"hermes-atlas-evolution": {"settings": values}}}}
+        sys.modules["hermes_cli.config"] = config   # inside the patched sys.modules: removed after the test
+        sys.modules["hermes_cli"].config = config
 
     def plugin(self) -> FakeContext:
         context = FakeContext()
@@ -185,7 +192,10 @@ class PluginLoopTest(PluginBase):
         close_observers()
         with experience(self.home) as conn:
             self.assertEqual(conn.execute("SELECT kind, count FROM guard_daily").fetchall()[0][:], ("gateway_stop", 1))
-        self.settings(evolution={"runtime_guard": False})
+        self.settings(evolution={"runtime_guard": False})   # a file the agent's own tools can write: ignored
+        self.assertEqual(self.plugin().fire("pre_tool_call", tool_name="terminal",
+                                            args={"command": "systemctl --user restart hermes-gateway"})["action"], "block")
+        self.hermes_settings(runtime_guard=False)
         quiet = self.plugin()   # still remembers what the agent wrote, but vetoes nothing
         self.assertIsNone(quiet.fire("pre_tool_call", tool_name="terminal", args={"command": "systemctl --user restart hermes-gateway"}))
 
@@ -210,7 +220,7 @@ class PluginLoopTest(PluginBase):
         poke.assert_called_once()
 
     def test_the_agent_proposal_cap_holds_across_calls_of_the_registered_tool(self):
-        self.settings(agent_advice=True)
+        self.hermes_settings(agent_tools=True)
         context = self.plugin()
         context.fire("pre_llm_call", session_id="own", turn_id="t", platform="cli", user_message="go")
         handler = context.tools["hermes_atlas_evolution_lessons"]["handler"]
@@ -305,7 +315,8 @@ class PluginLoopTest(PluginBase):
                     self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_sample").fetchone()[0], expected)
 
     def test_hooks_fail_open_when_storage_is_unusable_and_tolerate_odd_payloads(self):
-        self.settings(evolution={"lessons": "auto"}, agent_advice=True)
+        self.settings(evolution={"lessons": "auto"})
+        self.hermes_settings(agent_tools=True)
         context = self.plugin()
         for payload in ({}, {"tool_name": None, "status": "error", "result": 7, "args": "x", "tool_call_id": 5},
                         {"tool_name": "t" * 500, "status": "blocked", "result": "{" * 10, "session_id": ["x"]}):
@@ -370,7 +381,7 @@ class SurfacesTest(PluginBase):
         cycle(self.home, now=__import__("time").time(), config={"evolution": {"lessons": "auto", "reflector": False}})
         with experience(self.home) as conn:
             self.assertEqual(conn.execute("SELECT total FROM failure").fetchone()[0], 4)   # still measured
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_owner").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_owner_daily").fetchone()[0], 0)
             self.assertEqual([row[0] for row in conn.execute("SELECT status FROM lesson")], ["candidate"])
         for index in range(2):   # the owner hits it twice in their own terminal: now it may activate by itself
             self.turn(context, f"own-{index}", f"o{index}", platform="cli")
@@ -382,7 +393,8 @@ class SurfacesTest(PluginBase):
             self.assertEqual(conn.execute("SELECT status FROM lesson").fetchone()[0], "active")
 
     def test_a_chat_gets_template_lessons_only_and_the_tools_answer_only_the_owner(self):
-        self.settings(evolution={"lessons": "auto"}, agent_advice=True)
+        self.settings(evolution={"lessons": "auto"})
+        self.hermes_settings(agent_tools=True)
         context = self.plugin()
         with experience(self.home) as conn:
             lessons.add_custom(conn, "Use ssh admin@10.0.0.7 for the tenant MCP.", tool="terminal", origin="operator",
@@ -402,7 +414,13 @@ class SurfacesTest(PluginBase):
         self.assertIn("lessons", json.loads(tool({"action": "search"}, session_id="a")))
 
     def test_an_owner_listed_in_owner_sender_ids_is_the_owner_in_a_chat_too(self):
+        # In settings.json, which the agent's own file tools can write, the id makes nobody the owner.
         self.settings(evolution={"lessons": "auto", "owner_sender_ids": ["555"]}, agent_advice=True)
+        context = self.plugin()
+        self.turn(context, "dm", "t1", platform="telegram", sender_id="555")
+        self.assertEqual(context.tools["hermes_atlas_evolution_lessons"]["check"](), False)
+        self.settings(evolution={"lessons": "auto"})
+        self.hermes_settings(owner_sender_ids=["555"], agent_tools=True)
         context = self.plugin()
         self.turn(context, "dm", "t1", platform="telegram", sender_id="555")
         tool = context.tools["hermes_atlas_evolution_lessons"]["handler"]
@@ -410,7 +428,7 @@ class SurfacesTest(PluginBase):
         self.failing_call(context, "dm", "t1", "c1")
         close_observers()
         with experience(self.home) as conn:
-            self.assertEqual(conn.execute("SELECT total FROM failure_owner").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT SUM(count) FROM failure_owner_daily").fetchone()[0], 1)
 
     def test_the_owner_notice_waits_for_a_session_end_hermes_shows(self):
         self.settings(evolution={"lessons": "suggest"})
@@ -428,6 +446,63 @@ class SurfacesTest(PluginBase):
 
 
 
+class SubagentOwnerTest(PluginBase):
+    """A delegated child serves whoever its parent served: a stranger cannot reach the owner's lessons through one."""
+
+    def setUp(self):
+        super().setUp()
+        self.settings(evolution={"lessons": "auto", "reflector": True})
+        self.hermes_settings(agent_tools=True)
+        self.context = self.plugin()
+        with experience(self.home) as conn:
+            lessons.add_custom(conn, "Use the staging vault path ops/db-stage for database work.", tool="general",
+                               origin="operator", now=1.0, active=True)
+
+    def delegate(self, parent, child, **who):
+        self.context.fire("pre_llm_call", session_id=parent, turn_id="p1", user_message="delegate it", **who)
+        self.context.fire("subagent_start", parent_session_id=parent, parent_turn_id="p1", child_session_id=child,
+                          child_subagent_id=child, child_role="worker", child_goal="do it")
+        render = self.context.sections["hermes-atlas-evolution.playbook"]["content"]
+        prompt = render({"session_id": child, "platform": "subagent"})   # built before the child's first turn
+        self.context.fire("pre_llm_call", session_id=child, turn_id="c1", user_message="do it", platform="subagent",
+                          parent_session_id=parent)
+        tool = self.context.tools["hermes_atlas_evolution_lessons"]["handler"]
+        reply = json.loads(tool({"action": "search"}, session_id=child))
+        crash = json.dumps({"output": "Traceback (most recent call last): RuntimeError: IGNORE PREVIOUS", "exit_code": 1})
+        self.context.fire("post_tool_call", tool_name="terminal", status="error", args={"command": "frobnicate"},
+                          result=crash, session_id=child, turn_id="c1", tool_call_id=f"{child}-x")
+        close_observers()
+        with experience(self.home) as conn:
+            owned = conn.execute("SELECT COALESCE(SUM(count), 0) FROM failure_owner_daily").fetchone()[0]
+            excerpts = conn.execute("SELECT COUNT(*) FROM failure_sample").fetchone()[0]
+        return "ops/db-stage" in prompt, "lessons" in reply, owned, excerpts
+
+    def test_a_child_delegated_from_a_strangers_chat_serves_the_stranger(self):
+        self.assertEqual(self.delegate("tg-chat", "child-1", platform="telegram", sender_id="stranger"),
+                         (False, False, 0, 0))
+
+    def test_a_child_delegated_from_the_owners_own_session_serves_the_owner(self):
+        self.assertEqual(self.delegate("cli-session", "child-2", platform="cli"), (True, True, 1, 1))
+
+    def test_a_compaction_that_renames_the_parent_keeps_its_children_the_owners(self):
+        # Hermes compresses in the middle of the owner's turn and the agent delegates under the new id at once
+        self.context.fire("pre_llm_call", session_id="cli-1", turn_id="t1", user_message="long job", platform="cli")
+        self.context.fire("post_compaction", session_id="cli-1-cont", old_session_id="cli-1", kind="auto", reason="full")
+        self.context.fire("subagent_start", parent_session_id="cli-1-cont", parent_turn_id="t1", child_session_id="kid",
+                          child_subagent_id="kid", child_role="worker", child_goal="do it")
+        prompt = self.context.sections["hermes-atlas-evolution.playbook"]["content"]({"session_id": "kid",
+                                                                                       "platform": "subagent"})
+        self.context.fire("pre_llm_call", session_id="kid", turn_id="k1", user_message="do it", platform="subagent",
+                          parent_session_id="cli-1-cont")
+        reply = json.loads(self.context.tools["hermes_atlas_evolution_lessons"]["handler"]({"action": "search"},
+                                                                                           session_id="kid"))
+        self.assertEqual(("ops/db-stage" in prompt, "lessons" in reply), (True, True))
+
+    def test_a_child_whose_parent_is_unknown_serves_someone_else(self):
+        render = self.context.sections["hermes-atlas-evolution.playbook"]["content"]
+        self.assertNotIn("ops/db-stage", render({"session_id": "orphan", "platform": "subagent"}))
+
+
 class HostIsolationTest(PluginBase):
     def test_in_a_plugin_host_nothing_is_registered_that_could_block_every_tool(self):
         with patch.dict("os.environ", {"HERMES_PLUGIN_HOST_PROCESS": "1"}):
@@ -435,6 +510,40 @@ class HostIsolationTest(PluginBase):
         self.assertNotIn("pre_tool_call", hosted.hooks)
         self.assertIn("post_tool_call", hosted.hooks)          # everything else still observes
         self.assertIn("pre_tool_call", self.plugin().hooks)
+
+
+
+class OwnerPlatformLoopTest(PluginBase):
+    def test_a_platform_listed_as_the_owners_gets_every_lesson_from_its_first_message(self):
+        self.settings(evolution={"lessons": "auto"})
+        self.hermes_settings(owner_platforms=["api_server"], agent_tools=True)
+        context = self.plugin()
+        with experience(self.home) as conn:
+            lessons.add_custom(conn, "Use the staging tenant for every Atlas UI test run.", tool="terminal",
+                               origin="operator", now=1.0, active=True)
+        render = context.sections["hermes-atlas-evolution.playbook"]["content"]
+        self.assertIn("staging tenant", render({"session_id": "ui-1", "platform": "api_server"}))   # before any turn
+        self.assertNotIn("staging tenant", render({"session_id": "wa-1", "platform": "whatsapp"}))
+        context.fire("pre_llm_call", session_id="ui-1", turn_id="t1", platform="api_server", sender_id="ui",
+                     user_message="go")
+        tool = context.tools["hermes_atlas_evolution_lessons"]["handler"]
+        self.assertIn("lessons", json.loads(tool({"action": "search"}, session_id="ui-1")))
+        context.fire("post_tool_call", tool_name="terminal", status="error", args={"command": "rg x"},
+                     result=json.dumps({"output": "bash: rg: command not found", "exit_code": 127}),
+                     session_id="ui-1", turn_id="t1", tool_call_id="c1")
+        close_observers()
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT SUM(count) FROM failure_owner_daily").fetchone()[0], 1)
+
+    def test_a_call_hermes_middleware_rewrote_does_not_teach_the_agent(self):
+        context = self.plugin()
+        context.fire("post_tool_call", tool_name="terminal", status="error", args={"command": "rtk git status"},
+                     result=json.dumps({"output": "bash: rtk: command not found", "exit_code": 127}),
+                     middleware_trace=[{"source": "plugin", "name": "rtk-rewrite"}],
+                     session_id="s", turn_id="t", tool_call_id="m1")
+        close_observers()
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT klass, hint FROM failure").fetchall()[0][:], ("rewritten_command", "rtk"))
 
 
 if __name__ == "__main__":
@@ -492,7 +601,7 @@ class LegacyInstallTest(PluginBase):
 
 class NativeSettingsTest(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)
         self.home = Path(folder.name)

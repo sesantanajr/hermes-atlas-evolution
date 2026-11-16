@@ -523,6 +523,21 @@ PAIRS = (
     ("Atlas Evolution tick failed. Run ops tick in this profile to inspect.",
      "O tick do Atlas Evolution falhou. Rode ops tick neste perfil para ver o motivo."),
     ("Atlas Evolution tick could not be verified.", "Não foi possível verificar o tick do Atlas Evolution."),
+    ("Show the chat channels and senders, and the command that chooses which ones are you",
+     "Mostra os canais e remetentes de chat e o comando que escolhe quais são você"),
+    ("List chat channels and senders of the last 30 days", "Lista os canais e remetentes de chat dos últimos 30 dias"),
+    ("Print the command that counts a sender id as you", "Imprime o comando que conta um id de remetente como você"),
+    ("Print the command that stops counting a sender id as you",
+     "Imprime o comando que deixa de contar um id de remetente como você"),
+    ("Print the command that counts every chat of a platform as you (a private bot, your own UI)",
+     "Imprime o comando que conta todo chat de uma plataforma como você (um bot privado, a sua própria interface)"),
+    ("Print the command that stops counting every chat of a platform as you",
+     "Imprime o comando que deixa de contar todo chat de uma plataforma como você"),
+    ("Name a platform such as telegram or api_server", "Informe uma plataforma, como telegram ou api_server"),
+    ("A sender id has 1 to 200 characters", "Um id de remetente tem de 1 a 200 caracteres"),
+    ("Up to 20 entries are kept; remove one first", "São guardados no máximo 20 itens; remova um antes"),
+    ("evolution.owner_platforms must list up to 20 platform names such as telegram or api_server",
+     "evolution.owner_platforms deve listar até 20 nomes de plataforma, como telegram ou api_server"),
 )
 
 # Sentences with variable parts. Each entry: (English regex, English format, Portuguese regex, Portuguese format).

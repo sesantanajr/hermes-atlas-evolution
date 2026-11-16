@@ -121,13 +121,12 @@ O provedor, o modelo e os preços acima são apenas ilustrativos.
 
 O `ops plan` devolve um plano somente leitura com um orçamento sugerido: consultas de busca, extrações de página e frentes paralelas para pesquisa; frentes paralelas e rodadas de revisão para delegação; e amostras comparáveis para operações. Planos de pesquisa incluem descoberta de fontes, verificação de evidência e registro de incertezas. Planos de delegação indicam `delegate_task` para respostas que o agente atual precisa aguardar e Kanban para trabalhos que precisam sobreviver a reinícios (`--durable`).
 
-Ligue `agent_tools` nas configurações do plugin no Hermes, ou defina `"agent_advice": true` em `<HERMES_HOME>/evolution/settings.json`, e recarregue o plugin para liberar `hermes_atlas_evolution_plan` e `hermes_atlas_evolution_lessons` ao perfil. Inclua `hermes-atlas-evolution` quando o perfil usa uma lista explícita de toolsets. A ferramenta de planos devolve apenas o plano.
+Ligue `agent_tools` nas configurações do plugin no Hermes (ou com `hermes config set plugins.entries.hermes-atlas-evolution.settings.agent_tools true` no seu próprio terminal) e recarregue o plugin para liberar `hermes_atlas_evolution_plan` e `hermes_atlas_evolution_lessons` ao perfil. Inclua `hermes-atlas-evolution` quando o perfil usa uma lista explícita de toolsets. A ferramenta de planos devolve apenas o plano.
 
 A leitura dos quadros Kanban compartilhados exige `"inspect_shared_kanban": true`. A criação de cartão exige a sua própria autorização de encaminhamento, independente dessa chave. O exemplo associa as verificações ao perfil `reviewer` no quadro existente `ops`.
 
 ```json
 {
-  "agent_advice": true,
   "inspect_shared_kanban": true,
   "kanban_handoff": {"enabled": true, "board": "ops", "assignee": "reviewer"}
 }
@@ -181,12 +180,12 @@ Os cenários de mudança e reversão de peso são testados com um adaptador de s
 
 ## Chaves de configuração
 
-O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 KiB. O plugin o lê quando carrega, então reinicie o gateway depois de mudar; cada passada do autopilot e cada comando o leem de novo. As opções do ciclo de evolução estão descritas em [O ciclo de evolução](evolution-loop.md#configuração-e-idioma). As que aparecem no formulário de configurações do Hermes vencem as mesmas chaves deste arquivo.
+O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 KiB. O plugin o lê quando carrega, então reinicie o gateway depois de mudar; cada passada do autopilot e cada comando o leem de novo. As opções do ciclo de evolução estão descritas em [O ciclo de evolução](evolution-loop.md#configuração-e-idioma). As que aparecem no formulário de configurações do Hermes vencem as mesmas chaves deste arquivo. As ferramentas de arquivo do agente conseguem gravar este arquivo, então valores que ampliariam a confiança (`owner_sender_ids`, `owner_platforms`, `agent_advice: true`, `runtime_guard: false`) são ignorados aqui; defina-os no formulário de configurações do Hermes.
 
 | Chave | Formato | Padrão | Efeito |
 |---|---|---|---|
-| `evolution` | objeto | veja o ciclo | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `owner_sender_ids`, `reflector`, `reflector_daily_limit`, `autopilot_minutes`, `runtime_guard` |
-| `agent_advice` | booleano | `false` | Libera as ferramentas do agente (`agent_tools` no formulário do Hermes). |
+| `evolution` | objeto | veja o ciclo | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `reflector`, `reflector_daily_limit`, `autopilot_minutes`; `owner_sender_ids`, `owner_platforms` e `runtime_guard: false` são ignorados aqui e só valem pelo formulário do Hermes |
+| `agent_advice` | booleano | `false` | Ignorado quando `true`: as ferramentas do agente só são ligadas pelo formulário do Hermes (`agent_tools`). |
 | `sensitivity` | `low`, `balanced`, `high` | `balanced` | Limiar dos alertas adaptativos. |
 | `rates_usd_per_million` | objeto por provedor e modelo | nenhum | Preços para estimar custos (veja [Uso e custo](#uso-e-custo)). |
 | `daily_estimated_budget_usd` | número acima de 0, até 1.000.000 | nenhum | Limite diário (UTC) sobre a estimativa precificada. |
@@ -194,8 +193,8 @@ O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 
 | `kanban_handoff` | objeto: `enabled`, `board`, `assignee` | desligado | Autoriza o `ops handoff`. `board` e `assignee` são identificadores em minúsculas. |
 | `linux_supervisor` | objeto | ausente | Política dos ensaios reversíveis no systemd (veja [Remediação no Linux](#remediação-no-linux)). |
 | `semantic_incident_model` | caminho absoluto | nenhum | Modelo local de embeddings para o `ops similar`. |
-| `legacy_memory_commands` | booleano | `false` | Permite novas notas da 0.1 e o comando de chat `/evolution`. |
-| `automatic_shared_recall` | booleano | `false` | Com `legacy_memory_commands`, injeta no turno as notas compartilhadas da 0.1 que casarem. |
+| `legacy_memory_commands` | booleano | `false` | Permite novas notas da 0.1 e o comando de chat `/evolution`. Ignorado aqui quando `true`: defina com `hermes config set plugins.entries.hermes-atlas-evolution.settings.legacy_memory_commands true`. |
+| `automatic_shared_recall` | booleano | `false` | Com `legacy_memory_commands`, injeta no turno as notas compartilhadas da 0.1 que casarem. Ignorado aqui quando `true`, como o `legacy_memory_commands`: defina na configuração do Hermes. |
 
 ## Dados e compatibilidade
 

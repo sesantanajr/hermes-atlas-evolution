@@ -243,13 +243,18 @@ def _session_tag(session_id) -> str:
 
 
 def record_tool(home: Path, payload: dict, *, now: float | None = None, failure: dict | None = None,
-                sample: bool = False, owner: bool = True) -> dict | None:
+                sample: bool = False, owner: bool = True, origin: str | None = None) -> dict | None:
     """Count one finished tool call and, for a failure, its signature. Returns the classification.
 
     `owner`: the call ran in a turn of the owner's own (CLI, TUI, Desktop, cron, a subagent, or a chat with
-    a sender listed in owner_sender_ids). Every failure is counted; only the owner's are counted again in
-    failure_owner, which decides whether a lesson may activate by itself, and only theirs keep an excerpt
-    for the reflector: text a third party controls never reaches the model that drafts lessons."""
+    a sender listed in owner_sender_ids, or a chat on a platform listed in owner_platforms). Every failure is
+    counted; only the owner's are counted again, per day, in failure_owner_daily, which decides whether a lesson
+    may activate by itself, and only theirs keep an excerpt for the reflector: text a third party controls never
+    reaches the model that drafts lessons.
+
+    `origin`: the session's real origin label. A refused approval is also counted per origin and tool, with the
+    Hermes setting that decided it when nobody could have answered (see approval_setting), so the radar can tell
+    those from the rest and name the setting."""
     status = payload.get("status")
     if status not in ("ok", "error", "blocked"):
         return None
@@ -264,12 +269,20 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     row = (today, failure["tool"] if failure else tool, int(status == "error"), int(status == "blocked"), duration)
     seen = ((failure["signature"], failure["tool"], failure["klass"], failure["hint"], now, now,
              _session_tag(payload.get("session_id"))) if failure else None)
+    origin_name = label(origin, fallback="unknown") if isinstance(origin, str) else "unknown"
+    setting = ""
+    if failure and failure["klass"] == "approval_refused":
+        setting = approval_setting(_error_text(payload.get("error_message"), payload.get("result"))[0], origin_name)
     excerpt = ""
     if sample and owner and failure:
-        from .reflector import UNTEMPLATED, scrub
+        from .reflector import EXCERPT_LIMIT, UNTEMPLATED, scrub
 
         if failure["klass"] in UNTEMPLATED:   # only the reflector reads it, and only when it is switched on
             excerpt = scrub(_error_text(payload.get("error_message"), payload.get("result"))[0])
+            program = command_program(payload.get("args"))
+            if excerpt and program:   # which program failed makes a draft specific; only a bare command name
+                prefix = f"[{program}] "
+                excerpt = prefix + excerpt[-(EXCERPT_LIMIT - len(prefix)):]   # the end, where the cause is, stays
 
     def write(conn):
         conn.execute("""INSERT INTO tool_daily VALUES (?, ?, 1, ?, ?, ?)
@@ -282,8 +295,11 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
             conn.execute("""INSERT INTO failure_daily VALUES (?, ?, 1)
                 ON CONFLICT DO UPDATE SET count=count+1""", (today, seen[0]))
             if owner:
-                conn.execute("""INSERT INTO failure_owner VALUES (?, 1)
-                    ON CONFLICT DO UPDATE SET total=total+1""", (seen[0],))
+                conn.execute("""INSERT INTO failure_owner_daily VALUES (?, ?, 1)
+                    ON CONFLICT DO UPDATE SET count=count+1""", (today, seen[0]))
+            if seen[2] == "approval_refused":
+                conn.execute("""INSERT INTO approval_daily VALUES (?, ?, ?, ?, 1)
+                    ON CONFLICT DO UPDATE SET count=count+1""", (today, origin_name, seen[1], setting))
             if excerpt:
                 from .reflector import keep_sample
 
@@ -291,6 +307,69 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
 
     record(home, write, now=now)
     return failure
+
+
+_SHELL_TRIVIA = frozenset({"cd", "export", "set", "unset", "source", ".", "echo", "printf", "true", "false", "test",
+                           "sleep", "pwd", "exit", "local", "read"})
+# A script's own name can say whose it is (a client, a project): only programs called by name from the PATH, or
+# from a system folder, count.
+_SCRIPT = re.compile(r"\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php|ps1|bat|cmd|exe)\Z", re.I)
+_SYSTEM_BIN = frozenset({"/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin",
+                         "/opt/homebrew/bin"})
+
+
+def command_program(args) -> str:
+    """The program a terminal command runs (its first word after variable assignments and wrappers such as sudo,
+    env, timeout or systemd-run, read the way the runtime guard reads them), when it is a bare command name such
+    as git or npm, called from the PATH or from a system folder such as /usr/bin; '' otherwise. Never arguments,
+    other paths, script names or other text of the command, and never a name the redactor would touch."""
+    from .guard import _segments, _strip_prefix
+
+    command = args.get("command") if isinstance(args, dict) else None
+    if not isinstance(command, str) or not command.strip():
+        return ""
+    found = ""
+    for segment in (_segments(command[:4000]) or [])[:16]:   # the last real program of a chain is the likeliest to fail
+        tokens = _strip_prefix(segment)
+        name = tokens[0] if tokens else ""
+        folder, _, base = name.rpartition("/")
+        if folder and folder.rstrip("/") in _SYSTEM_BIN:
+            name = base
+        if not name or name in _SHELL_TRIVIA or "/" in name or "\\" in name or _SCRIPT.search(name):
+            continue
+        if _clean_hint(name) == name:
+            found = name
+    return found
+
+
+# Where Hermes decides a refused approval that nobody could answer as the turn ran. When a setting decides it,
+# Hermes names the setting in its refusal (tools/approval.py: "set approvals.<key>: approve"). A person's answer
+# reads "denied by user" (a chat, the API server, a gateway subagent), "User denied ..." (the CLI panel, also the
+# automatic denial a CLI subagent gets) or comes from an approval transport; a withdrawn prompt is no refusal.
+# Otherwise, in sessions nobody watches, the origin tells. '' means someone could have answered.
+_APPROVAL_SETTING = re.compile(r"\bapprovals\.(single_query_mode|cron_mode|unattended_mode)\b")
+_CLI_DENIED = re.compile(r"\bUser denied (?:this command|execute_code|this potentially dangerous action)\b")
+_PERSON = re.compile(r"\bdenied by user\b|\bthrough the selected approval transport\b|"
+                     r"\bwithdrawn before the user answered\b", re.I)
+UNATTENDED_SETTINGS = {"oneshot": "approvals.single_query_mode", "cron": "approvals.cron_mode",
+                       # automations and integrations a program drives: nobody watches them to approve
+                       "kanban": "approvals", "batch": "approvals", "curator": "approvals", "a2a": "approvals",
+                       "tool": "approvals"}
+
+
+def approval_setting(text: str, origin: str | None) -> str:
+    """The Hermes setting that decided a refused approval nobody could answer, or '' when someone could have."""
+    text = text[:4000] if isinstance(text, str) else ""
+    match = _APPROVAL_SETTING.search(text)
+    if match:
+        return f"approvals.{match.group(1)}"
+    if _PERSON.search(text):   # a person answered: in a chat, through an approval transport, in a gateway child
+        return ""
+    if origin == "subagent":   # Hermes denies a CLI subagent's prompt for it, unless delegation allows it
+        return "delegation.subagent_auto_approve" if _CLI_DENIED.search(text) else ""
+    if _CLI_DENIED.search(text):
+        return ""
+    return UNATTENDED_SETTINGS.get(origin or "", "")
 
 
 def surface_of(platform, source=None) -> str:
@@ -334,12 +413,32 @@ def turn_surface(payload: dict) -> str:
     return surface_of(platform, session_source(platform))
 
 
-def owner_turn(surface: str, sender_id, owners) -> bool:
-    """True when the owner is the one being served: their own surfaces, their automations and subagents, or
-    a chat message from a sender listed in owner_sender_ids."""
-    if surface in ("local", "cron", "subagent"):
+def origin_label(payload: dict) -> str:
+    """The session's real origin as a short label (telegram, api_server, oneshot, kanban, ...), for owner
+    platforms and approval counts. Never free text."""
+    platform = payload.get("platform")
+    source = payload.get("source") if isinstance(payload.get("source"), str) else session_source(platform)
+    for value in (source, platform):
+        if isinstance(value, str) and value.strip():
+            return label(value.strip().lower()[:48], fallback="unknown")
+    return "unknown"
+
+
+def owner_turn(surface: str, sender_id, owners, *, origin: str | None = None, owner_platforms=frozenset(),
+               parent_owner: bool = False) -> bool:
+    """True when the owner is the one being served: their own surfaces, their automations, a subagent delegated
+    from a turn that served the owner (`parent_owner`), a chat message from a sender listed in owner_sender_ids,
+    or any chat of a platform listed in owner_platforms (a private bot or the owner's own UI, where nobody else
+    writes). A subagent whose parent is unknown serves someone else: what depends on it is held back."""
+    if surface in ("local", "cron"):
         return True
-    return surface == "gateway" and sender_id is not None and str(sender_id) in owners
+    if surface == "subagent":
+        return parent_owner is True
+    if surface != "gateway":
+        return False
+    if origin is not None and origin in owner_platforms:
+        return True
+    return sender_id is not None and str(sender_id) in owners
 
 
 MAX_SKILLS_PER_TURN = 16
@@ -492,10 +591,11 @@ class FeedbackSensor:
     The previous message of a session is kept in memory as a set of hashed words, never as text.
     """
 
-    def __init__(self, home: Path, *, owner_sender_ids=(), reask_seconds: int = 180):
+    def __init__(self, home: Path, *, owner_sender_ids=(), owner_platforms=(), reask_seconds: int = 180):
         self.home = home
         self.owners = frozenset(str(item) for item in owner_sender_ids
                                 if isinstance(item, str) and item or type(item) is int)
+        self.platforms = frozenset(item for item in owner_platforms if isinstance(item, str) and item)
         self.reask_seconds = reask_seconds
         self._last: OrderedDict[bytes, tuple[float, frozenset]] = OrderedDict()
         self._lock = threading.Lock()
@@ -504,7 +604,11 @@ class FeedbackSensor:
         """A message the owner wrote: on their own surfaces, or in a chat from a listed sender. Automations,
         kanban workers and subagents get prompts written by software, never feedback."""
         surface = turn_surface(payload)
-        return surface == "local" or (surface == "gateway" and owner_turn(surface, payload.get("sender_id"), self.owners))
+        if surface == "local":
+            return True
+        origin = payload.get("origin") if isinstance(payload.get("origin"), str) else origin_label(payload)
+        return surface == "gateway" and owner_turn(surface, payload.get("sender_id"), self.owners, origin=origin,
+                                                   owner_platforms=self.platforms)
 
     def observe(self, payload: dict, *, clock: float | None = None, now: float | None = None) -> list[str]:
         message = payload.get("user_message")
@@ -574,7 +678,7 @@ def record_skill_event(home: Path, payload: dict, *, now: float | None = None) -
 
 def record_guard(home: Path, kind: str, *, now: float | None = None) -> None:
     """Count a command the runtime guard vetoed. Only the kind is kept, never the command."""
-    if kind not in ("gateway_stop", "runtime_removal"):
+    if kind not in ("gateway_stop", "runtime_removal", "plugin_settings"):
         return
     stamp = time.time() if now is None else now
     record(home, lambda conn: conn.execute("""INSERT INTO guard_daily VALUES (?, ?, 1)
@@ -605,6 +709,39 @@ def tool_summary(conn, *, now: float, days: int, limit: int = 15) -> dict:
             "by_tool": [{"tool": row["tool"], "calls": row["calls"], "errors": row["errors"], "blocked": row["blocked"],
                          "error_pct": round(100 * row["errors"] / row["calls"], 1),
                          "mean_ms": row["duration_ms"] // row["calls"]} for row in rows[:limit]]}
+
+
+# Tools whose time is not latency: they wait for a person (clarify, the Desktop onboarding and tour, a code
+# typed into the browser vault) or run a whole subagent (delegate_task).
+NOT_LATENCY = frozenset({"clarify", "delegate_task", "ask_user", "request_user_input", "setup_beat", "gui_tour",
+                         "browser_vault"})
+
+
+def slow_calls(conn, *, now: float, days: int, min_calls: int, min_mean_s: float, limit: int = 5) -> list[dict]:
+    """The tools whose calls take at least `min_mean_s` on average over at least `min_calls` calls in the window,
+    slowest first, whatever their share of the total time. Same exclusions as slow_tools."""
+    start, end = _window(now, days)
+    marks = ",".join("?" * len(NOT_LATENCY))
+    rows = conn.execute(f"""SELECT tool, SUM(calls) AS calls, SUM(duration_ms) AS duration_ms FROM tool_daily
+        WHERE day BETWEEN ? AND ? AND tool NOT IN ({marks}) GROUP BY tool
+        HAVING SUM(calls) >= ? AND SUM(duration_ms) >= ? * SUM(calls)
+        ORDER BY SUM(duration_ms) * 1.0 / SUM(calls) DESC, tool LIMIT ?""",
+                        (start, end, *sorted(NOT_LATENCY), min_calls, int(min_mean_s * 1000), limit)).fetchall()
+    return [{"tool": row["tool"], "calls": row["calls"], "mean_s": round(row["duration_ms"] / row["calls"] / 1000, 1),
+             "total_min": round(row["duration_ms"] / 60_000, 1)} for row in rows]
+
+
+def slow_tools(conn, *, now: float, days: int, limit: int = 3, min_calls: int = 3) -> list[dict]:
+    """The tools that took the most time in the window: calls, mean and total seconds. Durations come from the
+    hooks and, for replayed history, from the time between a tool request and its result (approximate). Tools
+    that wait for a person or run a subagent are left out: their time is not a bottleneck of the tool."""
+    start, end = _window(now, days)
+    marks = ",".join("?" * len(NOT_LATENCY))
+    rows = conn.execute(f"""SELECT tool, SUM(calls) AS calls, SUM(duration_ms) AS duration_ms FROM tool_daily
+        WHERE day BETWEEN ? AND ? AND tool NOT IN ({marks}) GROUP BY tool HAVING SUM(calls) >= ? AND SUM(duration_ms) > 0
+        ORDER BY SUM(duration_ms) DESC, tool LIMIT ?""", (start, end, *sorted(NOT_LATENCY), min_calls, limit)).fetchall()
+    return [{"tool": row["tool"], "calls": row["calls"], "mean_s": round(row["duration_ms"] / row["calls"] / 1000, 1),
+             "total_min": round(row["duration_ms"] / 60_000, 1)} for row in rows]
 
 
 def failure_summary(conn, *, now: float, days: int, limit: int = 12) -> list[dict]:

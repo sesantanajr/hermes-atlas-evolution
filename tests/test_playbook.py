@@ -20,7 +20,7 @@ ARGS = {"calls": [{"name": "files_search", "arguments": {}}]}
 
 class Base(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)   # Windows cannot remove a database that is still open.
         self.home = Path(folder.name)

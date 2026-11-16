@@ -16,7 +16,7 @@ SCHEMA = """CREATE TABLE messages (
 
 class InventoryTest(unittest.TestCase):
     def setUp(self):
-        scratch = tempfile.TemporaryDirectory()
+        scratch = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(scratch.cleanup)
         self.home = Path(scratch.name) / "profile"
         self.source = Path(scratch.name) / "bundled"

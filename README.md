@@ -74,11 +74,13 @@ The command-line `plugins update` only replaces the files: it does not reload a 
 
 - **Learns from the history Hermes already keeps.** The first passes replay the last 14 days of the profile's sessions, so a failure that recurred last week can become a lesson on the first day.
 - **Turns repeated tool failures into lessons.** A failure seen at least 3 times, in 2 sessions or on 2 days, becomes one sentence such as "When calling `example_search`, always pass the required argument `query`." The agent reads the active lessons at the start of each session.
-- **Tells your turns from everyone else's.** A lesson applies by itself only after your own turns hit the failure (your CLI, TUI or Desktop, your automations, or a chat with a sender you list in `owner_sender_ids`). Failures that only other people caused in a chat wait for your approval, and a chat where someone else may read along gets only template lessons, never text you or a model wrote.
+- **Tells your turns from everyone else's.** A lesson applies by itself only after your own turns hit the failure (your CLI, TUI or Desktop, your automations, a chat with a sender you list in `owner_sender_ids`, or any chat of a platform you list in `owner_platforms`, such as a private bot or your own interface). Failures that only other people caused in a chat wait for your approval, and a chat where someone else may read along gets only template lessons, never text you or a model wrote. `hermes evolution owner` shows each chat channel with its senders and prints the command that sets this up.
+- **Finds the bottlenecks you can remove.** Approvals refused where nobody could approve (one-shot runs, automations, subagents), with the Hermes settings that decide them; the tools that take the most time, and a tool that is slow call after call.
+- **Keeps the queue short.** Lessons nobody decided on yet are withdrawn when the evidence no longer supports them, when they repeat another lesson's sentence, or when they only give advice every failure would get.
 - **Measures before and after.** Each lesson against its own failure, each skill rewrite by the turns that loaded the skill, each setting change by the week before and the week after. In `auto` mode a lesson that does not help is retired.
 - **Asks an AI model when no template fits.** The reflector drafts a lesson through Hermes, at most 6 calls a day by default, and the draft waits for you.
 - **Watches Hermes' health.** It points out sessions cut off instead of closing normally, conversations that send too much text to the model, compactions that free little room, and plugins that fail to load, clash with each other or break another plugin's commands (those failures never become lessons).
-- **Protects the running Hermes.** It vetoes agent commands that would stop, restart or kill the gateway (as a systemd unit on Linux, a LaunchAgent on macOS or a Windows service or task) or delete the Python, the code or the profile that Hermes runs on. The agent is told to leave a restart to you.
+- **Protects the running Hermes.** It vetoes agent commands that would stop, restart or kill the gateway (as a systemd unit on Linux, a LaunchAgent on macOS or a Windows service or task) or delete the Python, the code or the profile that Hermes runs on, and it keeps the agent from changing this plugin's settings or switching it off. The agent is told to leave those to you.
 - **Runs by itself and asks before changing Hermes.** A background pass runs at most once an hour per profile. Changes to Hermes, such as locking a skill, are proposed with the exact command for you to run.
 - **Speaks your language.** Every message, the digest and the lessons come in English or Brazilian Portuguese, following the profile.
 
@@ -95,17 +97,19 @@ Subcommands of `hermes evolution`. `--lang en|pt` works with any of them.
 | `lessons approve <id>` | Activates one waiting lesson after showing its exact text. |
 | `proposals list`, `proposals approve <id>`, `proposals reject <id>` | The queue of proposals, and your decision on one. |
 | `learn` | Runs a pass now instead of waiting for the background one. |
+| `owner` | Lists each chat channel with its senders; `owner add <id>` or `owner add-platform <name>` prints the `hermes config set` command that marks one as you. In your own terminal only. |
 
 Every command and option: [Commands](docs/evolution-loop.md#commands).
 
 ## Settings
 
-Set them in Hermes Desktop under Settings → Plugins, or in the profile's `config.yaml` under `plugins.entries.hermes-atlas-evolution.settings`. Restart the gateway after a change.
+Set them in Hermes Desktop under Settings → Plugins, or in the profile's `config.yaml` under `plugins.entries.hermes-atlas-evolution.settings`. Restart the gateway after a change. `owner_sender_ids`, `owner_platforms`, `agent_tools: true` and `runtime_guard: false` count only from there, never from the plugin's own `settings.json`, which the agent's file tools can write.
 
 | Option | Default | What it does |
 |---|---|---|
 | `lessons` | `auto` | `auto`: template lessons apply at once (once your own turns hit the failure), are measured and are retired when they do not help; reflector drafts and agent proposals wait for approval. `suggest`: every lesson waits for approval. `off`: measure only. |
-| `owner_sender_ids` | `[]` | Your sender ids on messaging platforms (text or numbers, such as your Telegram id). A chat turn from one of them counts as yours. Your CLI, TUI and Desktop always do. |
+| `owner_sender_ids` | `[]` | Your sender ids on messaging platforms (text or numbers, such as your Telegram id). A chat turn from one of them counts as yours. Your CLI, TUI and Desktop always do. `hermes evolution owner` lists the senders. |
+| `owner_platforms` | `[]` | Platforms where every chat is yours (a private bot, your own interface through the API server), such as `telegram` or `api_server`. Their chats count as yours from the first message. Only list a platform nobody else writes to. |
 | `language` | `auto` | `en` or `pt`. `auto` follows the profile language. |
 | `reflector` | `true` | Drafts lessons with an AI model, through Hermes, for failures in your own turns that have no template. |
 | `autopilot_minutes` | `60` | Runs the background pass at most once per interval, from 15 to 1440 minutes. `0` turns the background pass off: passes then run only from `learn`, `ops tick`, the weekly digest recipe and the first `status`. |
@@ -128,7 +132,7 @@ Every option, `settings.json` and what happens with an invalid value: [Settings 
 ## Privacy and safety
 
 - **What it keeps.** Counters, failure classes, hashed session IDs, lesson sentences and proposals, under `<HERMES_HOME>/evolution/`. It keeps no conversation text, prompt, tool argument, tool output or memory content. While the reflector is on, it keeps a short excerpt of the error message, up to 300 characters with secrets, paths and addresses masked, per failure in your own turns that has no template, until the failure has a lesson or for 14 days.
-- **What it reads**, always read-only: Hermes' own history, logs and skill records, and, for `status`, the session counts of your other profiles ([full list](docs/hermes-integration.md#what-the-plugin-reads)).
+- **What it reads**, always read-only: Hermes' own history, logs and skill records, for `status` the session counts of your other profiles and of each chat channel, and, for `hermes evolution owner` in your own terminal, the sender ids of each channel ([full list](docs/hermes-integration.md#what-the-plugin-reads)).
 - **Runs in the background.** Only inside Hermes: a small timer checks every 10 minutes whether a learning round is due.
 - **Model calls.** Only the reflector calls an AI model, through Hermes and its provider settings (auxiliary task `evolution_reflector`), at most 3 times per pass and 6 times a day by default. `reflector: false` stops it.
 - **Network.** No connection of its own and no telemetry.

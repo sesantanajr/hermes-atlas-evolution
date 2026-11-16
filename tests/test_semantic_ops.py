@@ -21,7 +21,7 @@ class SemanticOpsTest(unittest.TestCase):
                         incident("cpu_wait", "CPU stall caused by concurrent background jobs")]
 
     def valid_model(self):
-        model_dir = tempfile.TemporaryDirectory()
+        model_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(model_dir.cleanup)
         model = Path(model_dir.name)
         (model / "config.json").write_text("{}", encoding="utf-8")

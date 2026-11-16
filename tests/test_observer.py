@@ -23,7 +23,7 @@ def tool(call, status="ok"):
 
 class ObserverTests(unittest.TestCase):
     def setUp(self):
-        self.folder = tempfile.TemporaryDirectory()
+        self.folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.folder.cleanup)
         self.addCleanup(operations.close_observers)
         self.home = Path(self.folder.name)
@@ -124,6 +124,7 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0], 1)   # delivery ids: 2 days
         self.assertEqual(days, ["2026-10-12", "2026-11-15"])
 
+    @unittest.skipIf(os.name == "nt", "Windows cannot delete a database that is still open")
     def test_replaced_database_and_forked_process_get_a_new_connection(self):
         observe(self.home, "tool", tool("first"), now=NOW)
         first = operations._observer(self.home).connection

@@ -110,46 +110,220 @@ def valid_text(text) -> bool:
     return clean_text(text) is not None
 
 
+# Advice any failure would get: not worth an approval. A draft is generic when nothing but such advice is left
+# once its condition ("When X,") is set aside: reading the output or the error, checking before retrying,
+# diagnosing the cause. A draft that also says what to do (delete a lock file, pass a flag, use another tool) is
+# specific, and so is one that names something in backticks.
+_CONDITION = re.compile(r"\s*(?:when(?:ever)?|if|after|quando|se|sempre\s+que|ao|após)\b[^,;:]*[,;:]\s*", re.I)
+_SAME_CALL = (r"(?:\s+(?:it|that|the\s+(?:same\s+)?(?:call|command|request|step|operation)|a\s+(?:mesma\s+)?(?:chamada|operação)"
+              r"|o\s+(?:mesmo\s+)?(?:comando|pedido|passo)))?")
+_GENERIC_PHRASES = re.compile(
+    r"\b(?:read|reading|check|checking|review|reviewing|inspect|inspecting|look\s+at|examine|verify|confirm)\s+"
+    r"(?:the\s+)?(?:full\s+|exact\s+|whole\s+)?(?:command\s+)?"
+    r"(?:output|error(?:\s+(?:message|output))?s?|logs?|messages?|status|results?|exit\s+code|stderr|stdout)\b"
+    r"|\b(?:diagnose|diagnosing|investigate|investigating|identify|identifying|find|finding|understand|understanding"
+    r"|determine|determining)\s+(?:the\s+)?(?:root\s+)?(?:cause|problem|issue|error|reason)\b"
+    r"|\b(?:fix|fixing|address|resolve|correct|handle)\s+(?:it|that|this|the\s+(?:root\s+)?(?:cause|problem|issue|error))\b"
+    r"|\bbefore\s+(?:retrying|repeating|trying\s+again|running\s+it\s+again|you\s+retry|re-?running|calling\s+it\s+again)"
+    + _SAME_CALL + r"\b"
+    r"|\b(?:do\s+not|don't|never)\s+(?:retry|repeat)(?:\s+it)?\s+blindly\b|\binstead\s+of\s+retrying\s+blindly\b"
+    r"|\b(?:leia|ler|verifique|verificar|revise|revisar|inspecione|inspecionar|examine|examinar|confira|conferir|olhe"
+    r"|olhar|confirme|confirmar)\s+(?:a\s+|o\s+|os\s+|as\s+)?"
+    r"(?:saída|erro|mensagem(?:\s+de\s+erro)?|logs?|status|resultado|código\s+de\s+saída)\b"
+    r"|\b(?:diagnostique|diagnosticar|investigue|investigar|identifique|identificar|entenda|entender|descubra|descobrir)"
+    r"\s+(?:a\s+|o\s+)?(?:causa|problema|erro|motivo)(?:\s+raiz)?\b"
+    r"|\b(?:corrija|corrigir|resolva|resolver|trate|tratar)\s+(?:isso|o\s+problema|a\s+causa|o\s+erro)\b"
+    r"|\bantes\s+de\s+(?:repetir|tentar\s+de\s+novo|tentar\s+novamente|rodar\s+de\s+novo|executar\s+de\s+novo"
+    r"|chamar\s+de\s+novo)" + _SAME_CALL + r"\b"
+    r"|\bnão\s+(?:repita|tente\s+de\s+novo)\s+às\s+cegas\b", re.I)
+_FILLER = re.compile(r"\b(?:and|then|always|first|carefully|again|it|the|a|an|to|so|in\s+order|e|depois|sempre|"
+                     r"primeiro|com|atenção|isso|o|a|os|as|para|de|novo)\b|[\W_]+", re.I)
+
+
+def generic_advice(text: str) -> bool:
+    """True for a sentence that only gives advice every failure would get (read the error, check before retrying)."""
+    if not isinstance(text, str) or "`" in text:
+        return False
+    condition = _CONDITION.match(text)
+    advice = text[condition.end():] if condition else text
+    if not _GENERIC_PHRASES.search(advice):
+        return False
+    return not _FILLER.sub(" ", _GENERIC_PHRASES.sub(" ", advice)).strip()
+
+
 def _record_change(conn, lesson_id: int, now: float, subject: str) -> None:
     conn.execute("""INSERT OR IGNORE INTO change(ref, kind, subject, detail, at) VALUES (?, 'lesson', ?, '{}', ?)""",
                  (f"lesson:{lesson_id}:{int(now)}", subject, now))
 
 
 OWNER_ACTIVATION = 2   # failures in the owner's own turns before a derived lesson may activate by itself
+WITHDRAWN = "withdrawn"   # verdict of a lesson tidy took back: kept as retired so its id is never reused
+
+
+def _text_key(tool: str, klass: str, hint: str) -> str:
+    """The sentence a derived lesson renders (in English), so two failures that read the same are one lesson."""
+    template = TEMPLATES.get(klass)
+    return template[1].format(tool=tool, hint=hint) if template else f"{tool}\0{klass}\0{hint}"
+
+
+def _owner_by_key(conn: sqlite3.Connection) -> dict[str, int]:
+    """Failures in the owner's own turns per lesson sentence: failures that read the same share their evidence."""
+    owner = dict(conn.execute("SELECT signature, SUM(count) FROM failure_owner_daily GROUP BY signature").fetchall())
+    found: dict[str, int] = {}
+    if owner:
+        for signature, tool, klass, hint in conn.execute("SELECT signature, tool, klass, hint FROM failure").fetchall():
+            if owner.get(signature):
+                key = _text_key(tool, klass, hint)
+                found[key] = found.get(key, 0) + owner[signature]
+    return found
+
+
+def _decided_keys(conn: sqlite3.Connection, *, waiting: bool) -> set[str]:
+    """Sentences of derived lessons that are active, retired by the operator or for not helping, and, with
+    `waiting`, still waiting for a decision: another failure that reads the same never brings them back.
+    Withdrawn lessons do not count."""
+    statuses = "('active', 'candidate', 'retired')" if waiting else "('active', 'retired')"
+    return {_text_key(row[0], row[1], row[2]) for row in conn.execute(
+        f"""SELECT tool, klass, hint FROM lesson WHERE origin='derived' AND status IN {statuses}
+            AND NOT (status='retired' AND verdict IS '{WITHDRAWN}')""")}
 
 
 def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> list[int]:
-    """Create lessons for recurring failures that have a template. Returns the new lesson ids.
+    """Create lessons for recurring failures that have a template, and bring back a withdrawn lesson whose
+    failure recurs (same id, same text). Returns the ids of the lessons created or brought back.
 
-    In auto mode a lesson activates by itself only when the owner's own turns hit the failure at least
-    OWNER_ACTIVATION times. One that only chats with other people caused waits for the owner's approval,
-    so nobody else can put a lesson in the owner's prompt."""
+    In auto mode a lesson activates by itself only when the owner's own turns hit the failure (or another that
+    reads the same) at least OWNER_ACTIVATION times. One that only chats with other people caused waits, so
+    nobody else can put a lesson in the owner's prompt: for the owner's approval, or until the owner's own turns
+    hit it too (promote)."""
     if mode not in MODES or mode == "off":
         return []
-    rows = conn.execute("""SELECT f.signature, f.tool, f.klass, f.hint, f.total, f.sessions,
-          (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=f.signature) AS days,
-          COALESCE((SELECT o.total FROM failure_owner o WHERE o.signature=f.signature), 0) AS owner_total
-        FROM failure f WHERE f.total >= ? AND NOT EXISTS (SELECT 1 FROM lesson l WHERE l.signature=f.signature)
+    rows = conn.execute(f"""SELECT f.signature, f.tool, f.klass, f.hint, f.total, f.sessions,
+          (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=f.signature) AS days, l.id AS lesson_id
+        FROM failure f LEFT JOIN lesson l ON l.signature=f.signature
+        WHERE f.total >= ? AND (l.id IS NULL OR l.origin='derived' AND l.status='retired' AND l.verdict IS '{WITHDRAWN}')
         ORDER BY f.total DESC LIMIT 200""", (MIN_TOTAL,)).fetchall()
     created = []
+    rewriters = rewriter_binaries(conn)
+    taken = _decided_keys(conn, waiting=True)
+    owner = None
     for row in rows:
         template = TEMPLATES.get(row["klass"])
         if template is None or template[0] and not row["hint"] or row["tool"] == "unknown":
             continue
         if row["sessions"] < 2 and row["days"] < 2:
             continue   # one bad session is not a pattern yet
-        status = "active" if mode == "auto" and row["owner_total"] >= OWNER_ACTIVATION else "candidate"
-        # OR IGNORE: another process may have derived the same lesson since the SELECT above.
-        cursor = conn.execute("""INSERT OR IGNORE INTO lesson(signature, tool, klass, hint, origin, status, created, updated,
-              activated) VALUES (?, ?, ?, ?, 'derived', ?, ?, ?, ?)""",
-                              (row["signature"], row["tool"], row["klass"], row["hint"], status, now, now,
-                               now if status == "active" else None))
+        if row["klass"] == "missing_dependency" and row["hint"] in rewriters:
+            continue   # another plugin rewrote the command into this binary: the agent never called it
+        key = _text_key(row["tool"], row["klass"], row["hint"])
+        if key in taken:
+            continue   # the same sentence is already in the playbook, waiting, or was turned down
+        taken.add(key)
+        owner = _owner_by_key(conn) if owner is None else owner
+        status = "active" if mode == "auto" and owner.get(key, 0) >= OWNER_ACTIVATION else "candidate"
+        activated = now if status == "active" else None
+        if row["lesson_id"] is not None:   # withdrawn when its evidence faded, and the failure is back
+            cursor = conn.execute(f"""UPDATE lesson SET status=?, verdict=NULL, updated=?, activated=?, rate_before=NULL,
+                  rate_after=NULL, evaluated=NULL, baseline_failures=NULL, baseline_calls=NULL
+                WHERE id=? AND status='retired' AND verdict IS '{WITHDRAWN}'""", (status, now, activated, row["lesson_id"]))
+            lesson_id = row["lesson_id"]
+        else:   # OR IGNORE: another process may have derived the same lesson since the SELECT above
+            cursor = conn.execute("""INSERT OR IGNORE INTO lesson(signature, tool, klass, hint, origin, status, created,
+                  updated, activated) VALUES (?, ?, ?, ?, 'derived', ?, ?, ?, ?)""",
+                                  (row["signature"], row["tool"], row["klass"], row["hint"], status, now, now, activated))
+            lesson_id = cursor.lastrowid
         if not cursor.rowcount:
             continue
-        created.append(cursor.lastrowid)
+        created.append(lesson_id)
         if status == "active":
-            _record_change(conn, cursor.lastrowid, now, row["tool"])
+            _record_change(conn, lesson_id, now, row["tool"])
+        elif mode == "auto":   # waits only for the owner's own evidence
+            conn.execute("INSERT OR REPLACE INTO lesson_owner_wait VALUES (?, ?)", (lesson_id, row["signature"]))
+    # A reflector draft withdrawn when its evidence faded goes back to the queue once its failure meets the rule again.
+    for row in conn.execute(f"""SELECT l.id, l.text, f.sessions,
+          (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=l.signature) AS days
+        FROM lesson l JOIN failure f ON f.signature=l.signature
+        WHERE l.origin='reflector' AND l.status='retired' AND l.verdict IS '{WITHDRAWN}' AND f.total >= ?""",
+                            (MIN_TOTAL,)).fetchall():
+        if (row["sessions"] >= 2 or row["days"] >= 2) and not generic_advice(row["text"]):
+            conn.execute(f"""UPDATE lesson SET status='quarantined', verdict=NULL, updated=? WHERE id=? AND status='retired'
+                AND verdict IS '{WITHDRAWN}'""", (now, row["id"]))
+            created.append(row["id"])
     return created
+
+
+def promote(conn: sqlite3.Connection, *, now: float, mode: str) -> list[int]:
+    """In auto mode, activate the derived lessons that waited only for the owner's own turns to hit their failure
+    (or another that reads the same) OWNER_ACTIVATION times, now that they have. Returns their ids.
+
+    Only lessons derived in auto mode wait this way: a candidate from suggest mode or from a version before
+    0.7.0 keeps waiting for the operator, and one the operator retired or rejected is never touched. Everything
+    is read before anything is written, so the write lock is held only for the changes."""
+    rows = conn.execute("""SELECT w.lesson_id, w.signature, l.signature AS current, l.tool, l.klass, l.hint, l.status,
+          l.origin FROM lesson_owner_wait w LEFT JOIN lesson l ON l.id=w.lesson_id""").fetchall()
+    if not rows:
+        return []
+    stale = [row["lesson_id"] for row in rows
+             if row["status"] != "candidate" or row["origin"] != "derived" or row["current"] != row["signature"]]
+    promoted = []
+    if mode == "auto":
+        owner = _owner_by_key(conn)
+        promoted = [row["lesson_id"] for row in rows if row["lesson_id"] not in stale
+                    and owner.get(_text_key(row["tool"], row["klass"], row["hint"]), 0) >= OWNER_ACTIVATION]
+    activated = []
+    for lesson_id in promoted:   # only if it is still waiting: an operator may have decided on it meanwhile
+        cursor = conn.execute("""UPDATE lesson SET status='active', updated=?, activated=?, verdict=NULL,
+              baseline_failures=NULL, baseline_calls=NULL WHERE id=? AND status='candidate'""", (now, now, lesson_id))
+        if cursor.rowcount:
+            _record_change(conn, lesson_id, now, next(row["tool"] for row in rows if row["lesson_id"] == lesson_id))
+            activated.append(lesson_id)
+    conn.executemany("DELETE FROM lesson_owner_wait WHERE lesson_id=?", [(item,) for item in [*stale, *promoted]])
+    return activated
+
+
+def rewriter_binaries(conn: sqlite3.Connection) -> set[str]:
+    """Binaries seen missing only after another plugin rewrote the command (`rewritten_command` failures)."""
+    return {row[0] for row in conn.execute(
+        "SELECT DISTINCT hint FROM failure WHERE klass='rewritten_command' AND hint != ''").fetchall()}
+
+
+def tidy(conn: sqlite3.Connection, *, now: float) -> int:
+    """Withdraw lessons nobody decided on yet that the evidence no longer supports. Returns how many.
+
+    A derived candidate or a reflector draft goes when its failure no longer meets the rule that made it
+    (seen at least MIN_TOTAL times, in 2 sessions or on 2 days; a replay that recounted the history can
+    lower it), when it would say the same sentence as another lesson (active, turned down, or a candidate with
+    more evidence), when its missing binary turned out to come from another plugin's rewrite, or, for a draft,
+    when it only gives advice every failure would get. Active, retired and operator lessons are never touched.
+    A withdrawn lesson stays as retired with the verdict WITHDRAWN, so its id is never given to another lesson,
+    and derive brings it back, same id and text, if its failure returns. Run it only when the history replay is
+    settled."""
+    rewriters = rewriter_binaries(conn)
+    taken = _decided_keys(conn, waiting=False)
+    rows = conn.execute("""SELECT l.id, l.tool, l.klass, l.hint, l.origin, l.text,
+          COALESCE(f.total, 0) AS total, COALESCE(f.sessions, 0) AS sessions,
+          (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=l.signature) AS days
+        FROM lesson l LEFT JOIN failure f ON f.signature=l.signature
+        WHERE (l.status='candidate' AND l.origin='derived') OR (l.status='quarantined' AND l.origin='reflector')
+        ORDER BY total DESC, l.id""").fetchall()
+    withdrawn = []
+    for row in rows:
+        stale = row["total"] < MIN_TOTAL or row["sessions"] < 2 and row["days"] < 2
+        foreign = row["klass"] == "missing_dependency" and row["hint"] in rewriters
+        bland = row["origin"] == "reflector" and generic_advice(row["text"])
+        key = _text_key(row["tool"], row["klass"], row["hint"]) if row["origin"] == "derived" else None
+        if stale or foreign or bland or key in taken:
+            withdrawn.append(row["id"])
+        elif key is not None:
+            taken.add(key)
+    taken_back = []
+    for lesson_id in withdrawn:   # only if still undecided: an operator may have decided on it meanwhile
+        cursor = conn.execute(f"""UPDATE lesson SET status='retired', verdict='{WITHDRAWN}', updated=?
+            WHERE id=? AND status IN ('candidate', 'quarantined')""", (now, lesson_id))
+        if cursor.rowcount:
+            taken_back.append(lesson_id)
+    conn.executemany("DELETE FROM lesson_owner_wait WHERE lesson_id=?", [(item,) for item in taken_back])
+    return len(taken_back)
 
 
 def add_custom(conn: sqlite3.Connection, text: str, *, tool: str, origin: str, now: float, active: bool = False) -> int:
@@ -190,7 +364,11 @@ def set_status(conn: sqlite3.Connection, lesson_id: int, status: str, *, now: fl
     row = conn.execute("SELECT * FROM lesson WHERE id=?", (lesson_id,)).fetchone()
     if row is None:
         raise ValueError(f"Unknown lesson id {lesson_id}")
-    if row["status"] != status:
+    if row["status"] == status == "retired" and row["verdict"] == WITHDRAWN:
+        # The queue cleaning had taken it back; now the operator says no: that decision stays, and the lesson no
+        # longer comes back when its failure does.
+        conn.execute("UPDATE lesson SET verdict=NULL, updated=? WHERE id=?", (now, lesson_id))
+    elif row["status"] != status:
         conn.execute("UPDATE lesson SET status=?, updated=?, activated=CASE WHEN ?='active' THEN ? ELSE activated END,"
                      " verdict=CASE WHEN ?='active' THEN NULL ELSE verdict END,"
                      " baseline_failures=CASE WHEN ?='active' THEN NULL ELSE baseline_failures END,"
@@ -325,14 +503,15 @@ def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest", his
 
 
 def listing(conn: sqlite3.Connection, *, lang: str = "en", status: str | None = None) -> list[dict]:
-    rows = conn.execute("""SELECT l.*, COALESCE(f.total, 0) AS evidence, COALESCE(f.sessions, 0) AS sessions,
-          COALESCE((SELECT o.total FROM failure_owner o WHERE o.signature=l.signature), 0) AS owner_evidence FROM lesson l
+    rows = conn.execute("""SELECT l.*, COALESCE(f.total, 0) AS evidence, COALESCE(f.sessions, 0) AS sessions
+        FROM lesson l
         LEFT JOIN failure f ON f.signature=l.signature WHERE (? IS NULL OR l.status=?)
         ORDER BY CASE l.status WHEN 'active' THEN 0 WHEN 'candidate' THEN 1 WHEN 'quarantined' THEN 2 ELSE 3 END,
           evidence DESC, l.id""", (status, status)).fetchall()
+    owner = _owner_by_key(conn)   # what derive and promote decide on: failures that read the same count together
     return [{"id": row["id"], "status": row["status"], "origin": row["origin"], "tool": row["tool"], "class": row["klass"],
              "lesson": render(row, lang), "failures_seen": row["evidence"], "sessions": row["sessions"],
-             "failures_in_owner_turns": row["owner_evidence"],
+             "failures_in_owner_turns": owner.get(_text_key(row["tool"], row["klass"], row["hint"]), 0),
              "shown_in_sessions": row["shown"], "hints_given": row["hints"], "verdict": row["verdict"],
              "rate_before": row["rate_before"], "rate_after": row["rate_after"], "activated": row["activated"]}
             for row in rows]

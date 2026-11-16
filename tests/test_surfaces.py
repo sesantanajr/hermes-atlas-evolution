@@ -22,7 +22,7 @@ FAILED = json.dumps({"output": "Traceback (most recent call last):\n  boom\nValu
 
 class Base(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)
         self.home = Path(folder.name)
@@ -52,7 +52,8 @@ class SurfaceTest(Base):
     def test_the_owner_is_served_on_their_surfaces_and_by_listed_senders(self):
         owners = frozenset({"555"})
         self.assertEqual([owner_turn(surface, None, owners) for surface in ("local", "cron", "subagent", "gateway")],
-                         [True, True, True, False])
+                         [True, True, False, False])   # a subagent serves whoever its parent served
+        self.assertTrue(owner_turn("subagent", None, owners, parent_owner=True))
         self.assertTrue(owner_turn("gateway", 555, owners))   # a numeric Telegram id
         self.assertFalse(owner_turn("gateway", "stranger", owners))
 
@@ -95,12 +96,12 @@ class OwnerFailureTest(Base):
         close_observers()
         with experience(self.home) as conn:
             self.assertEqual(conn.execute("SELECT total FROM failure").fetchone()[0], 1)
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_owner").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_owner_daily").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_sample").fetchone()[0], 0)
         record_tool(self.home, payload, now=NOW, sample=True, owner=True)
         close_observers()
         with experience(self.home) as conn:
-            self.assertEqual(conn.execute("SELECT total FROM failure_owner").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT SUM(count) FROM failure_owner_daily").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_sample").fetchone()[0], 1)
 
 
@@ -152,7 +153,7 @@ class HistoryTest(Base):
         with experience(self.home) as conn:
             surfaces = dict(conn.execute("SELECT surface, SUM(turns) FROM turn_daily GROUP BY surface").fetchall())
             feedback = dict(conn.execute("SELECT kind, count FROM feedback_daily").fetchall())
-            owned = conn.execute("SELECT total FROM failure_owner").fetchone()[0]
+            owned = conn.execute("SELECT SUM(count) FROM failure_owner_daily").fetchone()[0]
             total = conn.execute("SELECT total FROM failure").fetchone()[0]
         self.assertEqual(surfaces, {"local": 3, "cron": 1, "gateway": 3, "subagent": 1})
         self.assertEqual(feedback, {"correction": 1})          # the session's first message is not a correction

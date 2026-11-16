@@ -20,7 +20,7 @@ from .native_actions import PLAYBOOKS
 from .operations import RETENTION_DAYS, database, recommendations, run_policy, summarize
 
 RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
-EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report")
+EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report", "owner")
 CYCLE_INTERVAL_SECONDS = 3600
 
 
@@ -48,8 +48,13 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
                "tool_hints": ("evolution", "tool_hints"), "feedback_signals": ("evolution", "feedback_signals"),
                "slow_turn_seconds": ("evolution", "slow_turn_seconds"),
                "owner_sender_ids": ("evolution", "owner_sender_ids"), "agent_tools": ("agent_advice",),
+               "owner_platforms": ("evolution", "owner_platforms"),
                "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit"),
                "autopilot_minutes": ("evolution", "autopilot_minutes"), "runtime_guard": ("evolution", "runtime_guard")}
+# Keys the form does not show but `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key>` can set:
+# the 0.1 notes, whose recall puts stored text in front of the agent on every turn.
+CONFIG_KEYS = {"legacy_memory_commands": ("legacy_memory_commands",),
+               "automatic_shared_recall": ("automatic_shared_recall",)}
 
 
 def native_settings(runtime_config) -> dict:
@@ -91,10 +96,66 @@ def legacy_install(home: Path, runtime_config) -> str | None:
     return None
 
 
+# Values that widen whom the plugin trusts or switch a protection off. The agent's own file tools can write
+# settings.json (Hermes guards only its config.yaml), so these count only from the Hermes configuration: the
+# plugin settings form or `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> ...`.
+# settings.json may still narrow them. Settings key -> (where settings.json keeps it, whether a value widens).
+TRUSTED_ONLY = {
+    "owner_sender_ids": (("evolution", "owner_sender_ids"), lambda value: value not in (None, [], ())),
+    "owner_platforms": (("evolution", "owner_platforms"), lambda value: value not in (None, [], ())),
+    "agent_tools": (("agent_advice",), lambda value: value is True),
+    "runtime_guard": (("evolution", "runtime_guard"), lambda value: value is False),
+    "legacy_memory_commands": (("legacy_memory_commands",), lambda value: value is True),
+    "automatic_shared_recall": (("automatic_shared_recall",), lambda value: value is True),
+}
+
+
+def _nested(data: dict, path: tuple) -> tuple[bool, object]:
+    for part in path[:-1]:
+        data = data.get(part) if isinstance(data, dict) else None
+    return (isinstance(data, dict) and path[-1] in data), (data.get(path[-1]) if isinstance(data, dict) else None)
+
+
+def ignored_settings(raw: dict) -> dict:
+    """The values of settings.json that widen trust and are therefore ignored: {settings key: value}."""
+    found = {}
+    for key, (path, widens) in TRUSTED_ONLY.items():
+        present, value = _nested(raw, path)
+        if present and widens(value):
+            found[key] = value
+    return found
+
+
+def _trusted(raw: dict) -> dict:
+    """settings.json without the values that widen trust (see TRUSTED_ONLY). The input is not changed."""
+    result = dict(raw)
+    for key in ignored_settings(raw):
+        path = TRUSTED_ONLY[key][0]
+        target = result
+        for part in path[:-1]:
+            target[part] = dict(target[part])
+            target = target[part]
+        del target[path[-1]]
+    return result
+
+
+def settings_command(home: Path, key: str, value) -> str:
+    """The `hermes config set` command that writes one plugin setting where the Hermes settings form keeps it."""
+    import shlex
+
+    from .native_actions import _profile_args
+
+    profile = " ".join(_profile_args(Path(home)))   # explicit even for default: Hermes may follow a sticky profile
+    literal = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, tuple, bool)) else str(value)
+    return " ".join(part for part in ("hermes", profile, "config set", f"plugins.entries.{PLUGIN_ID}.settings.{key}",
+                                      shlex.quote(literal)) if part)
+
+
 def effective_settings(home: Path, runtime_config=None, *, base: dict | None = None) -> dict:
-    """settings.json (or `base`) with the values set through Hermes' plugin settings on top (Hermes wins per key)."""
-    result = settings(home) if base is None else base
-    for key, path in NATIVE_KEYS.items():
+    """settings.json (or `base`) with the values set through Hermes' plugin settings on top (Hermes wins per key).
+    Values of settings.json that widen trust are left out (see TRUSTED_ONLY)."""
+    result = _trusted(settings(home) if base is None else base)
+    for key, path in {**NATIVE_KEYS, **CONFIG_KEYS}.items():
         value = native_settings(runtime_config).get(key)
         if value is None:
             continue
@@ -182,6 +243,17 @@ def setup(parser: argparse.ArgumentParser) -> None:
     state.add_argument("--format", choices=("md", "json"), default="md")
     state.add_argument("--no-learn", action="store_true",
                        help=_("Only read; do not run the first pass when this profile never had one"))
+    owner = commands.add_parser("owner", help=_("Show the chat channels and senders, and the command that chooses "
+                                                "which ones are you"))
+    owner_commands = owner.add_subparsers(dest="owner_action")
+    owner_commands.add_parser("list", help=_("List chat channels and senders of the last 30 days"))
+    owner_commands.add_parser("add", help=_("Print the command that counts a sender id as you")).add_argument("value")
+    owner_commands.add_parser("remove", help=_("Print the command that stops counting a sender id as you")
+                              ).add_argument("value")
+    owner_commands.add_parser("add-platform", help=_("Print the command that counts every chat of a platform as you "
+                                                     "(a private bot, your own UI)")).add_argument("value")
+    owner_commands.add_parser("remove-platform", help=_("Print the command that stops counting every chat of a platform "
+                                                        "as you")).add_argument("value")
     learn = commands.add_parser("learn", help=_("Run one evolution pass: derive lessons, measure changes, refresh proposals"))
     learn.add_argument("--notify-only", action="store_true", help=_("Print only new lessons, regressions and high-risk proposals"))
     playbook = commands.add_parser("lessons", help=_("Review the playbook learned from recurring tool failures"))
@@ -284,6 +356,94 @@ def _memory(conn, args):
     return store.audit(scope)
 
 
+_OWNER_TEXT = {
+    "en": {"title": "Who is you in chats", "current": "Counted as you now", "senders": "sender ids", "platforms": "platforms",
+           "none": "none", "channels": "Chat channels in the last 30 days", "col_channel": "channel",
+           "col_sessions": "sessions", "col_senders": "senders (sessions)", "col_you": "counts as you",
+           "yes": "yes", "no": "no", "empty": "No chat session in 30 days: your CLI, TUI and Desktop always count as you.",
+           "add": "To count a sender as you", "platform": "To count every chat of a channel as you (a private bot, your own UI)",
+           "channel": "<channel>",
+           "restart": "Then restart the gateway so the running hooks see it",
+           "run": "Run this in your own terminal (it writes the Hermes settings form's value), then restart the gateway:",
+           "why": "The plugin does not write it itself: who counts as you decides what reaches the agent, so it lives in "
+                  "the Hermes configuration, which the agent's file tools cannot change.",
+           "unchanged": "Nothing to change: {key} is already {value}.",
+           "ignored": "Ignored in `settings.json`, because the agent's file tools can write that file: {keys}. To keep a "
+                      "value, add it again with `hermes evolution owner add <id>` or `add-platform <channel>`."},
+    "pt": {"title": "Quem é você nos chats", "current": "Contam como você agora", "senders": "ids de remetente",
+           "platforms": "plataformas", "none": "nenhum", "channels": "Canais de chat dos últimos 30 dias",
+           "col_channel": "canal", "col_sessions": "sessões", "col_senders": "remetentes (sessões)",
+           "col_you": "conta como você", "yes": "sim", "no": "não",
+           "empty": "Nenhuma sessão de chat em 30 dias: o seu CLI, TUI e Desktop sempre contam como você.",
+           "add": "Para contar um remetente como você", "channel": "<canal>",
+           "platform": "Para contar todo chat de um canal como você (um bot privado, a sua própria interface)",
+           "restart": "Depois reinicie o gateway para os hooks em execução verem a mudança",
+           "run": "Rode isto no seu próprio terminal (grava o valor do formulário de configurações do Hermes) e depois "
+                  "reinicie o gateway:",
+           "why": "O plugin não grava isso sozinho: quem conta como você decide o que chega ao agente, então isso fica na "
+                  "configuração do Hermes, que as ferramentas de arquivo do agente não conseguem alterar.",
+           "unchanged": "Nada a mudar: {key} já é {value}.",
+           "ignored": "Ignorado no `settings.json`, porque as ferramentas de arquivo do agente conseguem gravar esse "
+                      "arquivo: {keys}. Para manter um valor, adicione de novo com `hermes evolution owner add <id>` ou "
+                      "`add-platform <canal>`."},
+}
+
+
+def _owner(args, home: Path, *, now: float, runtime_config, lang: str) -> str:
+    """`hermes evolution owner`: the chat channels and senders, and who counts as the owner. Operator only: it
+    shows sender ids. A change is printed as the `hermes config set` command that makes it, never written here:
+    the Hermes configuration is the one place the agent's file tools cannot change."""
+    from .evolve import options
+    from .status import chat_senders
+
+    _operator_only()
+    t = _OWNER_TEXT[lang if lang in _OWNER_TEXT else "en"]
+    action = getattr(args, "owner_action", None) or "list"
+    chosen = options(effective_settings(home, runtime_config), runtime_config, strict=False)
+    if action != "list":
+        key = "owner_platforms" if action.endswith("platform") else "owner_sender_ids"
+        value = str(args.value).strip()
+        if key == "owner_platforms":
+            value = value.lower()
+            if not re.fullmatch(r"[a-z][a-z0-9_.-]{0,47}", value):
+                raise ValueError("Name a platform such as telegram or api_server")
+        elif not 0 < len(value) <= 200:
+            raise ValueError("A sender id has 1 to 200 characters")
+        current = list(chosen[key])
+        updated = [*current, value] if action.startswith("add") and value not in current else \
+            [item for item in current if item != value] if action.startswith("remove") else current
+        if len(updated) > 20:
+            raise ValueError("Up to 20 entries are kept; remove one first")
+        if updated == current:
+            return t["unchanged"].format(key=key, value=json.dumps(current, ensure_ascii=False)) + "\n"
+        return "\n".join([t["run"], "", f"    {settings_command(home, key, updated)}", "    hermes gateway restart", "",
+                          t["why"]]) + "\n"
+    channels = chat_senders(home, since=now - 30 * 86_400, owners=chosen["owner_sender_ids"],
+                            platforms=chosen["owner_platforms"])
+    lines = [f"# {t['title']}", "",
+             f"- **{t['current']}:** {t['senders']}: {', '.join(f'`{item}`' for item in chosen['owner_sender_ids']) or t['none']}"
+             f" · {t['platforms']}: {', '.join(f'`{item}`' for item in chosen['owner_platforms']) or t['none']}", ""]
+    if not channels:
+        lines.append(t["empty"])
+    else:
+        lines += [f"## {t['channels']}", "", f"| {t['col_channel']} | {t['col_sessions']} | {t['col_senders']} | {t['col_you']} |",
+                  "|---|---:|---|---|"]
+        for channel in channels:
+            senders = ", ".join(f"`{item['id']}` ({item['sessions']})" + (" ✓" if item["owner"] else "")
+                                for item in channel["senders"][:8] if item["id"] is not None) or "—"
+            lines.append(f"| `{channel['origin']}` | {channel['sessions']} | {senders} | "
+                         f"{t['yes'] if channel['covered'] else t['no']} |")
+        lines += ["", f"{t['add']}: `hermes evolution owner add <id>`",
+                  f"{t['platform']}: `hermes evolution owner add-platform {t['channel']}`"]
+    try:
+        ignored = [key for key in ignored_settings(settings(home)) if key.startswith("owner_")]
+    except (OSError, ValueError, RecursionError):
+        ignored = []
+    if ignored:
+        lines += ["", t["ignored"].format(keys=", ".join(f"`{key}`" for key in ignored))]
+    return "\n".join(lines) + "\n"
+
+
 def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=None):
     """Commands of the evolution loop: lessons, skills, proposals, experiments and the digest."""
     from . import experiments, lessons, proposals
@@ -296,6 +456,8 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
     config = effective_settings(home, runtime_config)
     opts = options(config, runtime_config)
     lang = getattr(args, "lang", None) or opts["language"]
+    if action == "owner":
+        return _owner(args, home, now=now, runtime_config=runtime_config, lang=lang)
     if action == "status":
         from . import status
 
@@ -464,18 +626,27 @@ def _review_lessons(conn, lang: str, *, now: float) -> dict:
     order = "CASE origin WHEN 'derived' THEN 0 WHEN 'operator' THEN 1 WHEN 'reflector' THEN 2 ELSE 3 END, id"
     rows = conn.execute(f"SELECT * FROM lesson WHERE status IN ('candidate','quarantined') ORDER BY {order}").fetchall()
     decided = {"approved": [], "rejected": [], "skipped": []}
+    conn.commit()   # nothing is held while the owner reads: the gateway's hooks keep writing meanwhile
     for row in rows:
+        shown = playbook.render(row, lang)
         sys.stderr.write(f"\n#{row['id']} · {row['tool']} · {row['klass']} · {row['origin']}\n  "
-                         f"{playbook.render(row, lang)}\n{_REVIEW_PROMPT.get(lang, _REVIEW_PROMPT['en'])}")
+                         f"{shown}\n{_REVIEW_PROMPT.get(lang, _REVIEW_PROMPT['en'])}")
         sys.stderr.flush()
         answer = sys.stdin.readline().strip().lower()[:1]
         if answer == "x":
             break
         if answer in ("a", "r"):
             approve = answer == "a"
+            # A pass may have changed the lesson while the owner read it: decide only on what was shown.
+            now_row = conn.execute("SELECT * FROM lesson WHERE id=?", (row["id"],)).fetchone()
+            if now_row is None or now_row["status"] not in ("candidate", "quarantined") or \
+                    playbook.render(now_row, lang) != shown:
+                decided["skipped"].append(row["id"])
+                continue
             playbook.set_status(conn, row["id"], "active" if approve else "retired", now=now)
             conn.execute("UPDATE proposal SET status=?, updated=? WHERE code=? AND status IN ('open','approved')",
                          ("applied" if approve else "rejected", now, f"lesson:{row['id']}"))
+            conn.commit()   # each decision is saved at once, and the write lock is released before the next question
             decided["approved" if approve else "rejected"].append(row["id"])
         else:
             decided["skipped"].append(row["id"])
@@ -538,7 +709,8 @@ def _report(args, home: Path, *, running_version=None, provider=None, now: float
     rates = config.get("rates_usd_per_million", {})
     with database(home) as conn:
         if action == "memory":
-            if args.memory_action == "remember" and settings(home).get("legacy_memory_commands") is not True:
+            if args.memory_action == "remember" and \
+                    effective_settings(home, runtime_config).get("legacy_memory_commands") is not True:
                 raise ValueError("New legacy notes require legacy_memory_commands in Evolution settings")
             return _memory(conn, args)
         if action == "feedback":
@@ -762,18 +934,26 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
 
 
 def _standalone_config(home: Path) -> dict:
-    """The profile's config.yaml when a YAML parser is installed. Without one the runner uses defaults."""
+    """The profile's config.yaml when a YAML parser is installed. Without one, or when the file cannot be read,
+    the runner uses defaults and marks the configuration as unread: the settings only it holds (who the owner
+    is) are unknown there, not empty."""
+    from .evolve import CONFIG_UNREAD
+
+    if not (home / "config.yaml").exists():
+        return {}
     try:
         import yaml
     except ImportError:
-        return {}
+        return {CONFIG_UNREAD: True}
     try:
         with (home / "config.yaml").open("rb") as stream:
             body = stream.read(1_048_577)
         loaded = yaml.safe_load(body) if len(body) <= 1_048_576 else None
     except (OSError, ValueError, RecursionError, yaml.YAMLError):
+        return {CONFIG_UNREAD: True}
+    if loaded is None:   # an empty file: Hermes' defaults
         return {}
-    return loaded if isinstance(loaded, dict) else {}
+    return loaded if isinstance(loaded, dict) else {CONFIG_UNREAD: True}
 
 
 def _utf8_output() -> None:

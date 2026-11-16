@@ -18,9 +18,12 @@ def create_state(db: sqlite3.Connection) -> None:
 
 class DiagnosticsTest(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        self.temporary = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.temporary.cleanup)
         self.home = Path(self.temporary.name)
+        calm = patch("os.getloadavg", return_value=(0.1, 0.1, 0.1), create=True)   # a busy CI runner is not the host
+        calm.start()
+        self.addCleanup(calm.stop)
 
     def test_reports_aggregates_and_ignores_stale_logs_and_duplicate_sink_lines(self):
         (self.home / "logs").mkdir()

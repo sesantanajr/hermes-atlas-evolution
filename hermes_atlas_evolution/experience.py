@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import operations as _operations   # bound at import: a thread of an unloaded copy keeps its own module
@@ -87,17 +87,43 @@ CREATE TABLE IF NOT EXISTS guard_daily (
 """
 # Tables added after schema 8 without a version bump. A build that does not know a table ignores it, so
 # adding tables keeps the database open to older builds, where a new column would break their positional
-# inserts. operations creates any that are missing when it opens the database.
+# inserts. operations creates any that are missing (tables and indexes) when it opens the database.
 ADDITIVE_TABLES = (
-    # Failures seen in the owner's own turns (see signals.record_tool): only these let a lesson activate by itself.
+    # 0.6.0 kept the owner's failures as one total per signature; 0.7.0 keeps them per day (below), so a
+    # replay can take back exactly what it counted. Still created, so 0.6.0 keeps working after a downgrade.
     ("failure_owner", "CREATE TABLE IF NOT EXISTS failure_owner (signature TEXT PRIMARY KEY, total INTEGER NOT NULL) "
                       "WITHOUT ROWID"),
+    # Failures seen in the owner's own turns (see signals.record_tool): only these let a lesson activate by itself.
+    ("failure_owner_daily", "CREATE TABLE IF NOT EXISTS failure_owner_daily (day TEXT NOT NULL, signature TEXT NOT NULL, "
+                            "count INTEGER NOT NULL, PRIMARY KEY (day, signature)) WITHOUT ROWID"),
+    # Refused approvals per session origin and tool, with the Hermes setting that decided a refusal nobody could
+    # answer ('' when someone could have): the radar tells those from the rest and names the setting.
+    ("approval_daily", "CREATE TABLE IF NOT EXISTS approval_daily (day TEXT NOT NULL, source TEXT NOT NULL, "
+                       "tool TEXT NOT NULL, setting TEXT NOT NULL, count INTEGER NOT NULL, "
+                       "PRIMARY KEY (day, source, tool, setting)) WITHOUT ROWID"),
+    # Derived lessons that auto mode left waiting only because the owner's own turns had not hit the failure
+    # twice yet: they activate by themselves once they have (lessons.promote). The signature guards against
+    # a reused lesson id.
+    ("lesson_owner_wait", "CREATE TABLE IF NOT EXISTS lesson_owner_wait (lesson_id INTEGER PRIMARY KEY, "
+                          "signature TEXT NOT NULL) WITHOUT ROWID"),
+    # Per-signature lookups (lessons, promotion, the listing) would scan these tables once per signature.
+    ("failure_daily_signature", "CREATE INDEX IF NOT EXISTS failure_daily_signature ON failure_daily(signature)"),
+    ("failure_owner_daily_signature",
+     "CREATE INDEX IF NOT EXISTS failure_owner_daily_signature ON failure_owner_daily(signature)"),
 )
 SCHEMA += "".join(f"{statement};\n" for _, statement in ADDITIVE_TABLES)
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def utc_datetime(now: float) -> datetime:
+    """A Unix time as an aware UTC datetime on every system. Windows' fromtimestamp refuses times before 1970."""
+    return _EPOCH + timedelta(seconds=float(now))
+
+
 def utc_day(now: float) -> str:
-    return datetime.fromtimestamp(now, timezone.utc).date().isoformat()
+    return utc_datetime(now).date().isoformat()
 
 
 def day_offset(now: float, days: int) -> str:
@@ -142,18 +168,21 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
 
 
 def prune(conn: sqlite3.Connection, *, now: float) -> None:
-    """Drop aggregates older than the retention window. Lessons and open proposals are kept."""
+    """Drop aggregates older than the retention window. Lessons, retired ones included, and open proposals are
+    kept."""
     cutoff = day_offset(now, RETENTION_DAYS)
     for table in ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "review_daily",
-                  "skill_outcome_daily", "guard_daily"):
+                  "skill_outcome_daily", "guard_daily", "failure_owner_daily", "approval_daily"):
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))
     old = now - RETENTION_DAYS * 86_400
     conn.execute("DELETE FROM failure WHERE last_seen < ? AND signature NOT IN "
                  "(SELECT signature FROM lesson WHERE signature IS NOT NULL AND status IN ('active','candidate'))", (old,))
     conn.execute("DELETE FROM change WHERE at < ?", (old,))
     conn.execute("DELETE FROM proposal WHERE status NOT IN ('open','approved') AND updated < ?", (old,))
-    conn.execute("DELETE FROM lesson WHERE status='retired' AND updated < ?", (old,))
+    # Lessons are kept, retired ones included: a deleted row would free its id for another lesson, and a sentence
+    # the owner turned down would come back as new once its record was gone.
     # Excerpts expire here too, so they do not outlive their window when no learning pass runs.
     conn.execute("DELETE FROM failure_sample WHERE updated < ? OR signature NOT IN (SELECT signature FROM failure)",
                  (now - SAMPLE_DAYS * 86_400,))
     conn.execute("DELETE FROM failure_owner WHERE signature NOT IN (SELECT signature FROM failure)")
+    conn.execute("DELETE FROM failure_owner_daily WHERE signature NOT IN (SELECT signature FROM failure)")

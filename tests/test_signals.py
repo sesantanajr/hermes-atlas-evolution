@@ -1,5 +1,6 @@
 import json
 import tempfile
+import os
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -146,7 +147,7 @@ class ClassifyTest(unittest.TestCase):
 
 class StoreTest(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)   # Windows cannot remove a database that is still open.
         self.home = Path(folder.name)
@@ -248,7 +249,8 @@ class StoreTest(unittest.TestCase):
         with experience(self.home):
             pass
         path = self.home / "evolution" / "evolution.sqlite3"   # one database for operations and experience
-        self.assertEqual(path.stat().st_mode & 0o077, 0)
+        if os.name != "nt":   # POSIX permission bits
+            self.assertEqual(path.stat().st_mode & 0o077, 0)
         self.assertFalse((self.home / "evolution" / "experience.sqlite3").exists())
         import sqlite3
         raw = sqlite3.connect(path)

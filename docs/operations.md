@@ -121,13 +121,12 @@ The provider, the model and the prices above are placeholders.
 
 `ops plan` returns a read-only plan with a suggested budget: search queries, page extracts and parallel lanes for research, parallel lanes and review passes for delegation, and comparable samples for operations. Research plans include source discovery, evidence verification and a record of uncertainties. Delegation plans point to `delegate_task` for answers the current agent must wait for and to Kanban for work that must survive restarts (`--durable`).
 
-Turn on `agent_tools` in the Hermes plugin settings, or set `"agent_advice": true` in `<HERMES_HOME>/evolution/settings.json`, and reload the plugin to expose `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` to the profile. Include `hermes-atlas-evolution` when the profile uses an explicit list of toolsets. The plan tool returns only the plan.
+Turn on `agent_tools` in the Hermes plugin settings (or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.agent_tools true` from your own terminal) and reload the plugin to expose `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` to the profile. Include `hermes-atlas-evolution` when the profile uses an explicit list of toolsets. The plan tool returns only the plan.
 
 Reading shared Kanban boards requires `"inspect_shared_kanban": true`. Creating a card requires your own handoff authorization, independently of that key. The example assigns verifications to the profile `reviewer` on the existing board `ops`.
 
 ```json
 {
-  "agent_advice": true,
   "inspect_shared_kanban": true,
   "kanban_handoff": {"enabled": true, "board": "ops", "assignee": "reviewer"}
 }
@@ -181,12 +180,12 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 
 ## Configuration keys
 
-`<HERMES_HOME>/evolution/settings.json` is an optional JSON object of up to 64 KiB. The plugin reads it when it loads, so restart the gateway after a change; each autopilot pass and each command read it again. The options of the evolution loop are described in [The evolution loop](evolution-loop.md#settings-and-language). Those exposed in the Hermes settings form win over the same keys in this file.
+`<HERMES_HOME>/evolution/settings.json` is an optional JSON object of up to 64 KiB. The plugin reads it when it loads, so restart the gateway after a change; each autopilot pass and each command read it again. The options of the evolution loop are described in [The evolution loop](evolution-loop.md#settings-and-language). Those exposed in the Hermes settings form win over the same keys in this file. The agent's file tools can write this file, so values that would widen trust (`owner_sender_ids`, `owner_platforms`, `agent_advice: true`, `runtime_guard: false`) are ignored here; set them in the Hermes settings form.
 
 | Key | Format | Default | Effect |
 |---|---|---|---|
-| `evolution` | object | see the loop | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `owner_sender_ids`, `reflector`, `reflector_daily_limit`, `autopilot_minutes`, `runtime_guard` |
-| `agent_advice` | boolean | `false` | Exposes the agent tools (`agent_tools` in the Hermes form). |
+| `evolution` | object | see the loop | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `reflector`, `reflector_daily_limit`, `autopilot_minutes`; `owner_sender_ids`, `owner_platforms` and `runtime_guard: false` are ignored here and count only from the Hermes form |
+| `agent_advice` | boolean | `false` | Ignored when `true`: the agent tools are switched on only from the Hermes form (`agent_tools`). |
 | `sensitivity` | `low`, `balanced`, `high` | `balanced` | Threshold of adaptive alerts. |
 | `rates_usd_per_million` | object by provider and model | none | Prices for cost estimates (see [Usage and cost](#usage-and-cost)). |
 | `daily_estimated_budget_usd` | number above 0, up to 1,000,000 | none | Daily (UTC) limit on the priced estimate. |
@@ -194,8 +193,8 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 | `kanban_handoff` | object: `enabled`, `board`, `assignee` | disabled | Authorizes `ops handoff`. `board` and `assignee` are lower-case slugs. |
 | `linux_supervisor` | object | absent | Policy for reversible systemd trials (see [Linux remediation](#linux-remediation)). |
 | `semantic_incident_model` | absolute path | none | Local embedding model for `ops similar`. |
-| `legacy_memory_commands` | boolean | `false` | Allows new 0.1 notes and the `/evolution` chat command. |
-| `automatic_shared_recall` | boolean | `false` | With `legacy_memory_commands`, injects matching shared 0.1 notes into a turn. |
+| `legacy_memory_commands` | boolean | `false` | Allows new 0.1 notes and the `/evolution` chat command. Ignored here when `true`: set it with `hermes config set plugins.entries.hermes-atlas-evolution.settings.legacy_memory_commands true`. |
+| `automatic_shared_recall` | boolean | `false` | With `legacy_memory_commands`, injects matching shared 0.1 notes into a turn. Ignored here when `true`, like `legacy_memory_commands`: set it in the Hermes configuration. |
 
 ## Data and compatibility
 

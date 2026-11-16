@@ -13,7 +13,7 @@ import threading
 import time
 from collections import Counter, OrderedDict, deque
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 
 BUCKETS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
@@ -109,14 +109,14 @@ _ADDITIVE_READY: set[str] = set()
 
 
 def _ensure_additive(connection: sqlite3.Connection, path: Path) -> None:
-    """Create the tables added after schema 8 (experience.ADDITIVE_TABLES) that this database lacks. Checked
-    once per database file and process; the check is a read, so readers never wait for a writer here."""
+    """Create the tables and indexes added after schema 8 (experience.ADDITIVE_TABLES) that this database lacks.
+    Checked once per database file and process; the check is a read, so readers never wait for a writer here."""
     key = os.fspath(path)
     if key in _ADDITIVE_READY:
         return
     from .experience import ADDITIVE_TABLES
 
-    present = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    present = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'index')")}
     missing = [statement for name, statement in ADDITIVE_TABLES if name not in present]
     if missing:
         connection.execute("BEGIN IMMEDIATE")
@@ -410,7 +410,9 @@ if hasattr(os, "register_at_fork"):
 
 
 def _day(now: float) -> str:
-    return datetime.fromtimestamp(now, timezone.utc).date().isoformat()
+    from .experience import utc_day
+
+    return utc_day(now)
 
 
 def _label(value) -> str:
@@ -608,7 +610,9 @@ SEEN_DAYS = 2   # delivery ids only guard against an event delivered twice, whic
 
 
 def _prune(conn: sqlite3.Connection, now: float) -> None:
-    today = datetime.fromtimestamp(now, timezone.utc).date()
+    from .experience import utc_datetime
+
+    today = utc_datetime(now).date()
     cutoff = (today - timedelta(days=RETENTION_DAYS - 1)).isoformat()
     for table in ("metric", "research_latency", "native_activity"):
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))

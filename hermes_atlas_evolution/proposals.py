@@ -34,6 +34,9 @@ def _upsert(conn, seen: set, code: str, kind: str, risk: str, subject: str, evid
                      (body, command, risk, now, row["id"]))
 
 
+_INSTEAD = {"en": "<what to do instead>", "pt": "<o que fazer no lugar>"}
+
+
 def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None, reviews: dict | None = None,
             failures: list | None = None, turns: dict | None = None, changes: list | None = None,
             outcomes: dict | None = None, radar: list | None = None, lang: str = "en") -> list[dict]:
@@ -79,7 +82,7 @@ def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None,
         if item["class"] in _UNTEMPLATED and item["count"] >= 5 and item["days"] >= 2 and item["tool"] != "unknown":
             _upsert(conn, seen, f"investigate:{item['signature']}", "investigate_failure", "low", item["tool"],
                     {"class": item["class"], "hint": item["hint"], "count": item["count"], "days": item["days"]},
-                    f"hermes evolution lessons add --tool {item['tool']} \"<what to do instead>\"", now)
+                    f"hermes evolution lessons add --tool {item['tool']} \"{_INSTEAD.get(lang, _INSTEAD['en'])}\"", now)
     if turns and turns.get("turns", 0) >= 20 and (turns.get("slow_pct") or 0) >= 30:
         _upsert(conn, seen, "slow_turns", "investigate_latency", "medium", "turns",
                 {"turns": turns["turns"], "slow_pct": turns["slow_pct"], "p50_ms": turns["p50_ms"], "p95_ms": turns["p95_ms"]},

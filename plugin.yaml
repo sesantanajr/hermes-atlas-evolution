@@ -1,11 +1,12 @@
 name: hermes-atlas-evolution
-version: "0.6.0"
+version: "0.7.0"
 requires_hermes: ">=0.23.1"
 description: >-
   A measured self-improvement loop for Hermes Agent. Learns from Hermes' own history on the first pass,
   runs by itself in the background, turns recurring tool failures into short lessons, measures every lesson,
-  skill rewrite and setting change before and after, reports what slows Hermes down, and stops the agent
-  from taking down the gateway it runs on. Lessons from fixed templates apply at once (after the owner's own
+  skill rewrite and setting change before and after, points out what slows Hermes down (tools slow call after
+  call, approvals nobody could answer, heavy context, weak compaction) and stops the agent from taking down
+  the gateway it runs on. Lessons from fixed templates apply at once (after the owner's own
   turns hit the failure) and are retired when they do not help; text written by a model or by the agent waits
   for your approval.
 license: MIT
@@ -82,7 +83,16 @@ config_schema:
     description: >-
       Your sender ids on messaging platforms (text or numbers, such as a Telegram id). Turns from these senders
       count as yours (feedback, failures that may activate a lesson, the agent tools); the local CLI, TUI and
-      Desktop always do. Anyone else in a chat gets template lessons only.
+      Desktop always do. Anyone else in a chat gets template lessons only. `hermes evolution owner` lists the
+      senders of each chat channel.
+  owner_platforms:
+    type: list
+    default: []
+    label: Owner platforms
+    description: >-
+      Platforms where every chat is yours, such as a private bot or your own interface through the API server
+      (telegram, api_server, ...). Their chats count as yours from the first message, so they get all your
+      lessons. `hermes evolution owner add-platform <name>` prints the command that sets it.
   reflector:
     type: bool
     default: true

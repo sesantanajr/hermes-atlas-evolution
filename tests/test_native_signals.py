@@ -8,7 +8,7 @@ from hermes_atlas_evolution.operations import close_observers, database
 
 class NativeSignalTests(unittest.TestCase):
     def test_hooks_keep_only_counts_and_classify_interrupted_separately(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             home = Path(folder)
             for status in ("completed", "completed", "completed", "failed", "timeout", "interrupted", "secret-state"):
                 observe_native(home, "subagent_stop", {"child_status": status, "child_summary": "private-summary",
