@@ -85,7 +85,7 @@ MISSING = json.dumps({"output": f"bash: rg: command not found\n{SECRET}", "exit_
 
 class Base(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)
         self.home = Path(folder.name)

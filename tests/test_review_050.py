@@ -20,7 +20,7 @@ NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 
 class Base(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)
         self.home = Path(folder.name)

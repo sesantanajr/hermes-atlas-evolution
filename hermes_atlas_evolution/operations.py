@@ -410,7 +410,9 @@ if hasattr(os, "register_at_fork"):
 
 
 def _day(now: float) -> str:
-    return datetime.fromtimestamp(now, timezone.utc).date().isoformat()
+    from .experience import utc_day
+
+    return utc_day(now)
 
 
 def _label(value) -> str:
@@ -608,7 +610,9 @@ SEEN_DAYS = 2   # delivery ids only guard against an event delivered twice, whic
 
 
 def _prune(conn: sqlite3.Connection, now: float) -> None:
-    today = datetime.fromtimestamp(now, timezone.utc).date()
+    from .experience import utc_datetime
+
+    today = utc_datetime(now).date()
     cutoff = (today - timedelta(days=RETENTION_DAYS - 1)).isoformat()
     for table in ("metric", "research_latency", "native_activity"):
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))

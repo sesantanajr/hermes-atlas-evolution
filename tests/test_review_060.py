@@ -21,7 +21,7 @@ LINE = ("2026-11-15 10:00:0{n},123 INFO [session-x] agent.background_review: Bac
 
 class Base(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)
         self.home = Path(folder.name)
@@ -142,8 +142,9 @@ class DurabilityTest(Base):
             observer = operations._observer(self.home)
             self.assertEqual(observer._connect().execute("PRAGMA synchronous").fetchone()[0], 2)
         close_observers()
-        with experience(self.home) as conn:   # elsewhere nothing changes
-            self.assertEqual(conn.execute("PRAGMA checkpoint_fullfsync").fetchone()[0], 0)
+        if sys.platform != "darwin":   # on a real Mac the full syncs are the point
+            with experience(self.home) as conn:   # elsewhere nothing changes
+                self.assertEqual(conn.execute("PRAGMA checkpoint_fullfsync").fetchone()[0], 0)
 
 
 

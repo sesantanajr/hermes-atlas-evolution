@@ -10,7 +10,7 @@ from hermes_atlas_evolution.linux_host import scan_host
 
 class LinuxHostTest(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(tmp.cleanup)
         self.base = Path(tmp.name)
         self.proc = self.base / "proc"

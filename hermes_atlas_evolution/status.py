@@ -89,7 +89,9 @@ def _runtimes(conn, disk: str) -> tuple[list[dict], list[str]]:
 
 def _iso(stamp) -> str | None:
     try:
-        return datetime.fromtimestamp(float(stamp), timezone.utc).isoformat(timespec="seconds")
+        from .experience import utc_datetime
+
+        return utc_datetime(float(stamp)).isoformat(timespec="seconds")
     except (TypeError, ValueError, OSError, OverflowError):
         return None
 

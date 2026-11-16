@@ -8,7 +8,7 @@ from hermes_atlas_evolution.telemetry import ResearchTracker, research_summary
 
 class ResearchTrackerTests(unittest.TestCase):
     def setUp(self):
-        self.folder = tempfile.TemporaryDirectory()
+        self.folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.folder.cleanup)
         self.addCleanup(close_observers)
         self.home = Path(self.folder.name)

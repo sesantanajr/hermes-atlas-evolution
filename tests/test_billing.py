@@ -22,7 +22,7 @@ _SCHEMA = """CREATE TABLE session_model_usage (
 
 class NativeBillingTests(unittest.TestCase):
     def setUp(self):
-        workspace = TemporaryDirectory()
+        workspace = TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(workspace.cleanup)
         self.home = Path(workspace.name)
         self.path = self.home / "state.db"

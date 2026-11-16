@@ -16,7 +16,7 @@ NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
 
 class EvolutionTest(unittest.TestCase):
     def setUp(self):
-        self.folder = tempfile.TemporaryDirectory()
+        self.folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.folder.cleanup)
         self.addCleanup(close_observers)  # Windows cannot remove a database that is still open.
         self.home = Path(self.folder.name)

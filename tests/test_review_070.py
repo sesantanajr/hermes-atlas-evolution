@@ -28,7 +28,7 @@ CLEAN = {key: "" for key in ("ATLAS_EVOLUTION_AGENT", "HERMES_SESSION_ID", "HERM
 
 class Base(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)
         self.home = Path(folder.name)
@@ -278,7 +278,8 @@ class OwnerCommandTest(Base):
         self.run_cli(owner_action="add-platform", value="API_Server")
         stored = json.loads((self.home / "evolution" / "settings.json").read_text())["evolution"]
         self.assertEqual((stored["owner_sender_ids"], stored["owner_platforms"]), (["555"], ["api_server"]))
-        self.assertEqual((self.home / "evolution" / "settings.json").stat().st_mode & 0o077, 0)
+        if os.name != "nt":   # POSIX permission bits
+            self.assertEqual((self.home / "evolution" / "settings.json").stat().st_mode & 0o077, 0)
         self.run_cli(owner_action="remove", value="555")
         stored = json.loads((self.home / "evolution" / "settings.json").read_text())["evolution"]
         self.assertEqual(stored["owner_sender_ids"], [])

@@ -13,7 +13,7 @@ from hermes_atlas_evolution.native_actions import create_handoff, schedule_spec
 
 class NativeActionTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
+        temporary = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.config = {"kanban_handoff": {"enabled": True, "board": "operations", "assignee": "ops-review"}}

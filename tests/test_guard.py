@@ -1,6 +1,7 @@
 """The runtime guard vetoes commands that would take down the Hermes the agent runs in, and nothing else."""
 
 import tempfile
+import os
 import unittest
 from pathlib import Path
 
@@ -10,6 +11,21 @@ HOME = Path("/home/owner")
 RUNTIME = HOME / ".hermes" / "tools" / "python-3.14.10+build-linux-x64"
 PROTECTED = (RUNTIME, Path("/usr/local/lib/hermes-agent"), HOME / ".hermes")
 
+
+
+def setUpModule():
+    """The rules for POSIX paths, whatever system runs the tests; the Windows test switches them itself."""
+    from unittest.mock import patch
+
+    from hermes_atlas_evolution import guard
+
+    global _POSIX
+    _POSIX = patch.object(guard, "_WINDOWS", False)
+    _POSIX.start()
+
+
+def tearDownModule():
+    _POSIX.stop()
 
 def verdict(command):
     found = check("terminal", {"command": command}, protected=PROTECTED, home=HOME)
@@ -163,6 +179,7 @@ class PlatformTest(unittest.TestCase):
                 with self.subTest(command):
                     self.assertIsNone(windows(command))
 
+    @unittest.skipIf(os.name == "nt", "uv-style symlinks and 8.3 short names: POSIX scenario")
     def test_a_linked_runtime_is_protected_under_the_name_commands_use(self):
         import os
         import sys

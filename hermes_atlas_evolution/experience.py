@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import operations as _operations   # bound at import: a thread of an unloaded copy keeps its own module
@@ -103,8 +103,16 @@ ADDITIVE_TABLES = (
 SCHEMA += "".join(f"{statement};\n" for _, statement in ADDITIVE_TABLES)
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def utc_datetime(now: float) -> datetime:
+    """A Unix time as an aware UTC datetime on every system. Windows' fromtimestamp refuses times before 1970."""
+    return _EPOCH + timedelta(seconds=float(now))
+
+
 def utc_day(now: float) -> str:
-    return datetime.fromtimestamp(now, timezone.utc).date().isoformat()
+    return utc_datetime(now).date().isoformat()
 
 
 def day_offset(now: float, days: int) -> str:

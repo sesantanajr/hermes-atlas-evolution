@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import tempfile
+import os
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +29,7 @@ def history(home: Path, sessions: int, *, age: float = 3600) -> None:
 
 class StatusTest(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(folder.cleanup)
         self.addCleanup(close_observers)
         self.root = Path(folder.name)
@@ -62,6 +63,7 @@ class StatusTest(unittest.TestCase):
         self.assertIn("cron-box", text)
         self.assertIn("hermes -p cron-box plugins install sesantanajr/hermes-atlas-evolution --enable", text)
 
+    @unittest.skipIf(os.name == "nt", "the liveness probe is POSIX only, by design")
     def test_a_long_running_process_that_still_runs_older_code_is_flagged(self):
         import os
 
