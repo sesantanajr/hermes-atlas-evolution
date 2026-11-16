@@ -121,7 +121,7 @@ def review(home: Path, runtime_config=None) -> dict:
                 drop = second if kind == "exact" or len(second["text"]) <= len(first["text"]) else first
             # Hermes drops a repeat of the very same text in one file when it loads the file: that one costs nothing
             identical = first["file"] == second["file"] and first["text"] == second["text"]
-            issues.append({"kind": kind, "score": score, "entries": [first, second],
+            issues.append({"kind": kind, "score": score, "entries": [first, second], "identical": first["text"] == second["text"],
                            "suggested_drop": {"file": drop["file"], "fingerprint": drop["fingerprint"]},
                            "tokens_per_turn": 0 if identical else max(1, len(drop["text"]) // 4)})
     issues.sort(key=lambda item: ({"exact": 0, "contained": 1, "similar": 2}[item["kind"]], -item["score"]))

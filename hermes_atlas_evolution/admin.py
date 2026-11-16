@@ -85,7 +85,7 @@ def launch_home(home: Path) -> Path:
     return home.parent.parent if home.parent.name == "profiles" else home
 
 
-def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout: int = 60) -> None:
+def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout: int = 60, what: str = "setting") -> None:
     """Run `hermes --profile <name> <args...>` for this profile, Hermes' public command line, with an argument list
     (no shell). Raises ValueError with Hermes' own message when it refuses, fails or does not answer in time."""
     profile = Path(home).resolve()
@@ -100,13 +100,15 @@ def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout:
                      cwd=str(profile), stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8",
                      errors="replace", timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
-        raise ValueError("Hermes did not answer in time; that setting may not be saved: look at the settings "
-                         "again") from None
+        if what == "setting":
+            raise ValueError("Hermes did not answer in time; that setting may not be saved: look at the settings "
+                             "again") from None
+        raise ValueError("Hermes did not answer in time; check the result before trying again") from None
     except (OSError, subprocess.SubprocessError):
-        raise ValueError("Hermes refused the setting") from None
+        raise ValueError("Hermes refused the setting" if what == "setting" else "Hermes refused the command") from None
     if result.returncode != 0:
         detail = " ".join((result.stderr or result.stdout or "").split())[:200]
-        raise ValueError(detail or "Hermes refused the setting")
+        raise ValueError(detail or ("Hermes refused the setting" if what == "setting" else "Hermes refused the command"))
 
 
 def cli_writer(home: Path, *, runner=None, executable=None):
@@ -164,7 +166,7 @@ def recommended_settings(current: dict, suggestions: list[dict]) -> dict:
 
 def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: str = "en", writer=None,
            actor: str = "dashboard", runner=None) -> dict:
-    """One decision. `body`: {"kind": lesson|all|proposal|apply|undo|settings|memory, ...}. `runner` replaces
+    """One decision. `body`: {"kind": lesson|all|proposal|apply|apply_all|undo|settings|memory, ...}. `runner` replaces
     subprocess.run for the Hermes commands of "apply" and of its undo (tests)."""
     from . import decisions, memory_care
     from .experience import experience
@@ -176,6 +178,13 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
         from . import actions
 
         return actions.apply_proposal(home, int(body["id"]), now=now, actor=actor, runner=runner)
+    if kind == "apply_all":
+        from . import actions
+
+        ids = body.get("ids")
+        if not isinstance(ids, list) or not ids or len(ids) > 50:
+            raise ValueError("Invalid decision")
+        return actions.apply_many(home, ids, now=now, actor=actor, runner=runner)
     if kind == "memory":
         if body.get("action") != "remove":
             raise ValueError("Invalid decision")
@@ -220,8 +229,11 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
                                        position=result.get("position"), copies=result.get("copies"),
                                        runtime_config=runtime_config)
         if restored.get("restored"):
+            from .actions import memory_skip
+
             with experience(home) as conn:
                 decisions.mark_undone(conn, result["id"], now=now)
+                memory_skip(conn, result["file"], result["fingerprint"], now)   # the owner wants it: never again by itself
             result["undone"] = True
         else:
             result["reason"] = restored.get("reason", "changed_since")

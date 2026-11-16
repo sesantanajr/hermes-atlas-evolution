@@ -867,6 +867,13 @@ def _decisions(args, home: Path, *, now: float, lang: str, runtime_config=None):
             return decisions.masked(history) if _agent_shell() else history
         _operator_only()
         row = conn.execute("SELECT kind, target FROM decision_log WHERE id=?", (args.id,)).fetchone()
+        if row is not None and row["kind"] != "setting":
+            # a lesson, a proposal, a change applied with Hermes' command or a memory entry: undone here, as in the menu
+            conn.commit()
+            from .admin import decide
+
+            return decide(home, runtime_config or {}, {"kind": "undo", "id": args.id}, now=now, lang=lang,
+                          actor="terminal")
         current = ...
         if row is not None and row["kind"] == "setting":
             current = setting_values(home, runtime_config or {}).get(row["target"])

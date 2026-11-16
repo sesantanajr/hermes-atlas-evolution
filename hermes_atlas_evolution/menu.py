@@ -43,11 +43,12 @@ TEXT = {
         "suggest_advice": "Read {n} observation(s) with their numbers",
         "apply_all_q": "Apply these {n} change(s) to Hermes now? Each one can be undone in the history.",
         "applied": "Applied. To undo: {undo} (or from the history).", "applied_n": "Applied {n}.",
+        "already": "It was already so in Hermes (the skill was already locked): nothing to undo.",
         "auto_names": {"off": "off", "safe": "safe", "full": "full"},
         "auto_title": "Automatic actions", "auto_q": "Set the automatic actions to “{mode}”?",
         "auto_now": "Now: {mode}.",
         "auto_modes": ["off: nothing happens by itself; everything waits for you.",
-                       "safe: takes exact repeats out of Hermes' memory (a copy of the file is kept).",
+                       "safe: takes out copies of a memory entry that are the very same text (a copy of the file is kept).",
                        "full: also locks skills the curator keeps rewriting (at most 3 per pass)."],
         "auto_rules": "Each action goes to the history and can be undone; an automatic change you undo is never repeated.",
         "auto_recent": "Automatic actions of the last 7 days:", "auto_none": "None in the last 7 days.",
@@ -114,8 +115,8 @@ TEXT = {
         "memory_issues": "What repeats (taking one out saves about {tokens} tokens on every turn):",
         "memory_issues_free": "What repeats (Hermes already sends an identical repeat only once; taking it out tidies the file):",
         "list_changed": "It changed meanwhile (the panel or another terminal): look at it again; nothing was written.",
-        "kinds": {"exact": "same entry twice", "contained": "one entry says what the other says",
-                  "similar": "very similar entries"},
+        "kinds": {"exact": "same entry twice", "variant": "the same entry, differing only in case or spacing",
+                  "contained": "one entry says what the other says", "similar": "very similar entries"},
         "memory_prompt": "Number to choose which one stays · Enter back: ",
         "keep_prompt": "1 keep the first (takes the second out) · 2 keep the second · Enter back: ",
         "memory_removed": "Taken out. A copy of the file is in evolution/memory-backups; undo it in the history. New sessions read the change.",
@@ -145,11 +146,12 @@ TEXT = {
         "suggest_advice": "Ler {n} observação(ões) com os números",
         "apply_all_q": "Aplicar estas {n} mudança(s) no Hermes agora? Cada uma pode ser desfeita no histórico.",
         "applied": "Aplicada. Para desfazer: {undo} (ou pelo histórico).", "applied_n": "{n} aplicada(s).",
+        "already": "Já estava assim no Hermes (a skill já estava travada): nada a desfazer.",
         "auto_names": {"off": "desligadas", "safe": "seguras", "full": "completas"},
         "auto_title": "Ações automáticas", "auto_q": "Passar as ações automáticas para “{mode}”?",
         "auto_now": "Agora: {mode}.",
         "auto_modes": ["desligadas: nada acontece sozinho; tudo espera você.",
-                       "seguras: tira repetições exatas da memória do Hermes (guarda uma cópia do arquivo).",
+                       "seguras: tira cópias de uma entrada da memória que são exatamente o mesmo texto (guarda uma cópia do arquivo).",
                        "completas: também trava skills que o curador reescreve sem parar (até 3 por passada)."],
         "auto_rules": "Cada ação vai para o histórico e pode ser desfeita; uma mudança automática que você desfaz nunca se repete.",
         "auto_recent": "Ações automáticas dos últimos 7 dias:", "auto_none": "Nenhuma nos últimos 7 dias.",
@@ -216,8 +218,8 @@ TEXT = {
         "memory_issues": "O que se repete (tirar uma economiza cerca de {tokens} tokens em todo turno):",
         "memory_issues_free": "O que se repete (o Hermes já envia uma repetição idêntica uma vez só; tirá-la arruma o arquivo):",
         "list_changed": "Mudou nesse meio-tempo (o painel ou outro terminal): veja de novo; nada foi gravado.",
-        "kinds": {"exact": "a mesma entrada duas vezes", "contained": "uma entrada diz o que a outra já diz",
-                  "similar": "entradas muito parecidas"},
+        "kinds": {"exact": "a mesma entrada duas vezes", "variant": "a mesma entrada, diferindo só em maiúsculas ou espaços",
+                  "contained": "uma entrada diz o que a outra já diz", "similar": "entradas muito parecidas"},
         "memory_prompt": "Número para escolher qual fica · Enter volta: ",
         "keep_prompt": "1 manter a primeira (tira a segunda) · 2 manter a segunda · Enter volta: ",
         "memory_removed": "Retirada. Uma cópia do arquivo está em evolution/memory-backups; desfaça pelo histórico. As novas sessões já leem a mudança.",
@@ -400,15 +402,20 @@ class Menu:
         return [{**item, "explain": explain.describe(item, self.lang)} for item in items]
 
     def attention_lines(self, state: dict) -> list[str]:
-        from .status import _TEXT
+        """The "Needs attention" items exactly as `status` writes them (values and lists filled in)."""
+        from .status import _TEXT, markdown
 
-        texts = _TEXT.get(self.lang, _TEXT["en"])
-        lines = []
-        for code in state.get("attention") or ():
-            sentence = str(texts.get(code) or "")
-            if sentence:
-                lines.append(sentence.rstrip(":"))
-        return lines[:4]
+        heading = "## " + _TEXT.get(self.lang, _TEXT["en"])["attention"]
+        lines, inside = [], False
+        for line in markdown(state, self.lang).splitlines():
+            if line.startswith("## "):
+                inside = line == heading
+                continue
+            if inside and line.startswith("- "):
+                lines.append(line[2:])
+            elif inside and line.startswith("  - ") and lines:
+                lines[-1] += "\n    · " + line[4:]
+        return lines[:5] if state.get("attention") else []
 
     def suggestions(self, state: dict, items: list[dict]) -> list[tuple[str, object]]:
         """(text, action) for what is worth doing now, most useful first."""
@@ -454,8 +461,11 @@ class Menu:
                 if attention:
                     self.io.say()
                     self.io.say(self.io.bold(self.t["attention_title"]))
-                    for line in attention:
-                        self.io.para("• " + line, indent=2)
+                    for item in attention:
+                        first, *rest = item.split("\n")
+                        self.io.para("• " + first, indent=2)
+                        for sub in rest[:6]:
+                            self.io.say(sub)
                 ideas = self.suggestions(state, items)
                 if ideas:
                     self.io.say()
@@ -540,12 +550,13 @@ class Menu:
             self.io.say(f"   · {item['explain']['title']}: {item['subject']}")
         if not self.confirm(self.t["apply_all_q"].format(n=len(changes))):
             return
-        applied = 0
-        for item in changes:
-            result = admin.decide(self.home, self.runtime, {"kind": "apply", "id": item["id"]}, now=self.clock(),
-                                  lang=self.lang, actor="terminal")
-            applied += bool(result.get("applied"))
-        self.io.say(self.t["applied_n"].format(n=applied))
+        result = admin.decide(self.home, self.runtime, {"kind": "apply_all", "ids": [item["id"] for item in changes]},
+                              now=self.clock(), lang=self.lang, actor="terminal")
+        self.io.say(self.t["applied_n"].format(n=len(result["applied"])))
+        for item in result["skipped"]:
+            reason = item.get("reason")
+            self.io.say("   · #" + str(item["id"]) + ": " + (self.t["already"] if reason == "already" else
+                                                           self.t["changed"] if reason == "not_open" else self._(str(reason))))
 
     def set_auto(self, mode: str) -> None:
         for line in self.t["auto_modes"]:
@@ -629,7 +640,7 @@ class Menu:
                 result = admin.decide(self.home, self.runtime, {"kind": "apply", "id": item["id"]}, now=self.clock(),
                                       lang=self.lang, actor="terminal")
                 self.io.say(self.t["applied"].format(undo=result.get("undo")) if result.get("applied")
-                            else self.t["changed"])
+                            else self.t["already"] if result.get("reason") == "already" else self.t["changed"])
                 continue
             now_item = next((row for row in self.open_proposals() if row["id"] == item["id"]), None)
             if now_item is None or (now_item["evidence"], now_item["command"]) != (item["evidence"], item["command"]):
@@ -926,7 +937,8 @@ class Menu:
             self.io.say(self.t["memory_issues"].format(tokens=tokens) if tokens else self.t["memory_issues_free"])
             for number, issue in enumerate(issues, start=1):
                 first, second = issue["entries"]
-                self.io.say(f"  {number:>2}  {self.t['kinds'][issue['kind']]} · {first['file']} / {second['file']}")
+                label = "variant" if issue["kind"] == "exact" and not issue.get("identical") else issue["kind"]
+                self.io.say(f"  {number:>2}  {self.t['kinds'][label]} · {first['file']} / {second['file']}")
                 for entry in (first, second):
                     preview = entry["text"] if len(entry["text"]) <= 160 else entry["text"][:157] + "…"
                     self.io.para(preview, indent=7)

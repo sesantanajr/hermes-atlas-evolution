@@ -16,8 +16,9 @@ import re
 from .report import _ADVISORY, _KIND, _RISK
 
 # Proposal kind -> (Hermes arguments that apply it, Hermes arguments that undo it), with the skill as the last word.
-APPLY = {"skill_lock": (("curator", "lock"), ("curator", "unlock")),
-         "skill_archive": (("curator", "archive"), ("curator", "restore"))}
+# Only changes whose undo is certain: archiving a skill is not undone by `curator restore` (Hermes 0.23.1 restores it
+# at the top level under its frontmatter name, or an older archived copy), so it stays a change the owner applies.
+APPLY = {"skill_lock": (("curator", "lock"), ("curator", "unlock"))}
 AUTOMATIC = ("skill_lock",)   # what the autopilot applies by itself with auto_actions: full
 _SUBJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
@@ -30,6 +31,20 @@ def category(kind: str) -> str:
     if kind in _ADVISORY:
         return "advice"
     return "manual"
+
+
+def undo_for(applied) -> list | None:
+    """The Hermes arguments that undo `applied` (what a decision recorded it ran), derived again from APPLY and never
+    read from the record: a changed record can only fail to undo, never run something else."""
+    if not isinstance(applied, list) or len(applied) < 2 or not all(isinstance(part, str) for part in applied):
+        return None
+    subject = applied[-1]
+    if not _SUBJECT.fullmatch(subject):
+        return None
+    for forward, backward in APPLY.values():
+        if list(applied[:-1]) == list(forward):
+            return [*backward, subject]
+    return None
 
 
 def plan(proposal: dict) -> tuple[list, list] | None:
@@ -120,11 +135,24 @@ def _what(kind: str, subject: str, evidence: dict, lang: str) -> str:
     if kind == "compaction":
         return (f"As compactações mantiveram {_n(e.get('kept_pct'), lang, 1)}% do contexto: liberam pouco espaço." if pt
                 else f"Compactions kept {_n(e.get('kept_pct'), lang, 1)}% of the context: they free little room.")
+    if kind == "plugin_health" and "blocked_calls" in e:
+        return (f"Plugins barraram {_n(e.get('blocked_calls'), lang)} chamadas de ferramenta pelo hook {s} por erro"
+                " próprio, não por decisão." if pt else
+                f"Plugins blocked {_n(e.get('blocked_calls'), lang)} tool calls through the hook {s} by their own fault,"
+                " not by a decision.")
+    if kind == "plugin_health" and "error" in e:
+        return (f"O plugin {s} não carregou: {str(e.get('error'))[:160]}." if pt else
+                f"The plugin {s} did not load: {str(e.get('error'))[:160]}.")
     if kind == "plugin_health":
         return (f"O plugin {s} registra {_n(e.get('registered'), lang)} hook(s) e declara {_n(e.get('declared'), lang)}"
                 " no manifesto." if pt else
                 f"The plugin {s} registers {_n(e.get('registered'), lang)} hook(s) and declares {_n(e.get('declared'), lang)}"
                 " in its manifest.")
+    if kind == "plugin_conflict" and "failed_calls" in e:
+        return (f"{_n(e.get('failed_calls'), lang)} comandos de terminal falharam depois que outro plugin os reescreveu"
+                f" pelo hook {s}." if pt else
+                f"{_n(e.get('failed_calls'), lang)} terminal commands failed after another plugin rewrote them through"
+                f" the hook {s}.")
     if kind == "plugin_conflict":
         names = ", ".join(f"`{item}`" for item in e.get("plugins") or () if isinstance(item, str))
         return (f"Os plugins {names} mudam o resultado das ferramentas pelo hook {s}, e o Hermes só usa a mudança do"

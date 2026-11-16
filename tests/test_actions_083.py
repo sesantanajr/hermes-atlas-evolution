@@ -135,15 +135,18 @@ class ApplyTest(Base):
 class AutomaticTest(Base):
     FACT = "Reports go to the owner in Brazilian Portuguese."
 
-    def test_safe_takes_out_exact_memory_repeats_only(self):
+    def test_safe_takes_out_identical_copies_only(self):
         path = write_memory(self.home, "MEMORY.md", [self.FACT, "Other fact.", self.FACT.upper(),
                                                      "Reports go to the owner in Brazilian Portuguese, always."])
+        write_memory(self.home, "USER.md", [self.FACT])   # the very same text in both files
         lock = propose(self.home, "skill_lock", "hermes-admin", LOCK, "hermes curator lock hermes-admin")
         hermes = Hermes()
         done = actions.automatic(self.home, now=NOW, mode="safe", runner=hermes, usage={})
-        self.assertEqual(len(done["memory"]), 1)
+        self.assertEqual([item["file"] for item in done["memory"]], ["MEMORY.md"])   # USER.md keeps it
         self.assertEqual(hermes.calls, [])   # safe never changes Hermes' settings or skills
-        self.assertEqual(len(memory_care.parse(path.read_text(encoding="utf-8"))), 3)   # the similar one stays
+        # the upper-case variant and the similar entry stay: they differ, so they are the owner's to decide
+        self.assertEqual(memory_care.parse(path.read_text(encoding="utf-8")),
+                         ["Other fact.", self.FACT.upper(), "Reports go to the owner in Brazilian Portuguese, always."])
         with experience(self.home) as conn:
             row = conn.execute("SELECT actor, kind FROM decision_log").fetchone()
             self.assertEqual(tuple(row), ("automatic", "memory"))
@@ -234,7 +237,7 @@ class MenuActionsTest(Base):
         self.assertEqual(tuple(row), ("terminal", "operator", "active"))
 
     def test_the_automatic_screen_changes_the_mode_and_undoes(self):
-        write_memory(self.home, "MEMORY.md", ["Same.", "same."])
+        write_memory(self.home, "MEMORY.md", ["Same.", "Same."])
         actions.automatic(self.home, now=NOW, mode="safe")
         written = []
 
@@ -249,14 +252,15 @@ class MenuActionsTest(Base):
         self.assertIn("Undone.", script.text)
         self.assertEqual(written, [{"auto_actions": "full"}])
         self.assertEqual(memory_care.parse((self.home / "memories" / "MEMORY.md").read_text(encoding="utf-8")),
-                         ["Same.", "same."])
+                         ["Same.", "Same."])
+        self.assertEqual(actions.automatic(self.home, now=NOW, mode="safe")["memory"], [])   # put back: never again
 
 
 class PanelTest(Base):
     def test_the_snapshot_explains_each_proposal_and_lists_automatic_actions(self):
         api = load_api()
         propose(self.home, "skill_lock", "hermes-admin", LOCK, "hermes curator lock hermes-admin")
-        write_memory(self.home, "USER.md", ["A.", "a."])
+        write_memory(self.home, "USER.md", ["A.", "A."])
         actions.automatic(self.home, now=NOW, mode="safe")
         snap = api.snapshot(self.home, now=NOW, runtime_config={}, lang="pt", can_decide=True)
         told = snap["proposals"][0]["explain"]
@@ -268,6 +272,145 @@ class PanelTest(Base):
         self.assertIn("auto_actions", snap["settings"]["recommended"])
         with experience(self.home) as conn:
             self.assertEqual(decisions.history(conn)[0]["actor"], "automatic")
+
+
+class Review083Test(Base):
+    """The independent review of 0.8.3: each confirmed finding, as a test."""
+
+    def setUp(self):
+        super().setUp()
+        executable = patch.object(admin, "hermes_executable", return_value="/usr/local/bin/hermes")
+        executable.start()
+        self.addCleanup(executable.stop)
+
+    def test_safe_never_touches_entries_that_only_look_alike(self):
+        pairs = [("Keys live in /opt/App/keys.", "Keys live in /opt/app/keys."),
+                 ("Password hint: Abc-123.", "password hint: abc-123."),
+                 ("deploy:\n  steps: 2", "deploy:\n    steps: 2"),
+                 ("Water is H₂O.", "Water is H2O.")]
+        entries = [text for pair in pairs for text in pair]
+        path = write_memory(self.home, "MEMORY.md", entries)
+        self.assertEqual(actions.automatic(self.home, now=NOW, mode="full", usage={}, runner=Hermes())["memory"], [])
+        self.assertEqual(memory_care.parse(path.read_text(encoding="utf-8")), entries)
+
+    def test_terminal_undo_of_automatic_actions(self):
+        write_memory(self.home, "MEMORY.md", ["Same fact.", "Same fact."])
+        removed = actions.automatic(self.home, now=NOW, mode="safe")["memory"][0]["decision"]
+        proposal = propose(self.home, "skill_lock", "hermes-admin", LOCK, "hermes curator lock hermes-admin")
+        hermes = Hermes()
+        applied = actions.apply_proposal(self.home, proposal, now=NOW, runner=hermes, usage={})["decision"]
+        for decision in (removed, applied):
+            stream = io.StringIO()
+            with patch("hermes_atlas_evolution.admin.subprocess.run", hermes), contextlib.redirect_stdout(stream):
+                execute(SimpleNamespace(lang="en", evolution_action="decisions", decisions_action="undo", id=decision),
+                        self.home, runtime_config={})
+            self.assertTrue(json.loads(stream.getvalue())["undone"], decision)
+        self.assertEqual(hermes.calls[-1][-3:], ["curator", "unlock", "hermes-admin"])
+
+    def test_the_undo_is_derived_never_read_from_the_record(self):
+        proposal = propose(self.home, "skill_lock", "harmless", LOCK, "hermes curator lock harmless")
+        hermes = Hermes()
+        decision = actions.apply_proposal(self.home, proposal, now=NOW, runner=hermes, usage={})["decision"]
+        with experience(self.home) as conn:   # what an agent writing the database directly could do
+            conn.execute("UPDATE decision_log SET after=? WHERE id=?", (json.dumps(
+                {"status": "applied", "code": "skill_lock:harmless", "applied": ["curator", "lock", "harmless"],
+                 "undo": ["config", "set", "plugins.entries.hermes-atlas-evolution.settings.auto_actions", "full"]}),
+                decision))
+        admin.decide(self.home, {}, {"kind": "undo", "id": decision}, now=NOW, runner=hermes)
+        self.assertEqual(hermes.calls[-1][-3:], ["curator", "unlock", "harmless"])
+        other = propose(self.home, "skill_lock", "other", LOCK, "hermes curator lock other")
+        second = actions.apply_proposal(self.home, other, now=NOW, runner=hermes, usage={})["decision"]
+        with experience(self.home) as conn:
+            conn.execute("UPDATE decision_log SET after=? WHERE id=?", (json.dumps(
+                {"status": "applied", "applied": ["config", "set", "x", "y"]}), second))
+        calls = len(hermes.calls)
+        self.assertFalse(admin.decide(self.home, {}, {"kind": "undo", "id": second}, now=NOW, runner=hermes)["undone"])
+        self.assertEqual(len(hermes.calls), calls)
+
+    def test_automatic_applies_only_what_the_loop_wrote_itself(self):
+        with experience(self.home) as conn:   # a row whose kind and subject were changed after the loop wrote it
+            conn.execute("""INSERT INTO proposal(code, kind, risk, subject, evidence, command, status, created, updated)
+                VALUES ('slow_turns', 'skill_lock', 'medium', 'victim', '{}', 'x', 'open', 1, 1)""")
+        hermes = Hermes()
+        self.assertEqual(actions.automatic(self.home, now=NOW, mode="full", runner=hermes, usage={})["applied"], [])
+        self.assertEqual(hermes.calls, [])
+
+    def test_a_decision_made_while_hermes_runs_finds_the_proposal_taken(self):
+        from hermes_atlas_evolution import proposals
+
+        proposal = propose(self.home, "skill_lock", "hermes-admin", LOCK, "hermes curator lock hermes-admin")
+        refused = []
+
+        def meanwhile(command, **kwargs):
+            with experience(self.home) as conn:
+                try:
+                    proposals.decide(conn, proposal, "reject", now=NOW)
+                except ValueError as error:
+                    refused.append(str(error))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        self.assertTrue(actions.apply_proposal(self.home, proposal, now=NOW, runner=meanwhile, usage={})["applied"])
+        self.assertEqual(len(refused), 1)
+        self.assertEqual(actions.apply_proposal(self.home, proposal, now=NOW, runner=meanwhile, usage={})["reason"],
+                         "not_open")
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0], 1)
+
+    def test_the_owners_own_lock_is_never_undone(self):
+        proposal = propose(self.home, "skill_lock", "hermes-admin", LOCK, "hermes curator lock hermes-admin")
+        hermes = Hermes()
+        result = actions.apply_proposal(self.home, proposal, now=NOW, runner=hermes,
+                                        usage={"hermes-admin": {"locked": True}})
+        self.assertEqual((result["applied"], result["reason"], hermes.calls), (False, "already", []))
+        with experience(self.home) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0], 0)
+
+    def test_a_proposal_after_the_hundredth_still_applies(self):
+        for n in range(105):
+            propose(self.home, "investigate_failure", f"tool{n}", {"count": 5}, "x", "low")
+        proposal = propose(self.home, "skill_lock", "hermes-admin", LOCK, "hermes curator lock hermes-admin")
+        self.assertTrue(actions.apply_proposal(self.home, proposal, now=NOW, runner=Hermes(), usage={})["applied"])
+
+    def test_a_refusal_waits_a_day_and_a_pass_near_its_limit_runs_no_command(self):
+        import time as clock
+
+        propose(self.home, "skill_lock", "gone", LOCK, "hermes curator lock gone")
+        propose(self.home, "skill_lock", "other", LOCK, "hermes curator lock other")
+        failing = Hermes(fail_on="gone")
+        first = actions.automatic(self.home, now=NOW, mode="full", runner=failing, usage={})
+        self.assertEqual((len(first["failed"]), len(failing.calls)), (1, 1))   # stops at the first refusal
+        second = actions.automatic(self.home, now=NOW + 60, mode="full", runner=failing, usage={})
+        self.assertEqual([item["subject"] for item in second["applied"]], ["other"])
+        late = Hermes()
+        actions.automatic(self.home, now=NOW + 120, mode="full", runner=late, usage={}, deadline=clock.monotonic() + 30)
+        self.assertEqual(late.calls, [])
+        tomorrow = actions.automatic(self.home, now=NOW + 90_000, mode="full", runner=Hermes(fail_on="gone"), usage={})
+        self.assertEqual(len(tomorrow["failed"]), 1)   # tried again a day later
+
+    def test_apply_all_is_one_sequential_decision(self):
+        ids = [propose(self.home, "skill_lock", f"s{n}", LOCK, f"hermes curator lock s{n}") for n in range(3)]
+        hermes = Hermes(fail_on="s1")
+        result = admin.decide(self.home, {}, {"kind": "apply_all", "ids": ids}, now=NOW, runner=hermes)
+        self.assertEqual(result["applied"], [ids[0], ids[2]])
+        self.assertEqual([item["id"] for item in result["skipped"]], [ids[1]])
+
+    def test_radar_findings_read_as_sentences(self):
+        for kind, subject, evidence in (("plugin_health", "pre_tool_call", {"blocked_calls": 4}),
+                                        ("plugin_health", "broken", {"error": "ImportError"}),
+                                        ("plugin_conflict", "pre_tool_call", {"failed_calls": 7}),
+                                        ("compaction", "compression", {"compactions": 5, "kept_pct": 92.0})):
+            for lang in ("pt", "en"):
+                what = explain.describe({"kind": kind, "subject": subject, "evidence": evidence, "risk": "low"}, lang)["what"]
+                self.assertTrue(what and "?" not in what and "  " not in what, (kind, lang, what))
+
+    def test_the_attention_box_fills_in_its_values(self):
+        with experience(self.home) as conn:
+            conn.execute("INSERT INTO cursor(key, value) VALUES ('settings_reload', '[\"runtime_guard\"]')")
+        script = Script("0")
+        Menu(self.home, {}, lang="en", console=Console(read=script.read, write=script.write, width=110, color=False),
+             clock=lambda: NOW).run()
+        self.assertIn("`runtime_guard`", script.text)
+        self.assertNotIn("{keys}", script.text)
 
 
 if __name__ == "__main__":

@@ -745,12 +745,12 @@ A decision is made with the same code as the dashboard panel (`admin.py`) and re
 | Mode | What runs by itself |
 |---|---|
 | `off` | Nothing. Every change waits for you. |
-| `safe` (default) | Exact repeats in Hermes' memory are taken out: the same entry twice, case, spacing and Unicode forms aside, in one file or across both (the copy in `USER.md` stays). Similar entries are never touched by themselves: they wait for you in the menu. |
+| `safe` (default) | Copies of a memory entry that are the very same text, character for character, are taken out, in one file or across both (the copy in `USER.md` stays). An entry that differs in anything, case and spacing included (a path, a password, an indented block), and similar entries are never touched by themselves: they wait for you in the menu. An entry you put back is never taken out by itself again. |
 | `full` | Also the reversible changes to Hermes a proposal asks for, today **locking a skill** the curator keeps rewriting (`hermes --profile <name> curator lock <skill>`), at most 3 per pass. |
 
 Each action is recorded in the decision history with `automatic` as the actor, shows up in the menu's summary and in the panel's header, and can be undone from the menu (screen 5 or 4), the panel's History or `hermes evolution decisions undo <id>`: a lock is undone with `hermes curator unlock`, a memory entry is put back from the copy kept. An automatic change you undo is never applied by itself again. A skill already locked or pinned is left as it is. A failure (Hermes refusing, a timeout) is reported in the pass's result and never stops the pass.
 
-The same changes can be applied one at a time, or all at once, from the menu (**Apply now**, `t`) and the panel, in any mode. Archiving a skill nobody used (`hermes curator archive`, undone with `restore`) is applied only on your approval. A rollback or a change to a Hermes setting is never applied by the plugin: it shows the command.
+The same changes can be applied one at a time, or all at once, from the menu (**Apply now**, `t`) and the panel, in any mode; a skill you had locked yourself is left as it is, so an undo never unlocks it. A proposal is claimed before Hermes runs, so a decision made meanwhile or a second click finds it taken. Archiving a skill nobody used, a rollback or a change to a Hermes setting is never applied by the plugin: it shows the command (Hermes 0.23.1's `curator restore` does not put an archived skill back where it was). An automatic change Hermes refuses is tried again a day later; a pass stops trying at the first refusal and leaves the commands out when the pass is near its time limit.
 
 ## Hermes memory
 

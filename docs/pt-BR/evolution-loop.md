@@ -745,12 +745,12 @@ Uma decisão é tomada pelo mesmo código do painel do dashboard (`admin.py`) e 
 | Modo | O que roda sozinho |
 |---|---|
 | `off` | Nada. Toda mudança espera você. |
-| `safe` (padrão) | Repetições exatas da memória do Hermes são retiradas: a mesma entrada duas vezes, deixando de lado maiúsculas, espaços e formas Unicode, num arquivo ou entre os dois (a cópia do `USER.md` fica). Entradas parecidas nunca são mexidas sozinhas: esperam você no menu. |
+| `safe` (padrão) | Cópias de uma entrada da memória que são exatamente o mesmo texto, caractere por caractere, são retiradas, num arquivo ou entre os dois (a cópia do `USER.md` fica). Uma entrada que difere em qualquer coisa, inclusive maiúsculas e espaços (um caminho, uma senha, um bloco indentado), e entradas parecidas nunca são mexidas sozinhas: esperam você no menu. Uma entrada que você devolveu nunca mais é retirada sozinha. |
 | `full` | Também as mudanças reversíveis no Hermes que uma proposta pede, hoje **travar uma skill** que o curador reescreve sem parar (`hermes --profile <nome> curator lock <skill>`), até 3 por passada. |
 
 Cada ação vai para o histórico de decisões com `automatic` como autor, aparece no resumo do menu e no cabeçalho do painel, e pode ser desfeita pelo menu (tela 5 ou 4), pelo Histórico do painel ou pelo `hermes evolution decisions undo <id>`: uma trava é desfeita com `hermes curator unlock`, uma entrada da memória volta da cópia guardada. Uma mudança automática que você desfaz nunca mais é aplicada sozinha. Uma skill já travada ou fixada fica como está. Uma falha (o Hermes recusando, tempo esgotado) aparece no resultado da passada e nunca interrompe a passada.
 
-As mesmas mudanças podem ser aplicadas uma a uma, ou todas de uma vez, pelo menu (**Aplicar agora**, `t`) e pelo painel, em qualquer modo. Arquivar uma skill que ninguém usou (`hermes curator archive`, desfeito com `restore`) só é aplicado com a sua aprovação. Um rollback ou uma mudança numa configuração do Hermes nunca é aplicado pelo plugin: ele mostra o comando.
+As mesmas mudanças podem ser aplicadas uma a uma, ou todas de uma vez, pelo menu (**Aplicar agora**, `t`) e pelo painel, em qualquer modo; uma skill que você mesmo travou fica como está, então um desfazer nunca a destrava. Uma proposta é reservada antes de o Hermes rodar, então uma decisão tomada nesse meio-tempo ou um segundo clique a encontra ocupada. Arquivar uma skill que ninguém usou, um rollback ou uma mudança numa configuração do Hermes nunca é aplicado pelo plugin: ele mostra o comando (o `curator restore` do Hermes 0.23.1 não devolve a skill arquivada ao lugar de antes). Uma mudança automática que o Hermes recusa é tentada de novo um dia depois; uma passada para na primeira recusa e deixa os comandos de fora quando está perto do limite de tempo.
 
 ## Memória do Hermes
 

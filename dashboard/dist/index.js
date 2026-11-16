@@ -40,7 +40,9 @@
       cancel: "Cancel", confirm: "Approve all",
       done: { approve: "Approved.", reject: "Rejected.", retire: "Retired.", reactivate: "Reactivated.", all: "Approved {n}.",
               undo: "Undone.", settings: "Saved. It applies within a minute, without restarting.", proposal: "Recorded.",
-              applied: "Applied. You can undo it in the History tab.", dismissed: "Dismissed: it stays closed while nothing changes." },
+              applied: "Applied. You can undo it in the History tab.", dismissed: "Dismissed: it stays closed while nothing changes.",
+              appliedN: "Applied {n}. You can undo each one in the History tab.", already: "It was already so in Hermes: nothing to undo.",
+              changed: "It changed meanwhile: look at it again." },
       skippedChanged: "{n} skipped: they changed since you saw them.",
       lessonsEmpty: "No lessons yet. A tool failure that comes back (3 times, in 2 sessions or on 2 days) becomes one.",
       proposalsEmpty: "No open proposals.",
@@ -74,7 +76,7 @@
         agent_tools: "Let the agent read and propose lessons (proposals still wait for you)",
         runtime_guard: "Runtime guard (keeps the agent from taking Hermes down)",
         auto_actions: "Automatic actions (what the plugin does by itself)",
-        autoModes: { off: "off: everything waits for you", safe: "safe: takes exact repeats out of Hermes' memory",
+        autoModes: { off: "off: everything waits for you", safe: "safe: takes out copies of a memory entry that are the very same text",
                      full: "full: also locks skills the curator keeps rewriting" },
         autoHint: "Each action is recorded in the History with its undo; an automatic change you undo is never repeated.",
         guardWarn: "Turning the guard off lets the agent restart or delete what Hermes runs on.",
@@ -111,7 +113,9 @@
       cancel: "Cancelar", confirm: "Aprovar todas",
       done: { approve: "Aprovada.", reject: "Rejeitada.", retire: "Aposentada.", reactivate: "Reativada.", all: "{n} aprovadas.",
               undo: "Desfeito.", settings: "Salvo. Vale em até um minuto, sem reiniciar.", proposal: "Registrado.",
-              applied: "Aplicada. Dá para desfazer na aba Histórico.", dismissed: "Dispensada: fica fechada enquanto nada mudar." },
+              applied: "Aplicada. Dá para desfazer na aba Histórico.", dismissed: "Dispensada: fica fechada enquanto nada mudar.",
+              appliedN: "{n} aplicada(s). Dá para desfazer cada uma na aba Histórico.", already: "Já estava assim no Hermes: nada a desfazer.",
+              changed: "Mudou nesse meio-tempo: veja de novo." },
       skippedChanged: "{n} puladas: mudaram desde que você as viu.",
       lessonsEmpty: "Ainda não há lições. Uma falha de ferramenta que volta (3 vezes, em 2 sessões ou em 2 dias) vira uma.",
       proposalsEmpty: "Nenhuma proposta aberta.",
@@ -145,7 +149,7 @@
         agent_tools: "Deixar o agente ler e propor lições (as propostas continuam esperando você)",
         runtime_guard: "Guarda de runtime (impede o agente de derrubar o Hermes)",
         auto_actions: "Ações automáticas (o que o plugin faz sozinho)",
-        autoModes: { off: "desligadas: tudo espera você", safe: "seguras: tira repetições exatas da memória do Hermes",
+        autoModes: { off: "desligadas: tudo espera você", safe: "seguras: tira cópias de uma entrada da memória que são exatamente o mesmo texto",
                      full: "completas: também trava skills que o curador reescreve sem parar" },
         autoHint: "Cada ação fica no Histórico com o desfazer; uma mudança automática que você desfaz nunca se repete.",
         guardWarn: "Desligar a guarda deixa o agente reiniciar ou apagar aquilo em que o Hermes roda.",
@@ -452,10 +456,13 @@
     const t = props.t, rows = props.data.proposals || [], act = props.actions;
     if (!rows.length) return h("p", { className: "hae-muted" }, t.proposalsEmpty);
     const changes = rows.filter(function (row) { return (row.explain || {}).can_apply; });
-    const applyAll = function () {
-      changes.forEach(function (row) {
-        act.send({ kind: "apply", id: row.id }, function (result) { return result && result.applied ? t.done.applied : String(result && result.reason || ""); });
-      });
+    const applied = function (result) {
+      if (result && result.applied === true) return t.done.applied;
+      if (result && Array.isArray(result.applied)) return fill(t.done.appliedN, { n: result.applied.length });
+      return result && result.reason === "already" ? t.done.already : t.done.changed;
+    };
+    const applyAll = function () {   // one request: the plugin applies them one after the other
+      act.send({ kind: "apply_all", ids: changes.map(function (row) { return row.id; }) }, applied);
     };
     const order = ["change", "lesson", "manual", "advice"];
     const sorted = rows.slice().sort(function (a, b) {
@@ -474,7 +481,7 @@
         if (props.data.can_decide) {
           if (told.category === "change") {
             buttons = [h(Button, { key: "a", primary: true, disabled: !!act.working,
-                                   onClick: send({ kind: "apply", id: row.id }, function (result) { return result && result.applied ? t.done.applied : String(result && result.reason || ""); }) }, t.applyNow),
+                                   onClick: send({ kind: "apply", id: row.id }, applied) }, t.applyNow),
                        h(Button, { key: "r", disabled: !!act.working, onClick: send({ kind: "proposal", id: row.id, action: "reject" }, decided) }, t.reject)];
           } else if (told.category === "advice") {
             buttons = [h(Button, { key: "d", disabled: !!act.working, onClick: send({ kind: "proposal", id: row.id, action: "reject" }, function () { return t.done.dismissed; }) }, t.dismiss)];

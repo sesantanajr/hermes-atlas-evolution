@@ -249,12 +249,15 @@ def undo(conn: sqlite3.Connection, decision_id: int, *, now: float, actor: str =
         return {"id": decision_id, "undone": False, "restorable": True, "kind": "memory", "file": row["target"],
                 "fingerprint": before.get("fingerprint"), "backup": before.get("backup"),
                 "position": before.get("position"), "copies": before.get("copies", 1)}
-    if row["kind"] == "proposal" and isinstance(after.get("undo"), list):   # applied with a Hermes command
+    if row["kind"] == "proposal" and "applied" in after:   # applied with a Hermes command
+        from .explain import undo_for
+
+        backward = undo_for(after.get("applied"))   # derived again: what the record says it undoes is never run
         current = conn.execute("SELECT status FROM proposal WHERE id=?", (int(row["target"]),)).fetchone()
-        if current is None or current["status"] != "applied":
+        if backward is None or current is None or current["status"] != "applied":
             return {"id": decision_id, "undone": False, "reason": "changed_since"}
         return {"id": decision_id, "undone": False, "restorable": True, "kind": "proposal_apply",
-                "proposal": int(row["target"]), "code": after.get("code"), "undo": after["undo"]}
+                "proposal": int(row["target"]), "code": str(after.get("code") or "")[:200], "undo": backward}
     if row["kind"] == "proposal":
         current = conn.execute("SELECT status FROM proposal WHERE id=?", (int(row["target"]),)).fetchone()
         if current is None or current["status"] != after.get("status"):

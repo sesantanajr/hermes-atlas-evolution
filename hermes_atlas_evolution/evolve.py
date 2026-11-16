@@ -187,7 +187,8 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in fresh]
     from . import actions
 
-    automatic = actions.automatic(home, now=now, mode=opts["auto_actions"], runtime_config=runtime_config, usage=usage)
+    automatic = actions.automatic(home, now=now, mode=opts["auto_actions"], runtime_config=runtime_config, usage=usage,
+                                  deadline=deadline)
     if automatic["applied"]:
         with experience(home) as conn:
             pending = proposals.listing(conn, status="open")
