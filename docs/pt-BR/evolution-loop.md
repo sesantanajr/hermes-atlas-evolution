@@ -696,6 +696,7 @@ Subcomandos de `hermes evolution`. A saída é JSON, exceto no `report` e no `st
 
 | Comando | O que faz |
 |---|---|
+| *(nenhum)*, `menu` | O menu interativo (veja [O menu do terminal](#o-menu-do-terminal)). Sem um terminal para responder, ou no shell do agente, o comando sozinho mostra o `status`, e `menu` diz por que não abriu. |
 | `status [--format md\|json] [--no-learn]` | Mostra se o plugin está observando, aprendendo e protegendo este perfil, e a situação de cada perfil da mesma raiz do Hermes (veja [Status e aviso ao dono](#status-e-aviso-ao-dono)). Faz a primeira passada quando o perfil nunca teve uma, salvo com `--no-learn`. |
 | `owner [list \| add <id> \| remove <id> \| add-platform <nome> \| remove-platform <nome>]` | Quem conta como você nos chats (veja [Quem é atendido](#quem-é-atendido)). Só o operador. |
 | `learn [--notify-only]` | Uma passada agora: reprocessa o histórico enquanto a leitura não termina, deriva lições, consulta o refletor se ligado, mede, lê o radar, atualiza as propostas. Espera até 30 segundos por uma passada que já esteja rodando. |
@@ -704,7 +705,7 @@ Subcomandos de `hermes evolution`. A saída é JSON, exceto no `report` e no `st
 | `lessons list [--status STATUS]` | O playbook com origem, evidência e efeito medido. No terminal de um agente, a frase de uma lição escrita fica de fora (`text_hidden`), porque o terminal do chat de um estranho também é um terminal de agente; as lições de modelo fixo continuam. |
 | `lessons review` | Mostra cada lição que aguarda aprovação com o texto exato e pergunta: `a` aprova, `r` rejeita (a lição é aposentada), Enter pula, `x` sai. Só o operador, no próprio terminal. |
 | `lessons approve <id> [--yes]`, `lessons approve --all [--yes]`, `lessons retire <id>` | Ativa uma lição (depois de mostrar o texto), todas as que esperam menos as propostas do próprio agente (depois de mostrar cada frase), ou aposenta uma. Só o operador. |
-| `decisions [list] [--limit N]`, `decisions undo <id>` | As suas decisões sobre lições, propostas e configurações, no terminal e no painel do dashboard, da mais recente para a mais antiga; o desfazer volta atrás numa delas enquanto o que ela mudou continua como ela deixou (numa configuração, imprime o comando `hermes config set` que restaura o valor). Desfazer é só do operador. |
+| `decisions [list] [--limit N]`, `decisions undo <id>` | As suas decisões sobre lições, propostas e configurações, no terminal e no painel do dashboard, da mais recente para a mais antiga; o desfazer volta atrás numa delas enquanto o que ela mudou continua como ela deixou (numa configuração, imprime o comando `hermes config set` que restaura o valor; uma entrada retirada da memória do Hermes volta). Desfazer é só do operador. |
 | `lessons add "<texto>" [--tool NOME] [--activate] [--yes]` | Adiciona uma lição sua, em quarentena salvo `--activate`. Só o operador. |
 | `lessons export [--out ARQUIVO]` | As lições ativas como um pacote, impresso ou gravado num arquivo novo (veja [Pacotes de lições](#pacotes-de-lições)). Só o operador. |
 | `lessons import (ARQUIVO \| - \| --from PERFIL) [--dry-run] [--activate] [--yes]` | Traz as lições de um pacote ou de outro perfil deste Hermes, depois de mostrar cada uma. Só o operador. |
@@ -716,6 +717,35 @@ Subcomandos de `hermes evolution`. A saída é JSON, exceto no `report` e no `st
 | `ops ...` | Supervisor de operações ([Operações](operations.md)). |
 
 `health`, `tick`, `feedback`, `history` e `memory` vêm de versões anteriores ([Operações](operations.md#comandos-mantidos-de-versões-anteriores)). Com `plugins.isolation: host`, o Hermes não registra o `hermes evolution`; o executor independente `python -m hermes_atlas_evolution --home <perfil> ...` aceita os mesmos subcomandos ([Operações](operations.md#fora-do-hermes)).
+
+## O menu do terminal
+
+`hermes evolution` sem comando (ou `hermes evolution menu`) abre um menu no seu próprio terminal. Cada tela lista o que há com um número; você digita o número e depois uma letra para a ação (`a` aprova, `r` rejeita, `t` aprova todas), e Enter volta. `0`, Ctrl-D ou Ctrl-C saem. É texto simples, então funciona igual no Linux, no macOS e no Windows, por SSH e com leitor de tela, e segue o idioma do plugin (e o `--lang`).
+
+| Tela | O que mostra e faz |
+|---|---|
+| Resumo | O modo das lições, as lições ativas e as que esperam, as propostas abertas, a última passada, se a guarda e o refletor estão ligados e quantos pontos pedem atenção |
+| 1 Lições esperando você | Cada uma com a frase exata e a origem; aprove ou rejeite uma, ou aprove todas depois de ler cada frase (as propostas do próprio agente são aprovadas uma a uma) |
+| 2 Propostas abertas | Risco, tipo e assunto; a lição ou o comando de cada uma; aprove ou rejeite. Uma proposta que muda o Hermes imprime o comando para você rodar |
+| 3 Lições ativas | Com o efeito medido; aposente uma |
+| 4 Histórico de decisões e desfazer | As suas 20 últimas decisões, do terminal e do painel; desfaça uma enquanto o que ela mudou continua como ela deixou |
+| 5 Configurações | Cada opção do formulário com o valor atual; mude uma, ou aplique a configuração recomendada (lições em `auto`, refletor ligado e os canais de chat que são seus por construção) depois de ver o que muda. Gravadas com `hermes --profile <nome> config set ...`, conferidas antes pelas regras do próprio plugin |
+| 6 Quem é você nos chats | Cada canal dos últimos 30 dias com os remetentes, os sugeridos marcados; marque ou desmarque um canal inteiro ou um remetente como você |
+| 7 Memória do Hermes | Veja [Memória do Hermes](#memória-do-hermes) |
+| 8, 9 | O resumo de 7 dias e a situação completa |
+| 10 | Uma passada de aprendizado na hora |
+
+Uma decisão é tomada pelo mesmo código do painel do dashboard (`admin.py`) e gravada no mesmo histórico, com `terminal` como lugar. O menu só abre no terminal do operador: nunca onde os comandos que decidem se recusam a rodar (o shell do agente, veja o [SECURITY.md](../../SECURITY.md)), e nunca sem um terminal nas duas pontas.
+
+## Memória do Hermes
+
+O Hermes guarda dois arquivos de memória por perfil, `memories/MEMORY.md` (as notas do agente) e `memories/USER.md` (o que ele sabe de você), e põe os dois no prompt de sistema de toda sessão. Uma entrada dita duas vezes custa os seus tokens em todo turno e deixa menos espaço dentro dos limites do Hermes (`memory.memory_char_limit` e `memory.user_char_limit`). A tela de memória do menu mostra as entradas e os caracteres de cada arquivo diante do limite, e o que se repete:
+
+- **a mesma entrada duas vezes**: iguais quando se deixam de lado maiúsculas, espaços e formas Unicode, num arquivo ou entre os dois (um fato que está nos dois arquivos tem a sugestão de ficar no `USER.md`);
+- **uma entrada diz o que outra já diz**: 85% ou mais das palavras da menor estão na maior;
+- **entradas muito parecidas**: 60% ou mais das palavras em comum.
+
+Você vê as duas entradas inteiras e escolhe qual fica. A outra é retirada do jeito que a ferramenta de memória do Hermes grava: sob a mesma trava exclusiva (`<arquivo>.lock`), depois de ler o arquivo de novo, com substituição atômica, e só se a entrada ainda está lá como você a viu. Antes, uma cópia do arquivo inteiro é guardada em `<perfil>/evolution/memory-backups/` (só do dono, as 100 cópias mais recentes), e a decisão vai para o histórico com a impressão digital da entrada, nunca o texto. **Desfazer** a devolve ao lugar a partir dessa cópia, enquanto o arquivo ainda está como a retirada o deixou e ela cabe no limite. O plugin nunca reescreve uma entrada: para juntar duas entradas em palavras novas, peça ao agente, que faz isso com a ferramenta de memória dele. As sessões já em andamento ficam com a memória com que começaram; as novas leem a mudança.
 
 ## Configuração e idioma
 

@@ -252,7 +252,7 @@ class PanelRouteTest(Base):
             self.skipTest("FastAPI is installed with Hermes' dashboard only")
         app = FastAPI()
         app.include_router(self.api.router, prefix="/p")
-        self.api._current = lambda: (self.home, {})
+        self.api._current = lambda target=None: (self.home, {})
         client = TestClient(app)
         body = {"kind": "undo", "id": 1}
         login = {"Cookie": "hermes_session_at=abc"}
@@ -268,15 +268,12 @@ class PanelRouteTest(Base):
         self.assertTrue(client.get("/p/snapshot", headers=login).json()["can_decide"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CliWriterTest(Base):
     """The panel writes settings with Hermes' public `hermes config set`, profile by profile."""
 
     def test_each_value_is_one_config_set_of_the_profile(self):
-        api = load_api()
+        from hermes_atlas_evolution import admin
+
         calls = []
 
         def runner(command, **kwargs):
@@ -285,9 +282,9 @@ class CliWriterTest(Base):
 
         profile = self.home / "profiles" / "atlas-ai"
         profile.mkdir(parents=True)
-        with patch.object(api, "_hermes", return_value="/usr/local/bin/hermes"):
-            written = api.cli_writer(profile, runner=runner)({"owner_platforms": ["api_server"], "lessons": "auto",
-                                                              "reflector": False, "reflector_daily_limit": 6})
+        with patch.object(admin, "hermes_executable", return_value="/usr/local/bin/hermes"):
+            written = admin.cli_writer(profile, runner=runner)({"owner_platforms": ["api_server"], "lessons": "auto",
+                                                                "reflector": False, "reflector_daily_limit": 6})
         self.assertEqual(written, ["owner_platforms", "lessons", "reflector", "reflector_daily_limit"])
         self.assertEqual(calls[0][0], ["/usr/local/bin/hermes", "--profile", "atlas-ai", "config", "set",
                                        "plugins.entries.hermes-atlas-evolution.settings.owner_platforms", '["api_server"]'])
@@ -295,13 +292,15 @@ class CliWriterTest(Base):
         self.assertEqual(calls[0][1], str(profile.resolve()))
 
     def test_hermes_refusing_a_value_stops_and_says_why(self):
-        api = load_api()
+        from hermes_atlas_evolution import admin
+
         refuse = lambda command, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="✗ Invalid config key")  # noqa: E731
-        with patch.object(api, "_hermes", return_value="/usr/local/bin/hermes"), self.assertRaises(ValueError) as error:
-            api.cli_writer(self.home, runner=refuse)({"lessons": "auto"})
+        with patch.object(admin, "hermes_executable", return_value="/usr/local/bin/hermes"), \
+                self.assertRaises(ValueError) as error:
+            admin.cli_writer(self.home, runner=refuse)({"lessons": "auto"})
         self.assertIn("Invalid config key", str(error.exception))
-        with patch.object(api, "_hermes", return_value=None), self.assertRaises(ValueError):
-            api.cli_writer(self.home)({"lessons": "auto"})
+        with patch.object(admin, "hermes_executable", return_value=None), self.assertRaises(ValueError):
+            admin.cli_writer(self.home)({"lessons": "auto"})
 
 
 class StatusReloadTest(Base):
@@ -314,3 +313,7 @@ class StatusReloadTest(Base):
         self.assertEqual(report["settings_reload"], ["runtime_guard"])
         self.assertIn("settings_reload", report["attention"])
         self.assertIn("`runtime_guard`", status.markdown(report, "pt"))
+
+
+if __name__ == "__main__":
+    unittest.main()

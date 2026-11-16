@@ -696,6 +696,7 @@ Subcommands of `hermes evolution`. Output is JSON, except `report` and `status` 
 
 | Command | What it does |
 |---|---|
+| *(none)*, `menu` | The interactive menu (see [The terminal menu](#the-terminal-menu)). Without a terminal to answer from, or in an agent's shell, the bare command prints `status`, and `menu` says why it did not open. |
 | `status [--format md\|json] [--no-learn]` | Shows whether the plugin is observing, learning and protecting this profile, and the state of every profile of the same Hermes root (see [Status and owner notice](#status-and-owner-notice)). Runs the first pass when the profile never had one, unless `--no-learn`. |
 | `owner [list \| add <id> \| remove <id> \| add-platform <name> \| remove-platform <name>]` | Who counts as you in chats (see [Who is served](#who-is-served)). Operator only. |
 | `learn [--notify-only]` | One pass now: replay history while the backfill is not done, derive lessons, ask the reflector if on, measure, read the radar, refresh proposals. Waits up to 30 seconds for a pass that is already running. |
@@ -704,7 +705,7 @@ Subcommands of `hermes evolution`. Output is JSON, except `report` and `status` 
 | `lessons list [--status STATUS]` | The playbook with origin, evidence and measured effect. In an agent's terminal the sentence of a written lesson is left out (`text_hidden`), because the terminal of a stranger's chat is an agent's terminal too; template lessons stay. |
 | `lessons review` | Shows each lesson that waits for approval with its exact text and asks: `a` approves, `r` rejects (the lesson is retired), Enter skips, `x` quits. Operator only, in your own terminal. |
 | `lessons approve <id> [--yes]`, `lessons approve --all [--yes]`, `lessons retire <id>` | Activates one lesson (after showing the text), every waiting lesson except the agent's own proposals (after showing every sentence), or retires one. Operator only. |
-| `decisions [list] [--limit N]`, `decisions undo <id>` | Your decisions on lessons, proposals and settings, from the terminal and the dashboard panel, newest first; the undo takes one back while what it changed is still as it left it (for a setting, it prints the `hermes config set` command that restores the value). Undo is operator only. |
+| `decisions [list] [--limit N]`, `decisions undo <id>` | Your decisions on lessons, proposals and settings, from the terminal and the dashboard panel, newest first; the undo takes one back while what it changed is still as it left it (for a setting, it prints the `hermes config set` command that restores the value; an entry taken out of Hermes' memory is put back). Undo is operator only. |
 | `lessons add "<text>" [--tool NAME] [--activate] [--yes]` | Adds your lesson, quarantined unless `--activate`. Operator only. |
 | `lessons export [--out FILE]` | The active lessons as a pack, printed or written to a new file (see [Lesson packs](#lesson-packs)). Operator only. |
 | `lessons import (FILE \| - \| --from PROFILE) [--dry-run] [--activate] [--yes]` | Brings in the lessons of a pack or of another profile of this Hermes, after showing each one. Operator only. |
@@ -716,6 +717,35 @@ Subcommands of `hermes evolution`. Output is JSON, except `report` and `status` 
 | `ops ...` | Operations supervisor ([Operations](operations.md)). |
 
 `health`, `tick`, `feedback`, `history` and `memory` remain from earlier versions ([Operations](operations.md#commands-kept-from-earlier-versions)). Under `plugins.isolation: host` Hermes does not register `hermes evolution`; the standalone runner `python -m hermes_atlas_evolution --home <profile> ...` takes the same subcommands ([Operations](operations.md#running-outside-hermes)).
+
+## The terminal menu
+
+`hermes evolution` with no command (or `hermes evolution menu`) opens a menu in your own terminal. Each screen lists what there is with a number; you type the number, then a letter for the action (`a` approves, `r` rejects, `t` approves all), and Enter goes back. `0`, Ctrl-D or Ctrl-C leave. It is plain text, so it works the same on Linux, macOS and Windows, over SSH and with a screen reader, and it follows the plugin's language (`--lang` too).
+
+| Screen | What it shows and does |
+|---|---|
+| Summary | The lessons mode, active and waiting lessons, open proposals, the last pass, whether the guard and the reflector are on, and how many points need attention |
+| 1 Lessons waiting for you | Each one with its exact sentence and origin; approve or reject one, or approve all of them after reading every sentence (the agent's own proposals are approved one by one) |
+| 2 Open proposals | Risk, kind and subject; the lesson or the command behind each; approve or reject. A proposal that changes Hermes prints the command for you to run |
+| 3 Active lessons | With the measured effect; retire one |
+| 4 Decision history and undo | Your latest 20 decisions, from the terminal and the panel; undo one while what it changed is still as it left it |
+| 5 Settings | Every option of the settings form with its current value; change one, or apply the recommended setup (lessons on `auto`, the reflector on, and the chat channels that are yours by construction) after seeing what changes. Written with `hermes --profile <name> config set ...`, checked first with the plugin's own rules |
+| 6 Who is you in chats | Each channel of the last 30 days with its senders, the suggested ones marked; mark or unmark a whole channel or a sender as you |
+| 7 Hermes memory | See [Hermes memory](#hermes-memory) |
+| 8, 9 | The digest of 7 days and the full status |
+| 10 | A learning pass now |
+
+A decision is made with the same code as the dashboard panel (`admin.py`) and recorded in the same history, with `terminal` as the place. The menu opens only in the operator's terminal: never where the commands that decide refuse to run (an agent's shell, see [SECURITY.md](../SECURITY.md)), and never without a terminal on both ends.
+
+## Hermes memory
+
+Hermes keeps two memory files per profile, `memories/MEMORY.md` (the agent's notes) and `memories/USER.md` (what it knows about you), and puts both in the system prompt of every session. An entry said twice costs its tokens on every turn and leaves less room under Hermes' limits (`memory.memory_char_limit` and `memory.user_char_limit`). The menu's memory screen shows each file's entries and characters against its limit, and what repeats:
+
+- **the same entry twice**: equal once case, spacing and Unicode forms are set aside, in one file or across both (a fact in both files is suggested to stay in `USER.md`);
+- **one entry says what another says**: 85% or more of the shorter one's words are in the longer one;
+- **very similar entries**: 60% or more of their words in common.
+
+You see both entries in full and choose which one stays. The other is taken out the way Hermes' memory tool writes: under the same exclusive lock (`<file>.lock`), after reading the file again, with an atomic replace, and only if the entry is still there as you saw it. A copy of the whole file is kept first in `<profile>/evolution/memory-backups/` (owner-only, the latest 100 copies), and the decision goes to the history with the entry's fingerprint, never its text. **Undo** puts it back at its place from that copy, while the file still holds the entry as the removal left it and it fits the limit. The plugin never rewrites an entry: to merge two entries into new words, ask the agent, which does it with its memory tool. Sessions already running keep the memory they started with; new sessions read the change.
 
 ## Settings and language
 

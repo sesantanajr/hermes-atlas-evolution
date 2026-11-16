@@ -176,7 +176,7 @@ def raised_messages():
 
 class RaisedMessagesTest(unittest.TestCase):
     # "Evolution: <error>" only frames an error that is itself translated before it is framed.
-    FRAMES = {"Evolution: 77"}
+    FRAMES = {"Evolution: 77", "Evolution: 7"}
 
     def test_every_error_a_person_can_read_has_a_portuguese_form(self):
         found = list(raised_messages())

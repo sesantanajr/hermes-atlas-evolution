@@ -72,7 +72,9 @@ O `plugins update` da linha de comando só troca os arquivos: ele não recarrega
 
 ## O que ele faz
 
-- **Administre pelo dashboard do Hermes.** Uma aba **Evolution** no dashboard e no Hermes Desktop mostra o que o perfil aprendeu e o que espera por você e, quando o seu dashboard pede login, deixa você decidir ali: aprovar ou rejeitar cada lição, **aprovar todas** depois de ler cada frase, decidir propostas, mudar as configurações, escolher quem é você nos chats a partir de sugestões e **desfazer** qualquer decisão. Um dashboard sem login fica só leitura, porque qualquer programa da máquina poderia agir ali ([detalhes](docs/pt-BR/hermes-integration.md#o-painel-no-dashboard)).
+- **Um menu no seu terminal.** `hermes evolution`, sem comando, abre um menu numerado no seu próprio terminal: as lições que esperam você (uma a uma ou **aprovar todas**), as propostas, as lições ativas, o histórico com **desfazer**, cada configuração (ou **a configuração recomendada** de uma vez), quem é você nos chats, a memória do Hermes, o resumo, a situação completa e uma passada de aprendizado na hora. Ele decide com as mesmas regras do painel do dashboard e grava no mesmo histórico. No shell do agente, ou sem um terminal para responder, mostra a situação no lugar.
+- **Administre pelo dashboard do Hermes.** Uma aba **Evolution** no dashboard e no Hermes Desktop mostra o que o perfil aprendeu e o que espera por você e, quando o seu dashboard pede login, deixa você decidir ali, no perfil do próprio dashboard e em todo outro perfil escolhido nele (com o plugin ativado também no perfil do dashboard): aprovar ou rejeitar cada lição, **aprovar todas** depois de ler cada frase, decidir propostas, mudar as configurações, escolher quem é você nos chats a partir de sugestões e **desfazer** qualquer decisão. Um dashboard sem login fica só leitura, porque qualquer programa da máquina poderia agir ali ([detalhes](docs/pt-BR/hermes-integration.md#o-painel-no-dashboard)).
+- **Mantém a memória do Hermes enxuta.** O Hermes põe o `MEMORY.md` e o `USER.md` no prompt de toda sessão. O menu mostra quanto cada um ocupa e o que se repete neles (a mesma entrada duas vezes, uma entrada que diz o que outra já diz, entradas muito parecidas); você escolhe qual fica, e a outra é retirada sob a própria trava de memória do Hermes, com uma cópia do arquivo guardada e **desfazer**. Cada repetição retirada economiza os seus tokens em todo turno ([detalhes](docs/pt-BR/evolution-loop.md#memória-do-hermes)).
 - **Leva lições de um perfil para outro.** `lessons export` e `lessons import --from <perfil>` levam o que um perfil aprendeu para outro, ou para outra máquina, depois de mostrar cada frase. As lições importadas esperam até os seus turnos encontrarem a falha lá, e são medidas lá como qualquer outra ([detalhes](docs/pt-BR/evolution-loop.md#pacotes-de-lições)).
 - **Aprende com o histórico que o Hermes já guarda.** As primeiras passadas releem os últimos 14 dias de sessões do perfil, então uma falha que se repetiu na semana passada pode virar lição já no primeiro dia.
 - **Transforma falhas repetidas de ferramentas em lições.** Uma falha vista pelo menos 3 vezes, em 2 sessões ou em 2 dias, vira uma frase como "Ao chamar `example_search`, sempre passe o argumento obrigatório `query`." Chamadas que o Hermes encerra no próprio prazo também contam. O agente lê as lições ativas no começo de cada sessão.
@@ -95,6 +97,7 @@ Subcomandos de `hermes evolution`. O `--lang en|pt` funciona com todos eles.
 
 | Comando | O que faz |
 |---|---|
+| *(nenhum)*, `menu` | O menu interativo, no seu próprio terminal. Sem terminal (um script, um pipe, o shell do agente), o comando sozinho mostra o `status`. |
 | `status` | Mostra se o plugin está observando, aprendendo e protegendo este perfil, e a situação de cada perfil deste Hermes. |
 | `report [--days N]` | O resumo dos últimos N dias (7 por padrão), comparado com o período anterior. |
 | `lessons list` | As lições, com origem, evidências e efeito medido. |
@@ -140,13 +143,13 @@ Todas as opções, o `settings.json` e o que acontece com um valor inválido: [C
 
 ## Privacidade e segurança
 
-- **O que ele guarda.** Contadores, classes de falha, ids de sessão com hash, frases das lições e propostas, em `<HERMES_HOME>/evolution/`. Não guarda texto de conversa, prompt, argumento de ferramenta, saída de ferramenta nem conteúdo de memória. Com o refletor ligado, guarda um trecho da mensagem de erro, de até 300 caracteres e com segredos, caminhos e endereços mascarados, por falha dos seus próprios turnos que não tem modelo fixo, até a falha ganhar uma lição ou por 14 dias.
+- **O que ele guarda.** Contadores, classes de falha, ids de sessão com hash, frases das lições e propostas, em `<HERMES_HOME>/evolution/`. Não guarda texto de conversa, prompt, argumento de ferramenta, saída de ferramenta nem conteúdo de memória, fora a cópia de um arquivo de memória que guarda quando você retira uma entrada (só do dono, em `evolution/memory-backups/`, as 100 mais recentes). Com o refletor ligado, guarda um trecho da mensagem de erro, de até 300 caracteres e com segredos, caminhos e endereços mascarados, por falha dos seus próprios turnos que não tem modelo fixo, até a falha ganhar uma lição ou por 14 dias.
 - **O que ele lê**, sempre só para leitura: o histórico, os logs e os registros de skills do próprio Hermes, para o `status` a contagem de sessões dos seus outros perfis e de cada canal de chat e, para o `hermes evolution owner` no seu próprio terminal, os ids de remetente de cada canal ([lista completa](docs/pt-BR/hermes-integration.md#o-que-o-plugin-lê)).
 - **Roda em segundo plano.** Só dentro do Hermes: um temporizador confere a cada 10 minutos se está na hora de uma rodada de aprendizado.
 - **Chamadas a modelo.** Só o refletor chama um modelo de IA, pelo Hermes e com as configurações de provedor dele (tarefa auxiliar `evolution_reflector`), no máximo 3 vezes por passada e 6 vezes por dia, por padrão. `reflector: false` desliga.
 - **Rede.** Nenhuma conexão própria e nenhuma telemetria.
 - **Chats do gateway.** O plugin não manda nada para um chat. Os avisos dele aparecem só no Hermes do seu computador (CLI, TUI, Desktop), nunca num chat do gateway. O que o outro lado de um chat vê é o que o agente escreve.
-- **Decisões.** Os comandos que aprovam, rejeitam ou ativam algo não rodam no terminal do agente: só você decide, no seu terminal. O plugin muda apenas os próprios dados; mudanças no Hermes aparecem como comandos para você rodar.
+- **Decisões.** Só você decide: no seu próprio terminal (o menu ou os comandos, que se recusam a rodar no terminal do agente) ou num dashboard que pede login. O plugin muda os próprios dados, as próprias configurações pelo `hermes config set` do Hermes e os arquivos de memória do Hermes só para retirar a entrada que você escolheu; outras mudanças no Hermes aparecem como comandos para você rodar.
 
 Detalhes: [SECURITY.md](SECURITY.md).
 

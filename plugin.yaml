@@ -1,5 +1,5 @@
 name: hermes-atlas-evolution
-version: "0.8.1"
+version: "0.8.2"
 requires_hermes: ">=0.23.1"
 description: >-
   A measured self-improvement loop for Hermes Agent. Learns from Hermes' own history on the first pass,
@@ -8,8 +8,9 @@ description: >-
   call, approvals nobody could answer, heavy context, weak compaction) and stops the agent from taking down
   the gateway it runs on. Lessons from fixed templates apply at once (after the owner's own
   turns hit the failure) and are retired when they do not help; text written by a model or by the agent waits
-  for your approval. Lessons travel between profiles as packs, and an Evolution tab in the dashboard shows what
-  was learned and what waits for you.
+  for your approval. Lessons travel between profiles as packs; `hermes evolution` opens an interactive menu in
+  your terminal, and an Evolution tab in the dashboard shows what was learned and what waits for you. It also
+  finds what repeats in Hermes' memory and takes out the copy you choose.
 license: MIT
 homepage: https://github.com/sesantanajr/hermes-atlas-evolution
 author: "Sérgio Sant'Ana Júnior"
