@@ -89,6 +89,10 @@ class FakeMachine:
         return 0, "", ""
 
 
+POSIX_ONLY = unittest.skipUnless(os.name == "posix", "Linux and POSIX only: apt, /proc, statvfs, file modes")
+
+
+@POSIX_ONLY
 class SystemUpdateTest(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -311,6 +315,7 @@ class HermesCareTest(unittest.TestCase):
         self.assertIn("swap_full", report["findings"])
         self.assertNotIn("memory_low", report["findings"])
 
+    @POSIX_ONLY
     def test_a_stuck_gateway_a_growing_folder_and_a_filling_disk(self):
         gateway_files(self.home, beat_age=900, rss_kib=3_000_000)
         history = [{"at": NOW - 6 * 86_400, "sizes": {"sessions": 1 * 2**30}, "free": 20 * 2**30, "rss": 500 * 2**20}]
@@ -323,6 +328,7 @@ class HermesCareTest(unittest.TestCase):
         self.assertEqual(report["growth"][0]["folder"], "sessions")
         self.assertEqual(report["days_to_full"], 4.0)
 
+    @POSIX_ONLY
     def test_a_state_file_that_outlived_its_gateway_is_a_crash(self):
         gateway_files(self.home)
         state = json.loads((self.home / "gateway_state.json").read_text())
