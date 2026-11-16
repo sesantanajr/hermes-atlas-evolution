@@ -247,9 +247,10 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     """Count one finished tool call and, for a failure, its signature. Returns the classification.
 
     `owner`: the call ran in a turn of the owner's own (CLI, TUI, Desktop, cron, a subagent, or a chat with
-    a sender listed in owner_sender_ids). Every failure is counted; only the owner's are counted again in
-    failure_owner, which decides whether a lesson may activate by itself, and only theirs keep an excerpt
-    for the reflector: text a third party controls never reaches the model that drafts lessons.
+    a sender listed in owner_sender_ids, or a chat on a platform listed in owner_platforms). Every failure is
+    counted; only the owner's are counted again, per day, in failure_owner_daily, which decides whether a lesson
+    may activate by itself, and only theirs keep an excerpt for the reflector: text a third party controls never
+    reaches the model that drafts lessons.
 
     `origin`: the session's real origin label. A refused approval is also counted per origin and tool, so the
     radar can tell refusals nobody could have answered (a one-shot run, a cron job, a subagent) from the rest."""

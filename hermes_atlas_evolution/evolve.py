@@ -116,6 +116,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             if not step.get("more"):
                 break
         created = lessons.derive(conn, now=now, mode=opts["lessons"])
+        promoted = lessons.promote(conn, now=now, mode=opts["lessons"])
         # Only once the history is replayed: while it is, failure totals are still being counted (or recounted).
         withdrawn = lessons.tidy(conn) if history.get("status") in backfill.SETTLED else 0
         conn.commit()
@@ -165,9 +166,10 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         reading = radar.scan(home, conn, now=now, own_transform=opts["tool_hints"] and opts["lessons"] != "off")
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
                                     changes=verdicts, outcomes=outcomes, radar=reading["findings"], lang=opts["language"])
-        new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in created]
+        fresh = set(created) | set(promoted)
+        new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in fresh]
     return {"now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons,
-            "lessons_withdrawn": withdrawn, "reflector": reflection,
+            "lessons_promoted": len(promoted), "lessons_withdrawn": withdrawn, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
             "proposals_closed_as_applied": closed, "radar": [item["code"] for item in reading["findings"]],

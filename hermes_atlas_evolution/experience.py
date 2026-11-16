@@ -99,6 +99,11 @@ ADDITIVE_TABLES = (
     # Refused approvals per session origin and tool: the radar tells refusals nobody could answer from the rest.
     ("approval_daily", "CREATE TABLE IF NOT EXISTS approval_daily (day TEXT NOT NULL, source TEXT NOT NULL, "
                        "tool TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, source, tool)) WITHOUT ROWID"),
+    # Derived lessons that auto mode left waiting only because the owner's own turns had not hit the failure
+    # twice yet: they activate by themselves once they have (lessons.promote). The signature guards against
+    # a reused lesson id.
+    ("lesson_owner_wait", "CREATE TABLE IF NOT EXISTS lesson_owner_wait (lesson_id INTEGER PRIMARY KEY, "
+                          "signature TEXT NOT NULL) WITHOUT ROWID"),
 )
 SCHEMA += "".join(f"{statement};\n" for _, statement in ADDITIVE_TABLES)
 

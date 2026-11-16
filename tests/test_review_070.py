@@ -190,6 +190,57 @@ class HygieneTest(Base):
             self.assertEqual(cycle(self.home, now=NOW, config={"evolution": {"reflector": False}})["lessons_withdrawn"], 1)
 
 
+class PromoteTest(Base):
+    failure = HygieneTest.failure
+
+    def test_a_lesson_waiting_for_the_owner_activates_once_the_owners_turns_hit_its_failure(self):
+        with experience(self.home) as conn:
+            signature = self.failure(conn, "terminal", "timeout", "", 5, 3)              # only others hit it so far
+            older = self.failure(conn, "web_extract", "timeout", "", 5, 3)
+            conn.execute("""INSERT INTO lesson(signature, tool, klass, hint, origin, status, created, updated)
+                VALUES (?, 'web_extract', 'timeout', '', 'derived', 'candidate', 1, 1)""", (older,))   # suggest or 0.6.0
+            [waiting] = lessons.derive(conn, now=NOW, mode="auto")
+            self.assertEqual(lessons.promote(conn, now=NOW, mode="auto"), [])
+            for each in (signature, older):
+                conn.execute("INSERT INTO failure_owner_daily VALUES (?, ?, 2)", (utc_day(NOW), each))
+            self.assertEqual(lessons.promote(conn, now=NOW, mode="suggest"), [])     # suggest: every lesson waits
+            self.assertEqual(lessons.promote(conn, now=NOW + 60, mode="auto"), [waiting])
+            self.assertEqual(lessons.promote(conn, now=NOW + 120, mode="auto"), [])  # once
+            states = dict(conn.execute("SELECT tool, status FROM lesson").fetchall())
+            changes = conn.execute("SELECT COUNT(*) FROM change WHERE kind='lesson'").fetchone()[0]
+        self.assertEqual(states, {"terminal": "active", "web_extract": "candidate"})
+        self.assertEqual(changes, 1)   # measured from its activation, like a lesson derived active
+
+    def test_a_rejected_or_withdrawn_lesson_is_never_promoted(self):
+        with experience(self.home) as conn:
+            rejected = self.failure(conn, "terminal", "timeout", "", 5, 3)
+            stale = self.failure(conn, "skill_manage", "limit_exceeded", "", 3, 2)
+            first, second = sorted(lessons.derive(conn, now=NOW, mode="auto"))
+            lessons.set_status(conn, first, "retired", now=NOW)                       # the operator said no
+            conn.execute("UPDATE failure SET total=1, sessions=1 WHERE signature=?", (stale,))
+            self.assertEqual(lessons.tidy(conn), 1)                                   # its evidence went away
+            for each in (rejected, stale):
+                conn.execute("INSERT INTO failure_owner_daily VALUES (?, ?, 3)", (utc_day(NOW), each))
+            self.assertEqual(lessons.promote(conn, now=NOW, mode="auto"), [])
+            waiting = conn.execute("SELECT COUNT(*) FROM lesson_owner_wait").fetchone()[0]
+            states = dict(conn.execute("SELECT id, status FROM lesson").fetchall())
+        self.assertEqual((waiting, states), (0, {first: "retired"}))
+
+    def test_a_pass_reports_the_promoted_lesson_as_new(self):
+        from hermes_atlas_evolution.evolve import cycle
+
+        with experience(self.home) as conn:
+            signature = self.failure(conn, "terminal", "timeout", "", 5, 3)
+        settings = {"evolution": {"reflector": False}}
+        with patch.object(backfill, "step", lambda *a, **k: {"status": "done"}):
+            first = cycle(self.home, now=NOW, config=settings)
+            with experience(self.home) as conn:
+                conn.execute("INSERT INTO failure_owner_daily VALUES (?, ?, 2)", (utc_day(NOW), signature))
+            second = cycle(self.home, now=NOW + 3600, config=settings)
+        self.assertEqual([item["status"] for item in first["new_lessons"]], ["candidate"])
+        self.assertEqual(([item["status"] for item in second["new_lessons"]], second["lessons_promoted"]), (["active"], 1))
+
+
 class DraftTest(Base):
     def test_generic_drafts_are_declined_and_the_failing_program_reaches_the_model(self):
         failing = {"tool_name": "terminal", "status": "error", "args": {"command": "sudo -u ops systemctl restart nginx"},

@@ -39,7 +39,7 @@ The manifest declares the same 17 hooks, and a test compares the two lists.
 | `post_api_request` | Counts the call, its tokens and its duration per provider and model. |
 | `api_request_error` | Counts every failed attempt, classified as rate limit, authentication, timeout, upstream or error. |
 | `post_auxiliary_call` | Counts auxiliary calls and failures per task. |
-| `post_tool_call` | Counts the tool outcome, classifies a failure into a signature (as `rewritten_command` when the command that ran differs from the one `pre_tool_call` saw), counts it again when the turn served the owner (see [Who is served](evolution-loop.md#who-is-served)), times turns that use web research tools and, with the reflector on, keeps a scrubbed excerpt of an untemplated failure of the owner's own turns. |
+| `post_tool_call` | Counts the tool outcome and its duration, classifies a failure into a signature (as `rewritten_command` when Hermes' `middleware_trace` names a change or the command that ran differs from the one `pre_tool_call` saw), counts a refused approval per session origin, counts the failure again when the turn served the owner (see [Who is served](evolution-loop.md#who-is-served)), times turns that use web research tools and, with the reflector on, keeps a scrubbed excerpt of an untemplated failure of the owner's own turns. |
 | `transform_tool_result` | Adds the matching lesson to a failing result when `tool_hints` is `true`, which is off by default: Hermes keeps only the first plugin's change to a tool result. In a session that does not serve the owner, only template lessons are added. Registered while lessons are on, and silent otherwise. |
 | `pre_llm_call` | Works out the turn's surface and whether it serves the owner, starts the turn timer, classifies owner feedback in memory and attributes an owner correction to the skills of the previous turn. Returns context only for the opt-in 0.1 note recall. |
 | `post_llm_call` | Closes the timing of a research turn and nudges the autopilot. |
@@ -91,7 +91,8 @@ All of it is read-only and bounded in size and time.
 
 | Source | Used for |
 |---|---|
-| `skills/.usage.json`, `skills/.curator_ledger.jsonl` | Skill health and tracked skill changes. Metadata and hashes only; skill bodies are never opened. |
+| `skills/.usage.json`, `skills/.curator_ledger.jsonl` | Skill health and tracked skill changes. Metadata and hashes only; the evolution loop never opens a skill body. |
+| `SKILL.md` files under the skill folders, and the first 8 KiB of other plugins' `__init__.py` | Only for the operations supervisor (`ops inspect`, `ops tick`): skill files are read, within a total byte budget, to find duplicate skills, and only their hash and title are kept; a plugin's `__init__.py` start tells whether it is a provider plugin. Nothing of either is stored as text. |
 | `logs/agent.log`, and `agent.log.1` to `agent.log.5` on the first run | The completion line of each background review. The tails of the Hermes logs are also scanned for error categories. Links are ignored. |
 | `state.db` | Integrity check and Hermes' own usage accounting. The backfill: sessions and their messages from the 14 days before the plugin started observing, 25 sessions at a time, classified in memory and discarded. The radar: how the sessions of the last 7 days ended, and prompt tokens per agent call from `session_model_usage`. |
 | `pyvenv.cfg` of the running Python environment | The runtime guard: the base interpreter the environment points at. |
@@ -99,7 +100,8 @@ All of it is read-only and bounded in size and time.
 | `/proc/<pid>/stat` and `/proc/<pid>/cmdline` of the command's ancestors, `/proc/self/cgroup` | On Linux, only when a decision command (`lessons approve`, `retire`, `add`, `review`, `proposals approve`, `reject`) runs: whether a Hermes process is an ancestor or the command runs in a Hermes gateway's cgroup. Nothing is stored. |
 | Hermes' plugin manager, when it is loaded in the process | For the radar: the enabled plugins, the number of hooks each registered and the name of a load error. |
 | `plugin.yaml` of the plugins bundled with Hermes and of `<HERMES_HOME>/plugins/` | For the radar: the hooks each plugin declares (`provides_hooks`). At most 500 folders and 64 KiB per manifest. |
-| `cron/jobs.json`, Kanban boards | Workload diagnostics, as counts. |
+| `cron/jobs.json`, Kanban boards | Workload diagnostics, as counts; `status` also checks whether the weekly digest job exists. |
+| The `sessions` table of this profile's `state.db`: source and sender of each chat session | For `status`, the sessions and number of senders of each chat channel in 7 days (counts only). For `hermes evolution owner`, run by the operator in their own terminal, the sender ids of each channel in 30 days with their session counts. Nothing is stored. |
 | `gateway_state.json`, `gateway.pid` | Gateway state, including a named profile served by the root gateway. |
 | `memories/MEMORY.md`, `memories/USER.md` | Presence, size, UTF-8 readability and structure counts such as entries, duplicates and oversized entries. The content is not stored or reported. |
 | Hermes configuration | The plugin's own entry under `plugins.entries.hermes-atlas-evolution.settings`, `display.language`, an allowlist of settings for change tracking, and Cron, Kanban, delegation and memory limits. |
@@ -133,6 +135,7 @@ All of it is read-only and bounded in size and time.
 |---|---|
 | Default installation | Observers with aggregated data. The autopilot runs a pass at most once an hour, and the first passes learn from 14 days of the profile's history. Recurring failures with a template become active lessons (`lessons: auto`) once the owner's own turns hit them twice; they reach the agent in new sessions, are measured, and are retired when they do not help. Failures only other people caused wait for approval. The reflector drafts lessons that wait for approval. The runtime guard vetoes the commands described above. Operator commands can inspect the profile's signals. |
 | `owner_sender_ids` | The sender ids, text or numbers, whose chat turns count as the owner's, as in a local session. |
+| `owner_platforms` | The platforms where every chat counts as the owner's, from the first message: only a platform nobody else writes to, such as a private bot or the owner's own interface through the API server. |
 | `lessons: suggest` | Derived lessons are candidates that wait for approval, like every other lesson. |
 | `lessons: off` | No lesson is derived and no lesson surface is registered. |
 | `tool_hints` (off by default) | The matching lesson is also appended to a failing tool result, which discards the change another plugin's `transform_tool_result` would make to that result. |
@@ -178,7 +181,7 @@ Requires Hermes Agent 0.23.1 or later and Python 3.11 or later.
 
 **Verified on the development machine** (measurements, not guarantees):
 
-- The unit and end-to-end tests against a simulated Hermes, also under Hermes' Python with its native redactor; CI runs Python 3.11 to 3.13 on Linux. The Windows and macOS rules of the runtime guard, Windows paths and output, and the macOS database settings are covered by tests that simulate those systems on Linux.
+- The unit and end-to-end tests against a simulated Hermes, also under Hermes' Python with its native redactor. CI runs them on Linux with Python 3.11 to 3.13 and on real macOS and Windows runners; tests that are POSIX by design (permission bits, the liveness probe, symlinked runtimes) are skipped on Windows.
 - `hermes plugins validate` of Hermes 0.23.1: no warnings (2 tools, 17 hooks), security scan safe, ready for `plugins.isolation: host`.
 - The backfill, on a copy of a real profile with 276 sessions: 0.6.0 replays 373 turns and 3,566 tool calls, exactly one per logical message of the window (0.5.0 counted 6,731, every copy Hermes' compaction keeps, and 86 interrupted turns instead of 23), in under a second. Of its 152 failures, 129 came from the owner's own turns.
 - The autopilot (one claim per profile, expiring lease, retry, profile pinning, a manual `learn` waiting for a running pass): verified in tests and in the CLI. The clock, the release of a pass at process exit, the stale-process check and the guard against two copies in one profile: verified in tests.
@@ -186,7 +189,7 @@ Requires Hermes Agent 0.23.1 or later and Python 3.11 or later.
 
 **Verified in production:** three real reflector calls through Hermes (provider DeepSeek, about 600 tokens and about 2 seconds each) produced three drafts in Portuguese.
 
-**Not verified:** lesson verdicts and skill outcomes over weeks of real use (there are no field results yet), the clock and the stale-process check in a long-running gateway that serves several profiles, the migration from 0.5.0 on a running gateway, the Kanban nudge of the autopilot (which needs `kanban.dispatch_in_gateway`), the autopilot and the reflector under `plugins.isolation: host`, Linux trials on a real systemd, other Hermes versions, and real macOS and Windows machines.
+**Not verified:** lesson verdicts and skill outcomes over weeks of real use (there are no field results yet), the clock and the stale-process check in a long-running gateway that serves several profiles, the migration from 0.5.0 on a running gateway, the Kanban nudge of the autopilot (which needs `kanban.dispatch_in_gateway`), the autopilot and the reflector under `plugins.isolation: host`, Linux trials on a real systemd, other Hermes versions, and a Hermes gateway running on macOS or Windows (the tests run there, the gateway did not).
 
 **Limits**
 
@@ -194,13 +197,13 @@ Requires Hermes Agent 0.23.1 or later and Python 3.11 or later.
 - Only lessons bound to a failure (derived and reflector) get a measured effect.
 - A database at schema 8 (0.5.0 and later) cannot be opened by 0.4.0 or earlier. To go back that far, restore a backup or delete `evolution.sqlite3`. 0.6.0 keeps schema 8 and only adds a table, so 0.5.0 still opens its database; from 0.6.0 on, a database at a newer schema also opens, since later versions only add tables and columns.
 - The autopilot needs a nudge: a turn, the clock or the Kanban tick. A host without `on_unload` gets no clock, so a quiet profile there waits for its next turn.
-- The backfill reads Hermes' history only before the plugin started observing the profile, at most 14 days back. It does not replay model calls and tokens, and it cannot tell a command another plugin rewrote.
+- The backfill reads Hermes' history only before the plugin started observing the profile, at most 14 days back. It does not replay model calls and tokens, it times tool calls only approximately (from the request to the result), and it cannot tell a command another plugin rewrote; a binary that failed live after a rewrite is kept out of the lessons from then on.
 - Under `plugins.isolation: host` there is no `hermes evolution`: use `python -m hermes_atlas_evolution --home <profile> ...` (it reads `config.yaml` only with PyYAML). The cron recipes need the Hermes CLI; a standalone pass drafts nothing and keeps waiting excerpts for a pass run inside Hermes.
 - Review counts depend on a line Hermes 0.23.1 writes to `agent.log`. Owner signals are heuristics over the first words of a message.
 - The runtime guard looks only at the command word of each part of a terminal command, after the wrappers it knows, and one level into a command given as one string. A command nested deeper, one run over `ssh` or from a script, a command it cannot parse and a path relative to the working folder all pass. It is a safety net, not a sandbox.
 - The stale-process check compares version numbers: a process that loaded different code under the same version number is not flagged, and on Windows no process is flagged.
 - The operator guard reads process ancestry and cgroups from `/proc`, so outside Linux it relies on the environment markers alone.
-- Who a chat turn serves comes from `owner_sender_ids`. With it empty, every messaging chat counts as someone else's: its failures still count, but lessons from them wait for approval and the chat gets template lessons only.
+- Who a chat turn serves comes from `owner_sender_ids` and `owner_platforms`. With both empty, every messaging chat counts as someone else's: its failures still count, but lessons from them wait for approval and the chat gets template lessons only. A platform listed in `owner_platforms` trusts everyone who writes there.
 
 ## Advanced: let the native background review propose lessons
 

@@ -21,7 +21,7 @@ cd hermes-atlas-evolution
 python -m unittest discover -s tests -v
 ```
 
-The same suite runs on GitHub Actions for Python 3.11, 3.12 and 3.13 on every push and pull request ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)).
+The same suite runs on GitHub Actions on every push and pull request ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)): on Linux with Python 3.11, 3.12 and 3.13, and on macOS and Windows with Python 3.13. Tests that are POSIX by design (permission bits, the liveness probe, symlinked runtimes) skip themselves on Windows; anything else that fails there is a bug. Compute dates with `experience.utc_datetime` or `utc_day`, never `datetime.fromtimestamp`, which refuses times before 1970 on Windows.
 
 When Hermes Agent is installed, run the suite a second time with the Python interpreter of that installation, the one that can `import agent.redact`. The tests then also exercise Hermes' native redactor and the interpreter your users run:
 

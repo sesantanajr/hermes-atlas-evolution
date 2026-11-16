@@ -43,7 +43,7 @@ class EvolutionTest(unittest.TestCase):
             self.assertNotIn(secret, backing_store)
 
     def test_failed_operator_tick_attempts_rollback_even_with_invalid_settings(self):
-        tick = SimpleNamespace(evolution_action="ops", ops_action="tick")
+        tick = SimpleNamespace(evolution_action="ops", ops_action="tick", lang="en")   # not the host's language
         with patch("hermes_atlas_evolution.cli._report", side_effect=ValueError("broken settings")), patch(
             "hermes_atlas_evolution.cli._rollback_trial", return_value={"status": "rolled_back"}
         ) as recover:

@@ -36,6 +36,7 @@ def _upsert(conn, seen: set, code: str, kind: str, risk: str, subject: str, evid
 
 _INSTEAD = {"en": "<what to do instead>", "pt": "<o que fazer no lugar>"}
 
+
 def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None, reviews: dict | None = None,
             failures: list | None = None, turns: dict | None = None, changes: list | None = None,
             outcomes: dict | None = None, radar: list | None = None, lang: str = "en") -> list[dict]:

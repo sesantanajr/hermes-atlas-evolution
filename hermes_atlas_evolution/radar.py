@@ -206,14 +206,15 @@ def approvals(conn, *, now: float, days: int = RADAR_DAYS) -> dict:
             "unattended_by_tool": dict(sorted(by_tool.items(), key=lambda item: -item[1]))}
 
 
+# A tool slower than this on average, over at least this many calls in the window, is worth a look.
+SLOW_TOOL_SECONDS = 20
+MIN_SLOW_TOOL_CALLS = 5
+
 
 def _slow_tools(conn, *, now: float, days: int) -> list[dict]:
     from .signals import slow_tools
 
     return slow_tools(conn, now=now, days=days, limit=5)
-
-SLOW_TOOL_SECONDS = 20
-MIN_SLOW_TOOL_CALLS = 5
 
 
 def findings(reading: dict) -> list[dict]:

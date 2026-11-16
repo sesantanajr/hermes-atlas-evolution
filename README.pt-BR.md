@@ -74,7 +74,9 @@ O `plugins update` da linha de comando só troca os arquivos: ele não recarrega
 
 - **Aprende com o histórico que o Hermes já guarda.** As primeiras passadas releem os últimos 14 dias de sessões do perfil, então uma falha que se repetiu na semana passada pode virar lição já no primeiro dia.
 - **Transforma falhas repetidas de ferramentas em lições.** Uma falha vista pelo menos 3 vezes, em 2 sessões ou em 2 dias, vira uma frase como "Ao chamar `example_search`, sempre passe o argumento obrigatório `query`." O agente lê as lições ativas no começo de cada sessão.
-- **Separa os seus turnos dos turnos dos outros.** Uma lição só entra em vigor sozinha depois que os seus próprios turnos encontram a falha (o seu CLI, TUI ou Desktop, as suas automações ou um chat com um remetente que você lista em `owner_sender_ids`). Falhas que só outras pessoas causaram num chat esperam a sua aprovação, e um chat em que outra pessoa pode estar lendo recebe só lições de modelo fixo, nunca texto escrito por você ou por um modelo de IA.
+- **Separa os seus turnos dos turnos dos outros.** Uma lição só entra em vigor sozinha depois que os seus próprios turnos encontram a falha (o seu CLI, TUI ou Desktop, as suas automações, um chat com um remetente que você lista em `owner_sender_ids` ou qualquer chat de uma plataforma que você lista em `owner_platforms`, como um bot privado ou a sua própria interface). Falhas que só outras pessoas causaram num chat esperam a sua aprovação, e um chat em que outra pessoa pode estar lendo recebe só lições de modelo fixo, nunca texto escrito por você ou por um modelo de IA. O `hermes evolution owner` mostra cada canal de chat com os remetentes e configura isso com um comando.
+- **Encontra os gargalos que você pode remover.** Aprovações recusadas onde ninguém podia aprovar (execuções avulsas, automações, subagentes), com as configurações do Hermes que decidem isso; as ferramentas que mais consomem tempo e uma ferramenta lenta chamada após chamada.
+- **Mantém a fila curta.** Lições que ninguém decidiu ainda são retiradas quando as evidências deixam de sustentá-las, quando repetem a frase de outra lição ou quando só dão um conselho que serviria para qualquer falha.
 - **Mede antes e depois.** Cada lição contra a própria falha, cada reescrita de skill pelos turnos que carregaram a skill, cada mudança de configuração pela semana anterior e pela seguinte. No modo `auto`, uma lição que não ajuda é aposentada.
 - **Pede a um modelo de IA quando nenhum modelo fixo serve.** O refletor rascunha uma lição pelo Hermes, com no máximo 6 chamadas por dia, por padrão, e o rascunho espera por você.
 - **Acompanha a saúde do Hermes.** Aponta sessões cortadas sem o encerramento normal, conversas que mandam texto demais ao modelo, compactações que liberam pouco espaço e plugins que falham ao carregar, brigam entre si ou quebram comandos de outro plugin (essas falhas nunca viram lição).
@@ -95,6 +97,7 @@ Subcomandos de `hermes evolution`. O `--lang en|pt` funciona com todos eles.
 | `lessons approve <id>` | Ativa uma lição que está esperando, depois de mostrar o texto exato. |
 | `proposals list`, `proposals approve <id>`, `proposals reject <id>` | A fila de propostas e a sua decisão sobre uma delas. |
 | `learn` | Faz uma passada agora, sem esperar a de segundo plano. |
+| `owner` | Lista cada canal de chat com os remetentes; `owner add <id>` ou `owner add-platform <nome>` marca um deles como você. Só no seu próprio terminal. |
 
 Todos os comandos e opções: [Comandos](docs/pt-BR/evolution-loop.md#comandos).
 
@@ -105,7 +108,8 @@ Ajuste no Hermes Desktop, em Configurações → Plugins, ou no `config.yaml` do
 | Opção | Padrão | O que faz |
 |---|---|---|
 | `lessons` | `auto` | `auto`: lições de modelo fixo entram em vigor na hora (assim que os seus próprios turnos encontram a falha), são medidas e são aposentadas quando não ajudam; rascunhos do refletor e propostas do agente esperam aprovação. `suggest`: toda lição espera aprovação. `off`: só mede. |
-| `owner_sender_ids` | `[]` | Os seus ids de remetente nas plataformas de mensagem (texto ou número, como o seu id do Telegram). Um turno de chat vindo de um deles conta como seu. O seu CLI, TUI e Desktop sempre contam. |
+| `owner_sender_ids` | `[]` | Os seus ids de remetente nas plataformas de mensagem (texto ou número, como o seu id do Telegram). Um turno de chat vindo de um deles conta como seu. O seu CLI, TUI e Desktop sempre contam. O `hermes evolution owner` lista os remetentes. |
+| `owner_platforms` | `[]` | Plataformas em que todo chat é seu (um bot privado, a sua própria interface pelo servidor de API), como `telegram` ou `api_server`. Os chats delas contam como seus desde a primeira mensagem. Só liste uma plataforma em que ninguém mais escreve. |
 | `language` | `auto` | `en` ou `pt`. `auto` segue o idioma do perfil. |
 | `reflector` | `true` | Rascunha lições com um modelo de IA, pelo Hermes, para falhas dos seus próprios turnos que não têm modelo fixo. |
 | `autopilot_minutes` | `60` | Roda a passada em segundo plano no máximo uma vez por intervalo, de 15 a 1440 minutos. Com `0`, a passada em segundo plano fica desligada: as passadas só rodam pelo `learn`, pelo `ops tick`, pela receita semanal do resumo e pelo primeiro `status`. |
@@ -129,7 +133,7 @@ Todas as opções, o `settings.json` e o que acontece com um valor inválido: [C
 ## Privacidade e segurança
 
 - **O que ele guarda.** Contadores, classes de falha, ids de sessão com hash, frases das lições e propostas, em `<HERMES_HOME>/evolution/`. Não guarda texto de conversa, prompt, argumento de ferramenta, saída de ferramenta nem conteúdo de memória. Com o refletor ligado, guarda um trecho da mensagem de erro, de até 300 caracteres e com segredos, caminhos e endereços mascarados, por falha dos seus próprios turnos que não tem modelo fixo, até a falha ganhar uma lição ou por 14 dias.
-- **O que ele lê**, sempre só para leitura: o histórico, os logs e os registros de skills do próprio Hermes e, para o `status`, a contagem de sessões dos seus outros perfis ([lista completa](docs/pt-BR/hermes-integration.md#o-que-o-plugin-lê)).
+- **O que ele lê**, sempre só para leitura: o histórico, os logs e os registros de skills do próprio Hermes, para o `status` a contagem de sessões dos seus outros perfis e de cada canal de chat e, para o `hermes evolution owner` no seu próprio terminal, os ids de remetente de cada canal ([lista completa](docs/pt-BR/hermes-integration.md#o-que-o-plugin-lê)).
 - **Roda em segundo plano.** Só dentro do Hermes: um temporizador confere a cada 10 minutos se está na hora de uma rodada de aprendizado.
 - **Chamadas a modelo.** Só o refletor chama um modelo de IA, pelo Hermes e com as configurações de provedor dele (tarefa auxiliar `evolution_reflector`), no máximo 3 vezes por passada e 6 vezes por dia, por padrão. `reflector: false` desliga.
 - **Rede.** Nenhuma conexão própria e nenhuma telemetria.

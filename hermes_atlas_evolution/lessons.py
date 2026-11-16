@@ -134,8 +134,8 @@ def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> li
     """Create lessons for recurring failures that have a template. Returns the new lesson ids.
 
     In auto mode a lesson activates by itself only when the owner's own turns hit the failure at least
-    OWNER_ACTIVATION times. One that only chats with other people caused waits for the owner's approval,
-    so nobody else can put a lesson in the owner's prompt."""
+    OWNER_ACTIVATION times. One that only chats with other people caused waits, so nobody else can put a
+    lesson in the owner's prompt: for the owner's approval, or until the owner's own turns hit it too (promote)."""
     if mode not in MODES or mode == "off":
         return []
     rows = conn.execute("""SELECT f.signature, f.tool, f.klass, f.hint, f.total, f.sessions,
@@ -170,7 +170,29 @@ def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> li
         created.append(cursor.lastrowid)
         if status == "active":
             _record_change(conn, cursor.lastrowid, now, row["tool"])
+        elif mode == "auto":   # waits only for the owner's own evidence
+            conn.execute("INSERT OR REPLACE INTO lesson_owner_wait VALUES (?, ?)", (cursor.lastrowid, row["signature"]))
     return created
+
+
+def promote(conn: sqlite3.Connection, *, now: float, mode: str) -> list[int]:
+    """In auto mode, activate the derived lessons that waited only for the owner's own turns to hit their failure
+    OWNER_ACTIVATION times, now that they have. Returns their ids.
+
+    Only lessons derived in auto mode wait this way: a candidate from suggest mode or from a version before
+    0.7.0 keeps waiting for the operator, and one the operator retired or rejected is never touched."""
+    conn.execute("""DELETE FROM lesson_owner_wait WHERE NOT EXISTS (SELECT 1 FROM lesson l WHERE l.id=lesson_id
+        AND l.signature=lesson_owner_wait.signature AND l.status='candidate' AND l.origin='derived')""")
+    if mode != "auto":
+        return []
+    rows = conn.execute("""SELECT w.lesson_id FROM lesson_owner_wait w WHERE
+        COALESCE((SELECT SUM(o.count) FROM failure_owner_daily o WHERE o.signature=w.signature), 0) >= ?
+        ORDER BY w.lesson_id""", (OWNER_ACTIVATION,)).fetchall()
+    promoted = [row[0] for row in rows]
+    for lesson_id in promoted:
+        set_status(conn, lesson_id, "active", now=now)
+    conn.executemany("DELETE FROM lesson_owner_wait WHERE lesson_id=?", [(item,) for item in promoted])
+    return promoted
 
 
 def _text_key(tool: str, klass: str, hint: str) -> str:
@@ -213,6 +235,7 @@ def tidy(conn: sqlite3.Connection) -> int:
         elif key is not None:
             taken.add(key)
     conn.executemany("DELETE FROM lesson WHERE id=?", [(item,) for item in withdrawn])
+    conn.executemany("DELETE FROM lesson_owner_wait WHERE lesson_id=?", [(item,) for item in withdrawn])
     return len(withdrawn)
 
 

@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.7.0
+
+This release makes the plugin see what slows Hermes down and whom each chat serves, and keeps the lesson queue clean. It points out refused approvals that nobody could have answered and tools that are slow call after call, lets the owner name the platforms that are theirs and pick their sender ids with a new command, `hermes evolution owner`, activates a waiting lesson once the owner's own turns hit its failure, and withdraws the lessons nobody decided on that the evidence no longer supports. The suite has 339 tests against a simulated Hermes context, run under the system Python and Hermes' own, and CI now runs it on Linux with Python 3.11 to 3.13 and on real macOS and Windows runners. The plugin passes `hermes plugins validate` on Hermes Agent 0.23.1 with the security scan reporting it safe. On a copy of a real profile the new findings named 23 approvals refused where nobody could answer and one MCP tool averaging 35 seconds over 49 calls; they have not been watched over weeks of real use yet.
+
+### Added
+
+- **`hermes evolution owner`.** Lists the chat channels of the profile in the last 30 days, each with its sender ids and their session counts, marks the ones that already count as the owner's, and adds or removes a sender id (`add <id>`, `remove <id>`) or a platform (`add-platform <name>`, `remove-platform <name>`) in `settings.json`. Operator only, in the owner's own terminal; a value set in the Hermes settings form is changed there. Restart the gateway after a change.
+- **`owner_platforms`.** Platforms where every chat counts as the owner's from the first message, such as a private bot or the owner's own interface through the API server. Their chats get every lesson, their failures count as the owner's, and their feedback is counted. List only a platform nobody else writes to.
+- **Refused approvals nobody could answer.** A refused approval is counted per day by the real origin of its session (`cron`, `oneshot`, `subagent`, `api_server`, `telegram`, ...) and tool. The digest shows them under "Hermes health", and 5 or more in 7 days from origins where nobody can answer an approval prompt as the turn runs (one-shot runs, cron and Kanban jobs, batch runs, the Curator, subagents, the API server, webhooks, A2A peers and `--source tool` integrations) open a low-risk proposal that points to `hermes config get approvals` and the `command_allowlist`, and says never to approve everything. A refused approval still never becomes a lesson.
+- **Slow tools.** The digest lists the tools that took the most time, with their mean and number of calls, and a tool that averages 20 seconds or more over at least 5 calls in 7 days opens a low-risk proposal. Tools that wait for a person (`clarify`) or run a whole subagent (`delegate_task`) are left out. The history replay times tool calls too, approximately (from the request to the result), so the first pass already shows them.
+- **A waiting lesson activates when the owner hits its failure.** In `auto` mode a derived lesson that waited only because the owner's own turns had not hit its failure twice yet activates by itself at the first pass after they have. A candidate from `suggest` mode or from an earlier version keeps waiting for approval, and a lesson the operator rejected stays retired.
+- **Lesson hygiene.** Once the history replay is settled, every pass withdraws the lessons nobody decided on that the evidence no longer supports: a derived candidate or a reflector draft whose failure no longer meets the rule (3 times, in 2 sessions or on 2 days), a candidate that would say the same sentence as another lesson, one about a missing binary that only another plugin's rewrite called, and a draft that only gives advice every failure would get. Active, retired and operator lessons are never touched, and a lesson comes back if its failure does. The pass reports how many it withdrew (`lessons_withdrawn`).
+- **`status` points out two gaps**: chat channels used in the last 7 days where no sender counts as the owner, with their session and sender counts (never the ids), and decisions waiting while no weekly digest is scheduled to remind the owner.
+
+### Changed
+
+- **The owner's failures are counted per day** (`failure_owner_daily`), so they age out with the 90-day retention and a replay takes back exactly what it counted. The `failure_owner` table of 0.6.0 is no longer written; it is kept so 0.6.0 still opens the database.
+- **Sharper reflector drafts.** The excerpt the reflector reads starts with the name of the program the command ran (`[git]`, `[npm]`), read the way the runtime guard reads commands, never its arguments. The instructions ask for a sentence specific to that program or condition, and a draft that only says to read the error or check before retrying is declined.
+- **Commands rewritten by Hermes' tool middleware** count as `rewritten_command`, never a lesson, when the `middleware_trace` that Hermes passes to `post_tool_call` names a change.
+- **No lesson about another plugin's binary.** No `missing_dependency` lesson is derived for a binary that failed live after another plugin rewrote the command into it, such as a command proxy missing from the PATH of a session.
+- **One sentence, one lesson.** A failure whose lesson would read the same as an existing one derives no second lesson.
+- **The radar** counts the plugin among the competitors for `transform_tool_result` only while its hints can change a result (`tool_hints` on and lessons not off).
+- Waiting lessons point to `hermes evolution lessons review` in `status` and in the digest. The proposal to investigate a failure, the digest scheduler's messages and the titles of the new findings speak Portuguese too.
+
+### Fixed
+
+- **Dates on Windows.** Python on Windows refuses to turn a time before 1970 into a date, which a missing time in Hermes' history can produce; every UTC date is now computed the same way on every system.
+- The tests that are POSIX by design (permission bits, the liveness probe, symlinked runtimes) skip themselves on Windows, and the macOS database settings are checked on a real macOS.
+
+### Upgrade notes
+
+- From 0.6.0: run `hermes plugins update hermes-atlas-evolution` in each profile (with `-p <profile>` for a named one), then `hermes gateway restart` once. From 0.5.0, follow the 0.6.0 notes below: remove `hermes-evolution` and install `hermes-atlas-evolution`.
+- The database stays at schema 8 and gains three tables (`failure_owner_daily`, `approval_daily`, `lesson_owner_wait`), so lessons and proposals stay and 0.5.0 and 0.6.0 can still open it. The history replay is redone once, the same way 0.6.0 redid 0.5.0's, to count the owner's failures per day, refused approvals per origin and tool durations. 0.6.0's owner totals are cleared; the owner's failures in days observed live under 0.6.0 are not recounted, so a lesson from those days waits until the owner's turns hit its failure again.
+- If you talk to your agent through a messaging app or your own interface, run `hermes evolution owner` in your own terminal, add your sender id or your private platform, and restart the gateway.
+- Lessons waiting for a decision that the evidence no longer supports are withdrawn by the first passes after the replay; `hermes evolution lessons review` shows what is left.
+
 ## 0.6.0
 
 This release renames the plugin to `hermes-atlas-evolution`, the name of its repository, and makes it count right, tell the owner from everyone else, and protect Hermes on every system it runs on. The history replay counts each message once (0.5.0 counted every copy Hermes' compaction keeps), only the owner's own turns can activate a lesson by themselves, the runtime guard knows the gateway on Linux, macOS and Windows, and every message speaks English or Brazilian Portuguese. Installing, updating and checking the plugin in every profile is easier, and every loaded profile gets its passes even when it is idle. The suite has 321 tests against a simulated Hermes context, run under the system Python and Hermes' own; the plugin passes `hermes plugins validate` on Hermes Agent 0.23.1 with the security scan reporting it safe. The clock, the stale-process check and the migration from 0.5.0 are verified in tests, not yet on a long-running production gateway.

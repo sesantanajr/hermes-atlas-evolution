@@ -39,7 +39,7 @@ O manifesto declara os mesmos 17 hooks, e um teste compara as duas listas.
 | `post_api_request` | Conta a chamada, os tokens e a duração por provedor e modelo. |
 | `api_request_error` | Conta cada tentativa que falhou, classificada como limite de taxa, autenticação, timeout, upstream ou erro. |
 | `post_auxiliary_call` | Conta chamadas auxiliares e falhas por tarefa. |
-| `post_tool_call` | Conta o desfecho da ferramenta, classifica uma falha numa assinatura (como `rewritten_command` quando o comando que rodou difere do que o `pre_tool_call` viu), conta a falha de novo quando o turno atendia o dono (veja [Quem é atendido](evolution-loop.md#quem-é-atendido)), cronometra turnos que usam ferramentas de pesquisa web e, com o refletor ligado, guarda um trecho mascarado de uma falha sem modelo fixo dos turnos do próprio dono. |
+| `post_tool_call` | Conta o desfecho da ferramenta e a duração dela, classifica uma falha numa assinatura (como `rewritten_command` quando o `middleware_trace` do Hermes aponta uma alteração ou o comando que rodou difere do que o `pre_tool_call` viu), conta uma aprovação recusada por origem da sessão, conta a falha de novo quando o turno atendia o dono (veja [Quem é atendido](evolution-loop.md#quem-é-atendido)), cronometra turnos que usam ferramentas de pesquisa web e, com o refletor ligado, guarda um trecho mascarado de uma falha sem modelo fixo dos turnos do próprio dono. |
 | `transform_tool_result` | Acrescenta a lição correspondente a um resultado que falhou quando `tool_hints` está em `true`, o que vem desligado: o Hermes só mantém a alteração do primeiro plugin num resultado de ferramenta. Numa sessão que não atende o dono, só entram lições de modelo fixo. Registrado enquanto as lições estão ligadas, e em silêncio fora disso. |
 | `pre_llm_call` | Descobre a superfície do turno e se ele atende o dono, inicia o cronômetro do turno, classifica em memória os sinais do dono e atribui uma correção do dono às skills do turno anterior. Só devolve contexto para a recuperação opcional das notas da 0.1. |
 | `post_llm_call` | Fecha a medição de um turno de pesquisa e dá um empurrão no autopilot. |
@@ -91,7 +91,8 @@ Tudo em modo somente leitura e com limite de tamanho e de tempo.
 
 | Origem | Uso |
 |---|---|
-| `skills/.usage.json`, `skills/.curator_ledger.jsonl` | Saúde das skills e mudanças acompanhadas. Só metadados e hashes; o conteúdo das skills nunca é aberto. |
+| `skills/.usage.json`, `skills/.curator_ledger.jsonl` | Saúde das skills e mudanças acompanhadas. Só metadados e hashes; o ciclo de evolução nunca abre o conteúdo de uma skill. |
+| Arquivos `SKILL.md` das pastas de skills e os primeiros 8 KiB do `__init__.py` de outros plugins | Só para o supervisor de operações (`ops inspect`, `ops tick`): os arquivos de skill são lidos, dentro de um limite total de bytes, para achar skills duplicadas, e só o hash e o título ficam; o começo do `__init__.py` de um plugin diz se ele é um plugin de provedor. Nada disso é guardado como texto. |
 | `logs/agent.log` e, na primeira execução, do `agent.log.1` ao `agent.log.5` | A linha de conclusão de cada revisão em segundo plano. O final dos logs do Hermes também é varrido em busca de categorias de erro. Links são ignorados. |
 | `state.db` | Checagem de integridade e a contabilidade de uso do próprio Hermes. A leitura do histórico: sessões e mensagens dos 14 dias anteriores ao início da observação, de 25 em 25 sessões, classificadas em memória e descartadas. O radar: como terminaram as sessões dos últimos 7 dias e os tokens de prompt por chamada do agente, da `session_model_usage`. |
 | `pyvenv.cfg` do ambiente Python em execução | A guarda de runtime: o interpretador base para o qual o ambiente aponta. |
@@ -99,7 +100,8 @@ Tudo em modo somente leitura e com limite de tamanho e de tempo.
 | `/proc/<pid>/stat` e `/proc/<pid>/cmdline` dos processos ancestrais do comando, `/proc/self/cgroup` | No Linux, só quando um comando de decisão (`lessons approve`, `retire`, `add`, `review`, `proposals approve`, `reject`) roda: se um processo do Hermes é ancestral ou se o comando roda no cgroup de um gateway do Hermes. Nada é gravado. |
 | O gerenciador de plugins do Hermes, quando está carregado no processo | Para o radar: os plugins habilitados, o número de hooks que cada um registrou e o nome de um erro de carregamento. |
 | `plugin.yaml` dos plugins distribuídos com o Hermes e de `<HERMES_HOME>/plugins/` | Para o radar: os hooks que cada plugin declara (`provides_hooks`). No máximo 500 pastas e 64 KiB por manifesto. |
-| `cron/jobs.json`, quadros Kanban | Diagnóstico de carga de trabalho, em contagens. |
+| `cron/jobs.json`, quadros Kanban | Diagnóstico de carga de trabalho, em contagens; o `status` também confere se a rotina do resumo semanal existe. |
+| A tabela `sessions` do `state.db` deste perfil: origem e remetente de cada sessão de chat | Para o `status`, as sessões e o número de remetentes de cada canal de chat em 7 dias (só contagens). Para o `hermes evolution owner`, rodado pelo operador no próprio terminal, os ids de remetente de cada canal em 30 dias com as contagens de sessão. Nada é gravado. |
 | `gateway_state.json`, `gateway.pid` | Estado do gateway, inclusive de um perfil com nome servido pelo gateway da raiz. |
 | `memories/MEMORY.md`, `memories/USER.md` | Presença, tamanho, leitura em UTF-8 e contagens de estrutura, como entradas, duplicatas e entradas grandes demais. O conteúdo não é gravado nem relatado. |
 | Configuração do Hermes | A entrada do próprio plugin em `plugins.entries.hermes-atlas-evolution.settings`, `display.language`, uma lista de permissão de configurações para acompanhar mudanças, e os limites de Cron, Kanban, delegação e memória. |
@@ -133,6 +135,7 @@ Tudo em modo somente leitura e com limite de tamanho e de tempo.
 |---|---|
 | Instalação padrão | Observadores com dados agregados. O autopilot roda uma passada no máximo uma vez por hora, e as primeiras passadas aprendem com 14 dias do histórico do perfil. Falhas recorrentes com modelo fixo viram lições ativas (`lessons: auto`) assim que os turnos do próprio dono as encontram duas vezes; elas chegam ao agente nas sessões novas, são medidas e são aposentadas quando não ajudam. Falhas que só outras pessoas causaram esperam aprovação. O refletor rascunha lições que aguardam aprovação. A guarda de runtime barra os comandos descritos acima. Os comandos de operador podem inspecionar os sinais do perfil. |
 | `owner_sender_ids` | Os ids de remetente, em texto ou número, cujos turnos de chat contam como do dono, como numa sessão local. |
+| `owner_platforms` | As plataformas em que todo chat conta como do dono, desde a primeira mensagem: só uma plataforma em que ninguém mais escreve, como um bot privado ou a própria interface do dono pelo servidor de API. |
 | `lessons: suggest` | As lições derivadas viram candidatas e aguardam aprovação, como todas as outras. |
 | `lessons: off` | Nenhuma lição é derivada e nenhuma superfície de lição é registrada. |
 | `tool_hints` (desligado por padrão) | A lição correspondente também é acrescentada ao resultado de ferramenta que falhou, o que descarta a alteração que o `transform_tool_result` de outro plugin faria nesse resultado. |
@@ -178,7 +181,7 @@ Exige Hermes Agent 0.23.1 ou superior e Python 3.11 ou superior.
 
 **Verificado na máquina de desenvolvimento** (medições, não garantias):
 
-- Os testes unitários e de ponta a ponta contra um Hermes simulado, também com o Python do Hermes e a função nativa de mascaramento de segredos dele; a integração contínua roda Python 3.11 a 3.13 no Linux. As regras da guarda de runtime para Windows e macOS, os caminhos e a saída no Windows e as configurações do banco no macOS são cobertos por testes que simulam esses sistemas no Linux.
+- Os testes unitários e de ponta a ponta contra um Hermes simulado, também com o Python do Hermes e a função nativa de mascaramento de segredos dele. A integração contínua roda os testes no Linux com Python 3.11 a 3.13 e em máquinas reais de macOS e Windows; os testes que são POSIX por desenho (bits de permissão, a checagem de processo vivo, runtimes com link simbólico) são pulados no Windows.
 - `hermes plugins validate` do Hermes 0.23.1: sem avisos (2 ferramentas, 17 hooks), varredura de segurança `safe`, pronto para `plugins.isolation: host`.
 - A leitura do histórico, numa cópia de um perfil real com 276 sessões: a 0.6.0 reprocessa 373 turnos e 3.566 chamadas de ferramentas, exatamente uma por mensagem lógica da janela (a 0.5.0 contava 6.731, cada cópia que a compactação do Hermes guarda, e 86 turnos interrompidos em vez de 23), em menos de um segundo. Das 152 falhas, 129 vieram dos turnos do próprio dono.
 - O autopilot (uma reserva por perfil, reserva que expira, nova tentativa, fixação do perfil, um `learn` manual esperando a passada em andamento): verificado nos testes e na CLI. O relógio, a liberação de uma passada na saída do processo, a checagem de código antigo e a proteção contra duas cópias num perfil: verificados nos testes.
@@ -186,7 +189,7 @@ Exige Hermes Agent 0.23.1 ou superior e Python 3.11 ou superior.
 
 **Verificado em produção:** três chamadas reais do refletor pelo Hermes (provedor DeepSeek, cerca de 600 tokens e cerca de 2 segundos cada) geraram três rascunhos em português.
 
-**Não verificado:** vereditos de lições e skills pelo resultado ao longo de semanas de uso real (ainda não há resultados de campo), o relógio e a checagem de código antigo num gateway de longa duração que atende vários perfis, a migração da 0.5.0 num gateway em execução, o empurrão do Kanban no autopilot (que depende de `kanban.dispatch_in_gateway`), o autopilot e o refletor com `plugins.isolation: host`, ensaios no Linux com systemd real, outras versões do Hermes, e máquinas reais com macOS e Windows.
+**Não verificado:** vereditos de lições e skills pelo resultado ao longo de semanas de uso real (ainda não há resultados de campo), o relógio e a checagem de código antigo num gateway de longa duração que atende vários perfis, a migração da 0.5.0 num gateway em execução, o empurrão do Kanban no autopilot (que depende de `kanban.dispatch_in_gateway`), o autopilot e o refletor com `plugins.isolation: host`, ensaios no Linux com systemd real, outras versões do Hermes, e um gateway do Hermes rodando no macOS ou no Windows (os testes rodam lá, o gateway não).
 
 **Limites**
 
@@ -194,13 +197,13 @@ Exige Hermes Agent 0.23.1 ou superior e Python 3.11 ou superior.
 - Só as lições ligadas a uma falha (derivadas e do refletor) têm efeito medido.
 - Um banco no esquema 8 (0.5.0 em diante) não abre na 0.4.0 ou anterior. Para voltar até lá, restaure um backup ou apague o `evolution.sqlite3`. A 0.6.0 mantém o esquema 8 e só acrescenta uma tabela, então a 0.5.0 ainda abre o banco dela; da 0.6.0 em diante, um banco num esquema mais novo também abre, porque as versões seguintes só acrescentam tabelas e colunas.
 - O autopilot precisa de um empurrão: um turno, o relógio ou o tick do Kanban. Um host sem `on_unload` não tem relógio, então ali um perfil parado espera o próximo turno.
-- A leitura do histórico só pega o que o Hermes registrou antes de o plugin começar a observar o perfil, até 14 dias para trás. Ela não reprocessa chamadas ao modelo nem tokens, e não reconhece um comando que outro plugin reescreveu.
+- A leitura do histórico só pega o que o Hermes registrou antes de o plugin começar a observar o perfil, até 14 dias para trás. Ela não reprocessa chamadas ao modelo nem tokens, mede as chamadas de ferramenta só de forma aproximada (do pedido ao resultado) e não reconhece um comando que outro plugin reescreveu; um binário que falhou ao vivo depois de uma reescrita fica fora das lições a partir daí.
 - Com `plugins.isolation: host` não existe `hermes evolution`: use `python -m hermes_atlas_evolution --home <perfil> ...` (que só lê o `config.yaml` com o PyYAML). As receitas de cron dependem da CLI do Hermes; uma passada pelo executor independente não rascunha nada e mantém os trechos em espera para uma passada feita dentro do Hermes.
 - A contagem de revisões depende de uma linha que o Hermes 0.23.1 grava no `agent.log`. Os sinais do dono são heurísticas sobre as primeiras palavras da mensagem.
 - A guarda de runtime só olha a palavra do comando em cada parte de um comando de terminal, depois dos invólucros que ela conhece, e um nível dentro de um comando passado como um único texto. Um comando aninhado mais fundo, um executado via `ssh` ou a partir de um script, um comando que ela não consegue interpretar e um caminho relativo à pasta de trabalho passam. Ela é uma rede de proteção, não uma sandbox.
 - A checagem de código antigo compara números de versão: um processo que carregou outro código com o mesmo número de versão não é apontado, e no Windows nenhum processo é apontado.
 - A checagem de operador (que só deixa o dono decidir) lê a ancestralidade dos processos e os cgroups em `/proc`, então fora do Linux ela depende só dos marcadores do ambiente.
-- Quem um turno de chat atende vem do `owner_sender_ids`. Com ele vazio, todo chat de mensagens conta como de outra pessoa: as falhas dele continuam contadas, mas as lições que vêm delas esperam aprovação e o chat recebe só lições de modelo fixo.
+- Quem um turno de chat atende vem do `owner_sender_ids` e do `owner_platforms`. Com os dois vazios, todo chat de mensagens conta como de outra pessoa: as falhas dele continuam contadas, mas as lições que vêm delas esperam aprovação e o chat recebe só lições de modelo fixo. Uma plataforma listada em `owner_platforms` confia em todos que escrevem nela.
 
 ## Avançado: deixar a revisão nativa propor lições
 
