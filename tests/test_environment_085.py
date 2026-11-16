@@ -469,7 +469,10 @@ class RobustnessTest(Fleet):
     def test_a_folder_name_that_is_not_utf8_is_skipped(self):
         home = self.profile("work")
         (home / "skills").mkdir(parents=True, exist_ok=True)
-        os.mkdir(os.fsencode(home / "skills") + b"/bad\xff")
+        try:
+            os.mkdir(os.fsencode(home / "skills") + b"/bad\xff")
+        except OSError:
+            self.skipTest("this file system refuses names that are not UTF-8 (macOS)")
         os.mkdir(os.fsencode(home / "plugins") + b"/.install-\xff") if (home / "plugins").exists() else None
         found = self.findings()
         json.dumps(found)   # storable, never a surrogate

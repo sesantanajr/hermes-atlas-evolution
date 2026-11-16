@@ -19,6 +19,11 @@ O Atlas Evolution passa a cuidar de todos os perfis de um Hermes de uma vez, num
 - Comandos do Hermes só rodam para um perfil de verdade (com `config.yaml`), então uma pasta de rascunho nunca faz o Hermes preparar uma casa nova; a suíte de testes nunca alcança o Hermes da própria máquina (`ATLAS_EVOLUTION_NO_HERMES=1`).
 - O README diz o que o plugin faz na prática e deixa de fora a saída de versões antigas.
 
+### Limites conhecidos
+
+- Quando o perfil que cuida do Hermes inteiro muda, o novo pode mostrar de novo uma sugestão que você rejeitou no antigo (uma mudança automática que você desfez continua desfeita).
+- Plugins guardados em pastas de categoria (`plugins/<categoria>/<nome>/`) não são lidos pelo ambiente.
+
 ### Atualizar a partir da 0.8.4
 
 Com as configurações padrão, atualizar passa você para o Modo Auto. A primeira passada olha todos os perfis e pode, sozinha: tirar cópias idênticas da memória, travar skills que o curador reescreve sem parar, rodar `hermes pm gc` se versões antigas de ferramentas ocuparem 300 MB ou mais, instalar o plugin em perfis usados nos últimos 7 dias que nunca o tiveram (o Hermes baixa do GitHub) e mover para a lixeira pastas de instalações que falharam. Para olhar antes e decidir à mão, passe o modo para assist antes de atualizar: `hermes config set plugins.entries.hermes-atlas-evolution.settings.mode assist`.

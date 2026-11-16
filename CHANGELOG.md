@@ -19,6 +19,11 @@ Atlas Evolution now looks after every profile of a Hermes at once, in a Mode aut
 - Hermes commands run only for a real profile (one with `config.yaml`), so a scratch folder never makes Hermes bootstrap a new home; the test suite never reaches the machine's own Hermes (`ATLAS_EVOLUTION_NO_HERMES=1`).
 - The README says what the plugin does in practice and leaves out the move from old versions.
 
+### Known limits
+
+- When the profile that looks after the whole Hermes changes, the new one may show again a suggestion you rejected in the old one (an automatic change you undid stays undone).
+- Plugins kept in category folders (`plugins/<category>/<name>/`) are not read by the environment.
+
 ### Updating from 0.8.4
 
 With the default settings, updating switches you to Mode auto. Its first pass looks at every profile and may, by itself: take out identical memory copies, lock skills the curator keeps rewriting, run `hermes pm gc` if old tool versions take 300 MB or more, install the plugin in profiles used in the last 7 days that never had it (Hermes downloads it from GitHub), and move failed install folders to its trash. To look first and decide by hand, set the mode to assist before updating: `hermes config set plugins.entries.hermes-atlas-evolution.settings.mode assist`.
