@@ -50,9 +50,11 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
     slow = checked("slow_turn_seconds", _whole(raw.get("slow_turn_seconds", DEFAULTS["slow_turn_seconds"])),
                    lambda value: type(value) is int and 5 <= value <= 3600,
                    "evolution.slow_turn_seconds must be an integer from 5 to 3600", DEFAULTS["slow_turn_seconds"])
+    # A settings form may store a Telegram id typed as a number: ids are compared as text.
     owners = checked("owner_sender_ids", raw.get("owner_sender_ids", ()),
                      lambda value: isinstance(value, (list, tuple)) and len(value) <= 20 and all(
-                         isinstance(item, str) and 0 < len(item) <= 200 for item in value),
+                         isinstance(item, str) and 0 < len(item) <= 200 or type(item) is int and item >= 0
+                         for item in value),
                      "evolution.owner_sender_ids must list up to 20 sender ids", ())
     daily = checked("reflector_daily_limit", _whole(raw.get("reflector_daily_limit", DEFAULTS["reflector_daily_limit"])),
                     lambda value: type(value) is int and 1 <= value <= 50,
@@ -70,7 +72,7 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
             "reflector": reflect, "reflector_daily_limit": daily, "autopilot_minutes": autopilot,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
             "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
-            "owner_sender_ids": tuple(owners)}
+            "owner_sender_ids": tuple(str(item) for item in owners)}
 
 
 def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None,
@@ -179,6 +181,7 @@ def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: i
     import re
     import shlex
 
+    from .i18n import text
     from .native_actions import _profile_args
 
     if type(weekday) is not int or not 0 <= weekday <= 6 or type(hour) is not int or not 0 <= hour <= 23:
@@ -197,7 +200,7 @@ import subprocess
 
 launcher = shutil.which("hermes")
 if not launcher:
-    raise SystemExit("Hermes CLI is not on the scheduler PATH.")
+    raise SystemExit({text("Hermes CLI is not on the scheduler PATH.", lang)!r})
 try:   # a fresh pass first, best effort: the digest is delivered even when it fails or runs out of time
     subprocess.run([launcher, *{arguments[:-6] + ["evolution", "learn", "--notify-only"]!r}],
                    capture_output=True, text=True, env=dict(os.environ, HERMES_HOME={str(profile)!r}),
@@ -209,9 +212,9 @@ try:
                             env=dict(os.environ, HERMES_HOME={str(profile)!r}),
                             encoding="utf-8", errors="replace", timeout=120, check=False)
     if result.returncode or len(result.stdout) > 65_536:
-        raise SystemExit("Atlas Evolution digest failed. Run `hermes evolution report` in this profile to inspect.")
+        raise SystemExit({text("Atlas Evolution digest failed. Run `hermes evolution report` in this profile to inspect.", lang)!r})
 except (OSError, subprocess.TimeoutExpired):
-    raise SystemExit("Atlas Evolution digest could not be produced.") from None
+    raise SystemExit({text("Atlas Evolution digest could not be produced.", lang)!r}) from None
 
 print(result.stdout.rstrip())
 '''

@@ -113,5 +113,38 @@ class LogwatchTest(Base):
             self.assertEqual(self.drain(), 1)
 
 
+
+class OwnerIdsTest(Base):
+    def test_numeric_owner_ids_from_the_settings_form_are_accepted(self):
+        from hermes_atlas_evolution.evolve import options
+        from hermes_atlas_evolution.signals import FeedbackSensor
+
+        chosen = options({"evolution": {"owner_sender_ids": [123456789, "abc"]}})
+        self.assertEqual(chosen["owner_sender_ids"], ("123456789", "abc"))
+        sensor = FeedbackSensor(self.home, owner_sender_ids=(123456789,))
+        kinds = sensor.observe({"session_id": "dm", "platform": "telegram", "sender_id": 123456789,
+                                "user_message": "não, errado"}, clock=0.0, now=NOW)
+        self.assertEqual(kinds, ["correction"])
+        with self.assertRaises(ValueError):
+            options({"evolution": {"owner_sender_ids": [True]}})
+
+
+class DurabilityTest(Base):
+    def test_macos_gets_full_syncs_like_hermes_state_db(self):
+        import sys
+
+        from hermes_atlas_evolution import operations
+
+        with patch.object(sys, "platform", "darwin"):
+            with experience(self.home) as conn:
+                self.assertEqual(conn.execute("PRAGMA checkpoint_fullfsync").fetchone()[0], 1)
+                self.assertEqual(conn.execute("PRAGMA synchronous").fetchone()[0], 2)
+            observer = operations._observer(self.home)
+            self.assertEqual(observer._connect().execute("PRAGMA synchronous").fetchone()[0], 2)
+        close_observers()
+        with experience(self.home) as conn:   # elsewhere nothing changes
+            self.assertEqual(conn.execute("PRAGMA checkpoint_fullfsync").fetchone()[0], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ import math
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 from collections import Counter, OrderedDict, deque
@@ -93,6 +94,11 @@ def _open(path: Path, timeout: float, **options) -> sqlite3.Connection:
         # A newer version of the plugin only ever adds tables and columns, so a database it upgraded still
         # works here after a downgrade: what this version reads and writes is all still there.
         connection.execute("PRAGMA foreign_keys=ON")
+        if sys.platform == "darwin":
+            # macOS fsync does not order writes: a checkpoint cut by a shutdown can leave half-written pages.
+            # Hermes forces full syncs there for its own state.db (hermes_state_wal.py); so does this database.
+            connection.execute("PRAGMA checkpoint_fullfsync=1")
+            connection.execute("PRAGMA synchronous=FULL")
     except BaseException:
         connection.close()
         raise
@@ -186,7 +192,7 @@ class _Observer:
         self._release()
         connection = _open(_database_path(self.home), OBSERVER_BUSY_SECONDS, check_same_thread=False)
         try:
-            if connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+            if connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal" and sys.platform != "darwin":
                 # Counters can lose the last moments before a power failure. WAL keeps the file consistent.
                 connection.execute("PRAGMA synchronous=NORMAL")
         except BaseException:

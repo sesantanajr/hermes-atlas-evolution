@@ -494,7 +494,8 @@ class FeedbackSensor:
 
     def __init__(self, home: Path, *, owner_sender_ids=(), reask_seconds: int = 180):
         self.home = home
-        self.owners = frozenset(item for item in owner_sender_ids if isinstance(item, str) and item)
+        self.owners = frozenset(str(item) for item in owner_sender_ids
+                                if isinstance(item, str) and item or type(item) is int)
         self.reask_seconds = reask_seconds
         self._last: OrderedDict[bytes, tuple[float, frozenset]] = OrderedDict()
         self._lock = threading.Lock()

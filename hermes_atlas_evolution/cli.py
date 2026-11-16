@@ -8,6 +8,7 @@ import math
 import os
 import re
 import sqlite3
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -618,7 +619,7 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
     if action == "plan":
         return plan(args.kind, args.effort, args.durable)
     if action == "schedule-spec":
-        return schedule_spec(home, every_minutes=args.every_minutes, upstream_tag=args.upstream_tag)
+        return schedule_spec(home, every_minutes=args.every_minutes, upstream_tag=args.upstream_tag, lang=args.lang)
     if action == "rollback":
         return _rollback_trial(home, now)
     config = effective_settings(home, runtime_config)
@@ -737,10 +738,10 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
             try:
                 outcome = _rollback_trial(home, now)
                 if outcome["status"] != "idle":
-                    recovery = f"\nActive trial recovery: {outcome['status']}"
+                    recovery = "\n" + text(f"Active trial recovery: {outcome['status']}", language)
             except (OSError, ValueError, sqlite3.Error):
-                recovery = "\nTrial recovery is unverified. Run ops rollback to recheck."
-        raise SystemExit(f"Evolution: {text(str(error), language)}{text(recovery, language)}") from None
+                recovery = "\n" + text("Trial recovery is unverified. Run ops rollback to recheck.", language)
+        raise SystemExit(f"Evolution: {text(str(error), language)}{recovery}") from None
     if isinstance(result, str):
         print(result, end="" if result.endswith("\n") else "\n")
     elif result is not None:
@@ -762,9 +763,22 @@ def _standalone_config(home: Path) -> dict:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def _utf8_output() -> None:
+    """Print UTF-8 whatever the console: on Windows a redirected stdout is the ANSI code page until Python 3.15,
+    and the digest's arrows and Portuguese would stop the run (Hermes' own CLI does the same)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def main():
     from .i18n import resolve, text
 
+    _utf8_output()
     def _(sentence: str) -> str:
         return text(sentence, resolve())
 

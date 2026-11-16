@@ -106,8 +106,11 @@ def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: fl
     }
 
 
-def schedule_spec(home: Path, *, every_minutes: int = 5, upstream_tag: str | None = None) -> dict:
-    """Produce a profile-local, no-agent cron recipe without writing files or jobs."""
+def schedule_spec(home: Path, *, every_minutes: int = 5, upstream_tag: str | None = None, lang: str = "en") -> dict:
+    """Produce a profile-local, no-agent cron recipe without writing files or jobs. Its messages reach the owner
+    through the job's delivery target, so they are written in `lang`."""
+    from .i18n import text
+
     if type(every_minutes) is not int or not 5 <= every_minutes <= 1440:
         raise ValueError("Cron interval must be between 5 and 1440 minutes")
     if upstream_tag is not None and (
@@ -126,7 +129,7 @@ import subprocess
 
 launcher = shutil.which("hermes")
 if not launcher:
-    raise SystemExit("Hermes CLI is not on the scheduler PATH.")
+    raise SystemExit({text("Hermes CLI is not on the scheduler PATH.", lang)!r})
 try:
     result = subprocess.run(
         [launcher, *{arguments!r}], capture_output=True, text=True,
@@ -134,9 +137,9 @@ try:
         encoding="utf-8", errors="replace", timeout=300, check=False
     )
     if result.returncode or len(result.stdout) > 65_536:
-        raise SystemExit("Atlas Evolution tick failed. Run ops tick in this profile to inspect.")
+        raise SystemExit({text("Atlas Evolution tick failed. Run ops tick in this profile to inspect.", lang)!r})
 except (OSError, subprocess.TimeoutExpired):
-    raise SystemExit("Atlas Evolution tick could not be verified.") from None
+    raise SystemExit({text("Atlas Evolution tick could not be verified.", lang)!r}) from None
 
 if result.stdout.strip():
     print(result.stdout.rstrip())

@@ -77,7 +77,10 @@ config_schema:
     type: list
     default: []
     label: Owner sender ids
-    description: Gateway sender ids whose corrections count as yours (local CLI, TUI and Desktop always count).
+    description: >-
+      Your sender ids on messaging platforms (text or numbers, such as a Telegram id). Turns from these senders
+      count as yours (feedback, failures that may activate a lesson, the agent tools); the local CLI, TUI and
+      Desktop always do. Anyone else in a chat gets template lessons only.
   reflector:
     type: bool
     default: true

@@ -32,18 +32,23 @@ def dm_scope(platform, user, chat, namespace="") -> str:
 
 
 def _private_scope(source, platform):
-    if source is None and platform in ("cli", "tui"):
+    origin = getattr(source, "platform", None)
+    origin = getattr(origin, "value", origin)
+    if source is None and platform in ("cli", "tui", "desktop", "acp", "local"):
         return "local"
+    if origin == "local" and getattr(source, "chat_type", None) == "dm":
+        return "local"   # Hermes 0.23.1 runs a local session's command in the gateway with Platform.LOCAL
     if (source is None or getattr(source, "chat_type", None) != "dm"
             or getattr(source, "is_bot", False) or getattr(source, "role_authorized", False)
             or getattr(source, "shared_session", False) or getattr(source, "thread_id", None)):
         raise ValueError("Use a direct chat or the local CLI")
-    origin = getattr(source, "platform", None)
-    origin = getattr(origin, "value", origin)
     return dm_scope(origin, source.user_id, source.chat_id, getattr(source, "scope_id", None) or "")
 
 
-def slash(home, raw_args: str, *, source=None, platform="") -> str:
+def slash(home, raw_args: str, *, source=None, platform="", lang: str = "en") -> str:
+    """The legacy /evolution command. Every reply is in the profile's language."""
+    from .i18n import text
+
     try:
         scope = _private_scope(source, platform)
         action, _, value = raw_args.strip().partition(" ")
@@ -51,21 +56,23 @@ def slash(home, raw_args: str, *, source=None, platform="") -> str:
             return "/evolution remember <category> <text> | recall <query> | forget <id>"
         if not value.strip():
             raise ValueError("Provide the command argument")
+        if action == "forget" and not value.strip().isdigit():
+            raise ValueError("Memory ID must be a positive integer.")
         with database(home) as conn:
             memory = MemoryStore(conn)
             if action == "remember":
                 category, _, note = value.strip().partition(" ")
                 entry = memory.remember(scope, category, note, source="slash")
-                return f"Saved #{entry['id']} ({entry['category']})."
+                return text(f"Saved #{entry['id']} ({entry['category']}).", lang)
             if action == "forget":
-                return "Removed." if memory.forget(scope, int(value)) else "Memory ID unavailable in this scope."
+                return text("Removed." if memory.forget(scope, int(value)) else "Memory ID unavailable in this scope.", lang)
             results = memory.search(scope, value, limit=3)
             return ("\n".join(f"#{row['id']} [{row['category']}] {row['text'][:400]}" for row in results)
-                    or "No matching memories.")
+                    or text("No matching memories.", lang))
     except ValueError as error:
-        return str(error)
+        return text(str(error), lang)
     except (OSError, sqlite3.Error):
-        return "Evolution storage is temporarily unavailable."
+        return text("Evolution storage is temporarily unavailable.", lang)
 
 
 def shared_context(home, payload: dict):
@@ -413,7 +420,7 @@ class _Plugin:
             return None
 
     def command(self, raw_args, *, source=None, platform=""):
-        return slash(self.home, raw_args, source=source, platform=platform)
+        return slash(self.home, raw_args, source=source, platform=platform, lang=self.lang)
 
     # ── agent tools (off unless the operator enables agent_tools) ────────────────────────────────────
 
