@@ -3,13 +3,13 @@
 import tempfile
 import os
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from hermes_atlas_evolution.guard import RuntimeGuard, check
 
-HOME = Path("/home/owner")
+HOME = PurePosixPath("/home/owner")   # POSIX paths on any system that runs the tests
 RUNTIME = HOME / ".hermes" / "tools" / "python-3.14.10+build-linux-x64"
-PROTECTED = (RUNTIME, Path("/usr/local/lib/hermes-agent"), HOME / ".hermes")
+PROTECTED = (RUNTIME, PurePosixPath("/usr/local/lib/hermes-agent"), HOME / ".hermes")
 
 
 
@@ -211,7 +211,7 @@ class PlatformTest(unittest.TestCase):
                 self.assertEqual(found and found["kind"], "runtime_removal")
 
     def test_hermes_home_in_a_command_is_the_profile(self):
-        profile = Path("/home/owner/.hermes/profiles/work")
+        profile = PurePosixPath("/home/owner/.hermes/profiles/work")
         found = check("terminal", {"command": "rm -rf $HERMES_HOME"}, protected=(profile,), home=HOME, profile=profile)
         self.assertEqual(found["kind"], "runtime_removal")
 
