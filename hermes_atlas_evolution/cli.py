@@ -51,7 +51,8 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
                "owner_sender_ids": ("evolution", "owner_sender_ids"), "agent_tools": ("agent_advice",),
                "owner_platforms": ("evolution", "owner_platforms"),
                "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit"),
-               "autopilot_minutes": ("evolution", "autopilot_minutes"), "runtime_guard": ("evolution", "runtime_guard")}
+               "autopilot_minutes": ("evolution", "autopilot_minutes"), "runtime_guard": ("evolution", "runtime_guard"),
+               "auto_actions": ("evolution", "auto_actions")}
 # Keys the form does not show but `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key>` can set:
 # the 0.1 notes, whose recall puts stored text in front of the agent on every turn.
 CONFIG_KEYS = {"legacy_memory_commands": ("legacy_memory_commands",),
@@ -106,6 +107,7 @@ TRUSTED_ONLY = {
     "owner_platforms": (("evolution", "owner_platforms"), lambda value: value not in (None, [], ())),
     "agent_tools": (("agent_advice",), lambda value: value is True),
     "runtime_guard": (("evolution", "runtime_guard"), lambda value: value is False),
+    "auto_actions": (("evolution", "auto_actions"), lambda value: value == "full"),   # changes Hermes by itself
     "legacy_memory_commands": (("legacy_memory_commands",), lambda value: value is True),
     "automatic_shared_recall": (("automatic_shared_recall",), lambda value: value is True),
 }
@@ -577,10 +579,20 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
             return _hidden_from_agent(listed, "evidence") if _agent_shell() else listed
         _operator_only()
         if task == "approve":
-            row = conn.execute("SELECT kind, evidence, command FROM proposal WHERE id=?", (args.id,)).fetchone()
+            from . import explain
+
+            row = conn.execute("SELECT kind, subject, evidence, command FROM proposal WHERE id=?", (args.id,)).fetchone()
             if row is None:
                 raise ValueError(f"Unknown proposal id {args.id}")
             evidence = json.loads(row["evidence"])
+            if explain.plan(dict(row)) is not None:   # a reversible change the plugin applies with Hermes' command
+                told = explain.describe({**dict(row), "evidence": evidence}, lang)
+                _confirm(f"{told['title']}: {row['subject']}\n  {told['does']}\n  {told['undo']}", lang,
+                         yes=getattr(args, "yes", False), apply=True)
+                conn.commit()
+                from .actions import apply_proposal
+
+                return apply_proposal(home, args.id, now=now, actor="terminal")
             _confirm(evidence.get("lesson") or row["command"], lang, yes=getattr(args, "yes", False))
         return decisions.decide_proposal(conn, args.id, task, now=now, actor="terminal", lang=lang, note=args.note)
 
@@ -720,7 +732,7 @@ def _review_lessons(conn, lang: str, *, now: float) -> dict:
     return decided
 
 
-def _confirm(text: str, lang: str, *, yes: bool) -> None:
+def _confirm(text: str, lang: str, *, yes: bool, apply: bool = False) -> None:
     """Show exactly what the agent would read and ask before it takes effect."""
     import sys
 
@@ -728,7 +740,10 @@ def _confirm(text: str, lang: str, *, yes: bool) -> None:
         return
     if not sys.stdin.isatty():
         raise ValueError("Confirm with --yes after reading the text with 'proposals list' or 'lessons list'")
-    question = "Ativar este texto para o agente? [s/N] " if lang == "pt" else "Activate this text for the agent? [y/N] "
+    if apply:
+        question = "Aplicar esta mudança no Hermes agora? [s/N] " if lang == "pt" else "Apply this change to Hermes now? [y/N] "
+    else:
+        question = "Ativar este texto para o agente? [s/N] " if lang == "pt" else "Activate this text for the agent? [y/N] "
     sys.stderr.write(f"\n  {text}\n\n{question}")   # stdout stays machine-readable
     sys.stderr.flush()
     answer = sys.stdin.readline().strip().lower()

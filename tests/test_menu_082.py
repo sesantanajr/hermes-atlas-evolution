@@ -215,9 +215,10 @@ class RecommendedTest(unittest.TestCase):
         suggestions = [{"kind": "platform", "value": "api_server"}, {"kind": "sender", "value": "hosted-owner:abc"},
                        {"kind": "platform", "value": "telegram"}]
         self.assertEqual(admin.recommended_settings(current, suggestions),
-                         {"lessons": "auto", "owner_platforms": ["telegram", "api_server"],
+                         {"lessons": "auto", "auto_actions": "full", "owner_platforms": ["telegram", "api_server"],
                           "owner_sender_ids": ["hosted-owner:abc"]})
-        done = {"lessons": "auto", "reflector": True, "owner_platforms": ["api_server"], "owner_sender_ids": []}
+        done = {"lessons": "auto", "reflector": True, "owner_platforms": ["api_server"], "owner_sender_ids": [],
+                "auto_actions": "full"}
         self.assertEqual(admin.recommended_settings(done, [{"kind": "platform", "value": "api_server"}]), {})
 
 
@@ -368,32 +369,33 @@ class MenuTest(Base):
             runtime["plugins"]["entries"]["hermes-atlas-evolution"]["settings"].update(values)
             return list(values)
 
-        shown = self.menu("5", "1", "2", "5", "3", "8", "y", "r", "y", "", "0", runtime=runtime, writer=writer)
+        shown = self.menu("6", "1", "2", "5", "3", "8", "y", "r", "y", "", "0", runtime=runtime, writer=writer)
         self.assertEqual(written[0], {"lessons": "suggest"})
         self.assertEqual(written[1], {"language": "pt"})
         self.assertEqual(written[2], {"tool_hints": True})
         self.assertIn("Applies the next time the plugin loads: tool_hints", shown)
-        self.assertEqual(written[3], {"lessons": "auto"})   # the recommended setup, after the change above
+        # the recommended setup, after the change above, one setting at a time
+        self.assertEqual(written[3:], [{"lessons": "auto"}, {"auto_actions": "full"}])
         with experience(self.home) as conn:
             logged = [row[0] for row in conn.execute("SELECT target FROM decision_log ORDER BY id")]
-        self.assertEqual(logged, ["lessons", "language", "tool_hints", "lessons"])
-        refused = self.menu("5", "4", "abc", "", "0", runtime=runtime, writer=writer)
+        self.assertEqual(logged, ["lessons", "language", "tool_hints", "lessons", "auto_actions"])
+        refused = self.menu("6", "4", "abc", "", "0", runtime=runtime, writer=writer)
         self.assertIn("Not done: autopilot_minutes must be a whole number", refused)
-        out_of_range = self.menu("5", "3", "500", "", "0", runtime=runtime, writer=writer)
+        out_of_range = self.menu("6", "3", "500", "", "0", runtime=runtime, writer=writer)
         self.assertIn("Not done:", out_of_range)
-        self.assertEqual(len(written), 4)   # nothing written for a refused value
+        self.assertEqual(len(written), 5)   # nothing written for a refused value
 
     def test_memory_screen_takes_out_the_copy_the_owner_chooses(self):
         path = write_memory(self.home, "MEMORY.md", [MemoryCareTest.FACT, "Other.", MemoryCareTest.SIMILAR])
-        shown = self.menu("7", "1", "1", "", "0")
+        shown = self.menu("8", "1", "1", "", "0")
         self.assertIn("very similar entries", shown)
         self.assertIn("Taken out.", shown)
         self.assertEqual(memory_care.parse(path.read_text(encoding="utf-8")), [MemoryCareTest.FACT, "Other."])
-        quiet = self.menu("7", "", "0")
+        quiet = self.menu("8", "", "0")
         self.assertIn("Nothing repeats.", quiet)
 
     def test_portuguese_and_leaving_with_end_of_input(self):
-        shown = self.menu("9", "", "42", lang="pt")
+        shown = self.menu("10", "", "42", lang="pt")
         self.assertIn("Lições esperando você (0)", shown)
         self.assertIn("Digite um dos números mostrados.", shown)
         self.assertIn("Até logo.", shown)

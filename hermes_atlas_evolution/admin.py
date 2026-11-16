@@ -26,9 +26,9 @@ from pathlib import Path
 PLUGIN_ID = "hermes-atlas-evolution"
 SETTINGS = ("lessons", "language", "tool_hints", "feedback_signals", "agent_tools", "slow_turn_seconds",
             "owner_sender_ids", "owner_platforms", "reflector", "reflector_daily_limit", "autopilot_minutes",
-            "runtime_guard")
+            "runtime_guard", "auto_actions")
 BOOLEANS = ("tool_hints", "feedback_signals", "agent_tools", "reflector", "runtime_guard")
-CHOICES = {"lessons": ("auto", "suggest", "off"), "language": ("auto", "en", "pt")}
+CHOICES = {"lessons": ("auto", "suggest", "off"), "language": ("auto", "en", "pt"), "auto_actions": ("off", "safe", "full")}
 LISTS = ("owner_sender_ids", "owner_platforms")
 NUMBERS = ("slow_turn_seconds", "reflector_daily_limit", "autopilot_minutes")
 RELOAD_KEYS = ("runtime_guard", "tool_hints")   # applied at the next load of the plugin (integration.RELOAD_KEYS)
@@ -85,36 +85,40 @@ def launch_home(home: Path) -> Path:
     return home.parent.parent if home.parent.name == "profiles" else home
 
 
+def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout: int = 60) -> None:
+    """Run `hermes --profile <name> <args...>` for this profile, Hermes' public command line, with an argument list
+    (no shell). Raises ValueError with Hermes' own message when it refuses, fails or does not answer in time."""
+    profile = Path(home).resolve()
+    command_path = executable() if callable(executable) else (executable or hermes_executable())
+    if command_path is None:
+        raise ValueError("Hermes command not found")
+    env = dict(os.environ, HERMES_HOME=str(profile))
+    env.pop("HERMES_PROFILE", None)   # the launch profile's own marker; --profile names the one changed
+    run = subprocess.run if runner is None else runner
+    try:
+        result = run([command_path, "--profile", profile_name(profile), *[str(item) for item in args]], env=env,
+                     cwd=str(profile), stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8",
+                     errors="replace", timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        raise ValueError("Hermes did not answer in time; that setting may not be saved: look at the settings "
+                         "again") from None
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("Hermes refused the setting") from None
+    if result.returncode != 0:
+        detail = " ".join((result.stderr or result.stdout or "").split())[:200]
+        raise ValueError(detail or "Hermes refused the setting")
+
+
 def cli_writer(home: Path, *, runner=None, executable=None):
     """A writer that sets each value with `hermes --profile <name> config set ...`, Hermes' public command, which
     checks the key, takes Hermes' config lock and writes atomically. Raises ValueError with Hermes' own message."""
-    profile = Path(home).resolve()
-    name = profile_name(profile)
 
     def write(values: dict) -> list:
-        command_path = executable() if callable(executable) else (executable or hermes_executable())
-        if command_path is None:
-            raise ValueError("Hermes command not found")
         written = []
         for key, value in values.items():
             literal = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, tuple, bool)) else str(value)
-            command = [command_path, "--profile", name, "config", "set", f"plugins.entries.{PLUGIN_ID}.settings.{key}",
-                       literal]
-            run = subprocess.run if runner is None else runner
-            env = dict(os.environ, HERMES_HOME=str(profile))
-            env.pop("HERMES_PROFILE", None)   # the launch profile's own marker; --profile names the one written
-            try:
-                result = run(command, env=env, cwd=str(profile),
-                             stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8", errors="replace", timeout=60,
-                             check=False)
-            except subprocess.TimeoutExpired:
-                raise ValueError("Hermes did not answer in time; that setting may not be saved: look at the settings "
-                                 "again") from None
-            except (OSError, subprocess.SubprocessError):
-                raise ValueError("Hermes refused the setting") from None
-            if result.returncode != 0:
-                detail = " ".join((result.stderr or result.stdout or "").split())[:200]
-                raise ValueError(detail or "Hermes refused the setting")
+            run_hermes(home, ["config", "set", f"plugins.entries.{PLUGIN_ID}.settings.{key}", literal], runner=runner,
+                       executable=executable)
             written.append(key)
         return written
 
@@ -143,9 +147,10 @@ def write_settings(home: Path, runtime_config: dict, values: dict, *, now: float
 
 
 def recommended_settings(current: dict, suggestions: list[dict]) -> dict:
-    """The changes the recommended setup makes to `current`: lessons on auto, the reflector on, and every channel
-    that is the owner's by construction (status.owner_suggestions) counted as the owner. Empty when nothing changes."""
-    wanted = {"lessons": "auto", "reflector": True}
+    """The changes the recommended setup makes to `current`: lessons on auto, the reflector on, the automatic actions
+    complete, and every channel that is the owner's by construction (status.owner_suggestions) counted as the owner.
+    Empty when nothing changes."""
+    wanted = {"lessons": "auto", "reflector": True, "auto_actions": "full"}
     platforms = list(current.get("owner_platforms") or [])
     senders = list(current.get("owner_sender_ids") or [])
     for item in suggestions or ():
@@ -158,14 +163,19 @@ def recommended_settings(current: dict, suggestions: list[dict]) -> dict:
 
 
 def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: str = "en", writer=None,
-           actor: str = "dashboard") -> dict:
-    """One decision. `body`: {"kind": lesson|all|proposal|undo|settings|memory, ...}."""
+           actor: str = "dashboard", runner=None) -> dict:
+    """One decision. `body`: {"kind": lesson|all|proposal|apply|undo|settings|memory, ...}. `runner` replaces
+    subprocess.run for the Hermes commands of "apply" and of its undo (tests)."""
     from . import decisions, memory_care
     from .experience import experience
 
     kind = body.get("kind") if isinstance(body, dict) else None
     if kind == "settings":
         return write_settings(home, runtime_config, body.get("values"), now=now, writer=writer, actor=actor)
+    if kind == "apply":
+        from . import actions
+
+        return actions.apply_proposal(home, int(body["id"]), now=now, actor=actor, runner=runner)
     if kind == "memory":
         if body.get("action") != "remove":
             raise ValueError("Invalid decision")
@@ -199,6 +209,11 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
         with experience(home) as conn:
             decisions.mark_undone(conn, result["id"], now=now)
         result["undone"] = True
+    elif result.get("kind") == "proposal_apply" and result.get("restorable"):
+        from . import actions
+
+        result.pop("restorable")
+        result = actions.undo_applied(home, result, now=now, runner=runner)
     elif result.get("kind") == "memory" and result.get("restorable"):
         result.pop("restorable")
         restored = memory_care.restore(home, result["file"], result["fingerprint"], result["backup"],

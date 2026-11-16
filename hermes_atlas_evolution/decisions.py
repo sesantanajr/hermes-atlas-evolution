@@ -26,7 +26,7 @@ from . import lessons as playbook
 
 ACTIONS = ("approve", "reject", "retire", "reactivate")
 WAITING = ("candidate", "quarantined")
-ACTORS = ("terminal", "dashboard")
+ACTORS = ("terminal", "dashboard", "automatic")
 HISTORY_LIMIT = 200
 
 
@@ -166,6 +166,14 @@ def record_setting(conn: sqlite3.Connection, key: str, before, after, *, now: fl
                 after={"value": after})
 
 
+def record_applied(conn: sqlite3.Connection, proposal_id: int, *, code: str, before: str, apply: list, undo: list,
+                   now: float, actor: str = "terminal") -> int:
+    """Log a proposal the plugin applied with Hermes' command (actions.apply_proposal), with the command that undoes it."""
+    return _log(conn, now=now, actor=actor, kind="proposal", target=str(proposal_id), action="apply",
+                before={"status": before}, after={"status": "applied", "code": code, "applied": list(apply),
+                                                  "undo": list(undo)})
+
+
 def record_memory(conn: sqlite3.Connection, name: str, mark: str, *, position: int, backup: str, before: int,
                   after: int, copies: int = 1, now: float, actor: str = "terminal") -> int:
     """Log an entry taken out of a memory file: its fingerprint, where it was, how many copies the file held and the
@@ -241,6 +249,12 @@ def undo(conn: sqlite3.Connection, decision_id: int, *, now: float, actor: str =
         return {"id": decision_id, "undone": False, "restorable": True, "kind": "memory", "file": row["target"],
                 "fingerprint": before.get("fingerprint"), "backup": before.get("backup"),
                 "position": before.get("position"), "copies": before.get("copies", 1)}
+    if row["kind"] == "proposal" and isinstance(after.get("undo"), list):   # applied with a Hermes command
+        current = conn.execute("SELECT status FROM proposal WHERE id=?", (int(row["target"]),)).fetchone()
+        if current is None or current["status"] != "applied":
+            return {"id": decision_id, "undone": False, "reason": "changed_since"}
+        return {"id": decision_id, "undone": False, "restorable": True, "kind": "proposal_apply",
+                "proposal": int(row["target"]), "code": after.get("code"), "undo": after["undo"]}
     if row["kind"] == "proposal":
         current = conn.execute("SELECT status FROM proposal WHERE id=?", (int(row["target"]),)).fetchone()
         if current is None or current["status"] != after.get("status"):

@@ -724,18 +724,33 @@ Subcommands of `hermes evolution`. Output is JSON, except `report` and `status` 
 
 | Screen | What it shows and does |
 |---|---|
-| Summary | The lessons mode, active and waiting lessons, open proposals, the last pass, whether the guard and the reflector are on, and how many points need attention |
+| Summary | The lessons mode, active and waiting lessons, open proposals, the last pass, the guard, the reflector and the automatic actions; what needs attention, in full sentences; and up to five **suggestions** with a letter (`a`, `b`…) that act at once: decide the waiting lessons, apply the recommended changes, turn on the complete automatic actions, tidy the memory, read the observations |
 | 1 Lessons waiting for you | Each one with its exact sentence and origin; approve or reject one, or approve all of them after reading every sentence (the agent's own proposals are approved one by one) |
-| 2 Open proposals | Risk, kind and subject; the lesson or the command behind each; approve or reject. A proposal that changes Hermes prints the command for you to run |
+| 2 Open proposals | Grouped as changes the plugin applies, lessons, changes you apply and observations, each with its title, risk, what was seen (with the numbers), what applying it does and how to undo it. `a` applies a change now with Hermes' own command, `t` applies all of them, `d` dismisses an observation, `e` writes the lesson for a failure no template covers |
 | 3 Active lessons | With the measured effect; retire one |
-| 4 Decision history and undo | Your latest 20 decisions, from the terminal and the panel; undo one while what it changed is still as it left it |
-| 5 Settings | Every option of the settings form with its current value; change one, or apply the recommended setup (lessons on `auto`, the reflector on, and the chat channels that are yours by construction) after seeing what changes. Written with `hermes --profile <name> config set ...`, checked first with the plugin's own rules |
-| 6 Who is you in chats | Each channel of the last 30 days with its senders, the suggested ones marked; mark or unmark a whole channel or a sender as you |
-| 7 Hermes memory | See [Hermes memory](#hermes-memory) |
-| 8, 9 | The digest of 7 days and the full status |
-| 10 | A learning pass now |
+| 4 Decision history and undo | Your latest 20 decisions and the automatic actions, from the terminal, the panel and the autopilot; undo one while what it changed is still as it left it |
+| 5 Automatic actions | The mode and what each mode does, the automatic actions of the last 7 days with their undo, and `m` to change the mode (see [Automatic actions](#automatic-actions)) |
+| 6 Settings | Every option of the settings form with its current value; change one, or apply the recommended setup (lessons on `auto`, the reflector on, complete automatic actions, and the chat channels that are yours by construction) after seeing what changes. Written with `hermes --profile <name> config set ...`, checked first with the plugin's own rules |
+| 7 Who is you in chats | Each channel of the last 30 days with its senders, the suggested ones marked; mark or unmark a whole channel or a sender as you |
+| 8 Hermes memory | See [Hermes memory](#hermes-memory) |
+| 9, 10 | The digest of 7 days and the full status |
+| 11 | A learning pass now |
 
 A decision is made with the same code as the dashboard panel (`admin.py`) and recorded in the same history, with `terminal` as the place. The menu opens only in the operator's terminal: never where the commands that decide refuse to run (an agent's shell, see [SECURITY.md](../SECURITY.md)), and never without a terminal on both ends.
+
+## Automatic actions
+
+`auto_actions` says what the plugin does by itself at the end of each learning pass (the autopilot's, `learn`'s or the menu's). It counts only from Hermes' configuration (the settings form, the panel, the menu or `hermes config set`), never from the plugin's `settings.json`, which the agent's file tools can write.
+
+| Mode | What runs by itself |
+|---|---|
+| `off` | Nothing. Every change waits for you. |
+| `safe` (default) | Exact repeats in Hermes' memory are taken out: the same entry twice, case, spacing and Unicode forms aside, in one file or across both (the copy in `USER.md` stays). Similar entries are never touched by themselves: they wait for you in the menu. |
+| `full` | Also the reversible changes to Hermes a proposal asks for, today **locking a skill** the curator keeps rewriting (`hermes --profile <name> curator lock <skill>`), at most 3 per pass. |
+
+Each action is recorded in the decision history with `automatic` as the actor, shows up in the menu's summary and in the panel's header, and can be undone from the menu (screen 5 or 4), the panel's History or `hermes evolution decisions undo <id>`: a lock is undone with `hermes curator unlock`, a memory entry is put back from the copy kept. An automatic change you undo is never applied by itself again. A skill already locked or pinned is left as it is. A failure (Hermes refusing, a timeout) is reported in the pass's result and never stops the pass.
+
+The same changes can be applied one at a time, or all at once, from the menu (**Apply now**, `t`) and the panel, in any mode. Archiving a skill nobody used (`hermes curator archive`, undone with `restore`) is applied only on your approval. A rollback or a change to a Hermes setting is never applied by the plugin: it shows the command.
 
 ## Hermes memory
 

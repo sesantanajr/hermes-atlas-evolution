@@ -45,7 +45,7 @@ _LOCK = threading.Lock()
 # Settings the panel may change: those of the plugin's settings form (plugin.yaml config_schema); admin.SETTINGS.
 SETTINGS = ("lessons", "language", "tool_hints", "feedback_signals", "agent_tools", "slow_turn_seconds",
             "owner_sender_ids", "owner_platforms", "reflector", "reflector_daily_limit", "autopilot_minutes",
-            "runtime_guard")
+            "runtime_guard", "auto_actions")
 
 
 def _module(name: str):
@@ -137,7 +137,9 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
                           own_transform=opts["tool_hints"] and opts["lessons"] != "off")
     with experience.experience(home) as conn:
         playbook = lessons.listing(conn, lang=lang)
-        queue = proposals.listing(conn, status="open")
+        explain = _module("explain")
+        queue = [{**item, "explain": explain.describe(item, lang)} for item in proposals.listing(conn, status="open")]
+        recent = _module("actions").recent(conn, now=now)
         pending = decisions.waiting(conn, lang=lang)
         history = decisions.history(conn, lang=lang, limit=40)
         reload_row = conn.execute("SELECT value FROM cursor WHERE key='settings_reload'").fetchone()
@@ -161,6 +163,7 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
     return {
         "lang": lang, "days": days, "generated": now, "profile": state["profile"], "version": state["plugin_version"],
         "mode": opts["lessons"], "status": state, "report": digest, "lessons": playbook, "proposals": queue,
+        "automatic": {"mode": opts["auto_actions"], "recent": recent},
         "pending": pending, "history": history, "can_decide": can_decide, "decide_reason": decide_reason,
         "settings": {"values": values, "reload": reload_keys, "recommended": recommended,
                      "reload_keys": ["runtime_guard", "tool_hints"], "problems": sorted(set(settings_problems))},
