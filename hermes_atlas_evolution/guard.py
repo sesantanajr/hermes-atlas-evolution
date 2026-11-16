@@ -309,28 +309,79 @@ def _stops_gateway(verb: str, rest: list[str], words: list[str]) -> bool:
         return len(words) >= 2 and bool(_UNIT.match(words[0])) and words[1] in ("restart", "stop")
     if verb in ("pkill", "killall"):
         return any("hermes" in word.lower() for word in words)
-    if verb == "hermes" and "gateway" in words:   # stop leaves Hermes down; restart is the owner's call
-        position = words.index("gateway") + 1
-        return position < len(words) and words[position] in ("stop", "restart")
+    if verb == "hermes":   # stop leaves Hermes down; restart is the owner's call
+        words = _hermes_words(rest)
+        return any(word == "gateway" and (following in ("stop", "restart") or _dynamic(following))
+                   for word, following in zip(words, words[1:]))
     return False
 
 
 PLUGIN_ID = "hermes-atlas-evolution"
-# This plugin's settings as `hermes config set|unset` names them, the whole plugins section included.
-_PLUGIN_KEY = re.compile(r"plugins(?:\.entries(?:\.(?:hermes-atlas-evolution|hermes-evolution)(?:\..*)?)?)?\Z")
+_PLUGIN_IDS = frozenset({PLUGIN_ID, "hermes-evolution"})   # and the id used up to 0.5.0
+# Options of the `hermes` command line that take a value, wherever they appear: Hermes reads the profile flag
+# even after the subcommand (hermes_cli.main._scan_profile_flag), so `hermes config set -p work <key>` and
+# `hermes gateway -p work restart` are the commands without it.
+_HERMES_VALUE_FLAGS = frozenset({"-p", "--profile", "-z", "--oneshot", "-m", "--model", "--provider", "--reasoning",
+                                 "-t", "--toolsets", "-r", "--resume", "-s", "--skills", "--usage-file", "--in",
+                                 "--cpu-profile", "--config"})
 
 
-def _changes_plugin(verb: str, words: list[str]) -> bool:
-    """The agent's `hermes config set|unset` of this plugin's settings, and `hermes plugins disable|remove` of this
-    plugin: who counts as the owner and whether the guard runs are the owner's decisions."""
+def _hermes_words(rest: list[str]) -> list[str]:
+    """The words of a `hermes` command line as Hermes reads them: options left out, with the value of each one
+    that takes a value."""
+    words, skip = [], False
+    for token in rest:
+        if skip:
+            skip = False
+        elif token in _HERMES_VALUE_FLAGS:
+            skip = True
+        elif not token.startswith("-"):
+            words.append(token)
+    return words
+
+
+def _dynamic(token: str) -> bool:
+    """A word the shell fills in when the command runs ($VAR, $'...', `...`): what it names cannot be read here."""
+    return "$" in token or "`" in token
+
+
+def _key_parts(key: str) -> list[str]:
+    """A `hermes config set` key split the way Hermes splits it: at dots, except a dot escaped with a backslash."""
+    return [part.replace("\0", ".").casefold() for part in key.replace("\\.", "\0").split(".")]
+
+
+def _owner_key(key: str) -> bool:
+    """Whether a config key holds what only the owner decides about plugins: the whole plugins section, the
+    plugins Hermes enables, disables or isolates, and this plugin's own settings. Other plugins' settings
+    (plugins.entries.<their id>) stay open to the agent."""
+    if _dynamic(key):
+        return True
+    parts = _key_parts(key)
+    if parts[0] != "plugins":
+        return False
+    return len(parts) < 3 or parts[1] != "entries" or parts[2] in _PLUGIN_IDS
+
+
+def _changes_plugin(verb: str, rest: list[str]) -> bool:
+    """The agent's own change to who this plugin trusts or whether it runs: `hermes config set|unset` of the
+    plugins section or of this plugin's settings, `hermes config edit`, and `hermes plugins disable|remove` of
+    this plugin. A word filled in by the shell where a key, an action or a name goes counts as such a change."""
     if verb != "hermes":
         return False
-    for index, word in enumerate(words[:-2]):
-        following = words[index + 1]
-        if word == "config" and following in ("set", "unset") and _PLUGIN_KEY.match(words[index + 2]):
-            return True
-        if word == "plugins" and following in ("disable", "remove", "rm", "uninstall") and PLUGIN_ID in words[index + 2:]:
-            return True
+    words = _hermes_words(rest)
+    for index, word in enumerate(words):
+        following = words[index + 1] if index + 1 < len(words) else None
+        if word == "config" and following is not None:
+            if following == "edit" or _dynamic(following):
+                return True
+            if following in ("set", "unset") and index + 2 < len(words) and _owner_key(words[index + 2]):
+                return True
+        if word == "plugins" and following is not None:
+            if _dynamic(following):
+                return True
+            if following in ("disable", "remove", "rm", "uninstall") and \
+                    any(name in _PLUGIN_IDS or _dynamic(name) for name in words[index + 2:]):
+                return True
     return False
 
 
@@ -390,7 +441,7 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
         words = [token for token in rest if not token.startswith("-")]
         if _stops_gateway(verb, rest, words):
             return {"kind": "gateway_stop"}
-        if _changes_plugin(verb, words):
+        if _changes_plugin(verb, rest):
             return {"kind": "plugin_settings"}
         path = _hit(_removed_paths(verb, rest, words), protected=protected, home=home, profile=profile)
         if path:

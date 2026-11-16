@@ -115,23 +115,29 @@ def valid_text(text) -> bool:
 # diagnosing the cause. A draft that also says what to do (delete a lock file, pass a flag, use another tool) is
 # specific, and so is one that names something in backticks.
 _CONDITION = re.compile(r"\s*(?:when(?:ever)?|if|after|quando|se|sempre\s+que|ao|após)\b[^,;:]*[,;:]\s*", re.I)
+_SAME_CALL = (r"(?:\s+(?:it|that|the\s+(?:same\s+)?(?:call|command|request|step|operation)|a\s+(?:mesma\s+)?(?:chamada|operação)"
+              r"|o\s+(?:mesmo\s+)?(?:comando|pedido|passo)))?")
 _GENERIC_PHRASES = re.compile(
-    r"\b(?:read|check|review|inspect|look\s+at|examine|verify|confirm)\s+(?:the\s+)?(?:full\s+|exact\s+|whole\s+)?"
-    r"(?:command\s+)?(?:output|error(?:\s+message)?s?|logs?|messages?|status|results?|exit\s+code|stderr|stdout)\b"
-    r"|\b(?:diagnose|investigate|identify|find|understand|determine)\s+(?:the\s+)?(?:root\s+)?"
-    r"(?:cause|problem|issue|error|reason)\b"
-    r"|\b(?:fix|address|resolve|correct|handle)\s+(?:it|that|this|the\s+(?:root\s+)?(?:cause|problem|issue|error))\b"
-    r"|\bbefore\s+(?:retrying|repeating|trying\s+again|running\s+it\s+again|you\s+retry|re-?running)(?:\s+it)?\b"
+    r"\b(?:read|reading|check|checking|review|reviewing|inspect|inspecting|look\s+at|examine|verify|confirm)\s+"
+    r"(?:the\s+)?(?:full\s+|exact\s+|whole\s+)?(?:command\s+)?"
+    r"(?:output|error(?:\s+(?:message|output))?s?|logs?|messages?|status|results?|exit\s+code|stderr|stdout)\b"
+    r"|\b(?:diagnose|diagnosing|investigate|investigating|identify|identifying|find|finding|understand|understanding"
+    r"|determine|determining)\s+(?:the\s+)?(?:root\s+)?(?:cause|problem|issue|error|reason)\b"
+    r"|\b(?:fix|fixing|address|resolve|correct|handle)\s+(?:it|that|this|the\s+(?:root\s+)?(?:cause|problem|issue|error))\b"
+    r"|\bbefore\s+(?:retrying|repeating|trying\s+again|running\s+it\s+again|you\s+retry|re-?running|calling\s+it\s+again)"
+    + _SAME_CALL + r"\b"
     r"|\b(?:do\s+not|don't|never)\s+(?:retry|repeat)(?:\s+it)?\s+blindly\b|\binstead\s+of\s+retrying\s+blindly\b"
-    r"|\b(?:leia|verifique|revise|inspecione|examine|confira|olhe|confirme)\s+(?:a\s+|o\s+|os\s+|as\s+)?"
+    r"|\b(?:leia|ler|verifique|verificar|revise|revisar|inspecione|inspecionar|examine|examinar|confira|conferir|olhe"
+    r"|olhar|confirme|confirmar)\s+(?:a\s+|o\s+|os\s+|as\s+)?"
     r"(?:saída|erro|mensagem(?:\s+de\s+erro)?|logs?|status|resultado|código\s+de\s+saída)\b"
-    r"|\b(?:diagnostique|investigue|identifique|entenda|descubra)\s+(?:a\s+|o\s+)?(?:causa|problema|erro|motivo)"
-    r"(?:\s+raiz)?\b"
-    r"|\b(?:corrija|resolva|trate)\s+(?:isso|o\s+problema|a\s+causa|o\s+erro)\b"
-    r"|\bantes\s+de\s+(?:repetir|tentar\s+de\s+novo|tentar\s+novamente|rodar\s+de\s+novo|executar\s+de\s+novo)\b"
+    r"|\b(?:diagnostique|diagnosticar|investigue|investigar|identifique|identificar|entenda|entender|descubra|descobrir)"
+    r"\s+(?:a\s+|o\s+)?(?:causa|problema|erro|motivo)(?:\s+raiz)?\b"
+    r"|\b(?:corrija|corrigir|resolva|resolver|trate|tratar)\s+(?:isso|o\s+problema|a\s+causa|o\s+erro)\b"
+    r"|\bantes\s+de\s+(?:repetir|tentar\s+de\s+novo|tentar\s+novamente|rodar\s+de\s+novo|executar\s+de\s+novo"
+    r"|chamar\s+de\s+novo)" + _SAME_CALL + r"\b"
     r"|\bnão\s+(?:repita|tente\s+de\s+novo)\s+às\s+cegas\b", re.I)
-_FILLER = re.compile(r"\b(?:and|then|always|first|carefully|again|it|the|a|an|to|e|depois|sempre|primeiro|com|"
-                     r"atenção|isso|o|a|os|as)\b|[\W_]+", re.I)
+_FILLER = re.compile(r"\b(?:and|then|always|first|carefully|again|it|the|a|an|to|so|in\s+order|e|depois|sempre|"
+                     r"primeiro|com|atenção|isso|o|a|os|as|para|de|novo)\b|[\W_]+", re.I)
 
 
 def generic_advice(text: str) -> bool:
@@ -264,10 +270,15 @@ def promote(conn: sqlite3.Connection, *, now: float, mode: str) -> list[int]:
         owner = _owner_by_key(conn)
         promoted = [row["lesson_id"] for row in rows if row["lesson_id"] not in stale
                     and owner.get(_text_key(row["tool"], row["klass"], row["hint"]), 0) >= OWNER_ACTIVATION]
-    for lesson_id in promoted:
-        set_status(conn, lesson_id, "active", now=now)
+    activated = []
+    for lesson_id in promoted:   # only if it is still waiting: an operator may have decided on it meanwhile
+        cursor = conn.execute("""UPDATE lesson SET status='active', updated=?, activated=?, verdict=NULL,
+              baseline_failures=NULL, baseline_calls=NULL WHERE id=? AND status='candidate'""", (now, now, lesson_id))
+        if cursor.rowcount:
+            _record_change(conn, lesson_id, now, next(row["tool"] for row in rows if row["lesson_id"] == lesson_id))
+            activated.append(lesson_id)
     conn.executemany("DELETE FROM lesson_owner_wait WHERE lesson_id=?", [(item,) for item in [*stale, *promoted]])
-    return promoted
+    return activated
 
 
 def rewriter_binaries(conn: sqlite3.Connection) -> set[str]:
@@ -305,10 +316,14 @@ def tidy(conn: sqlite3.Connection, *, now: float) -> int:
             withdrawn.append(row["id"])
         elif key is not None:
             taken.add(key)
-    conn.executemany(f"UPDATE lesson SET status='retired', verdict='{WITHDRAWN}', updated=? WHERE id=?",
-                     [(now, item) for item in withdrawn])
-    conn.executemany("DELETE FROM lesson_owner_wait WHERE lesson_id=?", [(item,) for item in withdrawn])
-    return len(withdrawn)
+    taken_back = []
+    for lesson_id in withdrawn:   # only if still undecided: an operator may have decided on it meanwhile
+        cursor = conn.execute(f"""UPDATE lesson SET status='retired', verdict='{WITHDRAWN}', updated=?
+            WHERE id=? AND status IN ('candidate', 'quarantined')""", (now, lesson_id))
+        if cursor.rowcount:
+            taken_back.append(lesson_id)
+    conn.executemany("DELETE FROM lesson_owner_wait WHERE lesson_id=?", [(item,) for item in taken_back])
+    return len(taken_back)
 
 
 def add_custom(conn: sqlite3.Connection, text: str, *, tool: str, origin: str, now: float, active: bool = False) -> int:
@@ -349,7 +364,11 @@ def set_status(conn: sqlite3.Connection, lesson_id: int, status: str, *, now: fl
     row = conn.execute("SELECT * FROM lesson WHERE id=?", (lesson_id,)).fetchone()
     if row is None:
         raise ValueError(f"Unknown lesson id {lesson_id}")
-    if row["status"] != status:
+    if row["status"] == status == "retired" and row["verdict"] == WITHDRAWN:
+        # The queue cleaning had taken it back; now the operator says no: that decision stays, and the lesson no
+        # longer comes back when its failure does.
+        conn.execute("UPDATE lesson SET verdict=NULL, updated=? WHERE id=?", (now, lesson_id))
+    elif row["status"] != status:
         conn.execute("UPDATE lesson SET status=?, updated=?, activated=CASE WHEN ?='active' THEN ? ELSE activated END,"
                      " verdict=CASE WHEN ?='active' THEN NULL ELSE verdict END,"
                      " baseline_failures=CASE WHEN ?='active' THEN NULL ELSE baseline_failures END,"

@@ -281,7 +281,8 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
             excerpt = scrub(_error_text(payload.get("error_message"), payload.get("result"))[0])
             program = command_program(payload.get("args"))
             if excerpt and program:   # which program failed makes a draft specific; only a bare command name
-                excerpt = f"[{program}] {excerpt}"[:EXCERPT_LIMIT]
+                prefix = f"[{program}] "
+                excerpt = prefix + excerpt[-(EXCERPT_LIMIT - len(prefix)):]   # the end, where the cause is, stays
 
     def write(conn):
         conn.execute("""INSERT INTO tool_daily VALUES (?, ?, 1, ?, ?, ?)
@@ -341,13 +342,16 @@ def command_program(args) -> str:
     return found
 
 
-# Where Hermes decides a refused approval that nobody could answer as the turn ran. Hermes names the setting in
-# its own refusal text (approvals.<key>: approve); otherwise the session's origin tells. '' means someone could
-# have answered (a person said no, or a prompt went unanswered in a session someone watches).
+# Where Hermes decides a refused approval that nobody could answer as the turn ran. When a setting decides it,
+# Hermes names the setting in its refusal (tools/approval.py: "set approvals.<key>: approve"). A person's answer
+# reads "denied by user" (a chat, the API server, a gateway subagent), "User denied ..." (the CLI panel, also the
+# automatic denial a CLI subagent gets) or comes from an approval transport; a withdrawn prompt is no refusal.
+# Otherwise, in sessions nobody watches, the origin tells. '' means someone could have answered.
 _APPROVAL_SETTING = re.compile(r"\bapprovals\.(single_query_mode|cron_mode|unattended_mode)\b")
+_CLI_DENIED = re.compile(r"\bUser denied (?:this command|execute_code|this potentially dangerous action)\b")
+_PERSON = re.compile(r"\bdenied by user\b|\bthrough the selected approval transport\b|"
+                     r"\bwithdrawn before the user answered\b", re.I)
 UNATTENDED_SETTINGS = {"oneshot": "approvals.single_query_mode", "cron": "approvals.cron_mode",
-                       "webhook": "approvals.unattended_mode", "msgraph_webhook": "approvals.unattended_mode",
-                       "api_server": "approvals.unattended_mode", "subagent": "delegation.subagent_auto_approve",
                        # automations and integrations a program drives: nobody watches them to approve
                        "kanban": "approvals", "batch": "approvals", "curator": "approvals", "a2a": "approvals",
                        "tool": "approvals"}
@@ -355,9 +359,14 @@ UNATTENDED_SETTINGS = {"oneshot": "approvals.single_query_mode", "cron": "approv
 
 def approval_setting(text: str, origin: str | None) -> str:
     """The Hermes setting that decided a refused approval nobody could answer, or '' when someone could have."""
-    match = _APPROVAL_SETTING.search(text[:4000]) if isinstance(text, str) else None
+    text = text[:4000] if isinstance(text, str) else ""
+    match = _APPROVAL_SETTING.search(text)
     if match:
         return f"approvals.{match.group(1)}"
+    if origin == "subagent":   # Hermes denies a CLI subagent's prompt for it, unless delegation allows it
+        return "delegation.subagent_auto_approve" if _CLI_DENIED.search(text) else ""
+    if _PERSON.search(text) or _CLI_DENIED.search(text):
+        return ""
     return UNATTENDED_SETTINGS.get(origin or "", "")
 
 
@@ -413,12 +422,16 @@ def origin_label(payload: dict) -> str:
     return "unknown"
 
 
-def owner_turn(surface: str, sender_id, owners, *, origin: str | None = None, owner_platforms=frozenset()) -> bool:
-    """True when the owner is the one being served: their own surfaces, their automations and subagents, a
-    chat message from a sender listed in owner_sender_ids, or any chat of a platform listed in owner_platforms
-    (a private bot or the owner's own UI, where nobody else writes)."""
-    if surface in ("local", "cron", "subagent"):
+def owner_turn(surface: str, sender_id, owners, *, origin: str | None = None, owner_platforms=frozenset(),
+               parent_owner: bool = False) -> bool:
+    """True when the owner is the one being served: their own surfaces, their automations, a subagent delegated
+    from a turn that served the owner (`parent_owner`), a chat message from a sender listed in owner_sender_ids,
+    or any chat of a platform listed in owner_platforms (a private bot or the owner's own UI, where nobody else
+    writes). A subagent whose parent is unknown serves someone else: what depends on it is held back."""
+    if surface in ("local", "cron"):
         return True
+    if surface == "subagent":
+        return parent_owner is True
     if surface != "gateway":
         return False
     if origin is not None and origin in owner_platforms:
@@ -696,8 +709,10 @@ def tool_summary(conn, *, now: float, days: int, limit: int = 15) -> dict:
                          "mean_ms": row["duration_ms"] // row["calls"]} for row in rows[:limit]]}
 
 
-# Tools whose time is not latency: they wait for a person (clarify) or run a whole subagent (delegate_task).
-NOT_LATENCY = frozenset({"clarify", "delegate_task", "ask_user", "request_user_input"})
+# Tools whose time is not latency: they wait for a person (clarify, the Desktop onboarding and tour, a code
+# typed into the browser vault) or run a whole subagent (delegate_task).
+NOT_LATENCY = frozenset({"clarify", "delegate_task", "ask_user", "request_user_input", "setup_beat", "gui_tour",
+                         "browser_vault"})
 
 
 def slow_calls(conn, *, now: float, days: int, min_calls: int, min_mean_s: float, limit: int = 5) -> list[dict]:

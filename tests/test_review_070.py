@@ -62,10 +62,18 @@ class OwnerPlatformTest(Base):
         self.assertEqual(sensor.observe({**said, "session_id": "w", "platform": "whatsapp"}, clock=0.0, now=NOW), [])
 
 
+# Hermes 0.23.1's own text when single-query mode decides (tools/approval.py, _Unattended.block_message).
+SINGLE_QUERY = json.dumps({"output": "", "exit_code": -1, "error": (
+    "BLOCKED: this command needs approval but single-query mode (-q) runs without a user present to approve it. "
+    "Use normal tools instead. To allow commands in single-query mode, set approvals.single_query_mode: approve in "
+    "config.yaml.")})
+
+
 class ApprovalTest(Base):
-    def refuse(self, origin, times, tool="terminal"):
+    def refuse(self, origin, times, tool="terminal", text=None):
+        text = text or (SINGLE_QUERY if origin == "oneshot" else REFUSED)
         for index in range(times):
-            record_tool(self.home, {"tool_name": tool, "status": "error", "result": REFUSED, "session_id": f"{origin}{index}"},
+            record_tool(self.home, {"tool_name": tool, "status": "error", "result": text, "session_id": f"{origin}{index}"},
                         now=NOW, origin=origin)
 
     def test_refusals_nobody_could_answer_become_one_proposal_for_the_owner(self):
@@ -121,7 +129,8 @@ class HistoryRedoTest(Base):
         self.assertEqual(backfill.step(self.home, now=NOW, budget_s=10)["status"], "done")
         close_observers()
         with experience(self.home) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM cursor WHERE key='backfill_version'").fetchone()[0], backfill.VERSION)
+            state = dict(conn.execute("SELECT key, value FROM cursor WHERE key IN ('backfill_version', 'backfill_revision')"))
+            self.assertEqual(state, {"backfill_revision": backfill.VERSION, "backfill_version": "2"})   # 0.6.0 reads "2"
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM failure_owner").fetchone()[0], 0)
             origins = dict(conn.execute("SELECT source, SUM(count) FROM approval_daily GROUP BY source").fetchall())
             owned = conn.execute("SELECT SUM(count) FROM failure_owner_daily").fetchone()[0]

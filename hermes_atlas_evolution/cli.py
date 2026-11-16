@@ -51,6 +51,10 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
                "owner_platforms": ("evolution", "owner_platforms"),
                "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit"),
                "autopilot_minutes": ("evolution", "autopilot_minutes"), "runtime_guard": ("evolution", "runtime_guard")}
+# Keys the form does not show but `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key>` can set:
+# the 0.1 notes, whose recall puts stored text in front of the agent on every turn.
+CONFIG_KEYS = {"legacy_memory_commands": ("legacy_memory_commands",),
+               "automatic_shared_recall": ("automatic_shared_recall",)}
 
 
 def native_settings(runtime_config) -> dict:
@@ -101,6 +105,8 @@ TRUSTED_ONLY = {
     "owner_platforms": (("evolution", "owner_platforms"), lambda value: value not in (None, [], ())),
     "agent_tools": (("agent_advice",), lambda value: value is True),
     "runtime_guard": (("evolution", "runtime_guard"), lambda value: value is False),
+    "legacy_memory_commands": (("legacy_memory_commands",), lambda value: value is True),
+    "automatic_shared_recall": (("automatic_shared_recall",), lambda value: value is True),
 }
 
 
@@ -149,7 +155,7 @@ def effective_settings(home: Path, runtime_config=None, *, base: dict | None = N
     """settings.json (or `base`) with the values set through Hermes' plugin settings on top (Hermes wins per key).
     Values of settings.json that widen trust are left out (see TRUSTED_ONLY)."""
     result = _trusted(settings(home) if base is None else base)
-    for key, path in NATIVE_KEYS.items():
+    for key, path in {**NATIVE_KEYS, **CONFIG_KEYS}.items():
         value = native_settings(runtime_config).get(key)
         if value is None:
             continue
@@ -237,14 +243,17 @@ def setup(parser: argparse.ArgumentParser) -> None:
     state.add_argument("--format", choices=("md", "json"), default="md")
     state.add_argument("--no-learn", action="store_true",
                        help=_("Only read; do not run the first pass when this profile never had one"))
-    owner = commands.add_parser("owner", help=_("Show the chat channels and senders, and choose which ones are you"))
+    owner = commands.add_parser("owner", help=_("Show the chat channels and senders, and the command that chooses "
+                                                "which ones are you"))
     owner_commands = owner.add_subparsers(dest="owner_action")
     owner_commands.add_parser("list", help=_("List chat channels and senders of the last 30 days"))
-    owner_commands.add_parser("add", help=_("Count a sender id as you")).add_argument("value")
-    owner_commands.add_parser("remove", help=_("Stop counting a sender id as you")).add_argument("value")
-    owner_commands.add_parser("add-platform", help=_("Count every chat of a platform as you (a private bot, your own UI)")
+    owner_commands.add_parser("add", help=_("Print the command that counts a sender id as you")).add_argument("value")
+    owner_commands.add_parser("remove", help=_("Print the command that stops counting a sender id as you")
                               ).add_argument("value")
-    owner_commands.add_parser("remove-platform", help=_("Stop counting every chat of a platform as you")).add_argument("value")
+    owner_commands.add_parser("add-platform", help=_("Print the command that counts every chat of a platform as you "
+                                                     "(a private bot, your own UI)")).add_argument("value")
+    owner_commands.add_parser("remove-platform", help=_("Print the command that stops counting every chat of a platform "
+                                                        "as you")).add_argument("value")
     learn = commands.add_parser("learn", help=_("Run one evolution pass: derive lessons, measure changes, refresh proposals"))
     learn.add_argument("--notify-only", action="store_true", help=_("Print only new lessons, regressions and high-risk proposals"))
     playbook = commands.add_parser("lessons", help=_("Review the playbook learned from recurring tool failures"))
@@ -353,6 +362,7 @@ _OWNER_TEXT = {
            "col_sessions": "sessions", "col_senders": "senders (sessions)", "col_you": "counts as you",
            "yes": "yes", "no": "no", "empty": "No chat session in 30 days: your CLI, TUI and Desktop always count as you.",
            "add": "To count a sender as you", "platform": "To count every chat of a channel as you (a private bot, your own UI)",
+           "channel": "<channel>",
            "restart": "Then restart the gateway so the running hooks see it",
            "run": "Run this in your own terminal (it writes the Hermes settings form's value), then restart the gateway:",
            "why": "The plugin does not write it itself: who counts as you decides what reaches the agent, so it lives in "
@@ -365,7 +375,7 @@ _OWNER_TEXT = {
            "col_channel": "canal", "col_sessions": "sessões", "col_senders": "remetentes (sessões)",
            "col_you": "conta como você", "yes": "sim", "no": "não",
            "empty": "Nenhuma sessão de chat em 30 dias: o seu CLI, TUI e Desktop sempre contam como você.",
-           "add": "Para contar um remetente como você",
+           "add": "Para contar um remetente como você", "channel": "<canal>",
            "platform": "Para contar todo chat de um canal como você (um bot privado, a sua própria interface)",
            "restart": "Depois reinicie o gateway para os hooks em execução verem a mudança",
            "run": "Rode isto no seu próprio terminal (grava o valor do formulário de configurações do Hermes) e depois "
@@ -424,7 +434,7 @@ def _owner(args, home: Path, *, now: float, runtime_config, lang: str) -> str:
             lines.append(f"| `{channel['origin']}` | {channel['sessions']} | {senders} | "
                          f"{t['yes'] if channel['covered'] else t['no']} |")
         lines += ["", f"{t['add']}: `hermes evolution owner add <id>`",
-                  f"{t['platform']}: `hermes evolution owner add-platform <channel>`"]
+                  f"{t['platform']}: `hermes evolution owner add-platform {t['channel']}`"]
     try:
         ignored = [key for key in ignored_settings(settings(home)) if key.startswith("owner_")]
     except (OSError, ValueError, RecursionError):
@@ -699,7 +709,8 @@ def _report(args, home: Path, *, running_version=None, provider=None, now: float
     rates = config.get("rates_usd_per_million", {})
     with database(home) as conn:
         if action == "memory":
-            if args.memory_action == "remember" and settings(home).get("legacy_memory_commands") is not True:
+            if args.memory_action == "remember" and \
+                    effective_settings(home, runtime_config).get("legacy_memory_commands") is not True:
                 raise ValueError("New legacy notes require legacy_memory_commands in Evolution settings")
             return _memory(conn, args)
         if action == "feedback":
@@ -923,18 +934,26 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
 
 
 def _standalone_config(home: Path) -> dict:
-    """The profile's config.yaml when a YAML parser is installed. Without one the runner uses defaults."""
+    """The profile's config.yaml when a YAML parser is installed. Without one, or when the file cannot be read,
+    the runner uses defaults and marks the configuration as unread: the settings only it holds (who the owner
+    is) are unknown there, not empty."""
+    from .evolve import CONFIG_UNREAD
+
+    if not (home / "config.yaml").exists():
+        return {}
     try:
         import yaml
     except ImportError:
-        return {}
+        return {CONFIG_UNREAD: True}
     try:
         with (home / "config.yaml").open("rb") as stream:
             body = stream.read(1_048_577)
         loaded = yaml.safe_load(body) if len(body) <= 1_048_576 else None
     except (OSError, ValueError, RecursionError, yaml.YAMLError):
+        return {CONFIG_UNREAD: True}
+    if loaded is None:   # an empty file: Hermes' defaults
         return {}
-    return loaded if isinstance(loaded, dict) else {}
+    return loaded if isinstance(loaded, dict) else {CONFIG_UNREAD: True}
 
 
 def _utf8_output() -> None:

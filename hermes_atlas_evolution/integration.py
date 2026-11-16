@@ -14,7 +14,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from .advisory import TOOL, tool_handler
-from .cli import execute, safe_settings, settings, setup
+from .cli import execute, safe_settings, setup
 from .memory import GLOBAL_SCOPE, MemoryStore, make_scope
 from .native_signals import HOOKS, observe_native
 from .operations import database, observe
@@ -75,11 +75,12 @@ def slash(home, raw_args: str, *, source=None, platform="", lang: str = "en") ->
         return text("Evolution storage is temporarily unavailable.", lang)
 
 
-def shared_context(home, payload: dict):
+def shared_context(home, payload: dict, config: dict):
+    """The 0.1 shared notes for a turn, when the owner switched them on in the Hermes configuration (`config` is
+    the trusted settings: settings.json alone, which the agent's file tools can write, cannot switch them on)."""
     query = payload.get("user_message")
     if not isinstance(query, str) or not query.strip() or payload.get("parent_session_id"):
         return None
-    config = settings(home)
     if config.get("legacy_memory_commands") is not True or config.get("automatic_shared_recall") is not True:
         return None
     with database(home, observer=True) as conn:
@@ -115,12 +116,14 @@ def autopilot_pass(home: Path, reflect, cancelled=None) -> dict:
 
     from .evolve import cycle
 
+    from .evolve import CONFIG_UNREAD
+
     try:
         from hermes_cli.config import load_config_readonly
 
         runtime = load_config_readonly() or {}
-    except Exception:   # the pass still runs with the plugin's own settings
-        runtime = {}
+    except Exception:   # the pass still runs with the plugin's own settings; who the owner is stays unknown
+        runtime = {CONFIG_UNREAD: True}
     current, _problems = safe_settings(home, runtime)
     result = cycle(home, now=time.time(), runtime_config=runtime, config=current, reflect=reflect, strict=False,
                    cancelled=cancelled)
@@ -179,6 +182,9 @@ class _Plugin:
         self.counted: dict[str, None] = {}  # sessions whose playbook render was already counted
         # session id -> (whether its latest turn served the owner, its origin label); memory only
         self.sessions: OrderedDict[str, tuple[bool, str]] = OrderedDict()
+        # delegated child session id -> its parent's session id, from subagent_start: a child serves whoever
+        # its parent served, and its prompt is built before its first turn says who the parent is
+        self.children: OrderedDict[str, str] = OrderedDict()
         self.owners = frozenset(str(item) for item in evolution["owner_sender_ids"] if item not in (None, ""))
         self.owner_platforms = frozenset(evolution["owner_platforms"])
         self.guard = None
@@ -209,11 +215,25 @@ class _Plugin:
 
     def native(self, hook: str):
         def callback(**payload):
+            if hook == "subagent_start":
+                self._remember_child(payload.get("child_session_id"), payload.get("parent_session_id"))
             try:
                 observe_native(self.home, hook, payload)
             except Exception:
                 self.warn(hook)
         return callback
+
+    def _remember_child(self, child, parent) -> None:
+        if isinstance(child, str) and isinstance(parent, str) and 0 < len(child) <= 400 and 0 < len(parent) <= 400:
+            with self.recent_lock:
+                self.children[child] = parent
+                self.children.move_to_end(child)
+                while len(self.children) > 2048:
+                    self.children.popitem(last=False)
+
+    def parent_of(self, session) -> str | None:
+        with self.recent_lock:
+            return self.children.get(session) if isinstance(session, str) else None
 
     def pre_tool(self, **payload):
         """Remember a hash of the command the agent wrote (another plugin may rewrite it before it runs), then
@@ -309,9 +329,11 @@ class _Plugin:
             surface = turn_surface(payload)
             origin = origin_label(payload)
             payload = {**payload, "surface": surface, "origin": origin}
+            parent = payload.get("parent_session_id") or self.parent_of(payload.get("session_id"))
             self._remember_owner(payload.get("session_id"),
                                  owner_turn(surface, payload.get("sender_id"), self.owners, origin=origin,
-                                            owner_platforms=self.owner_platforms), origin)
+                                            owner_platforms=self.owner_platforms,
+                                            parent_owner=surface == "subagent" and self.served_owner(parent)), origin)
         except Exception:
             pass
         try:
@@ -320,7 +342,7 @@ class _Plugin:
                 record_skill_correction(self.home, self.turns.recent_skills(payload.get("session_id")))
             self.research.start(payload)
             self.turns.start(payload)
-            return shared_context(self.home, payload) if self.legacy else None
+            return shared_context(self.home, payload, self.config) if self.legacy else None
         except Exception:
             return None
 
@@ -400,10 +422,15 @@ class _Plugin:
             info = session_info if hasattr(session_info, "get") else {}
             platform = info.get("platform")
             # A chat where someone else may be on the other side gets template lessons only: the prompt is built
-            # before the first message, so who is writing is not known yet.
+            # before the first message, so who is writing is not known yet. A delegated child gets what its
+            # parent got: subagent_start named the parent before the child's prompt was built.
             origin = session_source(platform) or platform
-            others = surface_of(platform, origin) == "gateway" and not self.served_owner(info.get("session_id")) \
-                and not (isinstance(origin, str) and origin.lower() in self.owner_platforms)
+            surface = surface_of(platform, origin)
+            if surface == "subagent":
+                others = not self.served_owner(self.parent_of(info.get("session_id")))
+            else:
+                others = surface == "gateway" and not self.served_owner(info.get("session_id")) \
+                    and not (isinstance(origin, str) and origin.lower() in self.owner_platforms)
             with experience(self.home) as conn:   # its own connection: WAL readers never wait for a writer
                 text = playbook.playbook(conn, lang=self.lang, chosen=shown, templates_only=others)
             session = info.get("session_id")

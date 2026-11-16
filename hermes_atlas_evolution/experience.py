@@ -168,7 +168,8 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
 
 
 def prune(conn: sqlite3.Connection, *, now: float) -> None:
-    """Drop aggregates older than the retention window. Lessons and open proposals are kept."""
+    """Drop aggregates older than the retention window. Lessons, retired ones included, and open proposals are
+    kept."""
     cutoff = day_offset(now, RETENTION_DAYS)
     for table in ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "review_daily",
                   "skill_outcome_daily", "guard_daily", "failure_owner_daily", "approval_daily"):
@@ -178,7 +179,8 @@ def prune(conn: sqlite3.Connection, *, now: float) -> None:
                  "(SELECT signature FROM lesson WHERE signature IS NOT NULL AND status IN ('active','candidate'))", (old,))
     conn.execute("DELETE FROM change WHERE at < ?", (old,))
     conn.execute("DELETE FROM proposal WHERE status NOT IN ('open','approved') AND updated < ?", (old,))
-    conn.execute("DELETE FROM lesson WHERE status='retired' AND updated < ?", (old,))
+    # Lessons are kept, retired ones included: a deleted row would free its id for another lesson, and a sentence
+    # the owner turned down would come back as new once its record was gone.
     # Excerpts expire here too, so they do not outlive their window when no learning pass runs.
     conn.execute("DELETE FROM failure_sample WHERE updated < ? OR signature NOT IN (SELECT signature FROM failure)",
                  (now - SAMPLE_DAYS * 86_400,))

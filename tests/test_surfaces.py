@@ -52,7 +52,8 @@ class SurfaceTest(Base):
     def test_the_owner_is_served_on_their_surfaces_and_by_listed_senders(self):
         owners = frozenset({"555"})
         self.assertEqual([owner_turn(surface, None, owners) for surface in ("local", "cron", "subagent", "gateway")],
-                         [True, True, True, False])
+                         [True, True, False, False])   # a subagent serves whoever its parent served
+        self.assertTrue(owner_turn("subagent", None, owners, parent_owner=True))
         self.assertTrue(owner_turn("gateway", 555, owners))   # a numeric Telegram id
         self.assertFalse(owner_turn("gateway", "stranger", owners))
 

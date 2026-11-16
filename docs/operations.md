@@ -127,7 +127,6 @@ Reading shared Kanban boards requires `"inspect_shared_kanban": true`. Creating 
 
 ```json
 {
-  "agent_advice": true,
   "inspect_shared_kanban": true,
   "kanban_handoff": {"enabled": true, "board": "ops", "assignee": "reviewer"}
 }
@@ -185,8 +184,8 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 
 | Key | Format | Default | Effect |
 |---|---|---|---|
-| `evolution` | object | see the loop | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `owner_sender_ids`, `reflector`, `reflector_daily_limit`, `autopilot_minutes`, `runtime_guard` |
-| `agent_advice` | boolean | `false` | Exposes the agent tools (`agent_tools` in the Hermes form). |
+| `evolution` | object | see the loop | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `reflector`, `reflector_daily_limit`, `autopilot_minutes`; `owner_sender_ids`, `owner_platforms` and `runtime_guard: false` are ignored here and count only from the Hermes form |
+| `agent_advice` | boolean | `false` | Ignored when `true`: the agent tools are switched on only from the Hermes form (`agent_tools`). |
 | `sensitivity` | `low`, `balanced`, `high` | `balanced` | Threshold of adaptive alerts. |
 | `rates_usd_per_million` | object by provider and model | none | Prices for cost estimates (see [Usage and cost](#usage-and-cost)). |
 | `daily_estimated_budget_usd` | number above 0, up to 1,000,000 | none | Daily (UTC) limit on the priced estimate. |
@@ -194,8 +193,8 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 | `kanban_handoff` | object: `enabled`, `board`, `assignee` | disabled | Authorizes `ops handoff`. `board` and `assignee` are lower-case slugs. |
 | `linux_supervisor` | object | absent | Policy for reversible systemd trials (see [Linux remediation](#linux-remediation)). |
 | `semantic_incident_model` | absolute path | none | Local embedding model for `ops similar`. |
-| `legacy_memory_commands` | boolean | `false` | Allows new 0.1 notes and the `/evolution` chat command. |
-| `automatic_shared_recall` | boolean | `false` | With `legacy_memory_commands`, injects matching shared 0.1 notes into a turn. |
+| `legacy_memory_commands` | boolean | `false` | Allows new 0.1 notes and the `/evolution` chat command. Ignored here when `true`: set it with `hermes config set plugins.entries.hermes-atlas-evolution.settings.legacy_memory_commands true`. |
+| `automatic_shared_recall` | boolean | `false` | With `legacy_memory_commands`, injects matching shared 0.1 notes into a turn. Ignored here when `true`, like `legacy_memory_commands`: set it in the Hermes configuration. |
 
 ## Data and compatibility
 

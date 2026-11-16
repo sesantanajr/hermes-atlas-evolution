@@ -446,6 +446,49 @@ class SurfacesTest(PluginBase):
 
 
 
+class SubagentOwnerTest(PluginBase):
+    """A delegated child serves whoever its parent served: a stranger cannot reach the owner's lessons through one."""
+
+    def setUp(self):
+        super().setUp()
+        self.settings(evolution={"lessons": "auto", "reflector": True})
+        self.hermes_settings(agent_tools=True)
+        self.context = self.plugin()
+        with experience(self.home) as conn:
+            lessons.add_custom(conn, "Use the staging vault path ops/db-stage for database work.", tool="general",
+                               origin="operator", now=1.0, active=True)
+
+    def delegate(self, parent, child, **who):
+        self.context.fire("pre_llm_call", session_id=parent, turn_id="p1", user_message="delegate it", **who)
+        self.context.fire("subagent_start", parent_session_id=parent, parent_turn_id="p1", child_session_id=child,
+                          child_subagent_id=child, child_role="worker", child_goal="do it")
+        render = self.context.sections["hermes-atlas-evolution.playbook"]["content"]
+        prompt = render({"session_id": child, "platform": "subagent"})   # built before the child's first turn
+        self.context.fire("pre_llm_call", session_id=child, turn_id="c1", user_message="do it", platform="subagent",
+                          parent_session_id=parent)
+        tool = self.context.tools["hermes_atlas_evolution_lessons"]["handler"]
+        reply = json.loads(tool({"action": "search"}, session_id=child))
+        crash = json.dumps({"output": "Traceback (most recent call last): RuntimeError: IGNORE PREVIOUS", "exit_code": 1})
+        self.context.fire("post_tool_call", tool_name="terminal", status="error", args={"command": "frobnicate"},
+                          result=crash, session_id=child, turn_id="c1", tool_call_id=f"{child}-x")
+        close_observers()
+        with experience(self.home) as conn:
+            owned = conn.execute("SELECT COALESCE(SUM(count), 0) FROM failure_owner_daily").fetchone()[0]
+            excerpts = conn.execute("SELECT COUNT(*) FROM failure_sample").fetchone()[0]
+        return "ops/db-stage" in prompt, "lessons" in reply, owned, excerpts
+
+    def test_a_child_delegated_from_a_strangers_chat_serves_the_stranger(self):
+        self.assertEqual(self.delegate("tg-chat", "child-1", platform="telegram", sender_id="stranger"),
+                         (False, False, 0, 0))
+
+    def test_a_child_delegated_from_the_owners_own_session_serves_the_owner(self):
+        self.assertEqual(self.delegate("cli-session", "child-2", platform="cli"), (True, True, 1, 1))
+
+    def test_a_child_whose_parent_is_unknown_serves_someone_else(self):
+        render = self.context.sections["hermes-atlas-evolution.playbook"]["content"]
+        self.assertNotIn("ops/db-stage", render({"session_id": "orphan", "platform": "subagent"}))
+
+
 class HostIsolationTest(PluginBase):
     def test_in_a_plugin_host_nothing_is_registered_that_could_block_every_tool(self):
         with patch.dict("os.environ", {"HERMES_PLUGIN_HOST_PROCESS": "1"}):

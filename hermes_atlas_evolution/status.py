@@ -331,8 +331,10 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         attention.append("digest_unscheduled")
     from .cli import ignored_settings, settings as stored_settings
 
-    try:   # values the agent could have written there are not used (cli.TRUSTED_ONLY); say so
-        report["settings_ignored"] = sorted(ignored_settings(stored_settings(home)))
+    from .cli import TRUSTED_ONLY
+
+    try:   # values the agent could have written there are not used (cli.TRUSTED_ONLY); say so, by their name there
+        report["settings_ignored"] = sorted(TRUSTED_ONLY[key][0][-1] for key in ignored_settings(stored_settings(home)))
     except (OSError, ValueError, RecursionError):
         report["settings_ignored"] = []
     if report["settings_ignored"]:
@@ -347,7 +349,8 @@ _TEXT = {
            "autopilot": "Autopilot", "every": "every {minutes} min", "off": "off (run `hermes evolution learn` yourself)",
            "last": "last pass", "ok": "ok", "failed": "failed",
            "never": "has not run yet; the clock starts it within 2 minutes of the plugin loading, or run `hermes evolution learn`",
-           "backfill": "Hermes history", "reflector": "Reflector", "on": "on", "calls": "calls today",
+           "backfill": "Hermes history", "reflector": "Reflector", "on": "on", "guard_on": "on", "guard_off": "off",
+           "calls": "calls today",
            "drafts": "drafts waiting", "lessons": "Lessons", "mode": "mode", "active": "active",
            "awaiting": "awaiting approval", "retired": "retired", "withdrawn": "withdrawn", "proposals": "Open proposals",
            "guard": "Runtime guard", "vetoed": "commands vetoed in 7 days", "attention": "Needs attention",
@@ -381,7 +384,8 @@ _TEXT = {
            "autopilot": "Autopilot", "every": "a cada {minutes} min", "off": "desligado (rode `hermes evolution learn` você mesmo)",
            "last": "última passada", "ok": "ok", "failed": "falhou",
            "never": "ainda não rodou; o relógio a inicia em até 2 minutos depois de o plugin carregar, ou rode `hermes evolution learn`",
-           "backfill": "Histórico do Hermes", "reflector": "Refletor", "on": "ligado", "calls": "chamadas hoje",
+           "backfill": "Histórico do Hermes", "reflector": "Refletor", "on": "ligado", "guard_on": "ligada",
+           "guard_off": "desligada", "calls": "chamadas hoje",
            "drafts": "rascunhos aguardando", "lessons": "Lições", "mode": "modo", "active": "ativas",
            "awaiting": "aguardando aprovação", "retired": "aposentadas", "withdrawn": "retiradas", "proposals": "Propostas abertas",
            "guard": "Guarda de runtime", "vetoed": "comandos barrados em 7 dias", "attention": "Precisa de atenção",
@@ -443,9 +447,9 @@ def markdown(report: dict, lang: str = "en") -> str:
     if guard.get("state") == "host":
         state = t["guard_host"]
     elif guard["enabled"]:
-        state = f"{t['on']} · {guard['vetoed_7d']} {t['vetoed']} · {t['guard_covers']}"
+        state = f"{t['guard_on']} · {guard['vetoed_7d']} {t['vetoed']} · {t['guard_covers']}"
     else:
-        state = t["off"].split(" (")[0]
+        state = t["guard_off"]
     lines.append(f"- **{t['guard']}:** {state}")
     if report.get("first_pass"):
         lines += ["", "> " + t["first_pass"].format(**report["first_pass"])]

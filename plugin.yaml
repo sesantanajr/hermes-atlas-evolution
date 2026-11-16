@@ -92,7 +92,7 @@ config_schema:
     description: >-
       Platforms where every chat is yours, such as a private bot or your own interface through the API server
       (telegram, api_server, ...). Their chats count as yours from the first message, so they get all your
-      lessons. `hermes evolution owner add-platform <name>` sets it too.
+      lessons. `hermes evolution owner add-platform <name>` prints the command that sets it.
   reflector:
     type: bool
     default: true

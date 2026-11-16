@@ -17,6 +17,10 @@ from .i18n import resolve
 from .experience import day_offset, experience, prune, utc_day
 from .skill_health import read_usage, skill_health, skill_outcomes
 
+# Set in a runtime configuration that could not be read (a standalone run without a YAML parser): the settings
+# that only the Hermes configuration holds, who the owner is among them, are unknown there, not empty.
+CONFIG_UNREAD = "_atlas_evolution_config_unread"
+
 DEFAULTS = {"lessons": "auto", "tool_hints": False, "feedback_signals": True, "language": "auto",
             "slow_turn_seconds": 60, "owner_sender_ids": (), "owner_platforms": (), "reflector": True, "reflector_daily_limit": 6,
             "autopilot_minutes": 60, "runtime_guard": True}
@@ -100,8 +104,9 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
 
     backfill.mark_observed(home, now=now)
     budget = backfill_budget_s if deadline is None else max(0.0, min(backfill_budget_s, deadline - _time.monotonic() - 30))
+    owner_known = not (isinstance(runtime_config, dict) and runtime_config.get(CONFIG_UNREAD))
     history = backfill.step(home, now=now, budget_s=budget, owner_sender_ids=opts["owner_sender_ids"],
-                            owner_platforms=opts["owner_platforms"], cancelled=cancelled,
+                            owner_platforms=opts["owner_platforms"], owner_known=owner_known, cancelled=cancelled,
                             sample=opts["reflector"] and opts["lessons"] != "off", slow_ms=opts["slow_turn_seconds"] * 1000)
     with experience(home) as conn:
         # Short transactions: hook writers of a running gateway share this database, so no phase keeps the

@@ -84,7 +84,7 @@ class TrustTest(Base):
         self.assertEqual((chosen["owner_platforms"], chosen["runtime_guard"], trusted["agent_advice"]),
                          (("api_server",), False, True))
         report = status.build(self.home, now=NOW, config=effective_settings(self.home, {}))
-        self.assertEqual(report["settings_ignored"], ["agent_tools", "owner_platforms", "owner_sender_ids", "runtime_guard"])
+        self.assertEqual(report["settings_ignored"], ["agent_advice", "owner_platforms", "owner_sender_ids", "runtime_guard"])
         text = status.markdown(report, "pt")
         self.assertIn("Estes valores do `settings.json` são ignorados", text)
         self.assertNotIn("5511987654321", text)   # status never shows a sender id

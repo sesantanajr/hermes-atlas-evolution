@@ -190,20 +190,27 @@ class EvolutionTest(unittest.TestCase):
             store.remember("local", "lesson", "continuidade avaliação SECRET")
             store.remember(GLOBAL_SCOPE, "preference", "continuidade avaliação PRIVATE")
             store.remember(GLOBAL_SCOPE, "lesson", "continuidade avaliação SHARED " + '"' * 110)
-        self.assertIsNone(shared_context(self.home, request))
+        from hermes_atlas_evolution.cli import effective_settings
+
+        self.assertIsNone(shared_context(self.home, request, effective_settings(self.home, {})))
         self._settings({"legacy_memory_commands": True, "automatic_shared_recall": True, "daily_estimated_budget_usd": 0.01,
                         "rates_usd_per_million": {"example": {"a": {"input": 20, "output": 0,
                                                                      "cache_read": 0, "cache_write": 0}}}})
-        context = shared_context(self.home, request)["context"]
+        # settings.json alone, which the agent's own file tools can write, cannot switch the recall on
+        self.assertIsNone(shared_context(self.home, request, effective_settings(self.home, {})))
+        form = {"plugins": {"entries": {"hermes-atlas-evolution": {"settings": {
+            "legacy_memory_commands": True, "automatic_shared_recall": True}}}}}
+        context = shared_context(self.home, request, effective_settings(self.home, form))["context"]
         self.assertIn("SHARED", context)
         self.assertNotIn("SECRET", context)
         self.assertNotIn("PRIVATE", context)
         self.assertLessEqual(len(context), 480)
-        self.assertIsNone(shared_context(self.home, {**request, "parent_session_id": "parent"}))
+        trusted = effective_settings(self.home, form)
+        self.assertIsNone(shared_context(self.home, {**request, "parent_session_id": "parent"}, trusted))
         observe(self.home, "api", {"provider": "example", "model": "a", "usage": {"input_tokens": 2000}}, now=NOW)
         tick = SimpleNamespace(evolution_action="tick", days=7, upstream_tag=None, changes_only=False)
         self.assertEqual(_report(tick, self.home, now=NOW)["decision"]["mode"], "conservative")
-        self.assertIsNone(shared_context(self.home, request))
+        self.assertIsNone(shared_context(self.home, request, trusted))
 
     def _settings(self, value):
         (self.home / "evolution" / "settings.json").write_text(json.dumps(value), encoding="utf-8")
