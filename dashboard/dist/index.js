@@ -39,7 +39,11 @@
       agentSingle: "proposed by the agent: approve it on its own",
       cancel: "Cancel", confirm: "Approve all",
       done: { approve: "Approved.", reject: "Rejected.", retire: "Retired.", reactivate: "Reactivated.", all: "Approved {n}.",
-              undo: "Undone.", settings: "Saved. It applies within a minute, without restarting.", proposal: "Recorded." },
+              undo: "Undone.", settings: "Saved. It applies within a minute, without restarting.", proposal: "Recorded.",
+              applied: "Applied. You can undo it in the History tab.", dismissed: "Dismissed: it stays closed while nothing changes.",
+              appliedN: "Applied {n}. You can undo each one in the History tab.", already: "It was already so in Hermes: nothing to undo.",
+              notApplied: "Not applied ({n}):",
+              changed: "It changed meanwhile: look at it again." },
       skippedChanged: "{n} skipped: they changed since you saw them.",
       lessonsEmpty: "No lessons yet. A tool failure that comes back (3 times, in 2 sessions or on 2 days) becomes one.",
       proposalsEmpty: "No open proposals.",
@@ -49,16 +53,20 @@
       verdict: { effective: "helps", ineffective: "does not help", inconclusive: "inconclusive", withdrawn: "withdrawn from the queue" },
       status: { active: "active", candidate: "waiting", quarantined: "waiting (written)", retired: "retired" },
       origin: { derived: "template", operator: "you", reflector: "reflector", agent: "agent" },
-      actor: { terminal: "terminal", dashboard: "panel" },
-      action: { approve: "approved", reject: "rejected", retire: "retired", reactivate: "reactivated", set: "changed" },
+      actor: { terminal: "terminal", dashboard: "panel", automatic: "automatic" },
+      action: { approve: "approved", reject: "rejected", retire: "retired", reactivate: "reactivated", set: "changed", apply: "applied" },
       memoryRemoved: "took a repeated entry out of",
       undo: "Undo", undone: "undone",
       historyEmpty: "No decision yet.",
+      applyAll: "Apply the {n} change(s)", applyAllHint: "Reversible changes to Hermes, each one recorded with its undo.",
+      applyNow: "Apply now", dismiss: "Dismiss", seen: "What was seen", undoHow: "To undo",
+      category: { change: "the plugin applies it", lesson: "lesson", manual: "you apply it", advice: "observation" },
+      autoLine: "Automatic actions", autoNames: { off: "off", safe: "safe", full: "full" },
       copy: "Copy", copied: "Copied",
       share: "Share what this profile learned with another profile:",
       s: {
         title: "Settings", save: "Save", saving: "Saving…", recommended: "Apply the recommended setup",
-        recommendedHint: "Lessons on auto, reflector on, and the channels below that are yours by construction.",
+        recommendedHint: "Lessons on auto, reflector on, complete automatic actions, and the channels below that are yours by construction.",
         reloadNote: "Applies the next time the plugin loads (the gateway reloads plugins when one is enabled or updated).",
         reloadPending: "Waiting for the next load of the plugin: {keys}.",
         lessons: "Lessons", lessonsHint: "auto: lessons from fixed templates apply once your own turns hit the failure; suggest: every lesson waits for you; off: measure only.",
@@ -68,6 +76,10 @@
         slow_turn_seconds: "A turn is slow after (seconds)", tool_hints: "Add the lesson to the failing tool result",
         agent_tools: "Let the agent read and propose lessons (proposals still wait for you)",
         runtime_guard: "Runtime guard (keeps the agent from taking Hermes down)",
+        auto_actions: "Automatic actions (what the plugin does by itself)",
+        autoModes: { off: "off: everything waits for you", safe: "safe: takes out copies of a memory entry that are the very same text",
+                     full: "full: also locks skills the curator keeps rewriting" },
+        autoHint: "Each action is recorded in the History with its undo; an automatic change you undo is never repeated.",
         guardWarn: "Turning the guard off lets the agent restart or delete what Hermes runs on.",
         owner: "Who is you in chats", ownerHint: "Turns from these count as yours: you get every lesson there, and your failures there teach. List only what nobody else uses.",
         platform: "every chat of this channel is you", sender: "this sender is you", suggested: "suggested",
@@ -101,7 +113,11 @@
       agentSingle: "proposta pelo agente: aprove sozinha",
       cancel: "Cancelar", confirm: "Aprovar todas",
       done: { approve: "Aprovada.", reject: "Rejeitada.", retire: "Aposentada.", reactivate: "Reativada.", all: "{n} aprovadas.",
-              undo: "Desfeito.", settings: "Salvo. Vale em até um minuto, sem reiniciar.", proposal: "Registrado." },
+              undo: "Desfeito.", settings: "Salvo. Vale em até um minuto, sem reiniciar.", proposal: "Registrado.",
+              applied: "Aplicada. Dá para desfazer na aba Histórico.", dismissed: "Dispensada: fica fechada enquanto nada mudar.",
+              appliedN: "{n} aplicada(s). Dá para desfazer cada uma na aba Histórico.", already: "Já estava assim no Hermes: nada a desfazer.",
+              notApplied: "Não aplicadas ({n}):",
+              changed: "Mudou nesse meio-tempo: veja de novo." },
       skippedChanged: "{n} puladas: mudaram desde que você as viu.",
       lessonsEmpty: "Ainda não há lições. Uma falha de ferramenta que volta (3 vezes, em 2 sessões ou em 2 dias) vira uma.",
       proposalsEmpty: "Nenhuma proposta aberta.",
@@ -111,16 +127,20 @@
       verdict: { effective: "ajuda", ineffective: "não ajuda", inconclusive: "inconclusivo", withdrawn: "retirada da fila" },
       status: { active: "ativa", candidate: "esperando", quarantined: "esperando (escrita)", retired: "aposentada" },
       origin: { derived: "modelo fixo", operator: "você", reflector: "refletor", agent: "agente" },
-      actor: { terminal: "terminal", dashboard: "painel" },
-      action: { approve: "aprovou", reject: "rejeitou", retire: "aposentou", reactivate: "reativou", set: "mudou" },
+      actor: { terminal: "terminal", dashboard: "painel", automatic: "automático" },
+      action: { approve: "aprovou", reject: "rejeitou", retire: "aposentou", reactivate: "reativou", set: "mudou", apply: "aplicou" },
       memoryRemoved: "tirou uma entrada repetida de",
       undo: "Desfazer", undone: "desfeita",
       historyEmpty: "Nenhuma decisão ainda.",
+      applyAll: "Aplicar as {n} mudança(s)", applyAllHint: "Mudanças reversíveis no Hermes, cada uma registrada com o desfazer.",
+      applyNow: "Aplicar agora", dismiss: "Dispensar", seen: "O que foi visto", undoHow: "Para desfazer",
+      category: { change: "o plugin aplica", lesson: "lição", manual: "você aplica", advice: "observação" },
+      autoLine: "Ações automáticas", autoNames: { off: "desligadas", safe: "seguras", full: "completas" },
       copy: "Copiar", copied: "Copiado",
       share: "Leve o que este perfil aprendeu para outro perfil:",
       s: {
         title: "Configurações", save: "Salvar", saving: "Salvando…", recommended: "Aplicar a configuração recomendada",
-        recommendedHint: "Lições em auto, refletor ligado e os canais abaixo que são seus por construção.",
+        recommendedHint: "Lições em auto, refletor ligado, ações automáticas completas e os canais abaixo que são seus por construção.",
         reloadNote: "Vale na próxima carga do plugin (o gateway recarrega os plugins quando um é ligado ou atualizado).",
         reloadPending: "Esperando a próxima carga do plugin: {keys}.",
         lessons: "Lições", lessonsHint: "auto: lições de modelos fixos valem quando os seus turnos encontram a falha; suggest: toda lição espera você; off: só mede.",
@@ -130,6 +150,10 @@
         slow_turn_seconds: "Um turno é lento depois de (segundos)", tool_hints: "Juntar a lição ao resultado da ferramenta que falhou",
         agent_tools: "Deixar o agente ler e propor lições (as propostas continuam esperando você)",
         runtime_guard: "Guarda de runtime (impede o agente de derrubar o Hermes)",
+        auto_actions: "Ações automáticas (o que o plugin faz sozinho)",
+        autoModes: { off: "desligadas: tudo espera você", safe: "seguras: tira cópias de uma entrada da memória que são exatamente o mesmo texto",
+                     full: "completas: também trava skills que o curador reescreve sem parar" },
+        autoHint: "Cada ação fica no Histórico com o desfazer; uma mudança automática que você desfaz nunca se repete.",
         guardWarn: "Desligar a guarda deixa o agente reiniciar ou apagar aquilo em que o Hermes roda.",
         owner: "Quem é você nos chats", ownerHint: "Os turnos destes contam como seus: ali você recebe todas as lições, e as suas falhas ensinam. Marque só o que ninguém mais usa.",
         platform: "todo chat deste canal é você", sender: "este remetente é você", suggested: "sugerido",
@@ -287,6 +311,14 @@
     return data && data.target ? "&profile=current&target=" + encodeURIComponent(data.target) : "";
   }
 
+  // fetchJSON throws "<status>: <body>"; the body of the decide route carries a translated `message`
+  function failure(error) {
+    let text = String(error && error.message || error);
+    const body = text.indexOf("{") >= 0 ? text.slice(text.indexOf("{")) : "";
+    try { const parsed = JSON.parse(body); text = parsed.message || parsed.error || text; } catch (e) { /* as is */ }
+    return text;
+  }
+
   function useActions(props) {
     const state = hooks.useState(null);
     const working = state[0], setWorking = state[1];
@@ -301,14 +333,30 @@
         props.reload();
       }).catch(function (error) {
         setWorking(null);
-        // fetchJSON throws "<status>: <body>"; the body of this route carries a translated `message`
-        let text = String(error && error.message || error);
-        const body = text.indexOf("{") >= 0 ? text.slice(text.indexOf("{")) : "";
-        try { const parsed = JSON.parse(body); text = parsed.message || parsed.error || text; } catch (e) { /* as is */ }
-        props.notify(text, true);
+        props.notify(failure(error), true);
       });
     };
-    return { send: send, working: working };
+    // Several requests one after the other (each answers in seconds, so no proxy in front of the dashboard times out),
+    // then one notice with what happened to all of them.
+    const sendAll = function (bodies, done) {
+      if (!props.data.can_decide || !bodies.length) return;
+      setWorking("batch");
+      const results = [];
+      const next = function (index) {
+        if (index >= bodies.length) {
+          setWorking(null);
+          props.notify(done(results), false);
+          props.reload();
+          return;
+        }
+        SDK.fetchJSON("/api/plugins/" + NAME + "/decide?lang=" + props.lang + scope(props.data), {
+          method: "POST", headers: { "Content-Type": "application/json", "X-Atlas-Evolution": "1" }, body: JSON.stringify(bodies[index])
+        }).then(function (result) { results.push(result); next(index + 1); })
+          .catch(function (error) { setWorking(null); props.notify(failure(error), true); props.reload(); });
+      };
+      next(0);
+    };
+    return { send: send, sendAll: sendAll, working: working };
   }
 
   function LessonActions(props) {
@@ -433,27 +481,66 @@
   function Proposals(props) {
     const t = props.t, rows = props.data.proposals || [], act = props.actions;
     if (!rows.length) return h("p", { className: "hae-muted" }, t.proposalsEmpty);
-    return h("div", { className: "hae-stack" }, rows.map(function (row) {
-      const lesson = row.evidence && row.evidence.lesson;
-      const decide = function (action) {
-        return function () {
-          act.send({ kind: "proposal", id: row.id, action: action }, function (result) {
-            return result && result.run_this ? t.runAfter + " " + result.run_this : t.done.proposal;
+    const changes = rows.filter(function (row) { return (row.explain || {}).can_apply; });
+    const applied = function (result) {
+      if (result && result.applied === true) return t.done.applied;
+      if (result && Array.isArray(result.applied)) return fill(t.done.appliedN, { n: result.applied.length });
+      return result && result.reason === "already" ? t.done.already : t.done.changed;
+    };
+    const applyAll = function () {   // batches of 10; the plugin applies each batch one change after the other
+      const ids = changes.map(function (row) { return row.id; }), bodies = [];
+      for (let at = 0; at < ids.length; at += 10) bodies.push({ kind: "apply_all", ids: ids.slice(at, at + 10) });
+      act.sendAll(bodies, function (results) {
+        let done = 0;
+        const reasons = [];
+        results.forEach(function (result) {
+          done += (result.applied || []).length;
+          (result.skipped || []).forEach(function (item) {
+            reasons.push("#" + item.id + " " + (item.reason === "already" ? t.done.already : item.reason === "not_open" ? t.done.changed : String(item.reason || "")));
           });
-        };
-      };
-      return h(Section, { key: row.id, title: "#" + row.id + " · " + row.kind },
-        h("div", { className: "hae-stack" },
-          h("div", { className: "hae-waiting-meta" },
-            h(Pill, { tone: row.risk === "high" ? "bad" : row.risk === "medium" ? "warn" : "neutral" }, t.col.risk + ": " + row.risk),
-            h("code", { className: "hae-code" }, row.subject)),
-          lesson ? h("div", { className: "hae-lesson" }, inline(String(lesson), "p" + row.id)) : null,
-          h("div", { className: "hae-muted" }, t.col.command),
-          h(CopyCommand, { t: t, command: row.command }),
-          props.data.can_decide ? h("div", { className: "hae-row-actions" },
-            h(Button, { primary: true, onClick: decide("approve"), disabled: !!act.working }, t.approve),
-            h(Button, { onClick: decide("reject"), disabled: !!act.working }, t.reject)) : null));
-    }));
+        });
+        return fill(t.done.appliedN, { n: done }) + (reasons.length ? " " + fill(t.done.notApplied, { n: reasons.length }) + " " + reasons.join("; ") : "");
+      });
+    };
+    const order = ["change", "lesson", "manual", "advice"];
+    const sorted = rows.slice().sort(function (a, b) {
+      return order.indexOf((a.explain || {}).category) - order.indexOf((b.explain || {}).category);
+    });
+    return h("div", { className: "hae-stack" },
+      props.data.can_decide && changes.length ? h("div", { className: "hae-actions hae-actions-left" },
+        h(Button, { primary: true, onClick: applyAll, disabled: !!act.working }, fill(t.applyAll, { n: changes.length })),
+        h("span", { className: "hae-muted" }, t.applyAllHint)) : null,
+      sorted.map(function (row) {
+        const told = row.explain || { title: row.kind, risk: row.risk, category: "manual" };
+        const lesson = row.evidence && row.evidence.lesson;
+        const send = function (body, done) { return function () { act.send(body, done); }; };
+        const decided = function (result) { return result && result.run_this ? t.runAfter + " " + result.run_this : t.done.proposal; };
+        let buttons = null;
+        if (props.data.can_decide) {
+          if (told.category === "change") {
+            buttons = [h(Button, { key: "a", primary: true, disabled: !!act.working,
+                                   onClick: send({ kind: "apply", id: row.id }, applied) }, t.applyNow),
+                       h(Button, { key: "r", disabled: !!act.working, onClick: send({ kind: "proposal", id: row.id, action: "reject" }, decided) }, t.reject)];
+          } else if (told.category === "advice") {
+            buttons = [h(Button, { key: "d", disabled: !!act.working, onClick: send({ kind: "proposal", id: row.id, action: "reject" }, function () { return t.done.dismissed; }) }, t.dismiss)];
+          } else {
+            buttons = [h(Button, { key: "a", primary: true, disabled: !!act.working, onClick: send({ kind: "proposal", id: row.id, action: "approve" }, decided) }, t.approve),
+                       h(Button, { key: "r", disabled: !!act.working, onClick: send({ kind: "proposal", id: row.id, action: "reject" }, decided) }, t.reject)];
+          }
+        }
+        return h(Section, { key: row.id, title: told.title },
+          h("div", { className: "hae-stack" },
+            h("div", { className: "hae-waiting-meta" },
+              h(Pill, { tone: row.risk === "high" ? "bad" : row.risk === "medium" ? "warn" : "neutral" }, t.col.risk + ": " + told.risk),
+              h(Pill, { tone: told.category === "change" ? "good" : "muted" }, t.category[told.category] || told.category),
+              h("code", { className: "hae-code" }, row.subject), h("span", { className: "hae-muted" }, "#" + row.id)),
+            told.what && told.category !== "lesson" ? h("div", null, h("strong", null, t.seen + ": "), inline(String(told.what), "w" + row.id)) : null,
+            lesson ? h("div", { className: "hae-lesson" }, inline(String(lesson), "p" + row.id)) : null,
+            told.does ? h("div", { className: "hae-muted" }, inline(String(told.does), "d" + row.id)) : null,
+            told.undo ? h("div", { className: "hae-muted" }, t.undoHow + ": ", h("code", { className: "hae-code" }, told.undo)) : null,
+            told.category === "advice" || told.category === "manual" ? h(CopyCommand, { t: t, command: row.command }) : null,
+            buttons ? h("div", { className: "hae-row-actions" }, buttons) : null));
+      }));
   }
 
   function Settings(props) {
@@ -487,7 +574,7 @@
       set(key, list);
     };
     const recommended = function () {
-      const values = Object.assign({}, form, { lessons: "auto", reflector: true });
+      const values = Object.assign({}, form, { lessons: "auto", reflector: true, auto_actions: "full" });
       suggestions.forEach(function (item) {
         const key = item.kind === "platform" ? "owner_platforms" : "owner_sender_ids";
         if ((values[key] || []).indexOf(item.value) < 0) values[key] = (values[key] || []).concat([item.value]);
@@ -530,6 +617,7 @@
             h(Button, { primary: true, onClick: recommended, disabled: disabled }, s.recommended),
             h("span", { className: "hae-muted" }, s.recommendedHint)) : null,
           field("lessons", select("lessons", ["auto", "suggest", "off"], s.modes), s.lessonsHint),
+          field("auto_actions", select("auto_actions", ["off", "safe", "full"], s.autoModes), s.autoHint),
           field("reflector", checkbox("reflector")),
           field("reflector_daily_limit", number("reflector_daily_limit", 1, 50)),
           field("autopilot_minutes", number("autopilot_minutes", 0, 1440)),
@@ -574,6 +662,7 @@
         const what = row.kind === "lesson" ? (t.action[row.action] || row.action) + " #" + row.target
           : row.kind === "setting" ? (t.action.set) + " " + row.target + ": " + JSON.stringify(row.before.value) + " → " + JSON.stringify(row.after.value)
           : row.kind === "memory" ? t.memoryRemoved + " " + row.target
+          : row.kind === "proposal" && row.after && row.after.applied ? t.action.apply + " hermes " + row.after.applied.join(" ")
           : (t.action[row.action] || row.action) + " " + t.tabs.proposals.toLowerCase() + " #" + row.target;
         return h("tr", { key: row.id, className: row.undone ? "hae-row-muted" : "" },
           h("td", null, when(row.at, t.lang)),
@@ -635,6 +724,8 @@
         data ? h("div", { className: "hae-subtitle" }, t.profile + " ", h("code", { className: "hae-code" }, data.profile), " · v" + data.version) : null),
       h("div", { className: "hae-actions" },
         data ? h(Pill, { tone: data.mode === "off" ? "muted" : "good" }, t.mode[data.mode] || data.mode) : null,
+        data && data.automatic ? h(Pill, { tone: data.automatic.mode === "off" ? "muted" : "good" },
+          t.autoLine + ": " + (t.autoNames[data.automatic.mode] || data.automatic.mode)) : null,
         data ? h(Pill, { tone: (data.status.runtime_guard || {}).enabled ? "good" : "bad" },
                  (data.status.runtime_guard || {}).enabled ? t.guardOn : t.guardOff) : null,
         data ? h(Pill, { tone: (data.status.reflector || {}).enabled ? "neutral" : "muted" },

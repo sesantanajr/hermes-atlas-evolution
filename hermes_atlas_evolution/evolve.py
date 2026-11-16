@@ -22,7 +22,7 @@ CONFIG_UNREAD = "_atlas_evolution_config_unread"
 
 DEFAULTS = {"lessons": "auto", "tool_hints": False, "feedback_signals": True, "language": "auto",
             "slow_turn_seconds": 60, "owner_sender_ids": (), "owner_platforms": (), "reflector": True, "reflector_daily_limit": 6,
-            "autopilot_minutes": 60, "runtime_guard": True}
+            "autopilot_minutes": 60, "runtime_guard": True, "auto_actions": "safe"}
 
 
 def _whole(value):
@@ -78,10 +78,17 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
     autopilot = checked("autopilot_minutes", _whole(raw.get("autopilot_minutes", DEFAULTS["autopilot_minutes"])),
                         lambda value: type(value) is int and (value == 0 or 15 <= value <= 1440),
                         "evolution.autopilot_minutes must be 0 (manual only) or an integer from 15 to 1440", 0)
+    chosen_actions = raw.get("auto_actions", DEFAULTS["auto_actions"])
+    if chosen_actions is False:   # a bare `off`, as for lessons
+        chosen_actions = "off"
+    # What runs by itself (actions.MODES); an invalid value runs nothing.
+    automatic = checked("auto_actions", chosen_actions, lambda value: value in ("off", "safe", "full"),
+                        "evolution.auto_actions must be off, safe or full", "off")
     # A protection: an invalid value keeps it on.
     guard = checked("runtime_guard", raw.get("runtime_guard", True), lambda value: type(value) is bool,
                     "evolution.runtime_guard must be true or false", True)
     return {"lessons": mode, "tool_hints": raw.get("tool_hints", False) is True, "runtime_guard": guard,
+            "auto_actions": automatic,
             "reflector": reflect, "reflector_daily_limit": daily, "autopilot_minutes": autopilot,
             "feedback_signals": raw.get("feedback_signals", True) is not False,
             "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
@@ -172,13 +179,23 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         outcomes = skill_outcomes(conn, start_day=day_offset(now, 13), end_day=utc_day(now))
         from . import radar
 
+        from .actions import recover
+
+        recover(conn)   # before the refresh: a claim the loop did not write itself expires there
         conn.commit()   # Hermes' state.db is read with no write lock held on this database
         reading = radar.scan(home, conn, now=now, own_transform=opts["tool_hints"] and opts["lessons"] != "off")
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
                                     changes=verdicts, outcomes=outcomes, radar=reading["findings"], lang=opts["language"])
         fresh = set(created) | set(promoted)
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in fresh]
-    return {"now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons,
+    from . import actions
+
+    automatic = actions.automatic(home, now=now, mode=opts["auto_actions"], runtime_config=runtime_config, usage=usage,
+                                  deadline=deadline)
+    if automatic["applied"]:
+        with experience(home) as conn:
+            pending = proposals.listing(conn, status="open")
+    return {"automatic": automatic,"now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons,
             "lessons_promoted": len(promoted), "lessons_withdrawn": withdrawn, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
@@ -193,10 +210,15 @@ def notify_view(result: dict) -> dict | None:
     retired = [item for item in result["lesson_effects"] if item["retired"]]
     urgent = [item for item in result["open_proposals"] if item["risk"] == "high" and item["created"] == result.get("now")]
     drafts = result.get("reflector", {}).get("drafted") or []
-    if not (result["new_lessons"] or regressions or retired or urgent or drafts):
+    automatic = result.get("automatic") or {}
+    acted = automatic.get("applied") or automatic.get("memory") or automatic.get("failed")
+    if not (result["new_lessons"] or regressions or retired or urgent or drafts or acted):
         return None
-    return {"new_lessons": result["new_lessons"], "reflector_drafts": drafts, "regressions": regressions,
+    view = {"new_lessons": result["new_lessons"], "reflector_drafts": drafts, "regressions": regressions,
             "lessons_retired": retired, "high_risk_proposals": urgent}
+    if acted:
+        view["automatic_actions"] = automatic
+    return view
 
 
 def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: int = 7, lang: str = "en",

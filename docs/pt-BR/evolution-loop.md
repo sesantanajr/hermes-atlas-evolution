@@ -724,18 +724,33 @@ Subcomandos de `hermes evolution`. A saída é JSON, exceto no `report` e no `st
 
 | Tela | O que mostra e faz |
 |---|---|
-| Resumo | O modo das lições, as lições ativas e as que esperam, as propostas abertas, a última passada, se a guarda e o refletor estão ligados e quantos pontos pedem atenção |
+| Resumo | O modo das lições, as lições ativas e as que esperam, as propostas abertas, a última passada, a guarda, o refletor e as ações automáticas; o que pede atenção, em frases completas; e até cinco **sugestões** com uma letra (`a`, `b`…) que agem na hora: decidir as lições que esperam, aplicar as mudanças recomendadas, ligar as ações automáticas completas, organizar a memória, ler as observações |
 | 1 Lições esperando você | Cada uma com a frase exata e a origem; aprove ou rejeite uma, ou aprove todas depois de ler cada frase (as propostas do próprio agente são aprovadas uma a uma) |
-| 2 Propostas abertas | Risco, tipo e assunto; a lição ou o comando de cada uma; aprove ou rejeite. Uma proposta que muda o Hermes imprime o comando para você rodar |
+| 2 Propostas abertas | Agrupadas em mudanças que o plugin aplica, lições, mudanças que você aplica e observações, cada uma com título, risco, o que foi visto (com os números), o que aplicá-la faz e como desfazer. `a` aplica uma mudança na hora com o próprio comando do Hermes, `t` aplica todas, `d` dispensa uma observação, `e` escreve a lição de uma falha que nenhum modelo fixo cobre |
 | 3 Lições ativas | Com o efeito medido; aposente uma |
-| 4 Histórico de decisões e desfazer | As suas 20 últimas decisões, do terminal e do painel; desfaça uma enquanto o que ela mudou continua como ela deixou |
-| 5 Configurações | Cada opção do formulário com o valor atual; mude uma, ou aplique a configuração recomendada (lições em `auto`, refletor ligado e os canais de chat que são seus por construção) depois de ver o que muda. Gravadas com `hermes --profile <nome> config set ...`, conferidas antes pelas regras do próprio plugin |
-| 6 Quem é você nos chats | Cada canal dos últimos 30 dias com os remetentes, os sugeridos marcados; marque ou desmarque um canal inteiro ou um remetente como você |
-| 7 Memória do Hermes | Veja [Memória do Hermes](#memória-do-hermes) |
-| 8, 9 | O resumo de 7 dias e a situação completa |
-| 10 | Uma passada de aprendizado na hora |
+| 4 Histórico de decisões e desfazer | As suas 20 últimas decisões e as ações automáticas, do terminal, do painel e do piloto automático; desfaça uma enquanto o que ela mudou continua como ela deixou |
+| 5 Ações automáticas | O modo e o que cada modo faz, as ações automáticas dos últimos 7 dias com o desfazer, e `m` para mudar o modo (veja [Ações automáticas](#ações-automáticas)) |
+| 6 Configurações | Cada opção do formulário com o valor atual; mude uma, ou aplique a configuração recomendada (lições em `auto`, refletor ligado, ações automáticas completas e os canais de chat que são seus por construção) depois de ver o que muda. Gravadas com `hermes --profile <nome> config set ...`, conferidas antes pelas regras do próprio plugin |
+| 7 Quem é você nos chats | Cada canal dos últimos 30 dias com os remetentes, os sugeridos marcados; marque ou desmarque um canal inteiro ou um remetente como você |
+| 8 Memória do Hermes | Veja [Memória do Hermes](#memória-do-hermes) |
+| 9, 10 | O resumo de 7 dias e a situação completa |
+| 11 | Uma passada de aprendizado na hora |
 
 Uma decisão é tomada pelo mesmo código do painel do dashboard (`admin.py`) e gravada no mesmo histórico, com `terminal` como lugar. O menu só abre no terminal do operador: nunca onde os comandos que decidem se recusam a rodar (o shell do agente, veja o [SECURITY.md](../../SECURITY.md)), e nunca sem um terminal nas duas pontas.
+
+## Ações automáticas
+
+`auto_actions` diz o que o plugin faz sozinho no fim de cada passada de aprendizado (a do piloto automático, a do `learn` ou a do menu). Só vale vindo da configuração do Hermes (o formulário, o painel, o menu ou o `hermes config set`), nunca do `settings.json` do plugin, que as ferramentas de arquivo do agente conseguem gravar.
+
+| Modo | O que roda sozinho |
+|---|---|
+| `off` | Nada. Toda mudança espera você. |
+| `safe` (padrão) | Cópias de uma entrada da memória que são exatamente o mesmo texto, caractere por caractere, são retiradas, num arquivo ou entre os dois (a cópia do `USER.md` fica). Uma entrada que difere em qualquer coisa, inclusive maiúsculas e espaços (um caminho, uma senha, um bloco indentado), e entradas parecidas nunca são mexidas sozinhas: esperam você no menu. Uma entrada que você devolveu nunca mais é retirada sozinha. |
+| `full` | Também as mudanças reversíveis no Hermes que uma proposta pede, hoje **travar uma skill** que o curador reescreve sem parar (`hermes --profile <nome> curator lock <skill>`), até 3 por passada. |
+
+Cada ação vai para o histórico de decisões com `automatic` como autor, aparece no resumo do menu e no cabeçalho do painel, e pode ser desfeita pelo menu (tela 5 ou 4), pelo Histórico do painel ou pelo `hermes evolution decisions undo <id>`: uma trava é desfeita com `hermes curator unlock`, uma entrada da memória volta da cópia guardada. Uma mudança automática que você desfaz nunca mais é aplicada sozinha. Uma skill já travada ou fixada fica como está. Uma falha (o Hermes recusando, tempo esgotado) aparece no resultado da passada e nunca interrompe a passada.
+
+As mesmas mudanças podem ser aplicadas uma a uma, ou todas de uma vez, pelo menu (**Aplicar agora**, `t`) e pelo painel, em qualquer modo; uma skill que você mesmo travou fica como está, então um desfazer nunca a destrava. Uma proposta é reservada antes de o Hermes rodar, então uma decisão tomada nesse meio-tempo ou um segundo clique a encontra ocupada. Arquivar uma skill que ninguém usou, um rollback ou uma mudança numa configuração do Hermes nunca é aplicado pelo plugin: ele mostra o comando (o `curator restore` do Hermes 0.23.1 não devolve a skill arquivada ao lugar de antes). Uma mudança automática que o Hermes recusa é tentada de novo um dia depois; uma passada para na primeira recusa e deixa os comandos de fora quando está perto do limite de tempo.
 
 ## Memória do Hermes
 

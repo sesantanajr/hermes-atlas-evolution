@@ -1,5 +1,30 @@
 # Changelog
 
+*Em português: [CHANGELOG.pt-BR.md](CHANGELOG.pt-BR.md).*
+
+## 0.8.3
+
+Atlas Evolution now acts by itself where it is safe, and says in plain words what each proposal means. In a real profile 16 proposals waited with codes such as `skill_lock` and `[medium]`, and nothing happened until the owner ran each command by hand; one skill had been rewritten 75 times in a week.
+
+### Added
+
+- **Automatic actions** (`auto_actions`, `safe` by default). At the end of each learning pass, `safe` takes out copies of a memory entry that are the very same text, character for character (a copy of the file is kept; an entry the owner puts back stays); `full` also locks the skills Hermes' curator keeps rewriting, with `hermes curator lock`, at most 3 per pass. Every action is recorded in the history with `automatic` as the actor and its undo (`hermes curator unlock`, the memory copy); an automatic change the owner undoes is never applied by itself again; a failure is reported and never stops the pass. The setting counts only from Hermes' configuration, like `runtime_guard: false`. The recommended setup now includes `full`.
+- **Apply now.** A reversible change a proposal asks for (today, locking a skill) is applied by the plugin with Hermes' own command from the menu, the panel or `proposals approve`, one at a time or all at once, and undone from the history.
+- **Proposals in plain words** (`explain.py`): a title, the risk, what was seen with its numbers, what applying it does and how to undo it, in English or Brazilian Portuguese, in the menu and the panel, grouped as changes the plugin applies, lessons, changes you apply and observations. An observation is dismissed with one key or click; a failure no template covers gets its lesson written from the menu.
+- **The menu's summary** shows what needs attention in full sentences and up to five lettered suggestions that act at once. A new screen, **Automatic actions** (5), shows the mode, the last 7 days of automatic actions with their undo and changes the mode; the following screens moved one number down.
+- `status` and the panel's header show the mode and the automatic actions of the last 7 days; `learn --notify-only` includes them.
+- `CHANGELOG.pt-BR.md`, and a "What's new" and a quick start at the top of both READMEs.
+
+### Updating from 0.8.2
+
+```bash
+hermes -p <profile> plugins update hermes-atlas-evolution   # each profile; without -p for the default one
+hermes gateway restart
+sudo systemctl restart hermes-dashboard
+```
+
+Automatic actions start as `safe`. To let the plugin lock unstable skills by itself: the menu's suggestion, screen 5, the recommended setup, or `hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.auto_actions full`.
+
 ## 0.8.2
 
 0.8.1's panel could not decide in a real production dashboard. Behind HTTPS, Hermes names the login cookie `__Host-hermes_session_at`, and the panel only knew the plain name, so the dashboard's own profile stayed read-only with the owner logged in; and every other profile selected in the dashboard runs the plugin in its own plugin host, which Hermes reaches without any cookie, so those profiles could never decide. The panel now decides only in the dashboard's own process, with the session Hermes' login gate verified there, and for any other profile it asks that process, naming the profile on screen. An independent review of the first fix found that trusting the plugin host's forwarded verdict could be fooled (Hermes hides the shared session token from that process, and the agent can change `dashboard.public_url`), so the plugin host never decides. Checked end to end in a Hermes 0.23.1 dashboard with a password login over HTTPS and in a headless browser, for the dashboard's profile and a second one, and against the same dashboard without a login, where the token any program can read still gets read-only and 403 on every route, the review's attack included. This version also adds an interactive menu in the terminal and the care of Hermes' memory.

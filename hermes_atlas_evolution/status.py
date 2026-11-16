@@ -286,6 +286,8 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         drafts = conn.execute("SELECT COUNT(*) FROM lesson WHERE origin='reflector' AND status='quarantined'").fetchone()[0]
         proposals = conn.execute("SELECT COUNT(*) FROM proposal WHERE status='open'").fetchone()[0]
         vetoed = guard_summary(conn, now=now, days=7)
+        automatic = conn.execute("SELECT COUNT(*) FROM decision_log WHERE actor='automatic' AND at >= ? AND undone IS NULL",
+                                 (now - 7 * 86_400,)).fetchone()[0]
         stale, gone = _runtimes(conn, plugin_version())
     if gone:
         from .experience import record
@@ -312,6 +314,7 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
                     "awaiting_approval": lessons.get("candidate", 0) + lessons.get("quarantined", 0),
                     "retired": lessons.get("retired", 0) - withdrawn, "withdrawn": withdrawn},
         "proposals_open": proposals,
+        "auto_actions": {"mode": opts["auto_actions"], "last_7d": automatic},
         "runtime_guard": {"enabled": opts["runtime_guard"], "state": _guard_state(opts["runtime_guard"]),
                           "vetoed_7d": sum(vetoed.values())},
         "profiles": _profiles(Path(home), now=now),
@@ -387,6 +390,9 @@ _TEXT = {
            "drafts": "drafts waiting", "lessons": "Lessons", "mode": "mode", "active": "active",
            "awaiting": "awaiting approval", "retired": "retired", "withdrawn": "withdrawn", "proposals": "Open proposals",
            "guard": "Runtime guard", "vetoed": "commands vetoed in 7 days", "attention": "Needs attention",
+           "auto": "Automatic actions", "auto_modes": {"off": "off", "safe": "safe (memory repeats)",
+                                                       "full": "full (memory repeats and unstable skills)"},
+           "auto_done": "{count} in 7 days",
            "guard_covers": "knows the gateway as a systemd unit (Linux), a LaunchAgent (macOS) and a Windows service or task, and keeps the agent from changing this plugin's settings",
            "guard_host": "off: plugins run in a plugin host here (plugins.isolation: host), where a crashed host would "
                          "block every tool",
@@ -423,6 +429,9 @@ _TEXT = {
            "drafts": "rascunhos aguardando", "lessons": "Lições", "mode": "modo", "active": "ativas",
            "awaiting": "aguardando aprovação", "retired": "aposentadas", "withdrawn": "retiradas", "proposals": "Propostas abertas",
            "guard": "Guarda de runtime", "vetoed": "comandos barrados em 7 dias", "attention": "Precisa de atenção",
+           "auto": "Ações automáticas", "auto_modes": {"off": "desligadas", "safe": "seguras (repetições da memória)",
+                                                       "full": "completas (repetições da memória e skills instáveis)"},
+           "auto_done": "{count} em 7 dias",
            "guard_covers": "reconhece o gateway como unidade systemd (Linux), LaunchAgent (macOS) e serviço ou tarefa "
                            "do Windows, e impede o agente de mudar as configurações deste plugin",
            "guard_host": "desligada: aqui os plugins rodam num host de plugins (plugins.isolation: host), onde um host "
@@ -486,6 +495,10 @@ def markdown(report: dict, lang: str = "en") -> str:
     else:
         state = t["guard_off"]
     lines.append(f"- **{t['guard']}:** {state}")
+    automatic = report.get("auto_actions") or {}
+    if automatic:
+        lines.append(f"- **{t['auto']}:** {t['auto_modes'].get(automatic.get('mode'), automatic.get('mode'))} · "
+                     + t["auto_done"].format(count=automatic.get("last_7d", 0)))
     if report.get("first_pass"):
         lines += ["", "> " + t["first_pass"].format(**report["first_pass"])]
     lines += ["", f"## {t['attention']}", ""]
@@ -496,6 +509,7 @@ def markdown(report: dict, lang: str = "en") -> str:
             continue
         if code == "settings_ignored":
             lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report["settings_ignored"])))
+            continue
         if code == "settings_reload":
             lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report["settings_reload"])))
             continue

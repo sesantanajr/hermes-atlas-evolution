@@ -593,6 +593,13 @@ PAIRS = (
     ("Unknown profile", "Perfil desconhecido"),
     ("Atlas Evolution is not installed in that profile", "O Atlas Evolution não está instalado nesse perfil"),
     ("Atlas Evolution is not enabled in that profile", "O Atlas Evolution não está ativado nesse perfil"),
+    # 0.8.3: actions
+    ("The plugin cannot apply this proposal; approve it to see the command",
+     "O plugin não aplica esta proposta; aprove-a para ver o comando"),
+    ("evolution.auto_actions must be off, safe or full", "evolution.auto_actions deve ser off, safe ou full"),
+    ("Hermes did not answer in time; check the result before trying again",
+     "O Hermes não respondeu a tempo; confira o resultado antes de tentar de novo"),
+    ("Hermes refused the command", "O Hermes recusou o comando"),
 )
 
 # Sentences with variable parts. Each entry: (English regex, English format, Portuguese regex, Portuguese format).

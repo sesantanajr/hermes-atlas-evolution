@@ -9,6 +9,41 @@ O Atlas Evolution (`hermes-atlas-evolution` no Hermes) ajuda o Hermes Agent a ap
 [![Licença: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Hermes Agent 0.23.1 ou superior](https://img.shields.io/badge/Hermes%20Agent-%E2%89%A5%200.23.1-6f42c1.svg)](https://github.com/NousResearch/hermes-agent/releases/tag/v0.23.1)
 
+## Novidades da 0.8.3
+
+- **Age sozinho, com segurança.** No fim de cada passada de aprendizado, o plugin tira cópias idênticas de uma entrada da memória do Hermes e, com `auto_actions: full`, trava as skills que o curador do Hermes reescreve sem parar (num perfil real, uma skill foi reescrita 75 vezes numa semana, cada vez gastando tokens). Toda ação vai para o histórico com o desfazer, e uma mudança automática que você desfaz nunca se repete.
+- **Propostas em palavras simples.** Cada uma diz o que foi visto, com os números, o que aplicá-la faz e como desfazer, em português do Brasil ou inglês. Uma mudança que o plugin consegue fazer é aplicada com um clique (**Aplicar agora**), ou todas de uma vez; uma observação é dispensada com um.
+- **Um menu que diz o que fazer.** `hermes evolution` abre com o que pede atenção e sugestões com letras, como "Aplicar 4 mudanças recomendadas" ou "Ligar as ações automáticas completas".
+- A 0.8.2 trouxe o menu do terminal, o cuidado com a memória do Hermes e o painel do dashboard decidindo com login de verdade. Todas as mudanças: [CHANGELOG em português](CHANGELOG.pt-BR.md).
+
+## Começo rápido
+
+```bash
+hermes plugins install sesantanajr/hermes-atlas-evolution --enable   # em cada perfil (-p <perfil>)
+hermes evolution                                                     # o menu, no seu próprio terminal
+```
+
+```text
+Atlas Evolution 0.8.3 · perfil atlas-ai
+Lições: modo auto · 10 ativas · 0 esperando você · 16 propostas abertas
+Última passada: 2026-11-16 16:18 (ok) · guarda de runtime ligada · refletor ligado
+Ações automáticas: seguras · 2 em 7 dias
+
+Sugestões:
+   a  Aplicar 4 mudança(s) recomendada(s): travar skill reescrita em excesso
+   b  Ligar as ações automáticas completas (daqui em diante o plugin aplica isso sozinho)
+   c  Ler 11 observação(ões) com os números
+
+   1  Lições esperando você (0)          7  Quem é você nos chats
+   2  Propostas abertas (16)             8  Memória do Hermes: repetições e espaço
+   3  Lições ativas (10)                 9  Resumo dos últimos 7 dias
+   4  Histórico de decisões e desfazer  10  Situação completa
+   5  Ações automáticas (seguras)       11  Rodar uma passada de aprendizado agora
+   6  Configurações                      0  Sair
+```
+
+O mesmo, com login, na aba **Evolution** do dashboard do Hermes.
+
 ## Instalação
 
 Vindo da 0.5.0 (instalada como `hermes-evolution`)? Pule esta parte e siga a [Migração da 0.5.0](#migração-da-050): a cópia antiga precisa sair antes, senão ela continua rodando e a nova fica inativa.
@@ -74,6 +109,7 @@ O `plugins update` da linha de comando só troca os arquivos: ele não recarrega
 
 - **Um menu no seu terminal.** `hermes evolution`, sem comando, abre um menu numerado no seu próprio terminal: as lições que esperam você (uma a uma ou **aprovar todas**), as propostas, as lições ativas, o histórico com **desfazer**, cada configuração (ou **a configuração recomendada** de uma vez), quem é você nos chats, a memória do Hermes, o resumo, a situação completa e uma passada de aprendizado na hora. Ele decide com as mesmas regras do painel do dashboard e grava no mesmo histórico. No shell do agente, ou sem um terminal para responder, mostra a situação no lugar.
 - **Administre pelo dashboard do Hermes.** Uma aba **Evolution** no dashboard e no Hermes Desktop mostra o que o perfil aprendeu e o que espera por você e, quando o seu dashboard pede login, deixa você decidir ali, no perfil do próprio dashboard e em todo outro perfil escolhido nele (com o plugin ativado também no perfil do dashboard): aprovar ou rejeitar cada lição, **aprovar todas** depois de ler cada frase, decidir propostas, mudar as configurações, escolher quem é você nos chats a partir de sugestões e **desfazer** qualquer decisão. Um dashboard sem login fica só leitura, porque qualquer programa da máquina poderia agir ali ([detalhes](docs/pt-BR/hermes-integration.md#o-painel-no-dashboard)).
+- **Age sozinho onde é seguro.** Com `auto_actions` (`safe` por padrão), o fim de cada passada tira cópias idênticas de uma entrada da memória do Hermes e, com `full`, também trava skills que o curador reescreve sem parar. Cada ação fica no histórico com o desfazer; uma mudança automática que você desfaz nunca se repete ([detalhes](docs/pt-BR/evolution-loop.md#ações-automáticas)).
 - **Mantém a memória do Hermes enxuta.** O Hermes põe o `MEMORY.md` e o `USER.md` no prompt de toda sessão. O menu mostra quanto cada um ocupa e o que se repete neles (a mesma entrada duas vezes, uma entrada que diz o que outra já diz, entradas muito parecidas); você escolhe qual fica, e a outra é retirada sob a própria trava de memória do Hermes, com uma cópia do arquivo guardada e **desfazer**. Cada repetição retirada economiza os seus tokens em todo turno ([detalhes](docs/pt-BR/evolution-loop.md#memória-do-hermes)).
 - **Leva lições de um perfil para outro.** `lessons export` e `lessons import --from <perfil>` levam o que um perfil aprendeu para outro, ou para outra máquina, depois de mostrar cada frase. As lições importadas esperam até os seus turnos encontrarem a falha lá, e são medidas lá como qualquer outra ([detalhes](docs/pt-BR/evolution-loop.md#pacotes-de-lições)).
 - **Aprende com o histórico que o Hermes já guarda.** As primeiras passadas releem os últimos 14 dias de sessões do perfil, então uma falha que se repetiu na semana passada pode virar lição já no primeiro dia.
@@ -125,6 +161,7 @@ Ajuste na aba **Evolution** do dashboard, no Hermes Desktop, em Configurações 
 | `reflector` | `true` | Rascunha lições com um modelo de IA, pelo Hermes, para falhas dos seus próprios turnos que não têm modelo fixo. |
 | `autopilot_minutes` | `60` | Roda a passada em segundo plano no máximo uma vez por intervalo, de 15 a 1440 minutos. Com `0`, a passada em segundo plano fica desligada: as passadas só rodam pelo `learn`, pelo `ops tick`, pela receita semanal do resumo e pelo primeiro `status`. |
 | `runtime_guard` | `true` | Barra comandos do agente que parariam o gateway ou apagariam aquilo em que o Hermes roda. Fica desligada onde o Hermes roda os plugins num host de plugins (`plugins.isolation: host`). |
+| `auto_actions` | `safe` | O que o plugin faz sozinho no fim de cada passada, cada ação no histórico com o desfazer. `safe`: tira cópias de uma entrada da memória que são exatamente o mesmo texto (guarda uma cópia do arquivo); o que difere espera você. `full`: também trava skills que o curador reescreve sem parar, com `hermes curator lock`, até 3 por passada. `off`: tudo espera você. Só vale vindo da configuração do Hermes, como a `runtime_guard`. |
 | `agent_tools` | `false` | Oferece ao agente as ferramentas `hermes_atlas_evolution_plan` e `hermes_atlas_evolution_lessons`, só nas suas próprias sessões. |
 | `tool_hints` | `false` | Também acrescenta a lição correspondente ao resultado de uma ferramenta que falhou. Vem desligado porque o Hermes só mantém a alteração do primeiro plugin no resultado de uma ferramenta. |
 | `feedback_signals` | `true` | Conta as suas correções, perguntas repetidas e agradecimentos, só como números. |
@@ -149,7 +186,7 @@ Todas as opções, o `settings.json` e o que acontece com um valor inválido: [C
 - **Chamadas a modelo.** Só o refletor chama um modelo de IA, pelo Hermes e com as configurações de provedor dele (tarefa auxiliar `evolution_reflector`), no máximo 3 vezes por passada e 6 vezes por dia, por padrão. `reflector: false` desliga.
 - **Rede.** Nenhuma conexão própria e nenhuma telemetria.
 - **Chats do gateway.** O plugin não manda nada para um chat. Os avisos dele aparecem só no Hermes do seu computador (CLI, TUI, Desktop), nunca num chat do gateway. O que o outro lado de um chat vê é o que o agente escreve.
-- **Decisões.** Só você decide: no seu próprio terminal (o menu ou os comandos, que se recusam a rodar no terminal do agente) ou num dashboard que pede login. O plugin muda os próprios dados, as próprias configurações pelo `hermes config set` do Hermes e os arquivos de memória do Hermes só para retirar a entrada que você escolheu; outras mudanças no Hermes aparecem como comandos para você rodar.
+- **Decisões.** Só você decide: no seu próprio terminal (o menu ou os comandos, que se recusam a rodar no terminal do agente) ou num dashboard que pede login. O plugin muda os próprios dados, as próprias configurações pelo `hermes config set` do Hermes, os arquivos de memória do Hermes só para tirar uma repetição (a que você escolheu, ou uma cópia idêntica com `auto_actions`) e as skills só com `hermes curator lock` (e `unlock` para desfazer), com a sua aprovação ou com `auto_actions: full`, cada uma com o desfazer; outras mudanças no Hermes aparecem como comandos para você rodar.
 
 Detalhes: [SECURITY.md](SECURITY.md).
 
