@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.6.0
+
+This release renames the plugin to `hermes-atlas-evolution`, the name of its repository, makes installing, updating and checking it in every profile easier, gives every loaded profile its passes even when it is idle, applies template lessons by default, keeps failures caused by other plugins out of the lessons, and leaves gateway restarts to the owner. The tests run against a simulated Hermes context, and the plugin passes `hermes plugins validate` on Hermes Agent 0.23.1 with the security scan reporting it safe. The clock, the stale-process check and the migration from 0.5.0 are verified in tests, not yet on a long-running production gateway.
+
+### Added
+
+- **`status` for every profile.** A table of every profile of the Hermes root, up to 200: sessions in the last 7 days, the plugin installed, installed under the old id or not installed, the last pass, and lessons active and waiting. It points to a busier profile (another profile with the plugin, at least 10 sessions in 7 days and more than 4 times as many as this one), prints the migration command for each profile still on the old id and the install command for each profile used in 7 days without the plugin, and flags a process that still runs older code. Other profiles are read only.
+- **First pass from `status`.** In a profile that never finished a pass, `status` runs one at once, with 90 seconds in all and at most 60 for the history, so the first look is not all zeros. `--no-learn` never runs it.
+- **Autopilot clock.** A daemon thread per loaded profile (`hermes-atlas-evolution-clock`) nudges the pass 2 minutes after the plugin loads and then every 10 minutes (`CLOCK_FIRST_SECONDS`, `CLOCK_PERIOD_SECONDS`), because a gateway that serves several profiles delivers its Kanban tick only to its own profile. It starts only when `autopilot_minutes` is not 0 and the host offers `on_unload`, and it stops when the plugin unloads.
+- **Stale code check.** A gateway or dashboard records the plugin version it loaded. `status` flags one that is still alive and runs another version than the code on disk, since `hermes plugins update` does not reload a running gateway, and says to run `hermes gateway restart`. The liveness probe runs on POSIX systems only.
+- **`hermes evolution lessons review`.** Shows each lesson that waits for approval with its exact text: `a` approves, `r` rejects, Enter skips, `x` quits, with the same keys in Portuguese. Operator only, in the owner's terminal.
+- **Failures caused by other plugins.** Two failure classes that never become lessons: `plugin_fault`, Hermes' refusal after another plugin's `pre_tool_call` hung or raised, and `rewritten_command`, a terminal command that failed after another plugin rewrote it. To tell, `pre_tool_call` keeps a hash of each terminal command in memory only. The radar counts both, the digest shows them under "Hermes health", and 3 or more of a kind open a medium-risk proposal with `hermes plugins list`.
+- **Web research in the history replay.** The first passes also time the research turns of the replayed history, and "Hermes health" in the digest shows web research turns, the time 1 in 20 of them exceeds, the turns of 120 seconds or more, and research errors and calls.
+- **One copy per profile.** While the copy installed under the old id `hermes-evolution` is enabled in a profile, the new one registers nothing and logs the command that removes the old one, so the two never count the same turns.
+
+### Changed
+
+- **Name.** The plugin id is `hermes-atlas-evolution`, as the repository (it was `hermes-evolution`). The Python package is `hermes_atlas_evolution` (standalone runner `python -m hermes_atlas_evolution`); the toolset is `hermes-atlas-evolution`; the tools are `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` (were `atlas_evolution_plan` and `atlas_evolution_lessons`); the prompt section is `hermes-atlas-evolution.playbook` (was `atlas-evolution.playbook`); the hint key is `hermes_atlas_evolution_lesson` (was `atlas_evolution_lesson`); the bundled skill is `hermes-atlas-evolution:evolution-review`; and the recipes and Kanban cards use `hermes-atlas-evolution-digest`, `hermes-atlas-evolution-watchdog` and `--created-by hermes-atlas-evolution`. Names Hermes shows no longer start with `atlas`, so a store that groups names starting with `atlas` no longer files the plugin under another product. The product name stays Atlas Evolution, and the `hermes evolution` command, the data folder `<HERMES_HOME>/evolution/` and `settings.json` keep their names.
+- **Settings saved under the old id**, `plugins.entries.hermes-evolution.settings`, still apply; the new id wins key by key.
+- **Lessons default to `auto`.** Lessons written from the fixed templates are active at once, are measured, and are retired when measured as ineffective 14 days or more after activation. Reflector drafts and agent proposals still wait for approval. `suggest` makes every lesson wait; `off` only measures.
+- **`tool_hints` is off by default.** Hermes keeps only the first plugin's change to a tool result, so a hint would discard the change another plugin makes to that result. The `transform_tool_result` hook stays registered while lessons are on, as the manifest declares, and is silent.
+- **Restarts are left to the owner.** The runtime guard also vetoes the agent's `hermes gateway restart` and tells the agent to ask the owner, who restarts from a terminal: without a terminal Hermes 0.23.1 refuses the restart while sessions are running, and `--yes` would interrupt them.
+- **The runtime guard sees through more wrappers**: `setsid`, `systemd-run` with its options, `runuser`, `watch`, `flock`, `xargs` and `rtk run`. It reads one level into a command given as one string to a shell (`-c`, `-lc`, `-ec` and similar) or to `su`, `runuser`, `script` and `flock` with `-c`. A restart scheduled through `systemd-run` was found in a real history.
+- **The operator guard** also refuses decisions when a Hermes process is an ancestor of the command or the command runs in a Hermes gateway's systemd cgroup, both read from `/proc` on Linux, so clearing the environment markers or detaching with `setsid` does not get an agent past it. The command's own `hermes evolution` launcher does not count.
+- **The autopilot binds the profile's secret scope** as well as its home, so in a gateway that serves several profiles a reflector call uses that profile's provider keys.
+- **Passes take a deadline where the caller has one.** The `ops schedule-spec` script gives the tick 300 seconds instead of 90, and the tick gives its pass 200 of them; the first pass of `status` has 90 seconds. A reflector call starts only when its worst case still fits.
+- **The weekly digest recipe** delivers the digest even when its `learn` fails or runs out of time, and gives `learn` 300 seconds instead of 120.
+- **The agent's 5 lesson proposals an hour** are counted in the database for the whole profile, not per process.
+- **A lesson counts as shown once per session**, however often Hermes renders that session's prompt again.
+- **Documentation.** The README covers installing, updating and migrating in every profile, with short tables of commands and settings; the development instructions moved to `CONTRIBUTING.md`, and the details to `docs/`. The README states that Atlas Evolution is free and open-source software under the MIT license, and `LICENSE` names the author.
+
+### Fixed
+
+- A profile served by another profile's gateway never ran a pass while it had no turns: the gateway delivers its Kanban tick only to its own profile. The clock covers it.
+- A pass cut by the exit of its process, such as a short-lived command, kept its lease for 15 minutes. The process now frees the lease at exit, and another process tries again 10 minutes later.
+- `status` in a profile that had not run a pass yet showed zeros until the next turn. It now runs the first pass.
+- Only the lease holder records the end of a pass, and a caller whose clock was read before another pass finished no longer runs a second one.
+- The history replay drops a slice when another pass moved its cursor in the meantime, such as after a process was suspended past its lease, so nothing is counted twice.
+- An unloaded autopilot gives back a pass it had claimed and stops the history replay at the next slice, and a thread of an unloaded copy keeps using its own modules instead of mixing with a reloaded copy.
+- No write transaction stays open while a pass reads the skill files, the Curator ledger or Hermes' `state.db`.
+- `SECURITY.md` said that the runtime guard does not look into `bash -c`; it reads one level deep.
+
+### Upgrade notes
+
+- In each profile that has 0.5.0, run `hermes plugins remove hermes-evolution` and then `hermes plugins install sesantanajr/hermes-atlas-evolution --enable`, with `-p <profile>` for a named profile, not `hermes plugins update`: Hermes names a plugin's folder after its id, so an update would not replace the old copy. Remove first: installing makes a running gateway rediscover its plugins, which drops the removed copy. If you installed first, run `hermes gateway restart` after the removal. The `status` of a profile on 0.6.0 lists the profiles still on the old id, with these commands.
+- `hermes plugins remove hermes-evolution` also deletes `plugins.entries.hermes-evolution` from the profile's `config.yaml`. To keep options set in the Hermes settings form, rename that block to `hermes-atlas-evolution` before removing the old copy, or set them again.
+- The database stays at schema 8, so what was learned stays.
+- Profiles that never set `lessons` now run in `auto`. Set `lessons: suggest` to keep the behaviour of 0.5.0. Candidate lessons derived before the upgrade stay candidates until you decide on them with `lessons review` or `lessons approve`.
+- Profiles that never set `tool_hints` no longer get a lesson appended to failing results. Set `tool_hints: true` to bring it back.
+- Where an explicit toolset list names `atlas-evolution`, or `auxiliary.background_review.extra_tools` names `atlas_evolution_lessons`, use `hermes-atlas-evolution` and `hermes_atlas_evolution_lessons`.
+- Cron jobs created from earlier recipes keep working, because they call `hermes evolution`. Create them again from a recipe printed now to get the new timeouts (300 seconds for the tick, a best-effort `learn` before the digest). The new recipes use the new job names, so delete the old job before you create the new one.
+- After `hermes plugins update hermes-atlas-evolution` in each profile, run `hermes gateway restart`. From 0.6.0 on, `status` flags a gateway or dashboard that still runs older code.
+- An agent that runs `hermes gateway restart` is now refused and asks you instead. Restart from your own terminal.
+
 ## 0.5.0
 
 This release makes the loop run by itself and learn from what Hermes already recorded, turns the reflector on by default, and adds a runtime guard, a health radar, a status command and owner notices. The plugin is covered by 257 unit and end-to-end tests against a simulated Hermes context, and passes `hermes plugins validate` on Hermes Agent 0.23.1 without warnings, with the security scan reporting it safe. The reflector made three real model calls through Hermes in production. The autopilot is verified in tests and in the CLI. Windows was only simulated in tests.

@@ -58,7 +58,7 @@ hermes evolution ops similar "disco lento e pesquisas demoradas"
 | Comando | O que faz |
 |---|---|
 | `ops inspect` | Coleta e explica os sinais do momento. Não grava observações e não altera nada no Hermes. |
-| `ops tick [--notify-only]` | Coleta, compara com o histórico, registra hipóteses e linhas de base e executa somente as ações habilitadas pela configuração. Também roda uma passada do ciclo de evolução, no máximo uma vez por hora, e a devolve no campo `evolution`; a passada é reservada como a do autopilot, então as duas nunca rodam ao mesmo tempo. Se o tick falhar, tenta encerrar um ensaio ativo no Linux. |
+| `ops tick [--notify-only]` | Coleta, compara com o histórico, registra hipóteses e linhas de base e executa somente as ações habilitadas pela configuração. Também roda uma passada do ciclo de evolução, no máximo uma vez por hora, e a devolve no campo `evolution`; a passada é reservada como a do autopilot, então as duas nunca rodam ao mesmo tempo, e tem um prazo de 200 segundos, dentro dos 300 segundos que o script do `schedule-spec` dá ao tick. Se o tick falhar, tenta encerrar um ensaio ativo no Linux. |
 | `ops history` | Mostra até 100 incidentes e 100 ensaios, com o estado de cada um. |
 | `ops review [--days N]` | Cruza medições adaptativas, feedback e resultados dos ensaios. Padrão de 14 dias, de 1 a 90. |
 | `ops feedback CODIGO helpful\|dismissed\|reset` | Avalia um alerta adaptativo já emitido. |
@@ -82,7 +82,7 @@ python -m hermes_atlas_evolution --home /caminho/do/perfil --hermes-version 0.23
   ops inspect --upstream-tag v0.23.1
 ```
 
-O `--home` usa `HERMES_HOME` por padrão. O executor independente lê o `config.yaml` do perfil (até 1 MiB) quando o PyYAML está instalado, para obter o provedor de memória, os limites, as configurações de Cron, Kanban e delegação, o `display.language` e as configurações do próprio plugin. Sem o PyYAML, usa os padrões. `--hermes-source` acrescenta ao inventário a árvore de plugins e skills distribuída com o Hermes. O executor nunca cria um `--home` inexistente: os comandos que abrem os bancos do Evolution falham, o `health` informa `profile_present: false`, e `ops history`, `ops similar`, `ops rollback`, `ops plan`, `ops schedule-spec` e `ops handoff` terminam sem erro. O refletor do ciclo de evolução não roda no executor independente, nem os hooks, o autopilot e a guarda de runtime, que dependem do plugin carregado pelo Hermes.
+O `--home` usa `HERMES_HOME` por padrão. O executor independente lê o `config.yaml` do perfil (até 1 MiB) quando o PyYAML está instalado, para obter o provedor de memória, os limites, as configurações de Cron, Kanban e delegação, o `display.language` e as configurações do próprio plugin. Sem o PyYAML, usa os padrões. `--hermes-source` acrescenta ao inventário a árvore de plugins e skills distribuída com o Hermes. O executor nunca cria um `--home` inexistente: os comandos que abrem os bancos do Evolution falham, o `health` informa `profile_present: false`, e `ops history`, `ops similar`, `ops rollback`, `ops plan`, `ops schedule-spec` e `ops handoff` terminam sem erro. O refletor do ciclo de evolução não roda no executor independente, nem os hooks, o autopilot, o relógio dele e a guarda de runtime, que dependem do plugin carregado pelo Hermes.
 
 ## Diagnósticos e alertas adaptativos
 
@@ -200,9 +200,9 @@ O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 
 ## Dados e compatibilidade
 
 - Os bancos ficam em `<HERMES_HOME>/evolution/`: `evolution.sqlite3`, com as métricas do observador e o ciclo de evolução, e `supervisor.sqlite3`, com incidentes, linhas de base, amostras adaptativas e ensaios. As métricas do observador ficam por 35 dias; os agregados do ciclo, os incidentes e os ensaios encerrados, por 90 dias. A retenção de 35 dias é aplicada pela primeira gravação de hook de cada dia UTC em cada processo, então vale mesmo sem `tick` agendado. Backups e logs próprios do Hermes seguem a retenção que já têm.
-- A versão 0.5.0 migra o `evolution.sqlite3` dos esquemas 0 a 7 para o esquema 8 automaticamente e recusa qualquer outro esquema. Uma versão anterior do plugin não abre um banco migrado: voltar de versão exige restaurar um backup do arquivo ou apagá-lo.
+- Desde a 0.5.0, o `evolution.sqlite3` está no esquema 8, e a 0.6.0 o mantém: os esquemas 0 a 7 são migrados automaticamente e qualquer outro esquema é recusado. A 0.4.0 ou anterior não abre um banco migrado: voltar até ela exige restaurar um backup do arquivo ou apagá-lo. A troca do nome do plugin na 0.6.0 não move os dados: o `<HERMES_HOME>/evolution/` mantém o nome.
 - As gravações dos hooks compartilham uma conexão por processo e por perfil, que fica aberta enquanto o Hermes roda. No Windows, isso significa que o `evolution.sqlite3` não pode ser apagado enquanto o Hermes está rodando.
-- Os bancos do próprio Hermes (`state.db`, quadros Kanban) são abertos somente para leitura, inclusive o `state.db` dos outros perfis da mesma raiz, onde o `status` só conta sessões.
+- Os bancos do próprio Hermes (`state.db`, quadros Kanban) são abertos somente para leitura. Para o `status`, isso inclui o `state.db` dos outros perfis da mesma raiz, onde ele só conta sessões, e o banco do plugin nesses perfis, onde ele lê a última passada e as contagens de lições.
 - Arquivos de notas da versão 0.1 são preservados. Os comandos que registram novas notas e o comando de chat legado exigem `legacy_memory_commands: true`. A injeção antiga de notas também exige `automatic_shared_recall: true`. Por padrão, a inspeção usa os sinais da memória nativa do Hermes.
 - O contrato de integração foi verificado na árvore oficial v0.23.1, commit `3b421578588243f920886e6fe79a6faa87ea026e`.
 
@@ -218,7 +218,7 @@ O `<HERMES_HOME>/evolution/settings.json` é um objeto JSON opcional de até 64 
 
 ## Como retirar o plugin
 
-Execute `hermes evolution ops rollback` antes de desabilitar o plugin com `hermes plugins disable hermes-atlas-evolution`, e recarregue o gateway do perfil. O plugin é instalado por perfil, então repita isso em cada perfil que o tiver (`hermes -p <perfil> ...`).
+Execute `hermes evolution ops rollback` antes de desabilitar o plugin com `hermes plugins disable hermes-atlas-evolution` ou de removê-lo com `hermes plugins remove hermes-atlas-evolution`. Desabilitar faz um gateway em execução descarregar o plugin; depois de uma remoção, rode `hermes gateway restart`. O plugin é instalado por perfil, então repita isso em cada perfil que o tiver (`hermes -p <perfil> ...`). Nenhum dos dois comandos apaga os dados em `<HERMES_HOME>/evolution/`; apague essa pasta você mesmo se quiser que eles sumam.
 
 ## Referências
 
