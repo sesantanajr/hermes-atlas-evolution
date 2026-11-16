@@ -126,8 +126,14 @@ def _declared_hooks(folders) -> dict[str, list[str]]:
     return found
 
 
-def plugins(home: Path) -> dict | None:
-    """Plugins loaded by this process for the profile. None when Hermes' plugin manager is not loaded here."""
+_SELF = "hermes-atlas-evolution"
+
+
+def plugins(home: Path, *, own_transform: bool = True) -> dict | None:
+    """Plugins loaded by this process for the profile. None when Hermes' plugin manager is not loaded here.
+
+    `own_transform` False: this plugin's transform_tool_result returns nothing (tool_hints off), so it never
+    competes with another plugin's transform and is left out of the overlaps."""
     module = sys.modules.get("hermes_cli.plugins")
     manager = getattr(module, "get_plugin_manager", None) if module is not None else None
     if not callable(manager):
@@ -155,7 +161,8 @@ def plugins(home: Path) -> dict | None:
         if hooks is not None and type(registered) is int and registered > len(hooks):
             undeclared.append({"plugin": key, "registered": registered, "declared": len(hooks)})
         for hook in FIRST_WINS_HOOKS:
-            if hooks and hook in hooks:
+            if hooks and hook in hooks and not (hook == "transform_tool_result" and not own_transform
+                                                and str(row.get("name") or key) == _SELF):
                 overlaps.setdefault(hook, []).append(key)
     return {"enabled": len(enabled), "errors": errors, "undeclared": undeclared,
             "overlaps": {hook: names for hook, names in overlaps.items() if len(names) > 1}}
@@ -219,7 +226,7 @@ def findings(reading: dict) -> list[dict]:
     return found
 
 
-def scan(home: Path, conn, *, now: float, days: int = RADAR_DAYS) -> dict:
+def scan(home: Path, conn, *, now: float, days: int = RADAR_DAYS, own_transform: bool = True) -> dict:
     """All readings and their findings. The plugin snapshot of the last process that could take one is kept."""
     reading = {"sessions": None, "context": None, "compaction": compaction(conn, now=now, days=days),
                "external": external(conn, now=now, days=days)}
@@ -232,7 +239,7 @@ def scan(home: Path, conn, *, now: float, days: int = RADAR_DAYS) -> dict:
             pass
         finally:
             source.close()
-    reading["plugins"] = plugins(home)
+    reading["plugins"] = plugins(home, own_transform=own_transform)
     if reading["plugins"] is not None:
         conn.execute("INSERT OR REPLACE INTO cursor VALUES ('radar_plugins', ?)", (json.dumps(reading["plugins"]),))
     else:

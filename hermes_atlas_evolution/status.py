@@ -116,10 +116,17 @@ def _command(name: str, rest: str) -> str:
 
 
 def _profile_state(folder: Path) -> tuple[str, str | None, int, int]:
-    """(plugin state, last pass, active lessons, lessons waiting) of a profile, read-only from its own database."""
-    if (folder / "plugins" / PLUGIN_DIR).is_dir():
+    """(plugin state, last pass, active lessons, lessons waiting) of a profile, read-only from its own database.
+
+    "both": the new copy is there but so is the old one, which keeps running while the new one stays inactive."""
+    new = (folder / "plugins" / PLUGIN_DIR).is_dir()
+    old = any((folder / "plugins" / legacy / "plugin.yaml").is_file() and not _is_this_plugin(folder / "plugins" / legacy)
+              for legacy in LEGACY_DIRS)
+    if new and old:
+        state = "both"
+    elif new or (folder / "plugins" / LEGACY_DIRS[0]).is_dir() and not old:
         state = "installed"
-    elif any((folder / "plugins" / legacy / "plugin.yaml").is_file() for legacy in LEGACY_DIRS):
+    elif old:
         state = "legacy"
     else:
         return "missing", None, 0, 0
@@ -142,6 +149,15 @@ def _profile_state(folder: Path) -> tuple[str, str | None, int, int]:
     return state, last, counts.get("active", 0), counts.get("candidate", 0) + counts.get("quarantined", 0)
 
 
+def _is_this_plugin(folder: Path) -> bool:
+    """True when a folder named after the old id holds this version (a clone updated in place)."""
+    try:
+        manifest = (folder / "plugin.yaml").read_text(encoding="utf-8", errors="replace")[:65_536]
+    except OSError:
+        return False
+    return re.search(rf"^name:\s*[\"']?{re.escape(PLUGIN_DIR)}[\"']?\s*$", manifest, re.M) is not None
+
+
 def _profiles(home: Path, *, now: float) -> list[dict]:
     """Every profile of the same Hermes root: sessions in 7 days and the plugin's state there.
 
@@ -161,8 +177,9 @@ def _profiles(home: Path, *, now: float) -> list[dict]:
                      "sessions_7d": _sessions(folder, since=now - 7 * 86_400) or 0, "plugin": state,
                      "last_pass": last, "lessons_active": active, "lessons_waiting": waiting,
                      "install": _command(name, f"plugins install {REPOSITORY} --enable"),
-                     "migrate": f"{_command(name, 'plugins remove ' + LEGACY_DIRS[0])} && "
-                                f"{_command(name, f'plugins install {REPOSITORY} --enable')}",
+                     "migrate": f"{_command(name, 'plugins remove ' + LEGACY_DIRS[0])} && " + (
+                         "hermes gateway restart" if state == "both"
+                         else _command(name, f"plugins install {REPOSITORY} --enable")),
                      "status": _command(name, "evolution status")})
     return rows
 
@@ -234,7 +251,7 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
     report["profiles_without_plugin"] = sorted(
         (row for row in report["profiles"] if row["plugin"] == "missing" and row["sessions_7d"] and not row["current"]),
         key=lambda row: -row["sessions_7d"])
-    report["legacy_installs"] = [row for row in report["profiles"] if row["plugin"] == "legacy"]
+    report["legacy_installs"] = [row for row in report["profiles"] if row["plugin"] in ("legacy", "both")]
     mine = next((row for row in report["profiles"] if row["current"]), None)
     busiest = max((row for row in report["profiles"] if row["plugin"] == "installed" and not row["current"]),
                   key=lambda row: row["sessions_7d"], default=None)
@@ -268,7 +285,7 @@ _TEXT = {
            "today": "Today (UTC)", "tool_calls": "tool calls", "turns": "turns", "model_calls": "model calls",
            "autopilot": "Autopilot", "every": "every {minutes} min", "off": "off (run `hermes evolution learn` yourself)",
            "last": "last pass", "ok": "ok", "failed": "failed",
-           "never": "has not run yet; it runs two minutes after Hermes loads the plugin",
+           "never": "has not run yet; the clock starts it within 2 minutes of the plugin loading, or run `hermes evolution learn`",
            "backfill": "Hermes history", "reflector": "Reflector", "on": "on", "calls": "calls today",
            "drafts": "drafts waiting", "lessons": "Lessons", "mode": "mode", "active": "active",
            "awaiting": "awaiting approval", "retired": "retired", "proposals": "Open proposals",
@@ -285,11 +302,12 @@ _TEXT = {
            "sessions": "sessions", "none": "Nothing needs attention.",
            "stale_runtime": "A running Hermes process still runs an older copy of the plugin than the one on disk (`hermes plugins update` does not reload a running gateway). Run `hermes gateway restart`; it waits for the running turns.",
            "stale_item": "pid {pid} ({kind}) loaded {version}",
-           "legacy_install": "These profiles still have the plugin under its old id hermes-evolution (up to 0.5.0). Remove it and install the new one; the data it learned stays:",
+           "legacy_install": "These profiles still have the plugin under its old id hermes-evolution (up to 0.5.0), which keeps running while a new copy there stays inactive. Run the command shown for each; the data it learned stays:",
            "busier_profile": "This profile is barely used. `{profile}` had {sessions} sessions in 7 days; see it with `{status}`.",
            "profiles": "Profiles of this Hermes", "col_profile": "profile", "col_sessions": "sessions (7 d)",
            "col_plugin": "plugin", "col_last": "last pass", "col_lessons": "lessons active / waiting",
-           "states": {"installed": "installed", "legacy": "old id (0.5.0)", "missing": "not installed"},
+           "states": {"installed": "installed", "legacy": "old id (0.5.0)", "both": "both copies: the old one runs",
+                      "missing": "not installed"},
            "first_pass": "First pass done now: {sessions} sessions, {tool_calls} tool calls of history read.",
            "statuses": {"done": "read", "running": "being read", "waiting": "waiting for the first pass",
                         "no_history": "no history", "unreadable": "unreadable", "unsupported_history": "unsupported format"}},
@@ -297,7 +315,7 @@ _TEXT = {
            "today": "Hoje (UTC)", "tool_calls": "chamadas de ferramentas", "turns": "turnos", "model_calls": "chamadas ao modelo",
            "autopilot": "Autopilot", "every": "a cada {minutes} min", "off": "desligado (rode `hermes evolution learn` você mesmo)",
            "last": "última passada", "ok": "ok", "failed": "falhou",
-           "never": "ainda não rodou; roda dois minutos depois que o Hermes carrega o plugin",
+           "never": "ainda não rodou; o relógio a inicia em até 2 minutos depois de o plugin carregar, ou rode `hermes evolution learn`",
            "backfill": "Histórico do Hermes", "reflector": "Refletor", "on": "ligado", "calls": "chamadas hoje",
            "drafts": "rascunhos aguardando", "lessons": "Lições", "mode": "modo", "active": "ativas",
            "awaiting": "aguardando aprovação", "retired": "aposentadas", "proposals": "Propostas abertas",
@@ -315,11 +333,12 @@ _TEXT = {
            "sessions": "sessões", "none": "Nada precisa de atenção.",
            "stale_runtime": "Um processo do Hermes em execução ainda roda uma cópia do plugin mais antiga que a do disco (o `hermes plugins update` não recarrega um gateway em execução). Rode `hermes gateway restart`; ele espera os turnos em andamento.",
            "stale_item": "pid {pid} ({kind}) carregou a {version}",
-           "legacy_install": "Estes perfis ainda têm o plugin com o nome antigo hermes-evolution (até a 0.5.0). Remova-o e instale o novo; os dados aprendidos ficam:",
+           "legacy_install": "Estes perfis ainda têm o plugin com o nome antigo hermes-evolution (até a 0.5.0), que continua rodando enquanto uma cópia nova ali fica inativa. Rode o comando de cada um; os dados aprendidos ficam:",
            "busier_profile": "Este perfil quase não é usado. O `{profile}` teve {sessions} sessões em 7 dias; veja com `{status}`.",
            "profiles": "Perfis deste Hermes", "col_profile": "perfil", "col_sessions": "sessões (7 d)",
            "col_plugin": "plugin", "col_last": "última passada", "col_lessons": "lições ativas / aguardando",
-           "states": {"installed": "instalado", "legacy": "nome antigo (0.5.0)", "missing": "não instalado"},
+           "states": {"installed": "instalado", "legacy": "nome antigo (0.5.0)", "both": "duas cópias: a antiga roda",
+                      "missing": "não instalado"},
            "first_pass": "Primeira passada feita agora: {sessions} sessões e {tool_calls} chamadas de ferramentas do histórico lidas.",
            "statuses": {"done": "lido", "running": "em leitura", "waiting": "aguardando a primeira passada",
                         "no_history": "sem histórico", "unreadable": "ilegível", "unsupported_history": "formato não suportado"}},

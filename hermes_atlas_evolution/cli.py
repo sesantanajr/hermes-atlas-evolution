@@ -74,9 +74,20 @@ def legacy_install(home: Path, runtime_config) -> str | None:
     enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
     if not isinstance(enabled, list):
         return None
+    here = Path(__file__).resolve().parent.parent
     for plugin_id in LEGACY_PLUGIN_IDS:
-        if plugin_id in enabled and (Path(home) / "plugins" / plugin_id / "plugin.yaml").is_file():
-            return plugin_id
+        folder = Path(home) / "plugins" / plugin_id
+        if plugin_id not in enabled or not (folder / "plugin.yaml").is_file():
+            continue
+        try:
+            if folder.resolve() == here:
+                continue   # this very code, in a folder still named after the old id (a clone updated in place)
+            manifest = (folder / "plugin.yaml").read_text(encoding="utf-8", errors="replace")[:65_536]
+        except OSError:
+            manifest = ""
+        if re.search(rf"^name:\s*[\"']?{re.escape(PLUGIN_ID)}[\"']?\s*$", manifest, re.M):
+            continue   # the folder holds this version, not the old plugin
+        return plugin_id
     return None
 
 
@@ -324,7 +335,9 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
         return digest_schedule_spec(home, weekday=args.weekday, hour=args.hour, days=args.days, lang=lang,
                                     deliver=args.deliver)
     if action == "report":
-        report = build(home, now=now, days=args.days, lang=lang, rates=config.get("rates_usd_per_million", {}))
+        chosen = options(config, runtime_config, strict=False)
+        report = build(home, now=now, days=args.days, lang=lang, rates=config.get("rates_usd_per_million", {}),
+                       own_transform=chosen["tool_hints"] and chosen["lessons"] != "off")
         return markdown(report, lang) if args.format == "md" else report
     with experience(home) as conn:
         if action == "experiments":

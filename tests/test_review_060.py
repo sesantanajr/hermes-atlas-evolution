@@ -146,5 +146,21 @@ class DurabilityTest(Base):
             self.assertEqual(conn.execute("PRAGMA checkpoint_fullfsync").fetchone()[0], 0)
 
 
+
+class DigestLabelTest(Base):
+    def test_failures_another_plugin_caused_say_they_never_become_lessons(self):
+        from hermes_atlas_evolution.report import build, markdown
+
+        stuck = json.dumps({"error": "pre_tool_call plugin callback timed out or is still running"})
+        for index in range(3):
+            signals.record_tool(self.home, {"tool_name": "read_file", "status": "blocked", "result": stuck,
+                                            "error_message": "pre_tool_call plugin callback timed out or is still running",
+                                            "session_id": f"s{index}"}, now=NOW)
+        close_observers()
+        text = markdown(build(self.home, now=NOW, days=7, lang="pt"), "pt")
+        self.assertIn("nunca vira lição: outro plugin causou a falha", text)
+        self.assertIn("Ciclo de automelhoria", text)
+
+
 if __name__ == "__main__":
     unittest.main()

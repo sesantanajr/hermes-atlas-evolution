@@ -1,11 +1,13 @@
 name: hermes-atlas-evolution
-version: "0.5.0"
+version: "0.6.0"
 requires_hermes: ">=0.23.1"
 description: >-
   A measured self-improvement loop for Hermes Agent. Learns from Hermes' own history on the first pass,
   runs by itself in the background, turns recurring tool failures into short lessons, measures every lesson,
   skill rewrite and setting change before and after, reports what slows Hermes down, and stops the agent
-  from taking down the gateway it runs on. Lessons wait for your approval by default.
+  from taking down the gateway it runs on. Lessons from fixed templates apply at once (after the owner's own
+  turns hit the failure) and are retired when they do not help; text written by a model or by the agent waits
+  for your approval.
 license: MIT
 homepage: https://github.com/sesantanajr/hermes-atlas-evolution
 author: "Sérgio Sant'Ana Júnior"
@@ -88,7 +90,7 @@ config_schema:
     description: >-
       Draft lessons for recurring failures that have no template, using the model of Hermes' auxiliary task
       evolution_reflector (it inherits the compression model). Keeps one scrubbed error excerpt per failure until a
-      draft exists. Drafts wait for approval unless lessons is auto.
+      draft exists, for failures in the owner's own turns only. Drafts always wait for your approval.
   reflector_daily_limit:
     type: int
     default: 6
@@ -100,12 +102,14 @@ config_schema:
     label: Autopilot (minutes)
     description: >-
       Run the learning pass by itself in the background, at most once per interval, from 15 to 1440 minutes.
-      0 runs it only when you call hermes evolution learn.
+      0 turns the background pass off; passes then run only from hermes evolution learn, ops tick, the weekly
+      digest recipe and the first status.
   runtime_guard:
     type: bool
     default: true
     label: Runtime guard
     description: >-
       Stop the agent from taking down the Hermes it runs in. Vetoes terminal commands that restart or kill the
-      gateway (it is told to use hermes gateway restart, which waits for running turns) or that delete the running
-      Python, the Hermes code or this profile.
+      gateway (systemd, launchd or a Windows service or task; the agent is told to leave the restart to the owner,
+      whose hermes gateway restart asks before interrupting running turns) or that delete the running Python, the
+      Hermes code or this profile. Off where plugins run in a plugin host.

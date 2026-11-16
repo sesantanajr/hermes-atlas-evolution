@@ -151,7 +151,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         from . import radar
 
         conn.commit()   # Hermes' state.db is read with no write lock held on this database
-        reading = radar.scan(home, conn, now=now)
+        reading = radar.scan(home, conn, now=now, own_transform=opts["tool_hints"] and opts["lessons"] != "off")
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
                                     changes=verdicts, outcomes=outcomes, radar=reading["findings"], lang=opts["language"])
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in created]

@@ -153,5 +153,40 @@ class GuardStateTest(unittest.TestCase):
         self.assertIn("plugins.isolation: host", status.markdown(report, "pt"))
 
 
+
+class MigrationStateTest(unittest.TestCase):
+    setUp = StatusTest.setUp
+
+    def install(self, profile: str, folder: str, name: str):
+        target = self.root / "profiles" / profile / "plugins" / folder
+        target.mkdir(parents=True)
+        (target / "plugin.yaml").write_text(f"name: {name}\nversion: 0.6.0\n")
+
+    def test_a_profile_with_both_copies_is_told_to_remove_the_old_one_and_restart(self):
+        self.install("both-box", "hermes-evolution", "hermes-evolution")
+        self.install("both-box", "hermes-atlas-evolution", "hermes-atlas-evolution")
+        self.install("in-place", "hermes-evolution", "hermes-atlas-evolution")   # a clone updated in place
+        report = status.build(self.home, now=NOW, config={})
+        rows = {row["profile"]: row for row in report["profiles"]}
+        self.assertEqual((rows["both-box"]["plugin"], rows["in-place"]["plugin"]), ("both", "installed"))
+        self.assertEqual(rows["both-box"]["migrate"],
+                         "hermes -p both-box plugins remove hermes-evolution && hermes gateway restart")
+        self.assertIn("both-box", [row["profile"] for row in report["legacy_installs"]])
+        text = status.markdown(report, "pt")
+        self.assertIn("duas cópias: a antiga roda", text)
+        self.assertIn("hermes -p both-box plugins remove hermes-evolution && hermes gateway restart", text)
+        self.assertEqual(report["version"] if "version" in report else status.plugin_version(), "0.6.0")
+
+    def test_the_new_code_in_a_folder_named_after_the_old_id_is_not_mistaken_for_the_old_plugin(self):
+        from hermes_atlas_evolution.cli import legacy_install
+
+        self.install("work", "hermes-evolution", "hermes-atlas-evolution")
+        config = {"plugins": {"enabled": ["hermes-evolution"]}}
+        self.assertIsNone(legacy_install(self.home, config))
+        old = self.root / "profiles" / "work" / "plugins" / "hermes-evolution" / "plugin.yaml"
+        old.write_text("name: hermes-evolution\nversion: 0.5.0\n")
+        self.assertEqual(legacy_install(self.home, config), "hermes-evolution")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,8 @@ from . import experiments, lessons, logwatch, proposals, signals
 from .experience import day_offset, experience, utc_day
 from .skill_health import skill_health, skill_outcomes
 
-def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dict | None = None) -> dict:
+def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dict | None = None,
+          own_transform: bool = True) -> dict:
     """Collect the digest for the last `days` days and the same span before it."""
     from .billing import native_billing
     from .operations import database, summarize
@@ -43,7 +44,8 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
         }
         from . import radar
 
-        report["health"] = {key: value for key, value in radar.scan(home, conn, now=now, days=min(days, 14)).items()
+        report["health"] = {key: value for key, value in radar.scan(home, conn, now=now, days=min(days, 14),
+                                                                    own_transform=own_transform).items()
                             if key != "findings"}
         try:
             with database(home) as ops:
@@ -97,6 +99,7 @@ _TEXT = {
         "failures_none": "No recurring tool failure in this window.", "times": "times", "days": "days",
         "lesson_state": "lesson", "no_lesson": "no lesson yet", "learning": "Self-improvement loop",
         "never_lesson": "never a lesson: the user's approval decides",
+        "other_plugin": "never a lesson: another plugin caused it",
         "reviews": "background reviews", "empty": "produced nothing", "review_tokens": "review tokens (input / output)",
         "share": "of the uncached input and output tokens went to learning (approximate)",
         "rewrites": "skill rewrites", "by_review": "by the automatic review", "skills": "skills",
@@ -134,8 +137,9 @@ _TEXT = {
         "feedback": "Sinais do dono", "corrections": "correções", "reasks": "perguntas repetidas", "thanks": "agradecimentos",
         "vs": "Comparado aos {days} dias anteriores", "verdict": "veredito", "failures": "Falhas que se repetem",
         "failures_none": "Nenhuma falha de ferramenta recorrente nesta janela.", "times": "vezes", "days": "dias",
-        "lesson_state": "lição", "no_lesson": "sem lição ainda", "learning": "Ciclo de auto-melhoria",
+        "lesson_state": "lição", "no_lesson": "sem lição ainda", "learning": "Ciclo de automelhoria",
         "never_lesson": "nunca vira lição: quem decide é a aprovação do usuário",
+        "other_plugin": "nunca vira lição: outro plugin causou a falha",
         "reviews": "revisões em segundo plano", "empty": "não produziram nada", "review_tokens": "tokens das revisões (entrada / saída)",
         "share": "dos tokens de entrada sem cache e de saída foram para o aprendizado (aproximado)",
         "rewrites": "reescritas de skills", "by_review": "pela revisão automática", "skills": "skills",
@@ -313,8 +317,12 @@ def markdown(report: dict, lang: str = "en") -> str:
     if report["recurring_failures"]:
         for item in report["recurring_failures"][:8]:
             detail = f" (`{item['hint']}`)" if item["hint"] else ""
-            state = (t["never_lesson"] if item["class"] == "approval_refused"
-                     else f"{t['lesson_state']}: {_STATUS[lang].get(item['lesson'], t['no_lesson'])}")
+            if item["class"] == "approval_refused":
+                state = t["never_lesson"]
+            elif item["class"] in ("plugin_fault", "rewritten_command"):
+                state = t["other_plugin"]
+            else:
+                state = f"{t['lesson_state']}: {_STATUS[lang].get(item['lesson'], t['no_lesson'])}"
             lines.append(f"- `{item['tool']}` · {item['class']}{detail}: {item['count']} {t['times']}, {item['days']} {t['days']}"
                          f" · {state}")
     else:

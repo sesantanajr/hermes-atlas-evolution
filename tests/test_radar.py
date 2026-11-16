@@ -136,6 +136,18 @@ class PluginHealthTest(Base):
         self.assertEqual(overlap["evidence"]["plugins"], ["aaa-pretty", "zzz-safety"])   # load order: the first wins
         self.assertNotIn("plugin_error:off", codes)
 
+    def test_this_plugin_competes_for_a_transform_only_while_its_hints_are_on(self):
+        from hermes_atlas_evolution import radar
+
+        rows = [{"name": name, "key": name, "enabled": True, "hooks": 1, "error": None}
+                for name in ("hermes-atlas-evolution", "omh")]
+        manifests = (("hermes-atlas-evolution", ("transform_tool_result",)), ("omh", ("transform_tool_result",)))
+        with self.manager(rows, user_manifests=manifests):
+            quiet = radar.plugins(self.home, own_transform=False)
+            hinting = radar.plugins(self.home, own_transform=True)
+        self.assertEqual(quiet["overlaps"], {})            # its hook returns nothing: no conflict with omh
+        self.assertEqual(hinting["overlaps"], {"transform_tool_result": ["hermes-atlas-evolution", "omh"]})
+
     def test_without_a_loaded_plugin_manager_the_radar_skips_plugins(self):
         with patch.dict(sys.modules, {"hermes_cli.plugins": None}):
             self.assertEqual(self.scan()["plugins"], None)
