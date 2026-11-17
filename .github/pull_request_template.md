@@ -26,7 +26,7 @@
 
 ## Documentation
 
-- [ ] `README.md` and `README.pt-BR.md`, or `docs/` and `docs/pt-BR/`, are updated together
+- [ ] Both language sections of `README.md`, and `docs/en-US/` and `docs/pt-BR/`, are updated together
 - [ ] New text a person or the agent reads has its English and Portuguese pair in `hermes_atlas_evolution/catalog.py`
 - [ ] Every command, option, setting and number in the docs exists in the code
 - [ ] `CHANGELOG.md` has an entry

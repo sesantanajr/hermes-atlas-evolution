@@ -2,7 +2,7 @@
 
 **English** | [Português (Brasil)](../pt-BR/evolution-loop.md)
 
-This document describes the loop that Atlas Evolution adds to Hermes Agent: how it runs by itself and learns from the profile's history, what is recorded, when a failure becomes a lesson, how lessons, skills and changes are measured, what the reflector does, what the health radar reads, what ends up in the proposal queue, and every command and setting. Every threshold below is a constant in the code, and the module that holds it is named next to it. For installation and a summary, see the [README](../../README.md).
+This document describes the loop that Atlas Evolution adds to Hermes Agent: how it runs by itself and learns from the profile's history, what is recorded, when a failure becomes a lesson, how lessons, skills and changes are measured, what the reflector does, what the health radar reads, what ends up in the proposal queue, and every command and setting. Every threshold below is a constant in the code, and the module that holds it is named next to it. For installation and a summary, see the [README](../../README.md#en-us).
 
 ## Contents
 
