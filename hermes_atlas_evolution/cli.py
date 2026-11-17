@@ -4,22 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import re
 import sqlite3
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
-from .operations import RETENTION_DAYS, database, recommendations, run_policy, summarize
+from .operations import RETENTION_DAYS, database, summarize
 
-RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
 EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report", "owner",
                      "decisions")
 MAINTENANCE_ACTIONS = ("system", "care", "schedule-digest", "environment", "update")
-CYCLE_INTERVAL_SECONDS = 3600
 
 
 def settings(home: Path) -> dict:
@@ -50,11 +46,10 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
                "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit"),
                "autopilot_minutes": ("evolution", "autopilot_minutes"), "runtime_guard": ("evolution", "runtime_guard"),
                "mode": ("evolution", "mode")}
-# Keys the form does not show but `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key>` can set:
-# the 0.1 notes, whose recall puts stored text in front of the agent on every turn.
-CONFIG_KEYS = {"auto_actions": ("evolution", "auto_actions"),   # 0.8.3's name of the mode, still read
-               "legacy_memory_commands": ("legacy_memory_commands",),
-               "automatic_shared_recall": ("automatic_shared_recall",)}
+# Keys the form does not show but `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key>` can set.
+# The keys of features removed in 0.11.0 (the 0.1 notes, the 0.3 supervisor) are no longer read, here or in
+# settings.json: a value left there is ignored, without an error or a warning.
+CONFIG_KEYS = {"auto_actions": ("evolution", "auto_actions")}   # 0.8.3's name of the mode, still read
 
 
 def native_settings(runtime_config) -> dict:
@@ -109,8 +104,6 @@ TRUSTED_ONLY = {
     # configuration (including the 0.8.3 name `auto_actions`).
     "mode": (("evolution", "mode"), lambda value: value != "manual"),
     "auto_actions": (("evolution", "auto_actions"), lambda value: value not in ("off", False)),
-    "legacy_memory_commands": (("legacy_memory_commands",), lambda value: value is True),
-    "automatic_shared_recall": (("automatic_shared_recall",), lambda value: value is True),
 }
 
 
@@ -147,7 +140,7 @@ def settings_command(home: Path, key: str, value) -> str:
     """The `hermes config set` command that writes one plugin setting where the Hermes settings form keeps it."""
     import shlex
 
-    from .native_actions import _profile_args
+    from .admin import _profile_args
 
     profile = " ".join(_profile_args(Path(home)))   # explicit even for default: Hermes may follow a sticky profile
     literal = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, tuple, bool)) else str(value)
@@ -218,19 +211,8 @@ def _portuguese_help(parser: argparse.ArgumentParser) -> None:
                 _portuguese_help(child)
 
 
-def snapshot(*args, **kwargs):
-    """diagnostics.snapshot, imported on first use: only `ops`, `tick` and the legacy `health` read it, and every Hermes
-    process imports this module (the plugin's command line) when the plugin loads."""
-    from .diagnostics import snapshot as take
-
-    return take(*args, **kwargs)
-
-
 def setup(parser: argparse.ArgumentParser) -> None:
-    from .advisory import EFFORTS, KINDS
     from .i18n import resolve, text
-    from .memory import CATEGORIES
-    from .native_actions import PLAYBOOKS
 
     language = resolve()   # help follows the profile language; output follows --lang or the settings
 
@@ -298,52 +280,10 @@ def setup(parser: argparse.ArgumentParser) -> None:
         "Schedule the weekly digest as a Hermes scheduled task (cron), no agent",
         "Agenda o resumo semanal como tarefa agendada do Hermes (cron), sem agente"))
     digest.add_argument("--deliver", default="local", help=_("Where to deliver it: local, or a channel such as telegram"))
-    health = commands.add_parser("health", help=_b("Inspect Hermes' files and the machine's signals",
-                                                   "Examina os arquivos do Hermes e os sinais da máquina"))
     usage = commands.add_parser("usage", help=_("Summarize provider and tool measurements"))
-    tick = commands.add_parser("tick", help=_("Run maintenance and record decisions"))
-    for command in (health, tick):
-        command.add_argument("--upstream-tag", help=_b("Reference version to compare against, without the network",
-                                                       "Versão de referência para comparar, sem rede"))
-    for command in (usage, tick):
-        command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
-    tick.add_argument("--changes-only", action="store_true", help=_("Only print when a decision changes"))
-    for command in (digest, health, usage, tick):
+    usage.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
+    for command in (digest, usage):
         output(command)
-
-    memory = commands.add_parser("memory", help=_b("Access the plugin's old notes", "Acessa as notas antigas do plugin"))
-    audience = memory.add_mutually_exclusive_group()
-    audience.add_argument("--shared", action="store_true", help=_("Explicitly select the profile-wide store"))
-    audience.add_argument("--dm", nargs=3, metavar=("PLATFORM", "USER", "CHAT"), help=_("Select a direct chat store"))
-    memory.add_argument("--namespace", default="", help=_b(
-        "Optional id of the platform's organization or workspace, for --dm",
-        "Id opcional da organização ou do espaço de trabalho da plataforma, para --dm"))
-    tasks = memory.add_subparsers(dest="memory_action", required=True)
-    add = tasks.add_parser("remember", help=_b("Keep a 0.1 note (deprecated)", "Guarda uma nota da 0.1 (obsoleto)"))
-    add.add_argument("category", choices=CATEGORIES)
-    add.add_argument("text")
-    add.add_argument("--confidence", type=float, default=1.0)
-    add.add_argument("--tag", action="append", default=[])
-    add.add_argument("--promote", action="store_true", help=_("Explicitly confirm a personal profile entry"))
-    recall = tasks.add_parser("recall", help=_b("Search the 0.1 notes (deprecated)", "Busca nas notas da 0.1 (obsoleto)"))
-    recall.add_argument("query")
-    recall.add_argument("--category", action="append", default=[], choices=CATEGORIES)
-    recall.add_argument("--include-shared", action="store_true")
-    recall.add_argument("--limit", type=int, default=5)
-    evaluate = tasks.add_parser("evaluate", help=_("Measure retrieval against a labeled JSON file"))
-    evaluate.add_argument("cases", type=Path)
-    evaluate.add_argument("--limit", type=int, default=5)
-    evaluate.add_argument("--include-shared", action="store_true")
-    tasks.add_parser("audit", help=_b("List every 0.1 note, to keep what you need (deprecated)",
-                                      "Lista todas as notas da 0.1, para guardar o que precisar (obsoleto)"))
-    remove = tasks.add_parser("forget", help=_b("Delete a 0.1 note (deprecated)", "Apaga uma nota da 0.1 (obsoleto)"))
-    remove.add_argument("id", type=int)
-
-    feedback = commands.add_parser("feedback", help=_b("Record whether an operational alert helped",
-                                                       "Registra se um alerta operacional ajudou"))
-    feedback.add_argument("code")
-    feedback.add_argument("result", choices=("helpful", "dismissed", "reset"))
-    output(commands.add_parser("history", help=_("Show learned maintenance priorities and feedback")))
 
     state = commands.add_parser("status", help=_("Show whether the plugin is observing, learning and protecting this profile"))
     state.add_argument("--format", choices=("md", "json"), default="md")
@@ -458,77 +398,9 @@ def setup(parser: argparse.ArgumentParser) -> None:
     for command in (playbook, digest, learn, state, history):
         command.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS,
                              help=_("Language of lessons, messages and the digest"))
-
-    ops = commands.add_parser("ops", help=_("Inspect and supervise Hermes and Linux resource contention"))
-    ops_commands = ops.add_subparsers(dest="ops_action", required=True)
-    ops_help = {"inspect": _b("Read the host and the workload now (deprecated)", "Lê o host e a carga agora (obsoleto)"),
-                "tick": _b("Run one supervision step (deprecated)", "Roda um passo da supervisão (obsoleto)")}
-    for name in ("inspect", "tick"):
-        command = ops_commands.add_parser(name, help=ops_help[name])
-        command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
-        command.add_argument("--upstream-tag")
-        command.add_argument("--hermes-source", type=Path, help=_("Include the bundled Hermes source inventory"))
-        command.add_argument("--sensitivity", choices=("low", "balanced", "high"))
-        if name == "tick":
-            command.add_argument("--notify-only", action="store_true", help=_("Print only new alerts and action transitions"))
-    ops_commands.add_parser("history", help=_b("Past supervision alerts (deprecated)",
-                                                "Alertas passados da supervisão (obsoleto)"))
-    ops_commands.add_parser("rollback", help=_b("Undo an active Linux trial (deprecated)",
-                                                 "Desfaz um ensaio ativo no Linux (obsoleto)"))
-    similar = ops_commands.add_parser("similar", help=_("Find previous diagnostic patterns"))
-    similar.add_argument("query")
-    similar.add_argument("--limit", type=int, choices=range(1, 11), default=5, metavar="1..10")
-    review = ops_commands.add_parser("review", help=_("Review learned baselines, feedback and outcomes"))
-    review.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=14, metavar="1..35")
-    rating = ops_commands.add_parser("feedback", help=_("Rate an adaptive alert"))
-    rating.add_argument("code")
-    rating.add_argument("result", choices=("helpful", "dismissed", "reset"))
-    planner = ops_commands.add_parser("plan", help=_("Create a read-only research, delegation or diagnostic plan"))
-    planner.add_argument("kind", choices=KINDS)
-    planner.add_argument("--effort", choices=EFFORTS, default="standard")
-    planner.add_argument("--durable", action="store_true")
-    handoff = ops_commands.add_parser("handoff", help=_("Create a blocked native Kanban verification card"))
-    handoff.add_argument("kind", choices=sorted(PLAYBOOKS))
-    handoff.add_argument("subject")
-    scheduler = ops_commands.add_parser("schedule-spec", help=_("Generate a native timer configuration for review"))
-    scheduler.add_argument("--every-minutes", type=int, default=5)
-    scheduler.add_argument("--upstream-tag")
     _accept_lang_everywhere(parser, _("Language of lessons, messages and the digest"))
     if language == "pt":
         _portuguese_help(parser)
-
-
-def _memory(conn, args):
-    from .memory import GLOBAL_SCOPE, MemoryStore
-
-    scope = "local"
-    if args.namespace and not args.dm:
-        raise ValueError("--namespace requires --dm")
-    if args.shared:
-        scope = GLOBAL_SCOPE
-    if args.dm:
-        from .integration import dm_scope
-
-        scope = dm_scope(*args.dm, args.namespace)
-    store = MemoryStore(conn)
-    if args.memory_action in ("remember", "forget"):
-        # A note may be recalled in front of the agent (the 0.1 shared recall): only the operator writes them.
-        _operator_only()
-    if args.memory_action == "remember":
-        return store.remember(scope, args.category, args.text, source="operator", confidence=args.confidence,
-                              tags=args.tag, promote=args.promote)
-    if args.memory_action == "recall":
-        return store.search(scope, args.query, categories=args.category, limit=args.limit,
-                            include_global=args.include_shared)
-    if args.memory_action == "evaluate":
-        with args.cases.open("rb") as stream:
-            body = stream.read(131_073)
-        if len(body) > 131_072:
-            raise ValueError("Evaluation file exceeds 128 KiB")
-        return store.evaluate(scope, json.loads(body), limit=args.limit, include_global=args.include_shared)
-    if args.memory_action == "forget":
-        return {"removed": store.forget(scope, args.id)}
-    return store.audit(scope)
 
 
 _OWNER_TEXT = {
@@ -1383,230 +1255,20 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
     return {"started": started, "folder": str(folder), "report": report}
 
 
-def _scheduled_cycle(home: Path, config: dict, *, now: float, runtime_config=None, reflect=None):
-    """Run the evolution pass from `ops tick`, at most once an hour and never alongside the autopilot of a
-    running gateway (both claim the same pass). Returns its notification view."""
-    from .autopilot import claim, finish
-    from .evolve import cycle, notify_view
-
-    owner = f"tick-{os.getpid()}"
-    # The clock of this moment, not of when the command started: an autopilot pass may have finished since.
-    if not claim(home, now=time.time(), interval_s=CYCLE_INTERVAL_SECONDS, owner=owner):
-        return None
-    started = time.time()
-    try:   # the cron recipe allows 300 s; the pass ends well before, skipping model calls that would not fit
-        result = cycle(home, now=started, runtime_config=runtime_config, config=config, reflect=reflect,
-                       deadline=time.monotonic() + 200)
-    except BaseException as problem:
-        finish(home, now=time.time(), owner=owner, ok=False, interval_s=CYCLE_INTERVAL_SECONDS, started=started,
-               error=type(problem).__name__)
-        raise
-    finish(home, now=time.time(), owner=owner, ok=True, interval_s=CYCLE_INTERVAL_SECONDS, started=started)
-    return notify_view(result)
-
-
-def _report(args, home: Path, *, running_version=None, provider=None, now: float, runtime_config=None,
-            hermes_source=None, kanban_home=None, supplemental=(), health_override=None, reflect=None):
+def _report(args, home: Path, *, now: float, runtime_config=None, reflect=None):
     action = args.evolution_action
     if action in EVOLUTION_ACTIONS:
         return _evolution(args, home, now=now, runtime_config=runtime_config, reflect=reflect)
     if action in MAINTENANCE_ACTIONS:
         return _maintenance(args, home, now=now, runtime_config=runtime_config)
-    if action == "ops":
-        return _ops(args, home, now=now, running_version=running_version, provider=provider,
-                    runtime_config=runtime_config, source=hermes_source, kanban_home=kanban_home, reflect=reflect)
-    health = None
-    if action in {"health", "tick"}:
-        health = health_override or snapshot(home, upstream_tag=args.upstream_tag, provider=provider,
-                                             running_version=running_version)
-        if action == "health":
-            return health
-    config = settings(home) if action in {"usage", "tick"} else {}
-    rates = config.get("rates_usd_per_million", {})
-    with database(home) as conn:
-        if action == "memory":
-            if args.memory_action == "remember" and \
-                    effective_settings(home, runtime_config).get("legacy_memory_commands") is not True:
-                raise ValueError("New legacy notes require legacy_memory_commands in Evolution settings")
-            return _memory(conn, args)
-        if action == "feedback":
-            result = None if args.result == "reset" else args.result
-            if not conn.execute("UPDATE maintenance SET feedback=? WHERE code=?", (result, args.code)).rowcount:
-                raise ValueError("Unknown finding code. Run tick first.")
-            return {"code": args.code, "feedback": result}
-        if action == "history":
-            return [dict(row) for row in conn.execute("SELECT * FROM maintenance ORDER BY active DESC,last_seen DESC,code")]
-        measured = summarize(conn, days=args.days, now=now, rates=rates)
-        if action == "tick":
-            assert health is not None
-            findings = [{"code": item["id"], "severity": item["severity"], "action": item["recommendation"]}
-                        for item in health["findings"]]
-            for item in findings:
-                if item["code"] in RESOURCE_FINDINGS:
-                    item["reduce_context"] = True
-            for code, measurement in RESOURCE_FINDINGS.items():
-                if health["host"][measurement] is None and conn.execute(
-                    "SELECT 1 FROM maintenance WHERE code=? AND active=1", (code,)
-                ).fetchone():
-                    findings.append({"code": code, "severity": "warning", "reduce_context": True,
-                                     "action": "Confirm recovery of the previously reported resource pressure."})
-            if health["database"]["status"] not in {"ok", "integrity_error"} and conn.execute(
-                "SELECT 1 FROM maintenance WHERE code='state_integrity' AND active=1"
-            ).fetchone():
-                findings.append({"code": "state_integrity", "severity": "critical",
-                                 "action": "Confirm recovery of the previously reported native database integrity issue.",
-                                 "current_check": health["database"]["status"]})
-            findings += recommendations(measured)
-            findings.extend(supplemental)
-            recovery_ready = True
-            budget = config.get("daily_estimated_budget_usd")
-            if budget is not None:
-                if type(budget) not in (int, float) or not 0 < budget <= 1_000_000 or not math.isfinite(budget):
-                    raise ValueError("daily_estimated_budget_usd must be positive and at most 1000000")
-                day_usage = measured if args.days == 1 else summarize(conn, days=1, now=now, rates=rates)
-                amount = day_usage["estimated_usd"]
-                recovery_ready = recovery_ready and day_usage["successful_llm_calls"] == day_usage["priced_calls"]
-                if amount is not None and amount >= budget:
-                    findings.append({"code": "evolution_daily_budget", "severity": "warning", "reduce_context": True,
-                                     "observed_estimate_usd": amount, "daily_budget_usd": budget,
-                                     "action": "Optional Evolution context paused. Review current provider and job usage."})
-            legacy_table = conn.execute("SELECT 1 FROM sqlite_master WHERE name='evolution_memories' AND type='table'").fetchone()
-            from .memory import MemoryStore
-
-            quality = MemoryStore(conn).audit("local", include_global=True) if legacy_table else None
-            if quality and (quality["quality"]["low_confidence"] or quality["quality"]["repeated_across_categories"]):
-                findings.append({"code": "evolution_memory_review", "severity": "info", "evidence": quality["quality"],
-                                 "action": "Review low-confidence memories and cross-category repeats."})
-            decision = run_policy(conn, findings, now=now, recovery_ready=recovery_ready)
-            if args.changes_only and not decision["changes"]:
-                return None
-            return {"decision": decision, "health": health, "memory_quality_local_and_shared": quality,
-                    "observer_usage": measured}
+    if action != "usage":
+        raise ValueError("Unknown Evolution command")
     from .billing import native_billing
 
-    return {"observer_usage": measured, "hermes_native_billing": native_billing(home, days=args.days, now=now)}
-
-
-def _rollback_trial(home: Path, now: float) -> dict:
-    from .linux_actions import Systemd
-    from .supervisor import _journal, supervise
-
-    if not (home / "evolution" / "supervisor.sqlite3").is_file():
-        return {"status": "idle", "reason": "no_active_trial"}
-    with _journal(home) as journal:
-        _, result = supervise(journal, Systemd(), None, now=now, safe=False, rollback=True)
-    return result
-
-
-def _ops(args, home: Path, *, now, running_version, provider, runtime_config, source, kanban_home, reflect=None):
-    from .advisory import plan
-    from .inventory import scan_inventory
-    from .learning import record_feedback, retrospective, review as adaptive_review
-    from .linux_actions import SystemPolicy, Systemd
-    from .linux_host import scan_host
-    from .native_actions import create_handoff, schedule_spec
-    from .native_signals import native_findings, native_summary
-    from .ops_metrics import current_metrics, workload_correlations
-    from .reasoning import diagnose
-    from .supervisor import _journal, baseline_metrics, journal_history, learned_baseline, record_observations, supervise
-    from .telemetry import research_summary
-    from .workloads import inspect_workloads
-
-    action = args.ops_action
-    if action == "history":
-        return journal_history(home)
-    if action in ("review", "feedback"):
-        with _journal(home) as journal:
-            return (retrospective(journal, now=now, days=args.days) if action == "review"
-                    else record_feedback(journal, args.code, args.result, now=now))
-    if action == "plan":
-        return plan(args.kind, args.effort, args.durable)
-    if action == "schedule-spec":
-        return schedule_spec(home, every_minutes=args.every_minutes, upstream_tag=args.upstream_tag, lang=args.lang)
-    if action == "rollback":
-        return _rollback_trial(home, now)
-    config = effective_settings(home, runtime_config)
-    if action == "handoff":
-        return create_handoff(home, config, kind=args.kind, subject=args.subject, now=now, lang=args.lang)
-    if action == "similar":
-        from .semantic_ops import match_incidents
-
-        model = config.get("semantic_incident_model")
-        if model is not None and (not isinstance(model, str) or not Path(model).is_absolute()):
-            raise ValueError("semantic_incident_model must be an absolute local model directory")
-        return match_incidents(args.query, journal_history(home)["incidents"], model_path=Path(model) if model else None,
-                               limit=args.limit)
-    health = snapshot(home, upstream_tag=args.upstream_tag, provider=provider, running_version=running_version)
-    sensitivity = args.sensitivity or config.get("sensitivity", "balanced")
-    if sensitivity not in ("low", "balanced", "high"):
-        raise ValueError("sensitivity must be low, balanced, or high")
-    host = scan_host(home)
-    runtime = runtime_config or {}
-    cfg = runtime.get("plugins", {})
-    cfg = cfg if isinstance(cfg, dict) else {}
-    inventory = scan_inventory(home, source=args.hermes_source or source, enabled_plugins=cfg.get("enabled"),
-                               disabled_plugins=cfg.get("disabled"), memory_limits=runtime.get("memory"), now=now)
-    workload_options = {key: runtime.get(key) for key in ("cron", "kanban", "delegation")}
-    if config.get("inspect_shared_kanban") is True:
-        workload_options["kanban_home"] = kanban_home
-    workloads = inspect_workloads(home, provider_options=workload_options, now=now)
-    rates = config.get("rates_usd_per_million", {})
+    rates = settings(home).get("rates_usd_per_million", {})
     with database(home) as conn:
-        usage = summarize(conn, days=args.days, now=now, rates=rates)
-        research = research_summary(conn, days=args.days, now=now)
-        native = native_summary(conn, days=args.days, now=now)
-        daily_usage = usage if args.days == 1 else summarize(conn, days=1, now=now, rates={})
-        daily_research = research if args.days == 1 else research_summary(conn, days=1, now=now)
-    observer_issues = native_findings(native)
-    related = workloads["recommendations"] + observer_issues + workload_correlations(workloads, observer_issues)
-    result = {"health": health, "linux_host": host, "inventory": inventory, "usage": usage, "research": research,
-              "workloads": workloads, "native_activity": native}
-    current_baseline = baseline_metrics(daily_usage, daily_research)
-    metrics = current_metrics(host, daily_usage, workloads, current_baseline)
-    if action == "inspect":
-        issues = diagnose(health, usage, host=host, inventory=inventory, telemetry={"research": research}) + related
-        result["diagnoses"] = issues
-        if (home / "evolution" / "supervisor.sqlite3").is_file():
-            with _journal(home) as journal:
-                result["learning"] = adaptive_review(journal, metrics=metrics, findings=issues, now=now,
-                                                      sensitivity=sensitivity)
-        return result
-    policy = SystemPolicy.read(config)
-    safe = (health["profile_present"] and health["database"]["status"] in ("ok", "integrity_skipped_large")
-            and not any(item["severity"] == "critical" or item["id"] in ("gateway_degraded", "gateway_startup_failure")
-                        for item in health["findings"]))
-    with _journal(home) as journal:
-        history = learned_baseline(journal, now=now)
-        def diagnose_with(candidates):
-            return diagnose(health, usage, host=host, inventory=inventory,
-                            telemetry={"research": research, "contention_candidates": candidates,
-                                       "current_daily_baseline": current_baseline}, history=history)
-
-        def approved_by_evidence(candidate):
-            return any(f"rebalance_background_{candidate['kind']}" in issue["action_ids"] for issue in diagnose_with([candidate]))
-
-        candidates, outcome = supervise(journal, Systemd(), policy, now=now, safe=safe, allow_kind=approved_by_evidence)
-        issues = diagnose_with(candidates) + related
-        record_observations(journal, issues, daily_usage, daily_research, now=now)
-        adaptive = adaptive_review(journal, metrics=metrics, findings=issues, now=now, sensitivity=sensitivity, record=True)
-    context_actions = [{"code": issue["code"], "action": issue["recommendation"], "severity": issue["severity"],
-                        "reduce_context": True} for issue in issues if "pause_optional_context" in issue["action_ids"]]
-    args_for_tick = SimpleNamespace(evolution_action="tick", upstream_tag=args.upstream_tag,
-                                    days=args.days, changes_only=False)
-    maintenance = _report(args_for_tick, home, now=now, health_override=health, supplemental=context_actions)
-    try:
-        evolution = _scheduled_cycle(home, config, now=now, runtime_config=runtime_config, reflect=reflect)
-    except (OSError, ValueError, sqlite3.Error):
-        evolution = None   # the learning pass never blocks operational supervision
-    if args.notify_only:
-        changes = maintenance["decision"]["changes"]
-        event = outcome if outcome["status"] in ("active", "rolled_back", "released", "not_applied") else None
-        if not adaptive["alerts"] and not event and not changes and not evolution:
-            return None
-        return {"alerts": adaptive["alerts"], "host_action": event, "maintenance_changes": changes,
-                "evolution": evolution}
-    return {**result, "diagnoses": issues, "paired_contention": candidates, "host_action": outcome,
-            "maintenance": maintenance["decision"], "learning": adaptive, "evolution": evolution}
+        measured = summarize(conn, days=args.days, now=now, rates=rates)
+    return {"observer_usage": measured, "hermes_native_billing": native_billing(home, days=args.days, now=now)}
 
 
 # ── what a person reads (0.9.0) ──────────────────────────────────────────────────────────────────────────────────
@@ -1614,7 +1276,7 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
 # output (the same structure as before 0.9.0). A caller that builds the arguments itself, without `format`, gets the
 # structure: the menu and the panel call `execute` that way.
 HUMAN_ACTIONS = ("care", "environment", "decisions", "lessons", "proposals", "learn", "skills", "experiments", "system",
-                 "health", "usage", "history", "tick", "schedule-digest", "update")
+                 "usage", "schedule-digest", "update")
 
 
 def _wants_text(args) -> bool:
@@ -2671,58 +2333,9 @@ def _system_md(result: dict, task: str, home: Path, lang: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-# `health`, `usage`, `history`, `tick` and `schedule-digest` as text (0.9.0); `--format json` keeps the structure.
+# `usage` and `schedule-digest` as text (0.9.0); `--format json` keeps the structure.
 _OPS = {
     "en": {
-        "health_title": "Hermes' files and the machine · profile `{profile}`",
-        "states": {"starting": "starting", "running": "running", "restarting": "restarting", "stopping": "stopping",
-                   "stopped": "stopped", "startup_failed": "failed to start", "degraded": "degraded"},
-        "no_state": "no state reported",
-        "process": {"confirmed": "process confirmed", "missing_locally": "process not found",
-                    "pid_reused_locally": "its process number now belongs to another program",
-                    "unverified": "process not checked"},
-        "beat": {"recent": "recent sign of life", "stale": "late sign of life"},
-        "version": "version {v}", "served": "served by the main profile's gateway",
-        "platforms": ("1 platform needs attention", "{n} platforms need attention"),
-        "store": {"ok": "session store ok", "unavailable": "session store unavailable",
-                  "retrying": "session store retrying"},
-        "db": "Session database",
-        "db_states": {"ok": "integrity ok", "integrity_error": "failed its integrity check",
-                      "integrity_skipped_large": "too large to check its integrity",
-                      "missing_or_unreadable": "not found or unreadable",
-                      "wal_sidecars_unavailable": "the write-ahead log files are incomplete",
-                      "snapshot_changed": "changed while it was read", "unexpected_schema": "unexpected format",
-                      "check_timed_out": "the check took too long", "busy": "busy", "unreadable": "unreadable"},
-        "wal": "write-ahead log {size}",
-        "notes": "Agent memory files", "provider": "memory provider `{name}`",
-        "file_states": {"empty": "empty", "missing_or_unreadable": "missing", "not_checked_too_large": "too large to read",
-                        "invalid_utf8": "invalid text", "unreadable": "unreadable"},
-        "disk": "Disk", "free": "{free} free of {total}", "memory": "Memory", "swap": "swap: {used} of {total} in use",
-        "cgroup": "process group limit: {free} free of {total}",
-        "load": "Load", "load_line": "{load} on {cpus} CPUs (last minute)",
-        "logs": "Logs of the last 24 h", "logs_none": "nothing unusual",
-        "events": {"warning": ("1 warning", "{n} warnings"), "error": ("1 error", "{n} errors"),
-                   "critical": ("1 critical error", "{n} critical errors"),
-                   "storage_io": ("1 full-disk error", "{n} full-disk errors"),
-                   "resource_exhaustion": ("1 out-of-memory error", "{n} out-of-memory errors"),
-                   "database_locked": ("1 locked database", "{n} locked databases"),
-                   "storage_access": ("1 file access denied", "{n} file accesses denied"),
-                   "rate_limit": ("1 provider rate limit", "{n} provider rate limits"),
-                   "authentication": ("1 authentication refused", "{n} authentications refused"),
-                   "timeout": ("1 timeout", "{n} timeouts"), "tool_result_error": ("1 tool error", "{n} tool errors"),
-                   "memory_failure": ("1 memory failure", "{n} memory failures"),
-                   "plugin_failure": ("1 plugin failure", "{n} plugin failures"),
-                   "plugin_dependency_error": ("1 plugin missing a dependency", "{n} plugins missing a dependency"),
-                   "plugin_contract_error": ("1 plugin calling Hermes the wrong way",
-                                             "{n} plugins calling Hermes the wrong way")},
-        "update": "Hermes update",
-        "update_states": {"not_checked": "not checked (pass `--upstream-tag <version>`)",
-                          "invalid_reference": "the reference version is not valid",
-                          "unknown_version": "the installed version is unknown",
-                          "update_available": "{current} → {reference} available", "ahead": "{current}, newer than {reference}",
-                          "current": "{current}, up to date"},
-        "severity": {"critical": "critical", "error": "error", "warning": "warning", "info": "note"},
-        "read_at": "Read {when}.",
         # usage
         "usage_title": "Model and tool use · {days} days ({span}, UTC)",
         "llm": "Model calls that worked", "llm_line": "{calls} · {measured} with token counts · {priced} with a known price",
@@ -2737,77 +2350,12 @@ _OPS = {
                           "unreadable": "not available (the session database could not be read)"},
         "native_other": "not available",
         "usage_none": "No model call measured in this window.",
-        # history
-        "history_title": "Maintenance alerts the plugin learned",
-        "history_cols": "| alert | state | last seen | days seen | your rating |",
-        "history_none": "No maintenance alert recorded yet.", "open": "open", "cleared": "cleared",
-        "ratings": {"helpful": "helped", "dismissed": "dismissed"},
-        "rate_hint": "Rate one with `{command}`.",
-        # tick
-        "tick_title": "Maintenance", "mode": "Optional context",
-        "modes": {"normal": "normal", "conservative": "paused: the machine or the budget is under pressure"},
-        "changes": "What changed now",
-        "transitions": {"opened": "opened", "cleared": "cleared", "normal": "optional context back to normal",
-                        "conservative": "optional context paused"},
-        "alerts": "Active alerts", "alerts_none": "No active alert.",
-        "days_seen": ("seen on 1 day", "seen on {n} days"),
-        "more_health": "The details of the machine: `{command}`.",
         # schedule-digest
         "digest_done": "The weekly digest is scheduled as a Hermes scheduled task (cron), no agent: `{job}`, "
                        "{schedule}, delivered to `{deliver}`. See it with `hermes cron list`.",
         "digest_already": "The weekly digest is already scheduled; nothing changed. See it with `hermes cron list`.",
     },
     "pt": {
-        "health_title": "Arquivos do Hermes e a máquina · perfil `{profile}`",
-        "states": {"starting": "iniciando", "running": "rodando", "restarting": "reiniciando", "stopping": "parando",
-                   "stopped": "parado", "startup_failed": "falhou ao iniciar", "degraded": "com problemas"},
-        "no_state": "sem estado informado",
-        "process": {"confirmed": "processo confirmado", "missing_locally": "processo não encontrado",
-                    "pid_reused_locally": "o número do processo agora é de outro programa",
-                    "unverified": "processo não verificado"},
-        "beat": {"recent": "sinal de vida recente", "stale": "sinal de vida atrasado"},
-        "version": "versão {v}", "served": "atendido pelo gateway do perfil principal",
-        "platforms": ("1 plataforma pede atenção", "{n} plataformas pedem atenção"),
-        "store": {"ok": "registro de sessões ok", "unavailable": "registro de sessões indisponível",
-                  "retrying": "registro de sessões tentando de novo"},
-        "db": "Banco de sessões",
-        "db_states": {"ok": "integridade ok", "integrity_error": "falhou na checagem de integridade",
-                      "integrity_skipped_large": "grande demais para checar a integridade",
-                      "missing_or_unreadable": "não encontrado ou ilegível",
-                      "wal_sidecars_unavailable": "os arquivos do registro de escrita estão incompletos",
-                      "snapshot_changed": "mudou durante a leitura", "unexpected_schema": "formato inesperado",
-                      "check_timed_out": "a checagem demorou demais", "busy": "ocupado", "unreadable": "ilegível"},
-        "wal": "registro de escrita {size}",
-        "notes": "Arquivos de memória do agente", "provider": "provedor de memória `{name}`",
-        "file_states": {"empty": "vazio", "missing_or_unreadable": "não existe", "not_checked_too_large": "grande demais para ler",
-                        "invalid_utf8": "texto inválido", "unreadable": "ilegível"},
-        "disk": "Disco", "free": "{free} livres de {total}", "memory": "Memória", "swap": "swap: {used} de {total} em uso",
-        "cgroup": "limite do grupo de processos: {free} livres de {total}",
-        "load": "Carga", "load_line": "{load} em {cpus} CPUs (último minuto)",
-        "logs": "Registros das últimas 24 h", "logs_none": "nada fora do comum",
-        "events": {"warning": ("1 aviso", "{n} avisos"), "error": ("1 erro", "{n} erros"),
-                   "critical": ("1 erro crítico", "{n} erros críticos"),
-                   "storage_io": ("1 erro de disco cheio", "{n} erros de disco cheio"),
-                   "resource_exhaustion": ("1 erro de falta de memória", "{n} erros de falta de memória"),
-                   "database_locked": ("1 banco travado", "{n} bancos travados"),
-                   "storage_access": ("1 acesso negado a arquivo", "{n} acessos negados a arquivos"),
-                   "rate_limit": ("1 limite de uso do provedor", "{n} limites de uso do provedor"),
-                   "authentication": ("1 autenticação recusada", "{n} autenticações recusadas"),
-                   "timeout": ("1 tempo esgotado", "{n} tempos esgotados"),
-                   "tool_result_error": ("1 erro de ferramenta", "{n} erros de ferramenta"),
-                   "memory_failure": ("1 falha da memória", "{n} falhas da memória"),
-                   "plugin_failure": ("1 falha de plugin", "{n} falhas de plugin"),
-                   "plugin_dependency_error": ("1 plugin sem uma dependência", "{n} plugins sem uma dependência"),
-                   "plugin_contract_error": ("1 plugin chamando o Hermes do jeito errado",
-                                             "{n} plugins chamando o Hermes do jeito errado")},
-        "update": "Atualização do Hermes",
-        "update_states": {"not_checked": "não verificada (passe `--upstream-tag <versão>`)",
-                          "invalid_reference": "a versão de referência não é válida",
-                          "unknown_version": "a versão instalada é desconhecida",
-                          "update_available": "{current} → {reference} disponível",
-                          "ahead": "{current}, mais nova que {reference}", "current": "{current}, em dia"},
-        "severity": {"critical": "crítico", "error": "erro", "warning": "aviso", "info": "nota"},
-        "read_at": "Lido em {when}.",
         "usage_title": "Uso de modelos e ferramentas · {days} dias ({span}, UTC)",
         "llm": "Chamadas ao modelo que deram certo",
         "llm_line": "{calls} · {measured} com contagem de tokens · {priced} com preço conhecido",
@@ -2823,93 +2371,11 @@ _OPS = {
                           "unreadable": "indisponível (o banco de sessões não pôde ser lido)"},
         "native_other": "indisponível",
         "usage_none": "Nenhuma chamada ao modelo medida neste período.",
-        "history_title": "Alertas de manutenção que o plugin aprendeu",
-        "history_cols": "| alerta | situação | visto por último | dias em que apareceu | sua avaliação |",
-        "history_none": "Nenhum alerta de manutenção registrado ainda.", "open": "aberto", "cleared": "resolvido",
-        "ratings": {"helpful": "ajudou", "dismissed": "dispensado"},
-        "rate_hint": "Para avaliar um: `{command}`.",
-        "tick_title": "Manutenção", "mode": "Contexto opcional",
-        "modes": {"normal": "normal", "conservative": "pausado: a máquina ou o orçamento estão sob pressão"},
-        "changes": "O que mudou agora",
-        "transitions": {"opened": "aberto", "cleared": "resolvido", "normal": "contexto opcional de volta ao normal",
-                        "conservative": "contexto opcional pausado"},
-        "alerts": "Alertas ativos", "alerts_none": "Nenhum alerta ativo.",
-        "days_seen": ("visto em 1 dia", "visto em {n} dias"),
-        "more_health": "Os detalhes da máquina: `{command}`.",
         "digest_done": "O resumo semanal foi agendado como tarefa agendada do Hermes (cron), sem agente: `{job}`, "
                        "{schedule}, entregue em `{deliver}`. Veja com `hermes cron list`.",
         "digest_already": "O resumo semanal já está agendado; nada mudou. Veja com `hermes cron list`.",
     },
 }
-
-
-def _health_md(result: dict, home: Path, lang: str) -> str:
-    from .i18n import text
-    from .status import human_size, local_time
-
-    t = _OPS[lang]
-    gate, host, db = result.get("gateway") or {}, result.get("host") or {}, result.get("database") or {}
-    lines = ["# " + t["health_title"].format(profile=_profile_name(home)), ""]
-    parts = [t["states"].get(gate.get("reported_state"), t["no_state"]),
-             t["process"].get(gate.get("process_liveness"), t["process"]["unverified"])]
-    if gate.get("heartbeat") in t["beat"]:
-        parts.append(t["beat"][gate["heartbeat"]])
-    if gate.get("reported_version"):
-        parts.append(t["version"].format(v=gate["reported_version"]))
-    if gate.get("served_by_host_gateway"):
-        parts.append(t["served"])
-    if gate.get("platforms_needing_attention"):
-        parts.append(_p(t["platforms"], gate["platforms_needing_attention"]))
-    if gate.get("reported_session_store") in t["store"]:
-        parts.append(t["store"][gate["reported_session_store"]])
-    lines.append(f"- **{_H[lang]['gateway']}:** " + " · ".join(parts))
-    parts = [t["db_states"].get(db.get("status"), t["db_states"]["unreadable"])]
-    if db.get("bytes") is not None:
-        parts.insert(0, human_size(db["bytes"]))
-    if db.get("wal_bytes"):
-        parts.append(t["wal"].format(size=human_size(db["wal_bytes"])))
-    lines.append(f"- **{t['db']}:** " + " · ".join(parts))
-    notes = (result.get("memory") or {})
-    files = [f"`{name}` " + (human_size(item.get("bytes")) if item.get("status") == "readable"
-                             else t["file_states"].get(item.get("status"), t["file_states"]["unreadable"]))
-             for name, item in (notes.get("native_files") or {}).items() if isinstance(item, dict)]
-    if notes.get("provider"):
-        files.append(t["provider"].format(name=notes["provider"]))
-    if files:
-        lines.append(f"- **{t['notes']}:** " + " · ".join(files))
-    disk = host.get("disk") or {}
-    if disk.get("total_bytes"):
-        lines.append(f"- **{t['disk']}:** " + t["free"].format(free=human_size(disk.get("free_bytes")),
-                                                              total=human_size(disk["total_bytes"])))
-    memory = host.get("memory") or {}
-    if memory.get("total_bytes"):
-        line = t["free"].format(free=human_size(memory.get("available_bytes")), total=human_size(memory["total_bytes"]))
-        if memory.get("swap_total_bytes"):
-            line += " · " + t["swap"].format(used=human_size(memory["swap_total_bytes"] - (memory.get("swap_free_bytes") or 0)),
-                                             total=human_size(memory["swap_total_bytes"]))
-        group = host.get("cgroup_memory") or {}
-        if group.get("total_bytes"):
-            line += " · " + t["cgroup"].format(free=human_size(group.get("available_bytes")),
-                                               total=human_size(group["total_bytes"]))
-        lines.append(f"- **{t['memory']}:** {line}")
-    load = host.get("load") or {}
-    if load.get("logical_cpus"):
-        lines.append(f"- **{t['load']}:** " + t["load_line"].format(load=_num(round(load.get("one_minute") or 0, 1), lang),
-                                                                   cpus=load["logical_cpus"]))
-    events = ((result.get("logs") or {}).get("events") or {})
-    said = [_p(t["events"][name], count) for name, count in events.items() if name in t["events"] and count]
-    lines.append(f"- **{t['logs']}:** " + (" · ".join(said) if said else t["logs_none"]))
-    update = result.get("update") or {}
-    state = t["update_states"].get(update.get("status"), t["update_states"]["not_checked"])
-    lines.append(f"- **{t['update']}:** " + state.format(current=update.get("current") or "?",
-                                                         reference=update.get("reference") or "?"))
-    lines += ["", f"## {_H[lang]['attention']}", ""]
-    findings = result.get("findings") or []
-    lines += [f"- [{t['severity'].get(item.get('severity'), item.get('severity'))}] "
-              f"{text(str(item.get('recommendation') or ''), lang)}" for item in findings] or [_H[lang]["nothing"]]
-    if result.get("observed_at"):
-        lines += ["", t["read_at"].format(when=local_time(result["observed_at"], lang))]
-    return "\n".join(lines) + "\n"
 
 
 def _usage_md(result: dict, lang: str, *, days: int) -> str:
@@ -2945,47 +2411,6 @@ def _usage_md(result: dict, lang: str, *, days: int) -> str:
                      f"{t['outcomes'].get(row.get('outcome'), row.get('outcome'))} | {_num(row.get('requests') or 0, lang)} | "
                      f"{_num(row.get('input_tokens') or 0, lang)} | {_num(row.get('output_tokens') or 0, lang)} | "
                      f"{_num(row.get('cache_read_tokens') or 0, lang)} |")
-    return "\n".join(lines) + "\n"
-
-
-def _history_md(rows: list, home: Path, lang: str) -> str:
-    from .status import local_time
-
-    t = _OPS[lang]
-    lines = [f"# {t['history_title']}", ""]
-    if not rows:
-        return "\n".join(lines + [t["history_none"]]) + "\n"
-    lines += [t["history_cols"], "|---|---|---|---:|---|"]
-    for row in rows[:80]:
-        lines.append(f"| `{row.get('code')}` | {t['open'] if row.get('active') else t['cleared']} | "
-                     f"{local_time(row.get('last_seen'), lang)} | {row.get('samples', 0)} | "
-                     f"{t['ratings'].get(row.get('feedback'), '—')} |")
-    lines += ["", t["rate_hint"].format(command=_hermes_cmd(home, "evolution feedback <alerta> helpful|dismissed"
-                                                            if lang == "pt" else "evolution feedback <alert> helpful|dismissed"))]
-    return "\n".join(lines) + "\n"
-
-
-def _tick_md(result: dict | None, home: Path, lang: str) -> str | None:
-    from .i18n import text
-
-    if result is None:   # --changes-only and nothing changed
-        return None
-    t = _OPS[lang]
-    decision = result.get("decision") or {}
-    lines = [f"# {t['tick_title']}", "",
-             f"- **{t['mode']}:** {t['modes'].get(decision.get('mode'), decision.get('mode'))}"]
-    changes = decision.get("changes") or []
-    if changes:
-        lines += ["", f"## {t['changes']}", ""]
-        for item in changes:
-            said = t["transitions"].get(item.get("transition"), item.get("transition"))
-            lines.append(f"- {said}" if item.get("code") == "evolution_mode" else f"- `{item.get('code')}`: {said}")
-    lines += ["", f"## {t['alerts']}", ""]
-    findings = decision.get("findings") or []
-    lines += [f"- [{t['severity'].get(item.get('severity'), item.get('severity'))}] "
-              f"{text(str(item.get('action') or ''), lang)} (`{item.get('code')}`, "
-              f"{_p(t['days_seen'], item.get('observed_days') or 1)})" for item in findings] or [t["alerts_none"]]
-    lines += ["", t["more_health"].format(command=_hermes_cmd(home, "evolution health"))]
     return "\n".join(lines) + "\n"
 
 
@@ -3048,26 +2473,11 @@ def _human(args, result, home: Path, lang: str):
         return _experiments_md(result, lang)
     if action == "system":
         return _system_md(result, args.system_action, home, lang)
-    if action == "health":
-        return _health_md(result, home, lang)
     if action == "usage":
         return _usage_md(result, lang, days=getattr(args, "days", 7))
-    if action == "history":
-        return _history_md(result, home, lang)
-    if action == "tick":
-        return _tick_md(result, home, lang)
     if action == "schedule-digest":
         return _digest_md(result, lang)
     return result
-
-
-# English keeps the supervisor's own state words (scripts match "Active trial recovery: rolled_back").
-_TRIAL_STATES = {"en": {"active": "still running", "rolled_back": "undone", "released": "released",
-                        "not_applied": "not applied", "observing": "being observed", "pending": "pending",
-                        "skipped": "skipped", "improved": "kept: it helped"},
-                 "pt": {"active": "ainda em andamento", "rolled_back": "desfeito", "released": "liberado",
-                        "not_applied": "não aplicado", "observing": "em observação", "pending": "pendente",
-                        "skipped": "pulado", "improved": "mantido: ajudou"}}
 
 
 def _output_language(args, home: Path, runtime_config) -> str:
@@ -3084,8 +2494,7 @@ def _output_language(args, home: Path, runtime_config) -> str:
     return resolve(configured if isinstance(configured, str) else None, runtime_config)
 
 
-def execute(args, home: Path, *, running_version=None, provider=None, runtime_config=None, hermes_source=None,
-            kanban_home=None, reflect=None) -> None:
+def execute(args, home: Path, *, runtime_config=None, reflect=None) -> None:
     from .i18n import localize, text
 
     now = time.time()
@@ -3106,26 +2515,14 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
                                                   "from, outside an agent session", language))
         args.evolution_action, args.format, args.no_learn = "status", "md", False
     try:
-        result = _report(args, home, running_version=running_version, provider=provider, now=now,
-                         runtime_config=runtime_config, hermes_source=hermes_source, kanban_home=kanban_home,
-                         reflect=reflect)
+        result = _report(args, home, now=now, runtime_config=runtime_config, reflect=reflect)
     except KeyboardInterrupt:
         hint = (_say(language, " A system update goes on in the background: `hermes evolution system report`.",
                      " Uma atualização do sistema continua em segundo plano: `hermes evolution system report`.")
                 if getattr(args, "evolution_action", None) == "system" else "")
         raise SystemExit("Evolution: " + _say(language, "Interrupted.", "Interrompido.") + hint) from None
     except (OSError, ValueError, sqlite3.Error) as error:
-        recovery = ""
-        if args.evolution_action == "ops" and args.ops_action == "tick":
-            try:
-                outcome = _rollback_trial(home, now)
-                if outcome["status"] != "idle":
-                    states = _TRIAL_STATES.get(language, _TRIAL_STATES["en"])
-                    recovery = "\n" + _say(language, "Active trial recovery: ", "Recuperação do teste ativo: ") + \
-                        states.get(outcome["status"], str(outcome["status"]))
-            except (OSError, ValueError, sqlite3.Error):
-                recovery = "\n" + text("Trial recovery is unverified. Run ops rollback to recheck.", language)
-        raise SystemExit(f"Evolution: {text(str(error), language)}{recovery}") from None
+        raise SystemExit(f"Evolution: {text(str(error), language)}") from None
     failed = _failed(args, result)
     if _wants_text(args):
         from .status import decimal_comma
@@ -3135,36 +2532,8 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
         print(result, end="" if result.endswith("\n") else "\n")
     elif result is not None:
         print(json.dumps(localize(result, language), indent=2, ensure_ascii=False, allow_nan=False))
-    notice = deprecation(getattr(args, "evolution_action", None), language)
-    if notice:
-        print(notice, file=sys.stderr)
     if failed:
         raise SystemExit(1)
-
-
-# Commands that only the 0.1 notes and the 0.3 ops supervisor use, none of them by default: deprecated in 0.10.0,
-# removed in 0.11.0. Each says so, with what replaces it, on stderr (a JSON answer on stdout stays parseable).
-DEPRECATED = {
-    "health": ("use `hermes evolution care check`", "use `hermes evolution care check`"),
-    "history": ("use `hermes evolution decisions`", "use `hermes evolution decisions`"),
-    "tick": ("the learning pass runs by itself (`hermes evolution learn` runs one now)",
-             "a rodada de aprendizado roda sozinha (`hermes evolution learn` roda uma agora)"),
-    "feedback": ("", ""),
-    "memory": ("keep what you need of these 0.1 notes: `hermes evolution memory audit`",
-               "guarde o que precisar dessas notas da 0.1: `hermes evolution memory audit`"),
-    "ops": ("", ""),
-}
-
-
-def deprecation(action, lang: str, *, name: str | None = None) -> str | None:
-    """The notice a deprecated command prints, in `lang` (`name`: how the owner typed it); None for any other."""
-    if action not in DEPRECATED:
-        return None
-    en, pt = DEPRECATED[action]
-    name = name or f"hermes evolution {action}"
-    if lang == "pt":
-        return f"Aviso: `{name}` está obsoleto e sai na versão 0.11.0" + (f"; {pt}." if pt else ".")
-    return f"Note: `{name}` is deprecated and goes away in 0.11.0" + (f"; {en}." if en else ".")
 
 
 def _failed(args, result) -> bool:
@@ -3224,19 +2593,11 @@ def main():
     parser = argparse.ArgumentParser(prog="python -m hermes_atlas_evolution")
     parser.add_argument("--home", type=Path, default=os.environ.get("HERMES_HOME") or None,
                         help=_("Explicit Hermes profile path"))
-    parser.add_argument("--hermes-version", help=_("Installed version if running outside Hermes"))
+    # Accepted and ignored since 0.11.0 (only the removed health checks read it): a script that passes it still runs.
+    parser.add_argument("--hermes-version", help=argparse.SUPPRESS)
     setup(parser)
     args = parser.parse_args()
     if args.home is None:
         parser.error(_("Pass --home or set HERMES_HOME"))
-    from .environment import root_of
-
-    given = args.home.expanduser()
-    home = given.resolve()
-    config = _standalone_config(home)
-    memory = config.get("memory")
-    provider = memory.get("provider") if isinstance(memory, dict) else None
-    # Named profiles live in <root>/profiles/<name>; shared Kanban boards belong to the root.
-    root = root_of(given)
-    execute(args, home, running_version=args.hermes_version, provider=provider if isinstance(provider, str) else None,
-            runtime_config=config, kanban_home=root)
+    home = args.home.expanduser().resolve()
+    execute(args, home, runtime_config=_standalone_config(home))

@@ -4,8 +4,8 @@ The language follows Hermes: the plugin's own `language` setting when it is `en`
 profile's `HERMES_LANGUAGE`, then `display.language` from the profile configuration, then the process
 locale, then English. Hermes codes such as `pt`, `pt-BR` and `pt_br` all select Portuguese.
 
-Diagnostic modules write their sentences in one language and `localize` maps them to the other through
-the pairs in `catalog`, gettext style: the source sentence is the key. Codes, numbers and identifiers
+Sentences written in one language (refusals, help texts, the scheduler scripts, the agent's tools) are mapped
+to the other by `text` and `localize` through the pairs in `catalog`, gettext style: the source sentence is the key. Codes, numbers and identifiers
 are never translated.
 """
 

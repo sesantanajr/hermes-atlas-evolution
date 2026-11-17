@@ -107,6 +107,19 @@ def profile_name(home: Path) -> str:
     return home.name if home.parent.name == "profiles" else "default"
 
 
+_PROFILE_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
+
+
+def _profile_args(profile: Path) -> list[str]:
+    """`--profile <name>` for Hermes' command line. A root HERMES_HOME alone can still follow Hermes' sticky
+    active_profile, so the name is always explicit. It is read before links are followed (profile_name): a linked
+    profile folder is still that profile, never the default one."""
+    name = profile_name(Path(profile))
+    if not _PROFILE_SLUG.fullmatch(name):
+        raise ValueError("Invalid Hermes profile directory name")
+    return ["--profile", name]
+
+
 def launch_home(home: Path) -> Path:
     """The root Hermes home of a profile (<root>/profiles/<name> belongs to <root>): environment.root_of."""
     from .environment import root_of

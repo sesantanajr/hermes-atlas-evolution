@@ -1,4 +1,4 @@
-"""Profile-local observer metrics and a feedback-driven maintenance loop."""
+"""Profile-local observer metrics: model calls, tool calls and research turns, counted per UTC day."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import threading
 import time
-from collections import Counter, OrderedDict, deque
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -19,11 +19,12 @@ from pathlib import Path
 BUCKETS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 RETENTION_DAYS = 35
 SCHEMA_VERSION = 8
-RECOVERY_SPACING_SECONDS = 300
 OBSERVER_BUSY_SECONDS = 0.035
 _OBSERVER_LOCK_SECONDS = 0.05
 _OBSERVER_QUEUE = 512
 _OBSERVER_LIMIT = 8
+# Every table stays, so a database written by an earlier version opens as it is: maintenance and control are the
+# 0.3 `tick` policy's, no longer written; native_activity keeps only post_compaction rows (radar.observe_compaction).
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, day TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS seen_day ON seen(day);
@@ -780,50 +781,6 @@ def summarize(conn: sqlite3.Connection, *, days: int, now: float, rates: dict) -
             "estimated_usd": round(estimate, 8) if priced_calls else None, "dropped_events": dropped}
 
 
-def recommendations(usage: dict) -> list[dict]:
-    by_lane = usage["groups"]
-    proposals = []
-    for outcome, instruction in (
-        ("rate_limit", "Measure concurrent jobs and backoff. Test staggering schedules before changing routing."),
-        ("auth", "Review provider credential status using Hermes diagnostics."),
-        ("upstream", "Compare upstream incidents and existing fallback behavior before changing models."),
-    ):
-        count = sum(row["requests"] for row in by_lane if row["outcome"] == outcome)
-        if count >= 3:
-            proposals.append({"code": f"llm_{outcome}", "severity": "warning", "count": count, "action": instruction})
-    aux_tokens = Counter()
-    aux_samples = Counter()
-    for row in by_lane:
-        if row["lane"].startswith("aux:"):
-            task = row["lane"][4:]
-            aux_samples[task] += row["usage_samples"]
-            aux_tokens[task] += sum(row[bucket] for bucket in BUCKETS[:4])
-    for task, measured_tokens in aux_tokens.items():
-        if aux_samples[task] >= 5 and measured_tokens >= 20_000:
-            proposals.append({"code": "aux_" + hashlib.sha256(task.encode()).hexdigest()[:12], "severity": "info",
-                              "task": task, "tokens": measured_tokens,
-                              "action": "Benchmark the existing auxiliary task on a cheaper model and check quality."})
-    main = [row for row in by_lane if row["lane"] == "main" and row["usage_samples"]]
-    samples = sum(row["usage_samples"] for row in main)
-    prompt = sum(sum(row[bucket] for bucket in (BUCKETS[0], BUCKETS[2], BUCKETS[3])) for row in main)
-    hits = sum(row["cache_read_tokens"] for row in main)
-    if samples >= 5 and prompt >= 5000 * samples and hits / prompt < 0.15:
-        proposals.append({"code": "large_main_prompt", "severity": "info", "average_prompt_tokens": prompt // samples,
-                          "cache_share": round(hits / prompt, 3),
-                          "action": "Measure tool schemas, injected memory and instruction size; test existing retrieval controls."})
-    tools = {row["outcome"]: row["requests"] for row in by_lane if row["lane"] == "tool"}
-    errors = sum(tools.get(outcome, 0) for outcome in TOOL_FAILURES)
-    attempts = tools.get("ok", 0) + errors
-    if attempts >= 10 and errors / attempts >= 0.25:
-        proposals.append({"code": "tool_errors", "severity": "warning", "errors": errors, "attempts": attempts,
-                          "action": "Use existing traces to find the failing tools and compare retries with successful runs."})
-    dropped = usage.get("dropped_events", 0)
-    if dropped >= 10:
-        proposals.append({"code": "observer_dropped_events", "severity": "info", "count": dropped,
-                          "action": "Treat these totals as a lower bound and look for a long writer on the Evolution database."})
-    return proposals
-
-
 SEEN_DAYS = 2   # delivery ids only guard against an event delivered twice, which happens within seconds
 
 
@@ -837,61 +794,3 @@ def _prune(conn: sqlite3.Connection, now: float) -> None:
     for table in ("metric", "research_latency", "native_activity"):
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))
     conn.execute("DELETE FROM seen WHERE day < ?", ((today - timedelta(days=SEEN_DAYS - 1)).isoformat(),))
-
-
-def run_policy(conn: sqlite3.Connection, findings: list[dict], *, now: float, recovery_ready: bool = True) -> dict:
-    """Advance decisions at most once per UTC day of evidence and report transitions."""
-    today = _day(now)
-    _prune(conn, now)
-    conn.execute("DELETE FROM maintenance WHERE active=0 AND feedback IS NULL AND last_seen < ?",
-                 (now - 90 * 86400,))
-    order = {"critical": 0, "error": 0, "warning": 1, "info": 2}
-    current = {}
-    for item in findings:  # One decision per code. A code reported twice keeps its most severe report.
-        known = current.get(item["code"])
-        if known is None or order.get(item.get("severity"), 3) < order.get(known.get("severity"), 3):
-            current[item["code"]] = item
-    findings = list(current.values())
-    prior = {row["code"]: dict(row) for row in conn.execute("SELECT * FROM maintenance")}
-    changed = []
-    for code, item in current.items():
-        old = prior.get(code)
-        if old is None or not old["active"]:
-            changed.append({"code": code, "transition": "opened"})
-        conn.execute("""INSERT INTO maintenance(code,active,first_seen,last_seen,samples,last_day) VALUES (?,1,?,?,1,?)
-            ON CONFLICT(code) DO UPDATE SET active=1,last_seen=excluded.last_seen,last_day=excluded.last_day,
-            samples=CASE WHEN active=0 THEN 1 ELSE samples + (last_day != excluded.last_day) END
-            """, (code, now, now, today))
-        item["observed_days"] = 1 if not old or not old["active"] else old["samples"] + (old["last_day"] != today)
-        item["feedback"] = old["feedback"] if old else None
-    for code, old in prior.items():
-        if old["active"] and code not in current:
-            conn.execute("UPDATE maintenance SET active=0 WHERE code=?", (code,))
-            changed.append({"code": code, "transition": "cleared"})
-    severe = any(item.get("severity") in ("critical", "error") or item.get("reduce_context") for item in findings)
-    state = conn.execute("SELECT value FROM control WHERE key='mode'").fetchone()
-    previous = state[0] if state else "normal"
-    # Pause only the extension's optional context reinforcement. Recover after two healthy ticks.
-    clear_checks = 0
-    last_clear = 0.0
-    if severe or previous == "conservative" and not recovery_ready:
-        mode = "conservative"
-    elif previous == "conservative":
-        state = dict(conn.execute("SELECT key,value FROM control WHERE key IN ('clear_checks','last_clear')"))
-        clear_checks = int(state.get("clear_checks", 0))
-        last_clear = float(state.get("last_clear", 0))
-        if not clear_checks or now - last_clear >= RECOVERY_SPACING_SECONDS:
-            clear_checks += 1
-            last_clear = now
-        mode = "normal" if clear_checks >= 2 else "conservative"
-    else:
-        mode = "normal"
-    conn.executemany("INSERT OR REPLACE INTO control VALUES(?,?)", (
-        ("mode", mode), ("clear_checks", str(clear_checks)), ("last_clear", str(last_clear)),
-    ))
-    if previous != mode:
-        changed.append({"code": "evolution_mode", "transition": mode})
-    feedback_order = {"helpful": 0, "dismissed": 2}
-    findings.sort(key=lambda item: (order.get(item.get("severity"), 3), feedback_order.get(item["feedback"], 1),
-                                    -item["observed_days"], item["code"]))
-    return {"mode": mode, "changes": changed, "findings": findings}

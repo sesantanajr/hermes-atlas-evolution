@@ -92,6 +92,28 @@ def context(source, *, now: float, days: int = RADAR_DAYS) -> dict | None:
             "cache_pct": round(100 * cached / prompt, 1) if prompt else None}
 
 
+def _tokens(value) -> int | None:
+    return value if type(value) is int and 0 <= value <= 1_000_000_000 else None
+
+
+def observe_compaction(home: Path, payload: dict, *, now: float | None = None) -> None:
+    """Count one compaction Hermes reported (post_compaction), with its context size before and after when both
+    are given, for `compaction` below. Only numbers are kept: one row per UTC day."""
+    import time
+
+    from .operations import _day, record
+
+    before, after = _tokens(payload.get("before_tokens")), _tokens(payload.get("after_tokens"))
+    measured = before is not None and after is not None
+    now = time.time() if now is None else now
+    row = (_day(now), "post_compaction", "observed", 0, before if measured else 0, after if measured else 0, int(measured))
+    record(home, lambda conn: conn.execute(
+        """INSERT INTO native_activity VALUES(?,?,?,1,?,?,?,?)
+            ON CONFLICT DO UPDATE SET events=events+1, duration_ms=duration_ms+excluded.duration_ms,
+            tokens_before=tokens_before+excluded.tokens_before, tokens_after=tokens_after+excluded.tokens_after,
+            measured=measured+excluded.measured""", row), now=now)
+
+
 def compaction(conn, *, now: float, days: int = RADAR_DAYS) -> dict:
     from .experience import day_offset, utc_day
 

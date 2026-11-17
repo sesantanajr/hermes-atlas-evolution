@@ -171,11 +171,62 @@ def owner_suggestions(channels: list[dict], *, owners=(), platforms=()) -> list[
     return found
 
 
+def _load_json(path: Path, limit: int) -> tuple[str, object]:
+    """(status, value) of a JSON file of Hermes, read in a bounded way: a regular file only (no link or reparse
+    point), at most `limit` bytes, the same file that was checked."""
+    import stat
+
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0) \
+                or not stat.S_ISREG(info.st_mode):
+            return "unreadable", None
+        if info.st_size > limit:
+            return "file_limit", None
+        with path.open("rb") as stream:
+            if not os.path.samestat(info, os.fstat(stream.fileno())):
+                return "snapshot_changed", None
+            raw = stream.read(limit + 1)
+    except FileNotFoundError:
+        return "not_found", None
+    except OSError:
+        return "unreadable", None
+    if len(raw) > limit:
+        return "file_limit", None
+    try:
+        return "ok", json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, ValueError, RecursionError):
+        return "invalid_format", None
+
+
+def legacy_notes_command(home: Path) -> str:
+    """A command that prints the notes of version 0.1 still in the plugin's database (read-only: the file is opened
+    with mode=ro), one per line: id, category, scope, when it was written and its text."""
+    import shlex
+
+    database = Path(home).resolve() / "evolution" / "evolution.sqlite3"
+    code = ("import pathlib,sqlite3,sys; db=sqlite3.connect(pathlib.Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True); "
+            "[print(row) for row in db.execute('SELECT id,category,scope,created_at,content FROM evolution_memories "
+            "ORDER BY id')]")
+    return f'python3 -c "{code}" {shlex.quote(str(database))}'
+
+
+def _legacy_notes(home: Path) -> dict | None:
+    """The notes of version 0.1 (table evolution_memories) left in the plugin's database: nothing reads or writes
+    them since 0.11.0, and they are not deleted, so the owner can keep what they need. None when there are none."""
+    try:
+        with experience(home) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='evolution_memories'").fetchone() is None:
+                return None
+            count = conn.execute("SELECT COUNT(*) FROM evolution_memories").fetchone()[0]
+    except (OSError, ValueError, sqlite3.Error):
+        return None
+    return {"count": count, "command": legacy_notes_command(home)} if count else None
+
+
 def _digest_scheduled(home: Path, *, paused_too: bool = True) -> bool:
     """Whether Hermes' scheduler holds the weekly digest of this plugin for the profile (a job the owner paused
     counts: it is theirs to resume, and a second one would deliver twice)."""
-    from .workloads import _load_json
-
     status, data = _load_json(Path(home) / "cron" / "jobs.json", 4 * 1024 * 1024)
     jobs = data.get("jobs") if status == "ok" and isinstance(data, dict) else None
     return any(isinstance(job, dict) and (paused_too or job.get("enabled") is not False)
@@ -639,6 +690,9 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
     report["db_recovered"] = recovered(home, now=time.time() if now is None else now)
     if report["db_recovered"]:
         attention.append("db_recovered")
+    report["legacy_notes"] = _legacy_notes(home)
+    if report["legacy_notes"]:
+        attention.append("legacy_notes")
     try:   # is the agent getting better (evolution_index), and what the plugin itself costs it (selfcost)
         from . import evolution_index, selfcost
 
@@ -853,6 +907,12 @@ _TEXT = {
            "db_recovered": "The plugin's database was damaged and was started again ({when}); the damaged copy is "
                            "kept as `evolution/{copy}`. Lessons, proposals and the history start over; Hermes itself "
                            "was not affected.",
+           "legacy_notes": ("{n} note of version 0.1 is still in the plugin's database. Since 0.11.0 nothing reads it "
+                            "and the agent no longer gets it; it was kept so you can copy what you need. To print it "
+                            "(read-only): `{command}`",
+                            "{n} notes of version 0.1 are still in the plugin's database. Since 0.11.0 nothing reads "
+                            "them and the agent no longer gets them; they were kept so you can copy what you need. To "
+                            "print them (read-only): `{command}`"),
            "settings_reload": "These settings changed and apply after `hermes gateway restart` (in the terminal, at the "
                               "next session): {keys}.",
            "settings_ignored": "These values in `settings.json` are ignored: {keys}. They would widen whom the plugin trusts or turn a protection off, and the agent's own file tools can write that file. Set the ones you want in the Hermes settings form, with `hermes evolution owner` (sender ids and platforms), or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> <value>` in your own terminal.",
@@ -1029,6 +1089,12 @@ _TEXT = {
            "db_recovered": "O banco do plugin estava danificado e foi recomeçado ({when}); a cópia danificada fica em "
                            "`evolution/{copy}`. Lições, propostas e o histórico recomeçam; o próprio Hermes não foi "
                            "afetado.",
+           "legacy_notes": ("{n} nota da versão 0.1 continua no banco do plugin. Desde a 0.11.0 nada a lê e o agente "
+                            "não a recebe mais; ela foi mantida para você copiar o que precisar. Para mostrá-la (só "
+                            "leitura): `{command}`",
+                            "{n} notas da versão 0.1 continuam no banco do plugin. Desde a 0.11.0 nada as lê e o "
+                            "agente não as recebe mais; elas foram mantidas para você copiar o que precisar. Para "
+                            "mostrá-las (só leitura): `{command}`"),
            "settings_reload": "Estas configurações mudaram e valem depois de `hermes gateway restart` (no terminal, na "
                               "próxima sessão): {keys}.",
            "settings_ignored": "Estes valores do `settings.json` são ignorados: {keys}. Eles ampliariam em quem o plugin confia ou desligariam uma proteção, e as ferramentas de arquivo do próprio agente conseguem gravar esse arquivo. Defina os que você quer no formulário de configurações do Hermes, com o `hermes evolution owner` (ids de remetente e plataformas) ou com `hermes config set plugins.entries.hermes-atlas-evolution.settings.<chave> <valor>` no seu próprio terminal.",
@@ -1355,6 +1421,11 @@ def markdown(report: dict, lang: str = "en") -> str:
         if code == "db_recovered":
             found = report.get("db_recovered") or {}
             lines.append("- " + t[code].format(copy=found.get("copy") or "?", when=_iso(found.get("at")) or "?"))
+            continue
+        if code == "legacy_notes":
+            notes = report["legacy_notes"]
+            one, many = t[code]
+            lines.append("- " + (one if notes["count"] == 1 else many).format(n=notes["count"], command=notes["command"]))
             continue
         lines.append(f"- {t[code]}")
         if code == "legacy_install":

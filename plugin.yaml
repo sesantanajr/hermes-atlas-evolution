@@ -35,10 +35,7 @@ provides_hooks:
   - on_session_end
   - on_skill_lifecycle
   - subagent_start
-  - subagent_stop
   - post_compaction
-  - post_curator_run
-  - on_kanban_worker_exited
   - on_session_finalize
   - on_kanban_dispatch_tick
 config_schema:

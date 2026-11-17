@@ -3,12 +3,12 @@
 from collections import Counter, defaultdict
 from contextlib import closing
 import math
+import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import time
-
-from .diagnostics import _checkpoint_unchanged, _regular_stat
 
 
 _TIMEOUT = 0.4
@@ -157,6 +157,27 @@ def _read_usage(db: sqlite3.Connection, *, start: float, now: float, deadline: f
         return {"status": "unexpected_schema"}
     rows = db.execute(_USAGE_SQL, (start, now, _ROW_LIMIT + 1))
     return _summarize(rows, start=start, deadline=deadline)
+
+
+def _regular_stat(path: Path) -> os.stat_result | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info if stat.S_ISREG(info.st_mode) else None
+
+
+def _checkpoint_unchanged(path: Path, before: os.stat_result, sidecars: list[Path]) -> bool:
+    """Whether a database read from its checkpoint alone is still the same file, with no writer opened since."""
+    after = _regular_stat(path)
+    try:
+        return bool(
+            after
+            and (before.st_ino, before.st_mtime_ns, before.st_size) == (after.st_ino, after.st_mtime_ns, after.st_size)
+            and not any(sidecar.exists() for sidecar in sidecars)
+        )
+    except OSError:
+        return False
 
 
 def native_billing(home: Path, *, days: int, now: float) -> dict:

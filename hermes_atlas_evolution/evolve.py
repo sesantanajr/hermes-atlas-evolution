@@ -296,7 +296,7 @@ def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: i
     import shlex
 
     from .i18n import text
-    from .native_actions import _profile_args
+    from .admin import _profile_args
 
     if type(weekday) is not int or not 0 <= weekday <= 6 or type(hour) is not int or not 0 <= hour <= 23:
         raise ValueError("Use a weekday from 0 (Sunday) to 6 and an hour from 0 to 23")
