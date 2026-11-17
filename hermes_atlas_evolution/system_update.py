@@ -71,7 +71,7 @@ def _shutdown_helper(entry: Path) -> bool:
 
 
 class Host:
-    """The machine the checks read: commands and files. Tests replace it."""
+    """The machine the checks read: commands and files (`runner` answers for the commands)."""
 
     def __init__(self, root: Path = Path("/"), runner=None):
         self.root = Path(root)
@@ -129,7 +129,7 @@ class Host:
             return None
 
     def which(self, name: str) -> bool:
-        if self.runner is not None:   # a test host answers for its own commands
+        if self.runner is not None:   # a host with its own runner answers for its own commands
             return self.run(["which", name])[0] == 0
         return shutil.which(name) is not None
 
@@ -298,12 +298,15 @@ EXEC_FAILED = 203         # systemd's status=203/EXEC: the program to start coul
 UNIT_CACHE_SECONDS = 60   # hermes_care and system_update read the units in the same pass: once is enough
 _UNIT_CACHE: dict = {}
 _BUS_ERRORS = ("Failed to connect to bus", "Failed to get D-Bus connection", "No medium found")
+# systemd 254 and later: "Failed to connect to user scope bus via local transport: ..." (and "system scope")
+_BUS_FAILED = re.compile(r"Failed to connect to .*bus")
 _TOOL_PYTHON = re.compile(r"python-\d[\w.+-]*")
 
 
 def bus_failed(code: int, err: str) -> bool:
     """systemctl could not reach the manager (no user session bus): nothing is known, which is not "no unit"."""
-    return code != 0 and any(marker in (err or "") for marker in _BUS_ERRORS)
+    err = err or ""
+    return code != 0 and (any(marker in err for marker in _BUS_ERRORS) or _BUS_FAILED.search(err) is not None)
 
 
 def _int(value) -> int | None:
@@ -313,12 +316,20 @@ def _int(value) -> int | None:
         return None
 
 
-def _executable(host: Host, path: str) -> bool:
+def _executable(host: Host, path: str) -> bool | None:
+    """True: a file this user can run. False: nothing is there (gone, a dangling link, a folder on the way gone).
+    None: it cannot be told from here (no right to look, or a file this user may not run while the unit's own
+    `User=` may): never reported as missing."""
     target = host.path(path)
     try:
-        return target.is_file() and os.access(target, os.X_OK)
-    except OSError:
+        info = os.stat(target)
+    except (FileNotFoundError, NotADirectoryError):
         return False
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return True if os.access(target, os.X_OK) else None
 
 
 def show_units(host: Host, scope: str, names: list[str], *, timeout: int = 10) -> dict | None:
@@ -328,8 +339,8 @@ def show_units(host: Host, scope: str, names: list[str], *, timeout: int = 10) -
         return {}
     prefix = ["--user"] if scope == "user" else []
     code, out, err = host.run(["systemctl", *prefix, "show", *names, "-p", ",".join(SHOW_PROPERTIES)], timeout=timeout)
-    if bus_failed(code, err):
-        host.unverified.add(scope)
+    if bus_failed(code, err) or code not in (0, 1) and not out.strip():
+        host.unverified.add(scope)   # no manager, a timeout, no systemctl: nothing is known
         return None
     if code != 0 and not out.strip():
         return {}
@@ -371,29 +382,68 @@ def _exec_source(host: Host, exec_path: str | None, drop_ins: list[str], fragmen
     return fallback
 
 
-def replacement_python(host: Host, exec_path: str | None) -> str | None:
-    """For a program under a Hermes tools folder (`.../tools/python-<version>/bin/python3`), the same program in the
-    newest python-* folder next to it that exists and can be run. None when there is none."""
+def _tool_parts(exec_path: str | None) -> tuple[str, str, str] | None:
+    """(the tools folder, the python-* folder, the rest) of a program under a Hermes tools folder
+    (`.../tools/python-<version>/bin/python3`), else None."""
     if not exec_path:
         return None
-    parts = exec_path.replace("\\", "/").split("/")
+    parts = str(exec_path).replace("\\", "/").split("/")
     index = next((i for i, part in enumerate(parts) if i > 0 and parts[i - 1] == "tools" and _TOOL_PYTHON.fullmatch(part)),
                  None)
     if index is None:
         return None
-    tools, rest = "/".join(parts[:index]) or "/", "/".join(parts[index + 1:])
+    return "/".join(parts[:index]) or "/", parts[index], "/".join(parts[index + 1:])
+
+
+def tool_references(host: Host, tools: str) -> tuple[set, set] | None:
+    """(the folders Hermes' `tools/facts.json` points at, the packages it manages): what `hermes pm gc` keeps, and
+    whose other versions it removes. None when it cannot be read."""
+    text = host.read(f"{tools.rstrip('/')}/facts.json", 2_000_000)
+    try:
+        facts = json.loads(text) if text else None
+    except (ValueError, RecursionError):
+        return None
+    packages = facts.get("packages") if isinstance(facts, dict) else None
+    if not isinstance(packages, dict):
+        return None
+    entries = {entry.get("entry") for entry in packages.values() if isinstance(entry, dict)}
+    return {entry for entry in entries if isinstance(entry, str)}, {key for key in packages if isinstance(key, str) and key}
+
+
+def unreferenced_python(host: Host, exec_path: str | None) -> bool:
+    """A program in a python-* folder of Hermes' tools that `tools/facts.json` no longer points at: it still runs, but
+    the next `hermes pm gc` removes it and the unit then fails with status=203/EXEC."""
+    parts = _tool_parts(exec_path)
+    found = tool_references(host, parts[0]) if parts else None
+    if not found:
+        return False
+    entries, packages = found
+    folder = parts[1]
+    return folder not in entries and any(folder == key or folder.startswith(key + "-") for key in packages)
+
+
+def _version_key(name: str):
+    version = name[len("python-"):].split("+", 1)[0]
+    return tuple(int(number) for number in re.findall(r"\d+", version)), name
+
+
+def replacement_python(host: Host, exec_path: str | None, *, current_only: bool = False) -> str | None:
+    """For a program under a Hermes tools folder (`.../tools/python-<version>/bin/python3`), the same program in the
+    python-* folder `tools/facts.json` points at (Hermes' current one), else in the newest python-* folder next to it,
+    that exists and can be run. `current_only`: only the one facts.json points at. None when there is none."""
+    parts = _tool_parts(exec_path)
+    if parts is None:
+        return None
+    tools, own, rest = parts
     try:
         names = [entry.name for entry in host.path(tools).iterdir() if _TOOL_PYTHON.fullmatch(entry.name)]
     except OSError:
         return None
-
-    def key(name: str):
-        version = name[len("python-"):].split("+", 1)[0]
-        return tuple(int(number) for number in re.findall(r"\d+", version)), name
-
-    for name in sorted(names, key=key, reverse=True):
+    found = tool_references(host, tools)
+    current = sorted((name for name in names if found and name in found[0]), key=_version_key, reverse=True)
+    for name in current + ([] if current_only else sorted(names, key=_version_key, reverse=True)):
         candidate = f"{tools.rstrip('/')}/{name}/{rest}" if rest else f"{tools.rstrip('/')}/{name}"
-        if candidate != exec_path and _executable(host, candidate):
+        if name != own and candidate != exec_path and _executable(host, candidate) is True:
             return candidate
     return None
 
@@ -403,17 +453,20 @@ def unit_detail(host: Host, unit: str, scope: str, raw: dict) -> dict:
     still exists, how often systemd restarted it."""
     paths = re.findall(r"\bpath=([^\s;]+)", raw.get("ExecStart") or "")
     exec_path = paths[0] if paths else None
-    exec_exists = None if exec_path is None else _executable(host, exec_path)
+    exec_exists = None if exec_path is None else _executable(host, exec_path)   # None: unknown, never "missing"
+    # still there, but in a tools folder Hermes no longer points at: the next `hermes pm gc` removes it
+    unreferenced = exec_exists is True and unreferenced_python(host, exec_path)
     drop_ins = [item for item in (raw.get("DropInPaths") or "").split() if item]
     fragment = raw.get("FragmentPath") or None
     detail = {"load_state": raw.get("LoadState"), "active_state": raw.get("ActiveState"), "sub_state": raw.get("SubState"),
               "result": raw.get("Result"), "n_restarts": _int(raw.get("NRestarts")),
               "exec_main_code": _int(raw.get("ExecMainCode")), "exec_main_status": _int(raw.get("ExecMainStatus")),
-              "exec_path": exec_path, "exec_exists": exec_exists, "drop_ins": drop_ins[:20], "fragment": fragment,
+              "exec_path": exec_path, "exec_exists": exec_exists, "exec_unreferenced": unreferenced,
+              "drop_ins": drop_ins[:20], "fragment": fragment,
               "need_reload": raw.get("NeedDaemonReload") == "yes", "exec_source": None, "replacement": None}
-    if exec_exists is False:
+    if exec_exists is False or unreferenced:
         detail["exec_source"] = _exec_source(host, exec_path, drop_ins, fragment)
-        detail["replacement"] = replacement_python(host, exec_path)
+        detail["replacement"] = replacement_python(host, exec_path, current_only=unreferenced)
     detail["exec_missing"] = exec_exists is False
     detail["restart_loop"] = bool(
         (detail["n_restarts"] or 0) >= RESTART_LOOP and detail["sub_state"] in ("auto-restart", "failed")
@@ -434,10 +487,8 @@ def _user_units(host: Host, *, fresh: bool = False) -> list[dict]:
     for scope, prefix in (("system", []), ("user", ["--user"])):
         code, out, err = host.run(["systemctl", *prefix, "list-unit-files", "--no-legend", "--plain", "hermes*"],
                                   timeout=20)
-        if bus_failed(code, err):
-            host.unverified.add(scope)
-            continue
-        if code not in (0, 1):
+        if bus_failed(code, err) or code not in (0, 1):
+            host.unverified.add(scope)   # 1 is "no unit matched"; anything else (a timeout, 124) says nothing
             continue
         listed = []
         for line in out.splitlines():
@@ -467,18 +518,52 @@ def _user_units(host: Host, *, fresh: bool = False) -> list[dict]:
 
 def probe_units(names: dict, *, host: Host | None = None, timeout: int = 4) -> dict:
     """A cheap look now, for `status` when the stored checks are old: one `systemctl show` per scope for the units
-    named ({"user": [...], "system": [...]}), each bounded by `timeout`. {"units": [...], "unverified": [...]}"""
+    named ({"user": [...], "system": [...]}), each bounded by `timeout`. {"units": [...], "unverified": [...]}
+    Never raises: a host without systemctl (macOS, Windows) answers no unit, both scopes unverified."""
     host = host or Host()
+    names = names if isinstance(names, dict) else {}
     units = []
     for scope in ("system", "user"):
         wanted = [name for name in names.get(scope) or () if isinstance(name, str) and name.endswith(".service")][:20]
-        shown = show_units(host, scope, wanted, timeout=timeout) if wanted else {}
-        for name in wanted:
-            raw = (shown or {}).get(name)
-            if raw and raw.get("ActiveState") and raw.get("LoadState") != "not-found":
-                units.append({"unit": name, "scope": scope, "active": raw.get("ActiveState") == "active",
-                              **unit_detail(host, name, scope, raw)})
+        try:
+            shown = show_units(host, scope, wanted, timeout=timeout) if wanted else {}
+            for name in wanted:
+                raw = (shown or {}).get(name)
+                if raw and raw.get("ActiveState") and raw.get("LoadState") != "not-found":
+                    units.append({"unit": name, "scope": scope, "active": raw.get("ActiveState") == "active",
+                                  **unit_detail(host, name, scope, raw)})
+        except Exception:   # a look is a bonus: what could not be read is unverified, never a failure of the caller
+            host.unverified.add(scope)
     return {"units": units, "unverified": sorted(host.unverified)}
+
+
+def refresh_units(stored: dict, *, host: Host | None = None, timeout: int = 10) -> dict:
+    """A stored check (cached) with its units as systemd says they are now, and the findings that come from them
+    (unit_exec_missing, unit_restart_loop) said again from those: after the owner repaired or undid a unit, the stored
+    problem is neither kept past its repair nor lost after its undo. A unit systemd did not answer for stays as it
+    was."""
+    if not isinstance(stored, dict):
+        return stored
+    units = [unit for unit in stored.get("units") or () if isinstance(unit, dict)]
+    names: dict = {"system": [], "user": []}
+    for unit in units:
+        if unit.get("scope") in names and isinstance(unit.get("unit"), str):
+            names[unit["scope"]].append(unit["unit"])
+    found = probe_units(names, host=host, timeout=timeout)
+    now = {(unit["scope"], unit["unit"]): unit for unit in found["units"]}
+    updated = []
+    for unit in units:
+        live = now.get((unit.get("scope"), unit.get("unit")))
+        # whether it comes back after a reboot is list-unit-files' answer, which a `show` does not give
+        updated.append({**unit, **{key: live[key] for key in UNIT_KEEP if key in live and key not in ("enabled", "state")}}
+                       if live else unit)
+    findings = [code for code in stored.get("findings") or () if code not in ("unit_exec_missing", "unit_restart_loop")]
+    problems = unit_problems(updated)
+    if problems["exec_missing"]:
+        findings.append("unit_exec_missing")
+    if problems["restart_loop"]:
+        findings.append("unit_restart_loop")
+    return {**stored, "units": updated, "findings": findings}
 
 
 def unit_problems(units) -> dict:
@@ -505,8 +590,8 @@ def failed_services(host: Host) -> list[str]:
     for scope, prefix in (("system", []), ("user", ["--user"])):
         code, out, err = host.run(["systemctl", *prefix, "list-units", "--type=service", "--state=failed",
                                    "--no-legend", "--plain"], timeout=20)
-        if bus_failed(code, err):
-            host.unverified.add(scope)
+        if bus_failed(code, err) or code not in (0, 1):
+            host.unverified.add(scope)   # a timeout or no systemctl says nothing of what failed
             continue
         if code == 0:
             for line in out.splitlines():
@@ -612,8 +697,9 @@ def _names(holds: Path) -> list[str]:
 
 
 def _left_out(code: int, err: str) -> bool:
-    """A command the time budget never launched: unknown, never a failure."""
-    return code == 124 and "time budget spent" in (err or "")
+    """A command the time budget never launched, or one stopped at its time limit (Host.run shortens that limit to
+    what is left of the budget): not checked, unknown, never a failure."""
+    return code == 124   # Host.run's answer for both ("time budget spent", "timed out"); dpkg and apt never end so
 
 
 def check(host: Host | None = None, *, now: float | None = None, home: Path | None = None,
@@ -658,14 +744,17 @@ def _check(host: Host, *, now: float | None, home: Path | None) -> dict:
     locks = host.held_locks()
     busy = sorted({name for name in host.processes() if name in BUSY_PROCESSES} | {f"lock:{name}" for name in locks})
     report["busy"] = busy
+    unchecked = False   # a check that ran out of time: the report is incomplete, never "broken"
     code, audit, err = host.run(["dpkg", "--audit"], timeout=60)
     report["dpkg_audit"] = audit.strip().splitlines()[:20]
+    unchecked |= _left_out(code, err)
     report["dpkg_ok"] = None if _left_out(code, err) else code == 0 and not audit.strip()
     report["root"] = host.root_user()
     # Without apt's lock (Debug::NoLocking): a check never makes unattended-upgrades or the owner's apt wait.
     code, out, err = host.run(["apt-get", "-o", "Debug::NoLocking=1", "check"], timeout=120)
+    unchecked |= _left_out(code, err)
     report["apt_ok"] = None if _left_out(code, err) else code == 0
-    report["apt_error"] = None if code == 0 else " ".join((err or out).split())[:200]
+    report["apt_error"] = None if code == 0 or _left_out(code, err) else " ".join((err or out).split())[:200]
     code, held, _err = host.run(["apt-mark", "showhold"], timeout=30)
     report["held"] = held.split() if code == 0 else []
     native = native_arch(host)
@@ -712,7 +801,7 @@ def _check(host: Host, *, now: float | None, home: Path | None) -> dict:
     if problems["restart_loop"]:
         findings.append("unit_restart_loop")
     report["units_unverified"] = sorted(host.unverified)
-    report["incomplete"] = host.skipped > skipped
+    report["incomplete"] = host.skipped > skipped or unchecked
     report["findings"] = findings
     report["ready"] = not ({"dpkg_interrupted", "apt_broken", "package_manager_busy", "disk_low"} & set(findings))
     return report
@@ -770,6 +859,22 @@ def _new_file(path: Path, mode: int = 0o600):
 def _write(path: Path, text: str, mode: int = 0o600) -> None:
     with os.fdopen(_new_file(path, mode), "w", encoding="utf-8") as stream:
         stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())   # on the disk before anyone relies on it (a power cut after a repair or a run)
+
+
+def _sync_folder(folder: Path) -> None:
+    """The folder's own entry on the disk (a rename is only durable then). Not every system opens a folder (Windows)."""
+    try:
+        handle = os.open(folder, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(handle)
+    except OSError:
+        pass
+    finally:
+        os.close(handle)
 
 
 def _write_atomic(path: Path, text: str, mode: int = 0o600) -> None:
@@ -785,6 +890,7 @@ def _write_atomic(path: Path, text: str, mode: int = 0o600) -> None:
         except OSError:
             pass
         raise
+    _sync_folder(path.parent)
 
 
 def _state_dir(host: Host) -> Path:
@@ -905,13 +1011,18 @@ exit "$code"
 """
 
 
+RUN_MAX_SECONDS = 3 * 3600   # a run's unit is stopped past this (RuntimeMaxSec), and repair() waits no longer
+
+
 def start(host: Host, folder: Path, *, full: bool = False, skip: list[str] = (), repair: bool = False) -> dict:
     """Start a run in its own systemd unit (without systemd, as a process of its own session)."""
     _write(folder / "run.sh", script(folder, full=full, skip=skip, repair=repair), 0o700)
     unit = f"hermes-evolution-os-{'repair' if repair else 'upgrade'}-{folder.name}"
     if host.path("/run/systemd/system").is_dir() and host.which("systemd-run"):
+        # A Type=simple run is "started" at once, so TimeoutStartSec never bounds it: RuntimeMaxSec does. Past it systemd
+        # sends SIGTERM, which the script's trap answers by releasing its holds, within TimeoutStopSec.
         code, out, err = host.run(["systemd-run", f"--unit={unit}", "--collect", "--quiet",
-                                   "--property=TimeoutStartSec=3h",
+                                   f"--property=RuntimeMaxSec={RUN_MAX_SECONDS}",
                                    "--property=TimeoutStopSec=4min", "/bin/sh", str(folder / "run.sh")], timeout=60)
         if code != 0:
             raise ValueError(" ".join((err or out).split())[:200] or "systemd-run refused the upgrade")
@@ -1119,8 +1230,9 @@ def repair(home: Path, host: Host | None = None, *, now: float | None = None, wa
     _write(folder / "check-before.json", json.dumps(found, ensure_ascii=False, indent=2))
     _snapshot(host, folder, "packages-before.tsv")
     started = start(host, folder, repair=True)
-    if wait:
-        while progress(host, folder) == "running":
+    if wait:   # never for good: past the run's own limit and its stop time, the report says it still runs
+        until = time.monotonic() + RUN_MAX_SECONDS + 300
+        while progress(host, folder) == "running" and time.monotonic() < until:
             time.sleep(2)
     report = check(host, now=time.time(), home=home)
     return {"started": started, "released": released, "exit": finished(folder), "state": progress(host, folder),
@@ -1140,73 +1252,132 @@ def _systemctl(host: Host, scope: str, *args: str, timeout: int = 30) -> dict:
             "tail": " ".join((err or out).split())[-200:]}
 
 
-def fix_unit_exec(host: Host, unit: dict, *, now: float | None = None) -> dict:
-    """Point a Hermes unit whose ExecStart names a program that is gone (Hermes replaced its bundled Python) at the
-    same program in the newest tools folder that has it, then daemon-reload, reset-failed and start.
+def _exec_program(text: str) -> str | None:
+    """The program a unit file's last `ExecStart=` line starts (its `-@:+!` prefixes left out), None when it sets none."""
+    values = [line.split("=", 1)[1].strip() for line in text.splitlines() if line.strip().startswith("ExecStart=")]
+    values = [value for value in values if value]
+    words = values[-1].split() if values else []
+    if not words:
+        return None
+    return words[0].lstrip("-@:+!") or None
 
-    Only the file that sets ExecStart (a drop-in, or the unit file), only the interpreter's path on its ExecStart
-    lines; a copy of the file is kept next to it (`<file>.atlas-<time>.bak`, a name systemd never loads) and
-    undo_unit_exec puts it back. The owner's: called from their terminal, never by the learning pass. ValueError
-    says why nothing was changed."""
-    now = time.time() if now is None else now
-    name, scope = str(unit.get("unit") or ""), unit.get("scope")
-    old, source = unit.get("exec_path"), unit.get("exec_source")
-    if not _UNIT_NAME.fullmatch(name) or scope not in ("user", "system") or not old or not source:
-        raise ValueError("Not a unit whose program is missing, or the file that sets it is unknown: nothing was changed")
-    if not name.startswith("hermes"):
-        raise ValueError("Only Hermes' own services are repaired here")
-    if _executable(host, old):
-        raise ValueError("The program the unit starts exists again: nothing to repair")
-    new = replacement_python(host, old)
-    if not new:
-        raise ValueError("No newer Hermes Python was found to point the unit at: reinstall Hermes' service instead")
-    path = host.path(source)
-    try:
-        info = os.lstat(path)
-    except OSError:
-        raise ValueError("The unit's file cannot be read: nothing was changed") from None
-    if not stat.S_ISREG(info.st_mode):
-        raise ValueError("The unit's file is a link or not a regular file: nothing was changed")
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines(keepends=True)
-    changed = 0
-    for index, line in enumerate(lines):
-        if line.lstrip().startswith("ExecStart=") and old in line:
-            lines[index] = line.replace(old, new)
-            changed += 1
-    if not changed:
-        raise ValueError("The unit's file does not name that program on an ExecStart line: nothing was changed")
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
-    backup = path.with_name(f"{path.name}.atlas-{stamp}-{secrets.token_hex(3)}.bak")
-    _write(backup, text, stat.S_IMODE(info.st_mode))
-    _write_atomic(path, "".join(lines), stat.S_IMODE(info.st_mode))
+
+def _restart(host: Host, scope: str, name: str) -> tuple[list[dict], str]:
+    """daemon-reload, reset-failed and start, each bounded; then whether it runs."""
     steps = [_systemctl(host, scope, "daemon-reload"), _systemctl(host, scope, "reset-failed", name),
              _systemctl(host, scope, "start", name, timeout=90)]
     _code, state, _err = host.run(["systemctl", *(["--user"] if scope == "user" else []), "is-active", name], timeout=10)
-    return {"ok": all(step["exit"] == 0 for step in steps) and state.strip() == "active", "unit": name, "scope": scope,
-            "file": source, "backup": str(backup), "from": old, "to": new, "lines": changed, "steps": steps,
-            "state": state.strip() or None,
+    return steps, state.strip()
+
+
+def fix_unit_exec(host: Host, unit: dict, *, now: float | None = None) -> dict:
+    """Point a Hermes unit whose ExecStart names a program that is gone (Hermes replaced its bundled Python) at the
+    same program in the tools folder Hermes points at (tools/facts.json), else the newest one that has it, then
+    daemon-reload, reset-failed and start. A program that still runs from a tools folder facts.json no longer points
+    at (the next `hermes pm gc` removes it) is moved the same way, to the one facts.json points at only. When the file
+    on disk is right already and only systemd has not read it again (NeedDaemonReload), nothing is written: reload,
+    reset-failed and start.
+
+    Only the file that sets ExecStart (a drop-in, or the unit file), only the interpreter's path on its ExecStart
+    lines; a copy of the file is kept next to it (`<file>.atlas-<time>.bak`, a name systemd never loads) and
+    undo_unit_exec puts it back. Called from the owner's terminal (`care fix-gateway`), and by the Mode auto only for
+    this profile's own user unit whose program is gone while no gateway runs (actions.repair_gateway). ValueError
+    says why nothing was changed; nothing else is raised (a host without systemctl is refused before any write)."""
+    now = time.time() if now is None else now
+    unit = unit if isinstance(unit, dict) else {}
+    name, scope = str(unit.get("unit") or ""), unit.get("scope")
+    old, source = unit.get("exec_path"), unit.get("exec_source")
+    if not _UNIT_NAME.fullmatch(name) or scope not in ("user", "system") or not isinstance(old, str) or not old \
+            or not isinstance(source, str) or not source:
+        raise ValueError("Not a unit whose program is missing, or the file that sets it is unknown: nothing was changed")
+    if not name.startswith("hermes"):
+        raise ValueError("Only Hermes' own services are repaired here")
+    if not host.which("systemctl"):
+        raise ValueError("systemd is not available here: nothing was changed")
+    exists = _executable(host, old)
+    stale = exists is True and unreferenced_python(host, old)   # read again here, never taken from `unit`
+    if exists is True and not stale:
+        raise ValueError("The program the unit starts exists again: nothing to repair")
+    if exists is None:   # cannot be told from here (no right to look): never rewritten on a guess
+        raise ValueError("Not a unit whose program is missing, or the file that sets it is unknown: nothing was changed")
+    path = host.path(source)
+    try:
+        info = os.lstat(path)
+    except (OSError, ValueError):
+        raise ValueError("The unit's file cannot be read: nothing was changed") from None
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("The unit's file is a link or not a regular file: nothing was changed")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        raise ValueError("The unit's file cannot be read: nothing was changed") from None
+    lines = text.splitlines(keepends=True)
+    changed = [index for index, line in enumerate(lines) if line.lstrip().startswith("ExecStart=") and old in line]
+    if not changed:
+        program = _exec_program(text)
+        if unit.get("need_reload") and program and program != old and _executable(host, program) is True:
+            # put right already (by hand, or a repair whose reload failed): systemd only has to read it again
+            steps, state = _restart(host, scope, name)
+            return {"ok": all(step["exit"] == 0 for step in steps) and state == "active", "unit": name, "scope": scope,
+                    "file": source, "backup": None, "from": old, "to": program, "lines": 0, "reload_only": True,
+                    "steps": steps, "state": state or None, "undo": None}
+        raise ValueError("The unit's file does not name that program on an ExecStart line: nothing was changed")
+    new = replacement_python(host, old, current_only=stale)
+    if not new:
+        raise ValueError("No newer Hermes Python was found to point the unit at: reinstall Hermes' service instead")
+    for index in changed:
+        lines[index] = lines[index].replace(old, new)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+    backup = path.with_name(f"{path.name}.atlas-{stamp}-{secrets.token_hex(3)}.bak")
+    try:
+        _write(backup, text, stat.S_IMODE(info.st_mode))
+    except OSError:
+        raise ValueError("The unit's file cannot be written (run this as the user it belongs to, or as root): "
+                         "nothing was changed") from None
+    try:
+        _write_atomic(path, "".join(lines), stat.S_IMODE(info.st_mode))
+    except OSError:
+        try:
+            os.unlink(backup)
+        except OSError:
+            pass
+        raise ValueError("The unit's file cannot be written (run this as the user it belongs to, or as root): "
+                         "nothing was changed") from None
+    steps, state = _restart(host, scope, name)
+    return {"ok": all(step["exit"] == 0 for step in steps) and state == "active", "unit": name, "scope": scope,
+            "file": source, "backup": str(backup), "from": old, "to": new, "lines": len(changed), "steps": steps,
+            "state": state or None, "reload_only": False,
             "undo": {"unit": name, "scope": scope, "file": source, "backup": str(backup)}}
 
 
 def undo_unit_exec(host: Host, record: dict) -> dict:
-    """Put back the file fix_unit_exec changed, from its copy, and reload systemd (the unit is left as it is)."""
+    """Put back the file fix_unit_exec changed, from its copy, and reload systemd (the unit is left as it is).
+    ValueError says why nothing was changed; nothing else is raised."""
+    record = record if isinstance(record, dict) else {}
     name, scope = str(record.get("unit") or ""), record.get("scope")
     source, backup = record.get("file"), Path(str(record.get("backup") or ""))
-    if not _UNIT_NAME.fullmatch(name) or scope not in ("user", "system") or not source:
+    if not _UNIT_NAME.fullmatch(name) or scope not in ("user", "system") or not isinstance(source, str) or not source:
         raise ValueError("Not a repair of this plugin")
     path = host.path(source)
-    if backup.parent != path.parent or not backup.name.startswith(path.name + ".atlas-") or backup.is_symlink() \
-            or not backup.is_file():
-        raise ValueError("The copy of the unit's file is gone: nothing was changed")
-    _write_atomic(path, backup.read_text(encoding="utf-8"), stat.S_IMODE(os.lstat(backup).st_mode))
+    try:
+        if backup.parent != path.parent or not backup.name.startswith(path.name + ".atlas-") or backup.is_symlink() \
+                or not backup.is_file():
+            raise ValueError("The copy of the unit's file is gone: nothing was changed")
+        text, mode = backup.read_text(encoding="utf-8"), stat.S_IMODE(os.lstat(backup).st_mode)
+    except (OSError, UnicodeError):
+        raise ValueError("The copy of the unit's file is gone: nothing was changed") from None
+    try:
+        _write_atomic(path, text, mode)
+    except OSError:
+        raise ValueError("The unit's file cannot be written (run this as the user it belongs to, or as root): "
+                         "nothing was changed") from None
     step = _systemctl(host, scope, "daemon-reload")
     return {"ok": step["exit"] == 0, "unit": name, "file": source, "restored_from": str(backup), "steps": [step]}
 
 
 UNIT_KEEP = ("unit", "scope", "enabled", "active", "state", "active_state", "sub_state", "result", "n_restarts",
-             "exec_main_status", "exec_path", "exec_exists", "exec_source", "replacement", "drop_ins", "need_reload",
-             "exec_missing", "restart_loop")
+             "exec_main_status", "exec_path", "exec_exists", "exec_unreferenced", "exec_source", "replacement", "drop_ins",
+             "need_reload", "exec_missing", "restart_loop")
 CHECK_BUDGET_SECONDS = 240
 
 

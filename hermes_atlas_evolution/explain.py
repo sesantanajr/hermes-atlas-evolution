@@ -154,10 +154,6 @@ def _duration(ms, lang: str) -> str:
     return f"{_n(seconds, lang, 0 if seconds >= 10 else 1)} s"
 
 
-_FAILURE = {"en": {"command_failed": "the command failed", "code_exception": "the code raised an error",
-                   "auth": "authentication was refused", "network": "the network failed", "other": "other error"},
-            "pt": {"command_failed": "o comando falhou", "code_exception": "o código deu erro",
-                   "auth": "a autenticação foi recusada", "network": "a rede falhou", "other": "outro erro"}}
 _RATES = {"en": {"interrupted_pct": "interrupted turns", "failed_pct": "failed turns", "slow_pct": "slow turns",
                  "error_pct": "tool errors"},
           "pt": {"interrupted_pct": "turnos interrompidos", "failed_pct": "turnos com falha", "slow_pct": "turnos lentos",

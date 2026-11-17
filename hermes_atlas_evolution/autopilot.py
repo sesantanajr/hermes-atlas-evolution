@@ -158,7 +158,9 @@ class Autopilot:
         Turns nudge the pass too, but a gateway that serves several profiles delivers its kanban tick only to
         its own profile, so another profile with no turns would otherwise never run a pass. The clock only
         calls `poke`, which is O(1) until a check is due. `stop` ends it (the plugin's on_unload)."""
-        if not self.interval_s or self._clock is not None or self._stop.is_set():
+        # The clock runs with the pass on "by hand only" too (interval 0): its tick still re-reads the settings and
+        # keeps the database's retention (integration), and poke() stays a no-op until an interval is set.
+        if self._clock is not None or self._stop.is_set():
             return False
 
         def loop():

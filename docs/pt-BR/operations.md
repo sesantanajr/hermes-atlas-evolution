@@ -60,7 +60,7 @@ hermes evolution ops similar "disco lento e pesquisas demoradas"
 | `ops inspect` | Coleta e explica os sinais do momento. Não grava observações e não altera nada no Hermes. |
 | `ops tick [--notify-only]` | Coleta, compara com o histórico, registra hipóteses e linhas de base e executa somente as ações habilitadas pela configuração. Também faz uma rodada do ciclo de evolução, no máximo uma vez por hora, e a devolve no campo `evolution`; a rodada é reservada como a do autopilot, então as duas nunca rodam ao mesmo tempo, e tem um prazo de 200 segundos, dentro dos 300 segundos que o script do `schedule-spec` dá ao tick. Se o tick falhar, tenta encerrar um ensaio ativo no Linux. |
 | `ops history` | Mostra até 100 incidentes e 100 ensaios, com o estado de cada um. |
-| `ops review [--days N]` | Cruza medições adaptativas, feedback e resultados dos ensaios. Padrão de 14 dias, de 1 a 90. |
+| `ops review [--days N]` | Cruza medições adaptativas, feedback e resultados dos ensaios. Padrão de 14 dias, de 1 a 35. |
 | `ops feedback CÓDIGO helpful\|dismissed\|reset` | Avalia um alerta adaptativo já emitido. |
 | `ops similar "<texto>" [--limit 1..10]` | Procura incidentes anteriores parecidos com o texto. Padrão 5. |
 | `ops plan research\|delegation\|operations [--effort quick\|standard\|deep] [--durable]` | Devolve um plano somente leitura. Esforço padrão `standard`. |
@@ -121,7 +121,7 @@ O provedor, o modelo e os preços acima são apenas ilustrativos.
 
 O `ops plan` devolve um plano somente leitura com um orçamento sugerido: consultas de busca, extrações de página e frentes paralelas para pesquisa; frentes paralelas e rodadas de revisão para delegação; e amostras comparáveis para operações. Planos de pesquisa incluem descoberta de fontes, verificação de evidência e registro de incertezas. Planos de delegação indicam `delegate_task` para respostas que o agente atual precisa aguardar e Kanban para trabalhos que precisam sobreviver a reinícios (`--durable`).
 
-Ligue `agent_tools` nas configurações do plugin no Hermes (ou com `hermes config set plugins.entries.hermes-atlas-evolution.settings.agent_tools true` no seu próprio terminal) e depois rode `hermes gateway restart`: o plugin registra `hermes_atlas_evolution_plan` e `hermes_atlas_evolution_lessons` para o perfil quando carrega. Desligar vale na hora. Inclua `hermes-atlas-evolution` quando o perfil usa uma lista explícita de toolsets. A ferramenta de planos devolve apenas o plano.
+Ligue `agent_tools` nas configurações do plugin no Hermes (ou com `hermes config set plugins.entries.hermes-atlas-evolution.settings.agent_tools true` no seu próprio terminal) e depois rode `hermes gateway restart`: o plugin registra `hermes_atlas_evolution_lessons` para o perfil quando carrega. Desligar vale na hora. Inclua `hermes-atlas-evolution` quando o perfil usa uma lista explícita de toolsets. (A ferramenta de planos `hermes_atlas_evolution_plan` saiu na 0.10.0: devolvia um texto fixo e não lia dado nenhum; `hermes evolution ops plan` continua imprimindo o mesmo plano.)
 
 A leitura dos quadros Kanban compartilhados exige `"inspect_shared_kanban": true`. A criação de cartão exige a sua própria autorização de encaminhamento, independente dessa chave. O exemplo associa as verificações ao perfil `reviewer` no quadro existente `ops`.
 

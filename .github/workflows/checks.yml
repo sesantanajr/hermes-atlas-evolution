@@ -54,8 +54,6 @@ jobs:
       # The plugin imports and its standalone runner answers on a throwaway profile (no Hermes needed).
       - name: Import and run the standalone CLI
         shell: bash
-        env:
-          ATLAS_EVOLUTION_NO_HERMES: "1"
         run: |
           python -c "import hermes_atlas_evolution.integration, hermes_atlas_evolution.fleet_update"
           mkdir -p "$RUNNER_TEMP/profile"

@@ -45,6 +45,13 @@ TEXT = {
                         "See {n} things to fix across your profiles (plugins, skills)"),
         "advice": "What to do",
         "what_maintenance": "ran Hermes' own maintenance: hermes {target} (nothing to undo)",
+        "care_gc_blocked": ("Not now: hermes pm gc would delete {folders}, which a Hermes service still starts from. "
+                            "Point the service at the current Python first: hermes evolution care fix-gateway."),
+        "what_sync": "brought Atlas Evolution in profile {profile} to the lead's code ({before} → {after}){failed}",
+        "sync_failed": "; Hermes refused it, tried again tomorrow",
+        "what_gateway": ("pointed the gateway's service {unit} at the Python Hermes uses now ({before} → "
+                         "{after}){failed}; undo: hermes evolution care undo-gateway"),
+        "gateway_failed": " (the gateway did not come up)",
         "and_more": (" (+{n} other kind)", " (+{n} other kinds)"),
         "env_title": "Environment: every profile of this Hermes",
         "env_mode": "Looked after by profile {lead} (its mode: {mode}; each other profile with the plugin follows its own) · last check: {when}",
@@ -220,6 +227,7 @@ TEXT = {
         "history_prompt": "Decision number to undo · Enter back: ", "undo_q": "Undo decision {id}?",
         "undone": "Undone.", "undone_mark": "undone",
         "reasons": {"changed_since": "Not undone: it changed since (a later decision or a pass). Nothing changed.",
+                    "nothing_to_undo": "Not undone: there is nothing to undo for this one (Hermes' own maintenance).",
                     "already_undone": "It was already undone.", "unknown_current": "Not undone: the current value is unknown.",
                     "no_room": "Not undone: the memory file has no room for it now.",
                     "no_copy": "Not undone: the copy of the memory file is gone."},
@@ -227,6 +235,7 @@ TEXT = {
         "did": {"approve": "approved", "reject": "rejected", "retire": "retired", "reactivate": "reactivated",
                 "set": "changed", "remove": "removed", "apply": "applied"},
         "what_lesson": "{did} lesson #{target}", "what_proposal": "{did} proposal #{target}",
+        "what_cron": "scheduled {target} ({schedule}) as a Hermes task",
         "what_setting": "changed {target}: {before} → {after}", "what_memory": "removed a duplicate entry from {target}",
         "settings_title": "Settings", "settings_prompt": "Number to change · r apply the recommended setup · Enter back: ",
         "toggle_q": "Turn “{label}” {state}?", "choice_prompt": "{options} · Enter keeps it: ",
@@ -283,6 +292,13 @@ TEXT = {
                         "Ver {n} coisas para arrumar nos seus perfis (plugins, skills)"),
         "advice": "O que fazer",
         "what_maintenance": "rodou a manutenção do próprio Hermes: hermes {target} (nada a desfazer)",
+        "care_gc_blocked": ("Agora não: o hermes pm gc apagaria {folders}, de onde um serviço do Hermes ainda inicia. "
+                            "Aponte o serviço para o Python atual antes: hermes evolution care fix-gateway."),
+        "what_sync": "levou o Atlas Evolution do perfil {profile} ao código do perfil que cuida de todos ({before} → {after}){failed}",
+        "sync_failed": "; o Hermes recusou, nova tentativa amanhã",
+        "what_gateway": ("apontou o serviço do gateway {unit} para o Python que o Hermes usa agora ({before} "
+                         "→ {after}){failed}; desfazer: hermes evolution care undo-gateway"),
+        "gateway_failed": " (o gateway não subiu)",
         "and_more": (" (+{n} outro tipo)", " (+{n} outros tipos)"),
         "env_title": "Ambiente: todos os perfis deste Hermes",
         "env_mode": "Quem cuida: perfil {lead} (modo dele: {mode}; cada outro perfil com o plugin segue o próprio) · última verificação: {when}",
@@ -463,6 +479,7 @@ TEXT = {
         "history_prompt": "Número da decisão para desfazer · Enter volta: ", "undo_q": "Desfazer a decisão {id}?",
         "undone": "Desfeito.", "undone_mark": "desfeita",
         "reasons": {"changed_since": "Não desfeito: mudou depois (outra decisão ou uma rodada). Nada mudou.",
+                    "nothing_to_undo": "Não desfeito: não há nada a desfazer nesta (manutenção do próprio Hermes).",
                     "already_undone": "Já estava desfeita.", "unknown_current": "Não desfeito: o valor atual é desconhecido.",
                     "no_room": "Não desfeito: o arquivo de memória não tem espaço para ela agora.",
                     "no_copy": "Não desfeito: a cópia do arquivo de memória não existe mais."},
@@ -470,6 +487,7 @@ TEXT = {
         "did": {"approve": "aprovou", "reject": "rejeitou", "retire": "aposentou", "reactivate": "reativou",
                 "set": "mudou", "remove": "removeu", "apply": "aplicou"},
         "what_lesson": "{did} a lição #{target}", "what_proposal": "{did} a proposta #{target}",
+        "what_cron": "agendou {target} ({schedule}) como tarefa do Hermes",
         "what_setting": "mudou {target}: {before} → {after}", "what_memory": "removeu uma entrada repetida de {target}",
         "settings_title": "Configurações", "settings_prompt": "Número para mudar · r aplicar a configuração recomendada · Enter volta: ",
         "toggle_q": "{state} “{label}”?", "choice_prompt": "{options} · Enter mantém: ",
@@ -546,7 +564,7 @@ class Quit(Exception):
 
 
 class Console:
-    """Plain-text input and output, so tests can drive the menu with a script of answers."""
+    """Plain-text input and output, so the menu also runs from a script of answers."""
 
     def __init__(self, *, read=None, write=None, width: int | None = None, color: bool | None = None):
         self._read = read or input
@@ -1448,7 +1466,8 @@ class Menu:
                 if chosen is not None and ("auto", "assist", "manual")[chosen] != mode:
                     self.guarded(lambda: self.write({"mode": ("auto", "assist", "manual")[chosen]}))
                 continue
-            if not (answer.isascii() and answer.isdigit()) or int(answer) not in {row["id"] for row in done if not row["undone"]}:
+            if not (answer.isascii() and answer.isdigit()) or int(answer) not in {
+                    row["id"] for row in done if not row["undone"] and row["kind"] != "maintenance"}:
                 self.io.say(self.t["invalid"])
                 continue
             self.undo(int(answer))
@@ -1507,12 +1526,25 @@ class Menu:
                                                  after=self.shown(row["target"], row["after"].get("value")))
         if row["kind"] == "memory":
             return self.t["what_memory"].format(target=row["target"])
+        if row["kind"] == "maintenance" and row["target"] == "gateway_repair":
+            before, after = row.get("before") or {}, row.get("after") or {}
+            return self.t["what_gateway"].format(unit=before.get("unit") or "?", before=before.get("path") or "?",
+                                                 after=after.get("path") or "?",
+                                                 failed="" if after.get("ok") else self.t["gateway_failed"])
+        if row["kind"] == "maintenance" and row["target"] == "plugin_sync":
+            before, after = row.get("before") or {}, row.get("after") or {}
+            return self.t["what_sync"].format(profile=before.get("profile") or "?", before=before.get("sha") or "?",
+                                              after=after.get("sha") or "?",
+                                              failed="" if after.get("ok") else self.t["sync_failed"])
         if row["kind"] == "maintenance":
             return self.t["what_maintenance"].format(target=str(row["target"]).replace("_", " "))
         if row["kind"] == "proposal" and isinstance((row.get("after") or {}).get("applied"), list):
             from .explain import command_text
 
             return f"{did} " + command_text(row["after"]["applied"], self.lang)
+        if row["kind"] == "cron":
+            return self.t["what_cron"].format(target=row["target"],
+                                              schedule=(row.get("after") or {}).get("schedule") or "?")
         return self.t["what_lesson" if row["kind"] == "lesson" else "what_proposal"].format(did=did, target=row["target"])
 
     def history(self) -> None:
@@ -1811,6 +1843,12 @@ class Menu:
                 force = True
                 continue
             key = ("pm_doctor", "doctor", "doctor_fix", "pm_gc")[chosen - 1]
+            if key == "pm_gc" and hermes_care.gc_blocked(found):
+                # it would delete a Python a Hermes service still starts from (hermes_care.gc_blocked)
+                self.io.para(self.t["care_gc_blocked"].format(
+                    folders=", ".join(str(item) for item in found.get("in_use_unreferenced") or ()) or "?"), indent=2)
+                self.pause()
+                continue
             command = "hermes " + " ".join(hermes_care.ACTIONS[key][0])
             if key == "doctor_fix":   # what the repair may change, and what the copy before it puts back
                 for line in self.t["care_fix_note"]:
@@ -2067,9 +2105,14 @@ class Menu:
 
         config = effective_settings(self.home, self.runtime)
         self.io.say(self.t["learn_running"])
+        import time
+
+        from .autopilot import LEASE_SECONDS
+
         result = run_exclusive(self.home, lambda: cycle(self.home, now=self.clock(), runtime_config=self.runtime,
                                                         config=config, lang=self.lang, reflect=self.reflect,
-                                                        backfill_budget_s=120.0))
+                                                        backfill_budget_s=120.0,
+                                                        deadline=time.monotonic() + LEASE_SECONDS - 180))
         history = result.get("history") or {}
         new = len(result.get("new_lessons") or [])
         opened = len(result.get("open_proposals") or [])
@@ -2084,13 +2127,32 @@ class Menu:
                 self.io.say(self.t["learn_next"])
 
 
+def tty(stream) -> bool:
+    """True when `stream` is a terminal someone types in. On Windows the NUL device (where `< NUL` and a service's
+    stdin point) also says isatty(): there it must be a console as well."""
+    try:
+        if not stream.isatty():
+            return False
+        if os.name != "nt":
+            return True
+        try:
+            number = stream.fileno()
+        except (AttributeError, ValueError, OSError):
+            return True   # no file behind it (a wrapper): its own isatty() said so
+        import ctypes
+        import msvcrt
+
+        mode = ctypes.c_uint32()
+        handle = msvcrt.get_osfhandle(number)
+        return bool(ctypes.windll.kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def interactive(stdin=None, stdout=None) -> bool:
     """True when someone can answer: both ends of this command are a terminal."""
     stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
-    try:
-        return bool(stdin.isatty() and stdout.isatty())
-    except (AttributeError, ValueError):
-        return False
+    return tty(stdin) and tty(stdout)
 
 
 def run(home: Path, runtime_config: dict | None, *, lang: str, reflect=None) -> None:

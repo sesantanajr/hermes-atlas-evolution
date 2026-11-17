@@ -2,6 +2,71 @@
 
 *In English: [CHANGELOG.md](CHANGELOG.md), with every version.*
 
+## 0.10.0
+
+A evolução do agente como um número, um plugin que mede quanto custa, e o mesmo trabalho feito com menos: uma passada
+de medição nos ganchos, na rodada de aprendizado e na leitura de todos os perfis, e uma auditoria de cada módulo.
+
+### Novidades
+
+- **O Índice de evolução** (`evolution_index`): um número de 0 a 100 por perfil e por dia (UTC), a partir do que o plugin já mede nos últimos 7 dias: ferramentas (chamadas que não falharam), turnos (nem falharam nem foram lentos), você (quão raramente você corrigiu o agente ou perguntou de novo), lições (das lições ativas já julgadas, a parte que cortou a falha pela metade) e saúde (as checagens do Hermes e do servidor: o que para o agente tira 25 pontos, o que é para arrumar logo 8, manutenção de rotina nada). É a média ponderada das partes com dados (pelo menos duas), guardada a cada rodada de aprendizado (90 dias), e aparece com as partes e a tendência contra uma semana atrás no `status`, no resumo e no primeiro quadro da Visão geral do painel.
+- **Quanto o plugin custa ao agente** (`selfcost`): cada gancho é cronometrado onde roda (cerca de um microssegundo de medição), cada processo grava os números a cada 10 minutos, e o `status` mostra a mediana e o p95 por chamada de ferramenta, por turno e por prompt. Acima de 50 ms de p95 em 200 chamadas, o `status` avisa.
+
+### Mais rápido
+
+- A seção de lições do prompt é montada no máximo a cada 30 segundos por tipo de sessão, e de novo na hora depois de uma rodada de aprendizado ou de uma mudança de configuração no mesmo processo: ela era lida do banco a cada prompt (de 3,8 ms para 0,02 ms por prompt).
+- Os contadores e o resultado de uma chamada de ferramenta são uma transação de gravação em vez de duas, cada atualização ainda no seu próprio savepoint; o gravador compartilhado confere a identidade do arquivo do banco a cada 2 segundos em vez de a cada gravação (de 0,5 ms para 0,3 ms por chamada).
+- Skills quase iguais são comparadas como máscaras de bits, ordenadas por tamanho para que um conjunto só encontre os que podem casar (8 vezes mais rápido com 400 skills, os mesmos pares); um `SKILL.md` só é lido e calculado de novo quando o tamanho ou a hora de mudança mudam.
+- Os módulos que só os comandos obsoletos usam (`diagnostics`, `memory`, `advisory`, `native_actions`) não são mais importados por todo processo do Hermes ao carregar.
+
+### Correções
+
+- Um nome de perfil, uma raiz e uma lista de perfis em todo lugar (`environment.root_of`, `environment.profiles`, `admin.profile_name`): um perfil que é um link recebia o nome do destino no `care` e num pacote exportado, e o `status` listava pastas (links, nomes que o Hermes recusa) de que o Modo Auto nunca cuida.
+- O `care --help` cita `fix-gateway` e `undo-gateway`; os subcomandos de `ops` e `memory` têm uma linha de ajuda; o `ops review --days` está documentado de 1 a 35, como o comando aceita; a docstring do pacote traz o nome dele.
+
+### Obsoleto (sai na 0.11.0)
+
+- `health` (use `care check`), `history` (use `decisions`), `tick`, `feedback`, `memory` e o comando de chat `/evolution` (as notas da 0.1; `memory audit` lista todas) e `ops` (o supervisor de Linux da 0.3 e seus ensaios). Nenhum deles é usado por padrão, pelo menu, pelo painel ou pela rodada de aprendizado; agora cada um avisa quando roda, no stderr.
+
+### Removido
+
+- A ferramenta do agente `hermes_atlas_evolution_plan`: devolvia um texto fixo e não lia dado nenhum. O `hermes evolution ops plan` imprime o mesmo plano até a 0.11.0; o `agent_tools` agora dá ao agente só a ferramenta de lições.
+- Código que nada usava (`environment._similar`, `hermes_care._in_use`, `admin.LISTS`, `explain._FAILURE`, `logwatch.RESULTS`, `proposals.RISKS`).
+
+## 0.9.2
+
+Autoreparo e todos os perfis atualizados sozinhos. Uma segunda revisão completa (seis passadas independentes pelo plugin inteiro) corrigiu o que a 0.9.1 ainda errava, a começar pelos perfis fixados, que a 0.9.1 dava como atualizados enquanto o Hermes os mantinha no commit antigo.
+
+### Novidades
+
+- **Todos os perfis no mesmo código, sozinho (Modo Auto).** O perfil que cuida do Hermes inteiro leva a cópia do plugin de cada outro perfil ao commit dele: uma cópia fixada em outro commit, mais antiga, com outro código na mesma versão, ou deixada pela metade por uma atualização interrompida. No máximo dois perfis por rodada, uma vez por situação, nova tentativa no dia seguinte se o Hermes recusar; nunca onde o plugin está desligado, onde o modo daquele perfil é Assistido ou Manual, nem num link de desenvolvimento. Nada novo é baixado sozinho: uma cópia sem fixação só é atualizada enquanto o último commit do repositório for o do líder. Cada sincronização fica no histórico.
+- **Autoreparo do banco do plugin.** Um `evolution.sqlite3` danificado (gravação interrompida, disco cheio, uma ferramenta de sincronização copiando o arquivo no meio da gravação) parava toda rodada, lição e contador enquanto o processo vivesse. Agora o dano é confirmado pela própria checagem do SQLite, o arquivo é posto de lado como `evolution.sqlite3.corrupt-<hora>` (os dois mais novos ficam) e um novo começa; o log avisa.
+- **Uma versão por gateway em execução.** O gateway e o dashboard importam todos os módulos do plugin ao subir, então uma atualização gravada em disco com ele rodando nunca mistura módulos novos e antigos nesse processo.
+- **O gateway se repara sozinho (Modo Auto).** Quando o serviço de usuário do próprio gateway aponta para um Python que o Hermes removeu (systemd `status=203/EXEC`, reinício em loop) e nenhum gateway está rodando, o perfil que cuida do Hermes o aponta para o Python que o Hermes usa agora, como o `care fix-gateway` faz: uma cópia do arquivo é guardada e o histórico mostra o reparo com o desfazer (`hermes evolution care undo-gateway`). No máximo uma vez por dia; nunca com um gateway rodando, numa unidade desligada que não está falhando, nem no escopo do sistema.
+- **Retenção sem o autopilot.** Com `autopilot_minutes: 0`, o banco continua descartando contadores antigos e os trechos do refletor uma vez por dia.
+
+### Correções
+
+- **Perfis fixados nunca eram atualizados.** O Hermes guarda os registros de instalação em `plugins/.install-metadata.json` (um por plugin), mantém a fixação quando um plugin é instalado de novo sem `--ref` e recusa o `plugins update` numa cópia fixada. O `hermes evolution update`, o `install.sh` e as orientações liam a fixação do arquivo errado e reinstalavam sem `--ref`, então o Hermes reinstalava o commit fixado e o perfil aparecia como atualizado. Agora a fixação passa para o último commit com o próprio `plugins install <url> --force --ref <commit>` do Hermes; uma cópia sem manifesto é instalada de novo; o `--enable` só entra onde o plugin já está ligado, então uma atualização nunca liga o plugin onde o dono o desligou; um link de desenvolvimento nunca é mexido.
+- **O `hermes pm gc` podia apagar o Python de onde o serviço do gateway ainda inicia** (depois que o `facts.json` do Hermes mudava, a pasta só sumia do relatório). Agora a checagem de saúde encontra essa pasta e avisa, e o `pm gc` fica bloqueado (Modo Auto, `care gc`, o menu) até o serviço apontar para o Python atual, o que o `care fix-gateway` faz.
+- **Reparo do gateway e status:** o `care fix-gateway` olha a unidade que o Hermes dá a este perfil (`hermes-gateway-<perfil>`, ou a da raiz quando ela atende o perfil) em vez de um nome fixo, recusa onde o systemd não pode ser consultado (com `sudo`), deixa em paz uma unidade que sobrou enquanto outro gateway roda, só recarrega quando o arquivo já estava certo e guarda o registro para desfazer; depois disso o status deixa de dizer que o gateway não sobe (e volta a dizer depois de um desfazer). Os arquivos das unidades são gravados com fsync.
+- **Checagens do Linux:** um `dpkg --audit` ou `apt-get check` cortado pelo tempo é "não verificado", nunca "quebrado"; o erro de barramento do systemd 254 e códigos de saída inesperados deixam o escopo não verificado em vez de vazio; um programa que este usuário não consegue ver nunca é dado como ausente; a unidade do gateway deste perfil é escolhida, nunca a de outro perfil; um perfil com nome atendido pelo gateway da raiz lê o estado da raiz; uma atualização do sistema tem limite de tempo (`RuntimeMaxSec`).
+- **Uma proposta que você recusou era aplicada sozinha 30 dias depois** no Modo Auto (ela reabre para você ver; a rodada automática não sabia que você tinha dito não). Agora uma recusa impede que ela seja aplicada sozinha, em qualquer perfil; desfazer a recusa libera.
+- **Comandos só do operador:** um agente passava pela checagem depois de limpar os marcadores do ambiente quando os argumentos de um processo do Hermes acima dele tinham a palavra "evolution" (um perfil chamado evolution, uma pergunta avulsa que a cita). Agora só o lançador do próprio comando é pulado, reconhecido pela forma dos argumentos.
+- **Proteção do Hermes:** comandos que reiniciam ou matam o gateway, apagam o Hermes ou mudam este plugin ainda passavam quando escritos como: continuação de linha (`\` no fim da linha); um `#` dentro de uma palavra (uma URL, `$#`) lido como comentário; um `<<EOF` dentro de aspas ou de um comentário; um shell que lê os comandos de um heredoc, de `<<<` ou de um pipe (`bash <<'EOF'`, `echo ... | sh`); `kill -- -$PPID` ou `pkill -u $USER`; `cmd /c` e `powershell -Command` com caminhos do Windows, `taskkill /IM python.exe`; `find ... ! -name X -delete` ou `-o`; `grep -F hermes | xargs kill`; uma gravação nos arquivos do próprio plugin (`sed -i`, `: >`, `tee`). Agora todos são barrados. Ela não barra mais `find ~/.hermes -name '*.log' | xargs rm`, `cd ~/.hermes && ls logs/*.log | xargs rm` nem a leitura do `config.yaml`, e um comando com muitos grupos `{a,b}` não leva mais minutos para ser checado (uma checagem travada bloqueia a ferramenta).
+- **Texto escondido dos terminais do agente:** o `report` e o `learn` mostravam textos de lições, rascunhos e lições de propostas que o `lessons list` esconde do terminal de um agente; agora escondem também.
+- **Memória:** a remoção automática de repetidas podia tirar a única cópia que o agente vê (a mesma entrada no `MEMORY.md` e num `USER.md` que o Hermes não carrega); uma remoção cujo registro não podia ser gravado derrubava a rodada inteira.
+- **Aprendizado:** uma falha que o refletor recusou era perguntada de novo a cada rodada, então as mesmas poucas falhas gastavam a cota do dia; uma sessão danificada no histórico do Hermes parava o replay para sempre (e com ele as bases das lições); uma rodada manual não tinha prazo e podia passar da reserva; o registro do Curator era lido segurando a trava de escrita.
+- **Painel:** outro perfil era comparado com a versão do plugin do próprio dashboard e podia mostrar a lista de plugins dele; os ids de remetente do dono chegavam a sessões só de leitura; o painel e as recusas podiam falar idiomas diferentes; um id grande demais para o SQLite dava um 500 cru; um erro de permissão do sistema era chamado de "gerenciado pelo administrador"; o custo do resumo agora avisa quando inclui sessões que começaram antes do período.
+- **Linha de comando:** todo comando impresso nomeia o perfil (`hermes -p default ...`), porque o Hermes pode seguir um perfil fixo; um comando que falhou (`update`, `care`) sai com código 1, então `hermes evolution update --all --yes && hermes gateway restart` não reinicia mais depois de uma atualização que falhou; Ctrl-C mostra uma frase, não um traceback; a dica sem terminal repete o seu próprio pedido; `owner add/remove` recusa onde os donos atuais não podem ser lidos, em vez de imprimir uma lista que os apagaria; decisões de cron e de manutenção aparecem descritas corretamente; um `HERMES_HOME` vazio não é um perfil.
+- **Windows:** o `NUL` não é mais tomado por um terminal, e o idioma segue a localidade do Windows.
+- **Perfis:** uma pasta de perfil que é um link para outro lugar não é mais tomada pelo perfil padrão (o que a tornava um segundo líder).
+- **`install.sh`:** cada perfil roda com o próprio `HERMES_HOME` e `--profile` (um perfil fixo ou exportado não faz mais atualizar o perfil errado); um nome de perfil que o Hermes recusaria, um nome repetido, uma pasta `profiles` mais acima no caminho, um `HOME` ausente e a falta de terminal (`curl ... | sh` sem `-t`) são tratados; o reinício do gateway nunca lê o resto de um script recebido por pipe, e uma falha nele aparece no código de saída.
+
+### Removido
+
+- Chaves que só a suíte de testes usava: `ATLAS_EVOLUTION_NO_HERMES` e `ATLAS_EVOLUTION_HOST_CHECKS`, e as referências a arquivos de teste no código e na documentação. O workflow de CI é o `checks.yml`.
+
 ## 0.9.1
 
 Versão de estabilidade: uma revisão completa do plugin corrigiu o que podia travar, vazar memória, perder dados ou dar orientação errada. O plugin agora se atualiza em todos os perfis e repara o problema do gateway que antes passava despercebido.

@@ -172,8 +172,6 @@ def _spawn(argv: list, *, env: dict, cwd: str, timeout: int) -> str:
 def run(home: Path, *, only=(), runner=None, timeout: int = TIMEOUT_SECONDS) -> dict:
     """Hermes' doctor checks for one profile, without network and without --fix: {ok, checks|error, seconds}."""
     home = Path(home)
-    if runner is None and os.environ.get("ATLAS_EVOLUTION_NO_HERMES") == "1":
-        return {"ok": False, "error": "disabled"}
     if runner is None and not (home / "config.yaml").is_file():
         return {"ok": False, "error": "not_a_profile"}
     env = _environment(home)

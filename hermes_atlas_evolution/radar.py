@@ -133,6 +133,18 @@ def _declared_hooks(folders) -> dict[str, list[str]]:
 _SELF = "hermes-atlas-evolution"
 
 
+def _own_home(home: Path) -> bool:
+    """Whether `home` is the profile Hermes resolves in this thread (True outside Hermes)."""
+    try:
+        from hermes_constants import get_hermes_home
+    except ImportError:
+        return True
+    try:
+        return Path(get_hermes_home()).resolve() == Path(home).resolve()
+    except Exception:
+        return True
+
+
 def plugins(home: Path, *, own_transform: bool = True) -> dict | None:
     """Plugins loaded by this process for the profile. None when Hermes' plugin manager is not loaded here.
 
@@ -297,7 +309,9 @@ def scan(home: Path, conn, *, now: float, days: int = RADAR_DAYS, own_transform:
             pass
         finally:
             source.close()
-    reading["plugins"] = plugins(home, own_transform=own_transform)
+    # The plugin manager loaded here is this process's own profile's: the dashboard reading another profile (or a
+    # gateway serving several) must neither show it for that profile nor save it as that profile's snapshot.
+    reading["plugins"] = plugins(home, own_transform=own_transform) if _own_home(home) else None
     if reading["plugins"] is not None:
         conn.execute("INSERT OR REPLACE INTO cursor VALUES ('radar_plugins', ?)", (json.dumps(reading["plugins"]),))
     else:

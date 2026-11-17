@@ -44,8 +44,11 @@ def _launcher() -> str | None:
 
 
 def _profile_args(profile: Path) -> list[str]:
-    # A root HERMES_HOME alone can still follow Hermes's sticky active_profile.
-    name = profile.name if profile.parent.name == "profiles" else "default"
+    # A root HERMES_HOME alone can still follow Hermes's sticky active_profile. The name is read before links are
+    # followed (admin.profile_name): a linked profile folder is still that profile, never the default one.
+    from .admin import profile_name
+
+    name = profile_name(Path(profile))
     if not _SLUG.fullmatch(name):
         raise ValueError("Invalid Hermes profile directory name")
     return ["--profile", name]
@@ -88,7 +91,7 @@ def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: fl
         + text(HANDOFF_RULES, lang)
     )
     command = [
-        executable, *_profile_args(profile), "kanban", "--board", board, "create", title,
+        executable, *_profile_args(Path(home).expanduser()), "kanban", "--board", board, "create", title,
         "--body", body, "--assignee", assignee, "--initial-status", "blocked",
         "--max-retries", "1", "--max-runtime", "5m", "--created-by", "hermes-atlas-evolution",
         "--idempotency-key", key, "--json",
@@ -131,7 +134,7 @@ def schedule_spec(home: Path, *, every_minutes: int = 5, upstream_tag: str | Non
     ):
         raise ValueError("Use a released version tag such as v0.23.1")
     profile = Path(home).expanduser().resolve()
-    profile_args = _profile_args(profile)
+    profile_args = _profile_args(Path(home).expanduser())
     arguments = [*profile_args, "evolution", "ops", "tick", "--notify-only"]
     if upstream_tag:
         arguments += ["--upstream-tag", upstream_tag]

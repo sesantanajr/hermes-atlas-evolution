@@ -7,7 +7,9 @@ runs by itself at the end of each learning pass:
   out of Hermes' memory (a copy of the file is kept); nothing else. An entry the owner put back stays.
 - auto ("full", the default): also the reversible changes of explain.AUTOMATIC (locking a skill the curator keeps
   rewriting, installing this plugin where a profile in use never had it, moving a failed install's folder to the
-  trash), at most MAX_CHANGES_PER_PASS per pass, with Hermes' own command; one Hermes refuses waits a day.
+  trash), at most MAX_CHANGES_PER_PASS per pass, with Hermes' own command; one Hermes refuses waits a day. The lead
+  profile also brings this plugin's copy in the other profiles to its own commit (fleet_update.auto_sync: a pinned,
+  older, different or half-installed copy), where that profile's own mode is auto too.
 
 Every action is recorded in the decision history with "automatic" as the actor and can be undone from the menu,
 the panel or `hermes evolution decisions undo <id>`. An automatic change the owner undoes is never applied
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from pathlib import Path
 
 MODES = ("off", "safe", "full")
@@ -307,7 +310,7 @@ def apply_many(home: Path, ids: list, *, now: float, actor: str = "terminal", ru
                 skipped.append({"id": raw, "reason": "one_by_one"})   # which plugin to keep is decided one by one
                 continue
             result = apply_proposal(home, int(raw), now=now, actor=actor, runner=runner, usage=usage)
-        except (TypeError, ValueError) as error:   # Stale included: checked again on disk, nothing ran
+        except (TypeError, ValueError, OverflowError) as error:   # Stale included: checked again on disk, nothing ran
             skipped.append({"id": raw, "reason": str(error)[:160]})
             continue
         except (OSError, sqlite3.Error):
@@ -384,7 +387,7 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
         return done
     try:
         done["memory"] = _memory(home, runtime_config, now=now)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, sqlite3.Error) as error:
         done["failed"].append({"what": "memory", "error": type(error).__name__})
     if done["mode"] != "full":
         return done
@@ -433,6 +436,20 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
         if result.get("applied"):
             done["applied"].append({"proposal": row["id"], "kind": row["kind"], "subject": row["subject"],
                                     "decision": result["decision"]})
+    try:   # this plugin in every other profile on the lead's code: a pinned, older or half-installed copy
+        from .fleet_update import auto_sync
+
+        synced = auto_sync(home, now=now, runner=runner, deadline=deadline)
+        if synced is not None:
+            done["plugin_sync"] = synced
+    except Exception as error:   # never fails the pass
+        done["failed"].append({"what": "plugin_sync", "error": type(error).__name__})
+    try:   # the gateway that cannot start because its service names a Python Hermes removed (203/EXEC)
+        repaired = repair_gateway(home, now=now, deadline=deadline)
+        if repaired is not None:
+            done["gateway_repair"] = repaired
+    except Exception as error:   # never fails the pass
+        done["failed"].append({"what": "gateway_repair", "error": type(error).__name__})
     if deadline is None or deadline - time.monotonic() >= NEEDED_SECONDS["pm_gc"]:
         # never past the pass's own deadline: Hermes' command gets what is left of it (at most PM_GC_SECONDS)
         limit = None if deadline is None else max(COMMAND_MIN_SECONDS, min(
@@ -460,6 +477,85 @@ def _target_allows(home: Path, subject) -> bool:
     return mode is None or mode == "auto"
 
 
+GATEWAY_REPAIR_EVERY_SECONDS = 86_400   # an automatic repair that did not bring the gateway up waits a day
+
+
+def repair_gateway(home: Path, *, now: float, deadline: float | None = None, host=None) -> dict | None:
+    """Self-repair of the Mode auto: the gateway's own systemd unit (user scope) names a Python that no longer exists
+    (Hermes replaced its bundled Python; systemd fails with status=203/EXEC and loops), so it is pointed at the Python
+    Hermes uses now, exactly as `hermes evolution care fix-gateway` does: a copy of the file is kept, and
+    `hermes evolution care undo-gateway` puts it back. Only by the profile that looks after the whole Hermes, only for
+    the unit Hermes names for this profile, never while any gateway unit runs, never for a unit that is off and not
+    failing, never in system scope (root's), at most once a day. Recorded in the history. None when nothing was due."""
+    import os
+    import time
+
+    if host is None and os.name != "posix":
+        return None   # systemd units: Linux only (`host` replaces the machine's commands and files)
+    from . import decisions, hermes_care, system_update
+    from .admin import profile_name
+    from .environment import lead, root_of
+    from .experience import experience
+
+    if lead(root_of(Path(home)), now=now) not in (None, profile_name(home)):
+        return None
+    with experience(home) as conn:
+        row = conn.execute("SELECT value FROM cursor WHERE key='care_check'").fetchone()
+        last = conn.execute("SELECT value FROM cursor WHERE key='auto_gateway_repair'").fetchone()
+    try:
+        care = json.loads(row[0]) if row else {}
+        tried = float(last[0]) if last else 0.0
+    except (TypeError, ValueError):
+        care, tried = {}, 0.0
+    if not isinstance(care, dict) or "gateway_exec_missing" not in (care.get("findings") or ()):
+        return None
+    if 0 <= now - tried < GATEWAY_REPAIR_EVERY_SECONDS:
+        return None
+    if deadline is not None and deadline - time.monotonic() < 120:
+        return None
+    gate = hermes_care.gateway(home, now=now)
+    if gate.get("running"):
+        return None
+    served = bool(gate.get("served_by_root"))
+    names = hermes_care.expected_gateway_units(home, served=served)
+    if not names:
+        return None
+    host = host or system_update.Host()
+    probe = system_update.probe_units({"user": names}, host=host, timeout=10)
+    units = probe.get("units") or []
+    if any(item.get("active") for item in units):
+        return None   # a gateway runs from one of them: nothing is down
+    broken = [item for item in units if item.get("scope") == "user" and item.get("exec_exists") is False
+              and item.get("replacement")]
+    unit = hermes_care.pick_gateway_unit(broken, home=home, served=served) if broken else None
+    if unit is None or unit.get("enabled") is False and not (unit.get("restart_loop") or unit.get("exec_missing")
+                                                            or unit.get("active_state") == "failed"):
+        return None   # a leftover that is off says nothing about the gateway
+    with experience(home) as conn:   # marked before it runs: another process never repairs the same unit meanwhile
+        conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('auto_gateway_repair', ?)", (str(now),))
+    try:
+        result = system_update.fix_unit_exec(host, unit, now=now)
+    except ValueError as error:
+        result = {"ok": False, "unit": unit.get("unit"), "error": str(error)[:160]}
+    if result.get("undo"):   # the same record `care undo-gateway` reads
+        record = Path(home) / "evolution" / "gateway-repair.json"
+        try:
+            record.parent.mkdir(parents=True, exist_ok=True)
+            temporary = record.with_name(f".{record.name}.tmp")
+            temporary.write_text(json.dumps(result["undo"]), encoding="utf-8")
+            os.replace(temporary, record)
+        except OSError:
+            pass
+    hermes_care.refresh_after_repair(home, now)
+    with experience(home) as conn:
+        decision = decisions.record_gateway_repair(conn, str(result.get("unit") or unit.get("unit")),
+                                                   before=str(result.get("from") or unit.get("exec_path") or ""),
+                                                   after=str(result.get("to") or ""), ok=bool(result.get("ok")),
+                                                   undo=bool(result.get("undo")), now=now)
+    return {"unit": result.get("unit") or unit.get("unit"), "ok": bool(result.get("ok")), "from": result.get("from"),
+            "to": result.get("to"), "error": result.get("error"), "decision": decision}
+
+
 RECLAIM_EVERY_SECONDS = 7 * 86_400
 
 
@@ -480,6 +576,8 @@ def reclaim(home: Path, *, now: float, runner=None, timeout: int | None = None) 
         care, ran = {}, 0.0
     if "unused_tools" not in (care.get("findings") or ()) or now - ran < RECLAIM_EVERY_SECONDS:
         return None
+    if hermes_care.gc_blocked(care):
+        return None   # a tools folder facts.json dropped is one a service still starts from: gc would delete it
     from .admin import profile_name
     from .environment import lead, root_of
 
@@ -562,5 +660,6 @@ def recent(conn, *, now: float, days: int = 7) -> list[dict]:
     rows = conn.execute("SELECT * FROM decision_log WHERE actor='automatic' AND at >= ? ORDER BY id DESC LIMIT 50",
                         (now - days * 86_400,)).fetchall()
     return [{"id": row["id"], "at": row["at"], "kind": row["kind"], "target": row["target"], "action": row["action"],
-             "after": json.loads(row["after"]), "undone": row["undone"]} for row in rows]
+             "before": json.loads(row["before"]), "after": json.loads(row["after"]), "undone": row["undone"]}
+            for row in rows]
 

@@ -21,16 +21,17 @@ Este documento descreve o ciclo que o Atlas Evolution acrescenta ao Hermes Agent
 13. [Rendimento do aprendizado](#rendimento-do-aprendizado)
 14. [Radar de saúde](#radar-de-saúde)
 15. [Propostas](#propostas)
-16. [Resumo](#resumo)
-17. [Status e aviso ao dono](#status-e-aviso-ao-dono)
-18. [Comandos](#comandos)
-19. [O menu do terminal](#o-menu-do-terminal)
-20. [O modo e as ações automáticas](#o-modo-e-as-ações-automáticas)
-21. [O ambiente](#o-ambiente)
-22. [Memória do Hermes](#memória-do-hermes)
-23. [Configuração e idioma](#configuração-e-idioma)
-24. [Ferramentas do agente e a skill distribuída](#ferramentas-do-agente-e-a-skill-distribuída)
-25. [Armazenamento](#armazenamento)
+16. [O Índice de evolução](#o-índice-de-evolução)
+17. [Resumo](#resumo)
+18. [Status e aviso ao dono](#status-e-aviso-ao-dono)
+19. [Comandos](#comandos)
+20. [O menu do terminal](#o-menu-do-terminal)
+21. [O modo e as ações automáticas](#o-modo-e-as-ações-automáticas)
+22. [O ambiente](#o-ambiente)
+23. [Memória do Hermes](#memória-do-hermes)
+24. [Configuração e idioma](#configuração-e-idioma)
+25. [Ferramentas do agente e a skill distribuída](#ferramentas-do-agente-e-a-skill-distribuída)
+26. [Armazenamento](#armazenamento)
 
 ## Visão geral
 
@@ -579,6 +580,24 @@ O `proposals list` ordena por risco, do maior para o menor. O `proposals approve
 
 `skill_rollback` e `config_review` são montadas a partir dos vereditos gravados das mudanças dos últimos 30 dias (`REGRESSION_DAYS`), provisórios ou finais. A proposta fica aberta enquanto o veredito continua `regressed` e a mudança tem menos de 30 dias; a evidência diz se o veredito é final. O `learn --notify-only` imprime uma proposta de risco alto uma vez, na rodada que a abre, e uma regressão uma vez, na rodada em que o veredito fica final.
 
+## O Índice de evolução
+
+O `status`, o resumo e a Visão geral do painel mostram um número de 0 a 100 para o perfil: o agente está melhorando? Ele é calculado pelo `evolution_index` com o que o plugin já mede nos últimos 7 dias, em cinco partes (cada uma de 0 a 100, maior é melhor), cada uma contada só com dados suficientes:
+
+| Parte | De onde vem | Escala | Precisa de |
+|---|---|---|---|
+| ferramentas | chamadas de ferramentas que não falharam | 10% falhando é 75, 40% é 0 | 40 chamadas |
+| turnos | turnos interativos que nem falharam nem foram lentos | cada % que falhou custa 2,5 pontos, cada % lento 1 | 20 turnos |
+| você | suas correções e perguntas repetidas a cada 100 turnos | 10 a cada 100 turnos é 70 | 20 turnos |
+| lições | das lições ativas já julgadas, a parte que cortou a falha pela metade (`effective`) | 0 a 100 | 1 lição julgada |
+| saúde | as últimas checagens do Hermes e do sistema | o que para o agente (gateway caído ou sem conseguir subir, banco de sessões danificado, disco cheio, sistema de pacotes quebrado) tira 25 pontos; o que é para arrumar logo (pouco disco, memória, swap, atualização de segurança) 8; manutenção de rotina (versões antigas de ferramentas, listas a atualizar) nada | uma checagem |
+
+O índice é a média ponderada das partes que têm dados (ferramentas 30%, turnos 25%, você 20%, lições 10%, saúde 15%, renormalizada sobre as partes presentes); com menos de duas partes ele diz "ainda não". Cada rodada de aprendizado guarda o valor do dia (uma entrada por dia UTC, a última do dia vale, 90 dias na linha `evolution_index` da tabela `cursor`), então o `status` mostra os últimos 14 dias como uma linha pequena e a tendência contra o valor mais recente com pelo menos 7 dias. Ele conta só agregados que o plugin já guarda: nenhum texto de mensagem, nenhuma saída de ferramenta.
+
+### Quanto o plugin custa ao agente
+
+Cada gancho que o plugin registra é cronometrado onde roda (`selfcost`: duas leituras de relógio por chamada; as últimas 512 durações por gancho ficam na memória). Cada processo grava os números a cada 10 minutos, numa linha `self_cost:<pid>` da tabela `cursor` (uma linha com mais de um dia é removida), e o `status` mostra a mediana e o p95 por chamada de ferramenta (`post_tool_call`), da proteção (`pre_tool_call`), por prompt (a seção de lições) e por turno (`pre_llm_call`). Um p95 acima de 50 ms em pelo menos 200 chamadas entra no que precisa de atenção: um disco lento ou um banco que outro processo mantém ocupado é a causa comum.
+
 ## Resumo
 
 O `hermes evolution report` monta o resumo dos últimos 1 a 35 dias (padrão 7) e o compara com o mesmo intervalo anterior.
@@ -805,7 +824,7 @@ Você vê as duas entradas inteiras e escolhe qual fica. A outra é retirada do 
 | `language` | `auto`, `en`, `pt` | `auto` | `auto` segue `HERMES_LANGUAGE`, `display.language`, o locale e, por fim, inglês. |
 | `tool_hints` | booleano | `false` | Acrescenta a lição correspondente ao resultado de ferramenta que falhou. Vem desligado porque o Hermes só mantém a alteração do primeiro plugin num resultado de ferramenta. |
 | `feedback_signals` | booleano | `true` | Conta correções, perguntas repetidas e agradecimentos do dono. |
-| `agent_tools` | booleano | `false` | Oferece `hermes_atlas_evolution_plan` e `hermes_atlas_evolution_lessons` ao agente, só nas sessões do próprio dono. Registradas quando o plugin carrega: depois de ligar, rode `hermes gateway restart`; desligar vale na hora. |
+| `agent_tools` | booleano | `false` | Oferece `hermes_atlas_evolution_lessons` ao agente, só nas sessões do próprio dono. Registradas quando o plugin carrega: depois de ligar, rode `hermes gateway restart`; desligar vale na hora. |
 | `slow_turn_seconds` | inteiro, de 5 a 3600 | `60` | Turno com pelo menos essa duração conta como lento. |
 | `owner_sender_ids` | até 20 ids, em texto ou números inteiros | `[]` | Remetentes do gateway cujos turnos atendem o dono (veja [Quem é atendido](#quem-é-atendido)). Sessões locais sempre atendem. |
 | `owner_platforms` | até 20 nomes de plataforma, como `telegram` ou `api_server` | `[]` | Plataformas em que todo chat atende o dono, desde a primeira mensagem. |
@@ -840,7 +859,7 @@ Os valores gravados com o nome antigo, `plugins.entries.hermes-evolution.setting
 
 A validação muda conforme quem chama (`evolve.options`). Os comandos recusam com erro um `lessons`, `mode`, `slow_turn_seconds`, `owner_sender_ids`, `owner_platforms`, `reflector`, `reflector_daily_limit`, `autopilot_minutes` ou `runtime_guard` inválido. Dentro do gateway e no autopilot, cada valor inválido é trocado sozinho por um valor seguro, e um aviso é registrado uma vez quando o plugin carrega: um `lessons` inválido significa `off`, um `mode` inválido significa `manual`, um `reflector` inválido desliga o refletor, um `autopilot_minutes` inválido significa 0 (rodadas só quando você pede), um `runtime_guard` inválido mantém a Proteção do Hermes ligada, e os demais ficam no padrão. Um `settings.json` ilegível desliga as lições até ser corrigido; os valores definidos no formulário do Hermes continuam valendo para as demais opções. `tool_hints` só fica ligado quando é `true`, e `feedback_signals` fica ligado a menos que seja `false`; `reflector` e `runtime_guard` aceitam `true` ou `false`; `autopilot_minutes` aceita 0 ou um inteiro de 15 a 1440.
 
-**Idioma** (`i18n`). Tudo o que uma pessoa ou o agente lê sai em inglês ou português do Brasil: lições, o cabeçalho da seção de prompt, dicas, o resumo, diagnósticos, planos, recomendações, cartões Kanban, as respostas das ferramentas do agente, mensagens de erro e a ajuda dos comandos. O idioma é escolhido nesta ordem: `--lang en|pt` na linha de comando, a opção `language` do plugin, o `HERMES_LANGUAGE` do perfil, o `display.language` da configuração do perfil, o locale (`LC_ALL`, `LC_MESSAGES`, `LANG`) e, por fim, inglês. A ajuda dos comandos é montada antes da leitura das opções, então segue só o `HERMES_LANGUAGE`, o `display.language` e o locale. O painel do dashboard também segue a opção `language`; com `auto`, usa o idioma escolhido para o perfil no Hermes, depois o idioma do dashboard, depois o idioma do sistema da máquina ([O painel no dashboard](hermes-integration.md#o-painel-no-dashboard)). Códigos como `pt`, `pt-BR` e `pt_br` selecionam português. Nomes de campo, códigos e identificadores da saída JSON continuam em inglês. Um catálogo de pares de frases no estilo gettext (`catalog`) traduz o resto, e o `tests/test_i18n.py` falha quando falta o par de uma frase de diagnóstico, de um texto de ajuda, de um cartão Kanban ou de um plano.
+**Idioma** (`i18n`). Tudo o que uma pessoa ou o agente lê sai em inglês ou português do Brasil: lições, o cabeçalho da seção de prompt, dicas, o resumo, diagnósticos, planos, recomendações, cartões Kanban, as respostas das ferramentas do agente, mensagens de erro e a ajuda dos comandos. O idioma é escolhido nesta ordem: `--lang en|pt` na linha de comando, a opção `language` do plugin, o `HERMES_LANGUAGE` do perfil, o `display.language` da configuração do perfil, o locale (`LC_ALL`, `LC_MESSAGES`, `LANG`) e, por fim, inglês. A ajuda dos comandos é montada antes da leitura das opções, então segue só o `HERMES_LANGUAGE`, o `display.language` e o locale. O painel do dashboard também segue a opção `language`; com `auto`, usa o idioma escolhido para o perfil no Hermes, depois o idioma do dashboard, depois o idioma do sistema da máquina ([O painel no dashboard](hermes-integration.md#o-painel-no-dashboard)). Códigos como `pt`, `pt-BR` e `pt_br` selecionam português. Nomes de campo, códigos e identificadores da saída JSON continuam em inglês. Um catálogo de pares de frases no estilo gettext (`catalog`) traduz o resto, e toda frase de diagnóstico, texto de ajuda, texto de cartão Kanban e frase de plano precisa ter o seu par ali.
 
 ## Ferramentas do agente e a skill distribuída
 
@@ -849,7 +868,6 @@ As duas ferramentas pertencem ao toolset `hermes-atlas-evolution` e só são reg
 | Ferramenta | Ações |
 |---|---|
 | `hermes_atlas_evolution_lessons` | `search`: até 5 lições ativas de uma ferramenta, incluindo as `general`. `propose`: guarda em quarentena uma lição para revisão do operador, no máximo 5 por hora para o perfil inteiro. `status`: contagem de lições por status e até 20 propostas abertas. |
-| `hermes_atlas_evolution_plan` | devolve um plano delimitado de pesquisa, delegação ou diagnóstico operacional. Está descrita em [Operações](operations.md). |
 
 A skill `hermes-atlas-evolution:evolution-review` é registrada junto com o plugin. Ela orienta o agente a conduzir a revisão com o dono: ler o resumo, explicar falhas, skills pelo resultado e lições, percorrer as propostas abertas do maior risco para o menor com o texto exato de cada lição, e entregar as decisões ao dono como comandos para rodar no próprio terminal. O agente informa e recomenda; os comandos que ele executa não conseguem aprovar, rejeitar nem ativar nada.
 

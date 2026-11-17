@@ -1,7 +1,7 @@
 """Sentence pairs (English, Brazilian Portuguese) used by `i18n`. One sentence per line, exact text.
 
 Diagnostic modules emit their sentences in Portuguese; planning, cost recommendations, the CLI and the
-agent-facing tools emit English. `tests/test_i18n.py` fails when a sentence in either set lacks a pair.
+agent-facing tools emit English. Every sentence in either set needs its pair here.
 """
 
 PAIRS = (
@@ -538,6 +538,13 @@ PAIRS = (
     ("Name a platform such as telegram or api_server", "Informe uma plataforma, como telegram ou api_server"),
     ("A sender id has 1 to 200 characters", "Um id de remetente tem de 1 a 200 caracteres"),
     ("Up to 20 entries are kept; remove one first", "São guardados no máximo 20 itens; remova um antes"),
+    ("systemd is not available here: nothing was changed", "O systemd não está disponível aqui: nada foi mudado"),
+    ("The unit's file cannot be written (run this as the user it belongs to, or as root): nothing was changed",
+     "O arquivo do serviço não pôde ser gravado (rode isto como o usuário dono dele, ou como root): nada foi mudado"),
+    ("The Hermes configuration could not be read here, so the owners already set are unknown: run it as hermes "
+     "evolution owner",
+     "A configuração do Hermes não pôde ser lida aqui, então os donos já definidos são desconhecidos: rode como "
+     "hermes evolution owner"),
     ("evolution.owner_platforms must list up to 20 platform names such as telegram or api_server",
      "evolution.owner_platforms deve listar até 20 nomes de plataforma, como telegram ou api_server"),
     # 0.8.0: lesson packs

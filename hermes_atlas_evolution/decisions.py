@@ -147,6 +147,8 @@ def decide_proposal(conn: sqlite3.Connection, proposal_id: int, action: str, *, 
         if row["kind"] in ("lesson", "lesson_retire") and isinstance(lesson_id, int) else None
     before_lesson = _state(lesson) if lesson is not None else None
     result = proposals.decide(conn, proposal_id, action, now=now, note=note)
+    if result["status"] == "rejected" and str(result.get("code") or "").startswith("env:"):
+        _share_skip(conn, result["code"], add=True)   # whichever profile looks after the Hermes next keeps it
     after_lesson = _state(conn.execute("SELECT * FROM lesson WHERE id=?", (lesson_id,)).fetchone()) \
         if lesson is not None else None
     if before_lesson is not None and after_lesson != before_lesson:
@@ -162,6 +164,23 @@ def decide_proposal(conn: sqlite3.Connection, proposal_id: int, action: str, *, 
                                                                if isinstance(result.get("run_this"), str)
                                                                and result["run_this"] else {})})
     return {**result, "decided": True, "decision": decision}
+
+
+def _share_skip(conn: sqlite3.Connection, code: str, *, add: bool) -> None:
+    """Add or lift a change across profiles in the skip list every profile of this Hermes reads (environment.state).
+    The profile's home is found from this connection's own database file. Never fails the decision."""
+    try:
+        from pathlib import Path
+
+        from .environment import forget_skip, remember, root_of
+
+        found = conn.execute("PRAGMA database_list").fetchone()
+        if not found or not found[2]:
+            return
+        root = root_of(Path(found[2]).parent.parent)   # <home>/evolution/evolution.sqlite3
+        remember(root, skip=[code]) if add else forget_skip(root, code)
+    except Exception:
+        pass
 
 
 def record_setting(conn: sqlite3.Connection, key: str, before, after, *, now: float, actor: str = "dashboard") -> int:
@@ -183,6 +202,26 @@ def record_maintenance(conn: sqlite3.Connection, action: str, *, reclaimable, ok
     """Log Hermes' own maintenance the plugin ran (today `hermes pm gc`). Nothing to undo."""
     return _log(conn, now=now, actor=actor, kind="maintenance", target=action, action="run",
                 before={"reclaimable": reclaimable if isinstance(reclaimable, int) else None}, after={"ok": ok})
+
+
+def record_sync(conn: sqlite3.Connection, profile: str, *, reason: str, before: str, after: str, version, ok: bool,
+                now: float, actor: str = "automatic") -> int:
+    """Log the Mode auto bringing this plugin's copy in another profile to the lead's commit (fleet_update.auto_sync).
+    Nothing to undo: the operator moves a copy with `hermes evolution update` when they want another commit."""
+    return _log(conn, now=now, actor=actor, kind="maintenance", target="plugin_sync", action="run",
+                before={"profile": str(profile), "reason": str(reason), "sha": str(before or "")[:12]},
+                after={"ok": bool(ok), "sha": str(after or "")[:12],
+                       "version": str(version)[:32] if version else None})
+
+
+def record_gateway_repair(conn: sqlite3.Connection, unit: str, *, before: str, after: str, ok: bool, undo: bool,
+                          now: float, actor: str = "automatic") -> int:
+    """Log the Mode auto pointing the gateway's unit at the Python Hermes uses now (actions.repair_gateway). It is
+    undone with `hermes evolution care undo-gateway`, which puts the file back from the copy kept."""
+    return _log(conn, now=now, actor=actor, kind="maintenance", target="gateway_repair", action="run",
+                before={"unit": str(unit)[:120], "path": str(before)[:300]},
+                after={"ok": bool(ok), "path": str(after)[:300], "undo": "hermes evolution care undo-gateway" if undo
+                       else None})
 
 
 def record_cron(conn: sqlite3.Connection, job: str, *, name: str, schedule: str, deliver: str, now: float,
@@ -305,6 +344,12 @@ def undo(conn: sqlite3.Connection, decision_id: int, *, now: float, actor: str =
             return {"id": decision_id, "undone": False, "reason": "changed_since"}
         conn.execute("UPDATE proposal SET status=?, updated=? WHERE id=?", (before["status"], now, int(row["target"])))
         conn.execute("UPDATE decision_log SET undone=? WHERE id=?", (now, decision_id))
+        if after.get("status") == "rejected":   # the owner takes the "no" back: the Mode auto may apply it again
+            code = conn.execute("SELECT code FROM proposal WHERE id=?", (int(row["target"]),)).fetchone()
+            if code is not None:
+                conn.execute("DELETE FROM cursor WHERE key=?", (f"auto_skip:{code[0]}",))
+                if str(code[0]).startswith("env:"):
+                    _share_skip(conn, code[0], add=False)
         return {"id": decision_id, "undone": True, "kind": "proposal"}
     lesson_id = int(row["target"])
     current = conn.execute("SELECT * FROM lesson WHERE id=?", (lesson_id,)).fetchone()

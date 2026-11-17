@@ -22,6 +22,9 @@ A Hermes that has run for weeks piles up problems nobody sees: the agent repeats
 | **Keeps Hermes healthy** | Runs Hermes' own `hermes doctor` checks on every profile in use once a day, without network, and turns what they find into plain steps: tools on without a key, a cache folder Hermes never cleans, rollback snapshots above the cap, a config to migrate, a security advisory. Also watches the gateway (alive or stuck), the session database, the disk (and the day it fills), memory, swap, CPU and old tool versions. Repairs with Hermes' own `doctor --fix` after a backup. |
 | **Keeps the server up to date** | Updates Ubuntu or Debian with checks before and after, a safety copy, your configuration files kept, and a repair if the power goes in the middle. |
 | **Protects Hermes from its own agent** | Blocks agent commands that would take down or delete what Hermes runs on. |
+| **Shows whether the agent is evolving** | The Evolution index: one number from 0 to 100 a day, per profile, from the agent's tool failures, its failed or slow turns, how often you had to correct it, the lessons that worked and Hermes' health, with the trend against a week ago. |
+| **Measures what it costs** | Every hook of the plugin is timed where it runs: `status` says what it adds per tool call, per turn and per prompt (typically well under a millisecond), and warns if that ever grows. |
+| **Repairs itself and every profile** | A damaged database is set aside and started again; every other profile's copy of the plugin is brought to the same code; a gateway that cannot start because Hermes replaced its Python is pointed at the new one, with undo. |
 
 ### Auto mode (default)
 
@@ -31,11 +34,14 @@ In each profile where it runs (with that profile's own mode):
 
 - removes duplicate memory entries (a copy of the file is kept);
 - locks skills the curator keeps rewriting;
-- frees old tool versions, at most once a week.
+- frees old tool versions, at most once a week (never one a Hermes service still starts from);
+- repairs itself: a damaged database of the plugin is set aside and started again.
 
 In the other profiles, from the profile that looks after the whole Hermes:
 
-- installs itself, at the same version, in profiles in use that never had it (never where you turned it off or removed it); Hermes downloads it from GitHub;
+- installs itself in profiles in use that never had it (never where you turned it off or removed it); Hermes downloads it from GitHub;
+- keeps its copy in every profile on its own code: a copy pinned to another commit, older, or left half-installed by an interrupted update is brought to the lead's commit with Hermes' own command (never where the plugin is off or that profile's mode is Assisted or Manual, never a development link; nothing newer than what the lead runs is downloaded by itself);
+- repairs the gateway's service when Hermes replaced its bundled Python and the service still starts the old one (systemd `status=203/EXEC`), with a copy of the file and `hermes evolution care undo-gateway` to undo;
 - moves folders left by failed installs to its trash (kept 30 days);
 - runs Hermes' own check (`hermes doctor`) once a day and lists what it finds, with what to do and the command (a large package cache goes to the trash with one key; folders with conversation data stay yours).
 
@@ -91,6 +97,14 @@ git clone https://github.com/sesantanajr/hermes-atlas-evolution.git && sh hermes
 
 It lists your profiles and asks which ones (Enter = all). Without questions: `sh install.sh --all --yes --install-missing --restart`. Once installed, `hermes evolution update` does the same from Hermes (`--all`, `--profiles a,b`, `--list`). If the gateway does not come back after Hermes updated itself: `hermes evolution care fix-gateway`.
 
+## What's new in 0.10.0
+
+- **The Evolution index.** `status`, the digest and the panel's Overview show one number from 0 to 100 for this profile, built from what the plugin already measures (tools, turns, your corrections, lessons, health), with its parts and its trend against a week ago, so you can see whether a lesson, a skill or a setting made the agent better.
+- **The plugin measures itself.** What each hook adds to the agent's turn, measured where it runs and shown in `status`; a warning if its slow tail ever passes 50 ms.
+- **Faster where it counts.** The lessons section of the prompt is no longer read from the database on every turn (3.8 ms → 0.02 ms); each tool call is one write instead of two; near-twin skills are found 8 times faster, and unchanged skill files are not read again.
+- **Lighter at load.** The modules only the old `ops`, `tick`, `history`, `health` and `memory` commands use are loaded only when those run; those commands are deprecated and go away in 0.11.0.
+- Every change, with 0.9.2's self-repair and fixes: [CHANGELOG](CHANGELOG.md).
+
 ## What's new in 0.9.0
 
 - **Hermes' own check, every day, on every profile.** The plugin runs the `hermes doctor` checks on each profile in use once a day, without network and without changing anything, and turns each problem into plain words, with what to do and the command: tools on without a key, a missing `.env`, a large cache Hermes never cleans, rollback snapshots above the cap, a config to migrate, a memory provider turned off, a security advisory (always first). Optional pieces you never set up are only counted. A problem of the whole machine is listed once.
@@ -111,13 +125,16 @@ Subcommands of `hermes evolution`. `--lang en|pt` works with any of them.
 | `lessons list`, `lessons review`, `lessons approve <id>`, `lessons approve --all` | The lessons, and your decision on the ones that wait. |
 | `proposals list`, `proposals approve <id>`, `proposals reject <id>` | The proposals; approving a change the plugin can make applies it with Hermes' own command. |
 | `decisions`, `decisions undo <id>` | Your decisions and the automatic actions, from the terminal, the dashboard and the autopilot, and the undo of one. |
-| `care [check \| pm-doctor \| doctor \| fix \| gc]` | Hermes' health, read from its own files; and Hermes' own checks and repairs. |
+| `care [check \| pm-doctor \| doctor \| fix \| gc \| fix-gateway \| undo-gateway]` | Hermes' health, read from its own files; Hermes' own checks and repairs; and the repair of a gateway service that still starts a Python Hermes removed (with its undo). |
+| `update [--all \| --profiles a,b] [--install-missing] [--list]` | This plugin updated in every profile, or in the ones you name; a pinned profile moves to the latest commit. |
 | `system [check \| plan \| upgrade \| repair \| report] [--full] [--skip PKG...]` | The operating system's update (Linux with apt). |
 | `environment [show \| scan \| catalog]` | Every profile of this Hermes: plugins, skills, conflicts and what to do; `scan` looks again now; `catalog` the Hermes plugin catalog kept in the plugin's database. |
 | `schedule-digest [--deliver local\|<channel>]` | The weekly digest as a Hermes cron job with no agent. |
 | `lessons export`, `lessons import` | Lessons shared with another profile or machine, after showing each one. |
 | `learn` | A learning pass now. |
 | `owner` | Each chat channel with its senders, and the command that marks one as you. |
+
+Deprecated in 0.10.0 and removed in 0.11.0 (each says so when it runs): `health` (use `care check`), `history` (use `decisions`), `tick` and `feedback`, `memory` and the `/evolution` chat command (the 0.1 notes: `memory audit` lists them so you can keep what you need) and `ops` (the 0.3 Linux supervisor).
 
 Every command and option: [Commands](docs/evolution-loop.md#commands).
 

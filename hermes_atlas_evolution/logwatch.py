@@ -19,7 +19,6 @@ _REVIEW = re.compile(
     rb"Background review complete: thread=[\w.-]{1,40} "
     rb"calls=(?P<calls>\d{1,7}) in=(?P<input>\d{1,10}) out=(?P<output>\d{1,10}) cache_read=(?P<cache>\d{1,11}) "
     rb"result=(?P<result>none|skill\+memory|skill|memory|error)\b")
-RESULTS = ("none", "skill", "memory", "skill+memory", "error")
 
 
 _ROTATED = 5   # agent.log.1 … agent.log.5

@@ -119,7 +119,9 @@ def review(home: Path, runtime_config=None) -> dict:
             # the shorter one is the usual one to take out; an exact repeat keeps the first, and a fact said in both
             # files stays in USER.md (what Hermes keeps about the user)
             if kind == "exact" and first["file"] != second["file"]:
-                drop = first if first["file"] == "MEMORY.md" else second
+                off = [entry for entry in (first, second) if not files[entry["file"]]["enabled"]]
+                # the copy in a file Hermes does not load goes: taking out the other would hide the fact from the agent
+                drop = off[0] if len(off) == 1 else first if first["file"] == "MEMORY.md" else second
             else:
                 drop = second if kind == "exact" or len(second["text"]) <= len(first["text"]) else first
             # Hermes drops a repeat of the very same text in one file when it loads the file: that one costs nothing
@@ -244,10 +246,21 @@ def remove(home: Path, name: str, mark: str, *, now: float, actor: str = "termin
         copy = _backup(home, name, raw, now)
         kept = entries[:position] + entries[position + 1:]
         _write(path, kept)
-    with experience(home) as conn:
-        decision = decisions.record_memory(conn, name, mark, position=position, backup=copy, before=len(entries),
-                                           after=len(kept), copies=len(found), now=now, actor=actor)
-    return {"removed": True, "file": name, "entries": len(kept), "backup": copy, "decision": decision}
+    import sqlite3
+    import time
+
+    decision = None
+    for attempt in range(3):   # the file is changed already: its record must not be lost to a busy moment
+        try:
+            with experience(home) as conn:
+                decision = decisions.record_memory(conn, name, mark, position=position, backup=copy,
+                                                   before=len(entries), after=len(kept), copies=len(found), now=now,
+                                                   actor=actor)
+            break
+        except (sqlite3.Error, OSError):
+            time.sleep(0.5 * (attempt + 1))
+    return {"removed": True, "file": name, "entries": len(kept), "backup": copy, "decision": decision,
+            "logged": decision is not None}
 
 
 def restore(home: Path, name: str, mark: str, backup: str, *, position=None, copies=None, runtime_config=None) -> dict:

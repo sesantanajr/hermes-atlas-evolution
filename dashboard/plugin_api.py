@@ -66,7 +66,7 @@ def _module(name: str):
 
 
 def _prefix(profile: str) -> str:
-    return "hermes" if profile == "default" else f"hermes -p {profile}"
+    return f"hermes -p {profile}"   # explicit even for default: `hermes profile use` makes another one sticky
 
 
 # Hermes names the login cookie by the request's shape (hermes_cli/dashboard_auth/cookies.py): bare over HTTP,
@@ -200,10 +200,11 @@ def decide_reply(home: Path, runtime_config: dict, body, *, now: float, hint=Non
     lang = profile_language(home, runtime_config, hint)
     try:
         return 200, localized_result(decide(home, runtime_config, body, now=now, lang=lang, writer=writer), lang)
-    except PermissionError as error:   # an administrator-managed key or a managed install
-        detail = i18n.text(" ".join(str(error).split())[:200], lang)
-        text = message("managed", lang) + (f" ({detail})" if detail else "")
-        return 403, {"error": "managed", "message": text}
+    except PermissionError as error:   # the operating system refused a file: said as it is, never as "managed"
+        detail = " ".join(str(error).split())[:200]
+        return 403, {"error": "denied", "message": message("refused", lang) + (f": {detail}" if detail else "")}
+    except OverflowError:   # a number SQLite cannot hold: not a decision
+        return 400, {"error": "invalid", "message": i18n.text("Invalid decision", lang)}
     except (KeyError, TypeError, ValueError) as error:
         detail = str(error.args[0]) if isinstance(error, KeyError) and error.args else str(error)
         if " " not in detail:   # a missing key or a bare value: the body was not a decision
@@ -245,7 +246,7 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
     config, settings_problems = cli.safe_settings(home, runtime_config)
     opts = evolve.options(config, runtime_config, strict=False, problems=settings_problems)
     values = current_settings(home, runtime_config)
-    lang = lang if lang in ("en", "pt") else panel_language(values.get("language"), ui_lang, opts["language"])
+    lang = lang if lang in ("en", "pt") else profile_language(home, runtime_config, ui_lang)
     state = status.build(home, now=now, config=config, runtime_config=runtime_config)
     digest = report.build(home, now=now, days=days, lang=lang, rates=config.get("rates_usd_per_million", {}),
                           own_transform=opts["tool_hints"] and opts["lessons"] != "off")
@@ -266,6 +267,7 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
                                             for item in channel["senders"]]} for channel in channels]
         suggestions = [item for item in suggestions if item["kind"] == "platform"]
         history = decisions.masked(history)
+        values = {**values, "owner_sender_ids": [], "owner_sender_count": len(values.get("owner_sender_ids") or ())}
     try:
         import json
 

@@ -206,10 +206,21 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     automatic = actions.automatic(home, now=now, mode=opts["auto_actions"], runtime_config=runtime_config, usage=usage,
                                   deadline=deadline)
     care = _daily_checks(home, now=now, deadline=deadline)
+    index = None
+    try:   # after the health checks: today's index counts what they found
+        from . import evolution_index
+
+        with experience(home) as conn:
+            index = evolution_index.update(conn, now=now)
+    except (sqlite3.Error, ValueError, TypeError) as error:
+        from logging import getLogger
+
+        getLogger(__name__).info("Atlas Evolution could not update the evolution index: %s", type(error).__name__)
     if automatic["applied"]:
         with experience(home) as conn:
             pending = proposals.listing(conn, status="open")
-    return {"automatic": automatic, "care": care, "environment": (fleet or {}).get("summary"), "now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons,
+    return {"automatic": automatic, "care": care, "evolution_index": index,
+            "environment": (fleet or {}).get("summary"), "now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons,
             "lessons_promoted": len(promoted), "lessons_withdrawn": withdrawn, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
@@ -219,12 +230,10 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
 
 def _environment(home: Path, *, now: float, runtime_config=None, deadline: float | None = None) -> dict | None:
     """Every profile of this Hermes (environment.refresh), when this profile looks after them. Never fails the pass."""
-    import os as _os
-
     from . import environment
 
-    if not (Path(home) / "config.yaml").is_file() or _os.environ.get("ATLAS_EVOLUTION_HOST_CHECKS") == "0":
-        return None   # a profile Hermes never configured (the test suite, a scratch home): nothing to look after
+    if not (Path(home) / "config.yaml").is_file():
+        return None   # a folder Hermes never configured (a scratch home): nothing to look after
     try:
         return environment.refresh(home, now=now, deadline=deadline)
     except Exception as error:   # MemoryError from a pathological file included: the pass never fails for this
@@ -241,13 +250,11 @@ def _daily_checks(home: Path, *, now: float, deadline: float | None) -> dict:
 
     from . import hermes_care, system_update
 
-    import os as _os
-
     found: dict = {}
     if deadline is not None and deadline - _time.monotonic() < 30:
         return found
-    # Only for a profile Hermes set up (a scratch folder has no config.yaml); ATLAS_EVOLUTION_HOST_CHECKS=0 opts out.
-    if not (Path(home) / "config.yaml").exists() or _os.environ.get("ATLAS_EVOLUTION_HOST_CHECKS") == "0":
+    # Only for a profile Hermes set up (a scratch folder has no config.yaml).
+    if not (Path(home) / "config.yaml").exists():
         return found
     try:
         with experience(home) as conn:
@@ -270,7 +277,9 @@ def notify_view(result: dict) -> dict | None:
     urgent = [item for item in result["open_proposals"] if item["risk"] == "high" and item["created"] == result.get("now")]
     drafts = result.get("reflector", {}).get("drafted") or []
     automatic = result.get("automatic") or {}
-    acted = automatic.get("applied") or automatic.get("memory") or automatic.get("failed")
+    synced = automatic.get("plugin_sync") or {}
+    acted = automatic.get("applied") or automatic.get("memory") or automatic.get("failed") or synced.get("synced") \
+        or synced.get("failed") or automatic.get("gateway_repair")
     if not (result["new_lessons"] or regressions or retired or urgent or drafts or acted):
         return None
     view = {"new_lessons": result["new_lessons"], "reflector_drafts": drafts, "regressions": regressions,
@@ -296,7 +305,7 @@ def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: i
     if not isinstance(deliver, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.:@+-]{0,119}", deliver):
         raise ValueError("deliver must be a Hermes delivery target such as local or origin")
     profile = Path(home).expanduser().resolve()
-    arguments = [*_profile_args(profile), "evolution", "report", "--days", str(days), "--lang", lang]
+    arguments = [*_profile_args(Path(home).expanduser()), "evolution", "report", "--days", str(days), "--lang", lang]
     script_name = "hermes-atlas-evolution-digest.py"
     script = f'''"""Deliver the Atlas Evolution digest without an agent turn."""
 import os
@@ -323,7 +332,7 @@ except (OSError, subprocess.TimeoutExpired):
 
 print(result.stdout.rstrip())
 '''
-    create_args = ["hermes", *_profile_args(profile), "cron", "create", f"0 {hour} * * {weekday}", "--name",
+    create_args = ["hermes", *_profile_args(Path(home).expanduser()), "cron", "create", f"0 {hour} * * {weekday}", "--name",
                    "hermes-atlas-evolution-digest", "--no-agent", "--script", script_name, "--deliver", deliver]
     return {"status": "planned", "profile_home": str(profile), "script_name": script_name,
             "script_path": str(profile / "scripts" / script_name), "script_content": script,

@@ -22,8 +22,14 @@ REPOSITORY = "sesantanajr/hermes-atlas-evolution"
 PLUGIN_DIR = "hermes-atlas-evolution"
 
 
-def plugin_version() -> str:
+def plugin_version(home: Path | None = None) -> str:
+    """The plugin's version: of the copy installed in the profile at `home` when there is one (the dashboard reads
+    other profiles, whose copies may be older or newer than its own), else of the code running here."""
     manifest = Path(__file__).resolve().parent.parent / "plugin.yaml"
+    if home is not None:
+        installed = Path(home) / "plugins" / "hermes-atlas-evolution" / "plugin.yaml"
+        if installed.is_file():
+            manifest = installed
     try:
         match = re.search(r'^version:\s*"?([\d.]+)"?', manifest.read_text(encoding="utf-8"), re.M)
     except OSError:
@@ -177,11 +183,11 @@ def _digest_scheduled(home: Path, *, paused_too: bool = True) -> bool:
                for job in jobs or ())
 
 
-LEGACY_DIRS = ("hermes-evolution",)   # the plugin id used up to 0.5.0
+LEGACY_DIRS = ("hermes-evolution",)   # the plugin id used up to 0.5.0 (the same as cli.LEGACY_PLUGIN_IDS)
 
 
 def _command(name: str, rest: str) -> str:
-    return f"hermes {'' if name == 'default' else f'-p {name} '}{rest}"
+    return f"hermes -p {name} {rest}"   # explicit even for default: `hermes profile use` makes another one sticky
 
 
 def _profile_state(folder: Path) -> tuple[str, str | None, int, int]:
@@ -232,13 +238,11 @@ def _profiles(home: Path, *, now: float) -> list[dict]:
 
     One gateway serves many profiles, but each profile loads its own plugins, so the profile you happen to be
     in may not be the one doing the work."""
+    from .environment import profiles, root_of
+
+    # the same profiles the Mode auto looks after (environment.profiles): never a link or a name Hermes refuses
+    candidates = profiles(root_of(home))
     home = Path(home).resolve()
-    root = home.parent.parent if home.parent.name == "profiles" else home
-    candidates = [("default", root)]
-    try:
-        candidates += [(entry.name, entry) for entry in sorted((root / "profiles").iterdir()) if entry.is_dir()][:200]
-    except OSError:
-        pass
     rows = []
     for name, folder in candidates:
         state, last, active, waiting = _profile_state(folder)
@@ -272,7 +276,8 @@ def never_ran(home: Path) -> bool:
 CARE_ATTENTION = ("hermes_gateway_crashed", "os_held_by_plugin", "hermes_gateway_heartbeat_stale", "hermes_gateway_memory_growth", "hermes_state_db_unreadable",
                   "hermes_state_db_damaged", "hermes_state_db_wal_large", "hermes_disk_critical", "hermes_disk_low",
                   "hermes_disk_filling", "hermes_storage_growth", "hermes_memory_low", "hermes_swap_full",
-                  "hermes_cpu_saturated", "hermes_unused_tools", "hermes_gateway_not_at_boot",
+                  "hermes_cpu_saturated", "hermes_unused_tools", "hermes_tools_in_use_unreferenced",
+                  "hermes_gateway_not_at_boot",
                   "os_dpkg_interrupted", "os_package_manager_stuck", "os_apt_broken", "os_reboot_required", "os_security_updates", "os_unattended_off",
                   "os_lists_stale", "os_unit_not_enabled", "hermes_gateway_exec_missing", "hermes_gateway_restart_loop",
                   "os_unit_exec_missing", "os_unit_restart_loop")
@@ -426,9 +431,13 @@ def _number(value) -> float | None:
     return number if number == number and abs(number) != float("inf") else None
 
 
-def _probe_names(care: dict | None, system: dict | None) -> dict:
-    """The Hermes units a look now asks systemd about: the ones the last checks saw, and the gateway's usual one."""
-    names: dict = {"user": ["hermes-gateway.service"], "system": []}
+def _probe_names(care: dict | None, system: dict | None, home: Path | None = None) -> dict:
+    """The Hermes units a look now asks systemd about: the ones the last checks saw, and the gateway's usual one
+    (this profile's name for it)."""
+    from .hermes_care import expected_gateway_units
+
+    served = bool(((care or {}).get("gateway") or {}).get("served_by_root"))
+    names: dict = {"user": list(expected_gateway_units(home, served=served)), "system": []}
     for unit in [*((system or {}).get("units") or ()), (care or {}).get("gateway_unit")]:
         if isinstance(unit, dict) and isinstance(unit.get("unit"), str) and unit.get("scope") in names \
                 and unit["unit"] not in names[unit["scope"]]:
@@ -436,30 +445,68 @@ def _probe_names(care: dict | None, system: dict | None) -> dict:
     return names
 
 
-def live_units(care: dict | None, system: dict | None, *, host=None) -> dict | None:
+def live_units(care: dict | None, system: dict | None, *, host=None, home: Path | None = None) -> dict | None:
     """One `systemctl show` per scope, 4 s at most, on Linux with systemd (or the `host` given): what Hermes'
     services do now. None where it cannot be asked."""
-    if host is None and (os.name != "posix" or not Path("/run/systemd/system").is_dir()
-                         or os.environ.get("ATLAS_EVOLUTION_NO_HERMES") == "1"):
+    if host is None and (os.name != "posix" or not Path("/run/systemd/system").is_dir()):
         return None
     try:
         from .system_update import probe_units
 
-        return probe_units(_probe_names(care, system), host=host, timeout=4)
+        return probe_units(_probe_names(care, system, home), host=host, timeout=4)
     except Exception:   # a look now is a bonus: status never fails for it
         return None
 
 
-def _apply_live(attention: list, live: dict) -> list:
+def _key(unit: dict) -> tuple:
+    return unit.get("scope"), unit.get("unit")
+
+
+def _unit_trouble(unit: dict) -> bool:
+    """A unit that cannot start or that systemd keeps restarting."""
+    return bool(unit.get("exec_missing") or unit.get("restart_loop")
+                or unit.get("exec_main_status") == 203 and unit.get("active_state") != "active")
+
+
+def _stored_units(care: dict | None, system: dict | None) -> list[dict]:
+    return [unit for unit in [(care or {}).get("gateway_unit"), *((system or {}).get("units") or ())]
+            if isinstance(unit, dict) and isinstance(unit.get("unit"), str)]
+
+
+def _current_units(care: dict | None, system: dict | None, live: dict | None) -> list[dict]:
+    """Hermes' units as known now: what a look now saw, then what the stored checks saw of the units it did not."""
+    seen = [unit for unit in (live or {}).get("units") or () if isinstance(unit, dict) and unit.get("unit")]
+    keys = {_key(unit) for unit in seen}
+    return seen + [unit for unit in _stored_units(care, system) if _key(unit) not in keys]
+
+
+def _apply_live(attention: list, live: dict, care: dict | None = None, system: dict | None = None,
+                home: Path | None = None) -> list:
     """The unit-derived attention codes, as systemd says now: a gateway that cannot start is said even when the
-    stored checks are old, and one that runs again is no longer said to be down."""
-    units = [unit for unit in live.get("units") or () if isinstance(unit, dict)]
-    gateway = next((unit for unit in sorted(units, key=lambda unit: unit.get("scope") != "user")
-                    if "gateway" in str(unit.get("unit"))), None)
+    stored checks are old, and one that runs again is no longer said to be down. When every unit the stored checks
+    found in trouble was looked at now and is fine (the owner repaired it), what they said of it is dropped."""
+    from .hermes_care import pick_gateway_unit
+
+    stored = _stored_units(care, system)
+    enabled = {_key(unit): unit["enabled"] for unit in stored if isinstance(unit.get("enabled"), bool)}
+    # a `show` does not say whether a unit comes back after a reboot: the stored checks' list-unit-files does
+    units = [{**unit, **({"enabled": enabled[_key(unit)]} if "enabled" not in unit and _key(unit) in enabled else {})}
+             for unit in live.get("units") or () if isinstance(unit, dict)]
+    picked = (care or {}).get("gateway_unit")
+    gate = (care or {}).get("gateway") or {}
+    gateway = pick_gateway_unit(units, home=home, served=bool(gate.get("served_by_root")),
+                                prefer=[_key(picked)] if isinstance(picked, dict) else ())
     codes = [code for code in attention if code not in UNIT_CODES] if gateway else list(attention)
+    now = {_key(unit): unit for unit in units}
+    troubled = [unit for unit in stored if _unit_trouble(unit)]
+    if troubled and all(_key(unit) in now and not _unit_trouble(now[_key(unit)]) for unit in troubled):
+        codes = [code for code in codes if code not in ("os_unit_exec_missing", "os_unit_restart_loop",
+                                                        "hermes_gateway_exec_missing", "hermes_gateway_restart_loop")]
     if gateway:
         running = gateway.get("active_state") == "active" and gateway.get("sub_state") == "running"
-        if not running and (gateway.get("exec_missing") or gateway.get("exec_main_status") == 203):
+        # a leftover unit that is off, while the gateway runs from another one, is not the gateway failing to start
+        leftover = gate.get("running") is True and gateway.get("enabled") is False
+        if not running and not leftover and (gateway.get("exec_missing") or gateway.get("exec_main_status") == 203):
             codes.append("hermes_gateway_exec_missing")
         elif not running and gateway.get("restart_loop"):
             codes.append("hermes_gateway_restart_loop")
@@ -477,7 +524,7 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
           host=None) -> dict:
     """The status of this profile. `live`: also ask systemd now about Hermes' services (one `systemctl show`, 4 s
     at most); by default when run from the command line, or when the stored health checks are old or the learning
-    pass stopped (a gateway that died stops the passes that would see it). `host` replaces the machine (tests)."""
+    pass stopped (a gateway that died stops the passes that would see it). `host` replaces the machine's commands and files."""
     from .evolve import options
     from .signals import guard_summary
 
@@ -498,7 +545,7 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         vetoed = guard_summary(conn, now=now, days=7)
         automatic = conn.execute("SELECT COUNT(*) FROM decision_log WHERE actor='automatic' AND at >= ? AND undone IS NULL",
                                  (now - 7 * 86_400,)).fetchone()[0]
-        stale, gone = _runtimes(conn, plugin_version())
+        stale, gone = _runtimes(conn, plugin_version(home))
     if gone:
         from .experience import record
 
@@ -513,7 +560,7 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         totals = {}
     report = {
         "profile": "default" if Path(home).resolve().parent.name != "profiles" else Path(home).resolve().name,
-        "plugin_version": plugin_version(), "observing_since": _iso(cursor.get("observed_since")),
+        "plugin_version": plugin_version(home), "observing_since": _iso(cursor.get("observed_since")),
         "today": {"tool_calls": tools, "turns": turns, "model_calls": calls},
         "autopilot": {"minutes": opts["autopilot_minutes"],
                       "last_pass": {**last, "at": _iso(last.get("at"))} if isinstance(last, dict) else None},
@@ -587,6 +634,21 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         report["settings_reload"] = []
     if report["settings_reload"]:
         attention.append("settings_reload")
+    from .operations import recovered
+
+    report["db_recovered"] = recovered(home, now=time.time() if now is None else now)
+    if report["db_recovered"]:
+        attention.append("db_recovered")
+    try:   # is the agent getting better (evolution_index), and what the plugin itself costs it (selfcost)
+        from . import evolution_index, selfcost
+
+        with experience(home) as conn:
+            report["evolution_index"] = evolution_index.current(conn, now=now)
+            report["self_cost"] = selfcost.summary(conn, now=now)
+    except (OSError, ValueError, sqlite3.Error):
+        report["evolution_index"] = report["self_cost"] = None
+    if (report.get("self_cost") or {}).get("slow"):
+        attention.append("self_slow")
     # Hermes' own health and the operating system's, as the last learning pass read them (hermes_care, system_update)
     care = system = None
     try:
@@ -619,13 +681,14 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
     report["health_age"] = round(max(ages)) if ages else None
     if live is None:
         live = process_kind() == "cli" or report["health_stale"]
-    report["live"] = live_units(care, system, host=host) if live else None
+    report["live"] = live_units(care, system, host=host, home=home) if live else None
     if report["live"] is not None:
-        health = _apply_live(health, report["live"])
+        health = _apply_live(health, report["live"], care, system, home)
     if {"hermes_gateway_exec_missing", "hermes_gateway_restart_loop"} & set(health):
         # the gateway's own line already says it, with its fix: the system's line only when another unit is concerned
-        problems = [unit for unit in [*((system or {}).get("units") or ()), *((report["live"] or {}).get("units") or ())]
-                    if isinstance(unit, dict) and (unit.get("exec_missing") or unit.get("restart_loop"))]
+        # (as known now: a unit the look now found fine is not one, whatever the stored checks said)
+        problems = [unit for unit in _current_units(None, system, report["live"])
+                    if unit.get("exec_missing") or unit.get("restart_loop")]
         if all("gateway" in str(unit.get("unit")) for unit in problems):
             health = [code for code in health if code not in ("os_unit_exec_missing", "os_unit_restart_loop")]
     if report["health_stale"] and (care or system):
@@ -729,6 +792,13 @@ _TEXT = {
                                    "what uses them the most: `ps -eo pcpu,comm --sort=-pcpu | head`.",
            "hermes_unused_tools": "Old versions of Hermes' tools take {size} and nothing uses them: "
                                   "`hermes evolution care gc` removes them (it asks first).",
+           "hermes_tools_in_use_unreferenced": "Hermes no longer points at {in_use_en} in its tools (`tools/facts.json`), "
+                                               "but something still starts from there: `hermes pm gc` would delete it "
+                                               "and that service would fail at its next start (status 203/EXEC). "
+                                               "Old tool versions are not removed until then. First point the service "
+                                               "at the current Python (`hermes evolution care fix-gateway` does it for "
+                                               "the gateway's service) or, for the running Hermes process, restart it "
+                                               "(`hermes gateway restart`); then `hermes evolution care gc`.",
            "hermes_gateway_not_at_boot": "The gateway runs as a user service without linger: after a reboot it does not start. Fix: `loginctl enable-linger {user}`.",
            "hermes_gateway_exec_missing": "The gateway's service `{unit}` cannot start: its ExecStart runs `{exec_path}`, "
                                           "which no longer exists (Hermes replaced its bundled Python{replacement_en}). "
@@ -772,6 +842,17 @@ _TEXT = {
                                  "end-of-session notices). Schedule the weekly digest to your chat with "
                                  "`hermes evolution schedule-digest --deliver <channel>`: it becomes a Hermes scheduled "
                                  "task (cron), no agent.",
+           "index": "Evolution index", "index_week": "in 7 days",
+           "index_wait": "not yet: it needs a few days of turns and tool calls",
+           "index_parts": {"tools": "tools", "turns": "turns", "you": "you", "lessons": "lessons", "health": "health"},
+           "cost": "What the plugin costs the agent", "cost_item": "{hook} {mean} (p95 {p95})",
+           "cost_hooks": {"post_tool_call": "per tool call", "pre_tool_call": "guard", "prompt_section": "per prompt",
+                          "pre_llm_call": "per turn"},
+           "self_slow": "Atlas Evolution is adding {p95} to {hook} in its slow tail (p95). A slow disk or a database "
+                        "kept busy by another process is the usual cause: see `hermes evolution care check`.",
+           "db_recovered": "The plugin's database was damaged and was started again ({when}); the damaged copy is "
+                           "kept as `evolution/{copy}`. Lessons, proposals and the history start over; Hermes itself "
+                           "was not affected.",
            "settings_reload": "These settings changed and apply after `hermes gateway restart` (in the terminal, at the "
                               "next session): {keys}.",
            "settings_ignored": "These values in `settings.json` are ignored: {keys}. They would widen whom the plugin trusts or turn a protection off, and the agent's own file tools can write that file. Set the ones you want in the Hermes settings form, with `hermes evolution owner` (sender ids and platforms), or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> <value>` in your own terminal.",
@@ -786,7 +867,8 @@ _TEXT = {
                       "missing": "not installed"},
            "first_pass": "First learning pass done now: {sessions} sessions, {tool_calls} tool calls of history read.",
            "statuses": {"done": "read", "running": "being read", "waiting": "waiting for the first learning pass",
-                        "no_history": "no history", "unreadable": "unreadable", "unsupported_history": "unsupported format"}},
+                        "no_history": "no history", "unreadable": "unreadable", "unsupported_history": "unsupported format",
+                        "damaged_history": "Hermes' history is damaged; replay ended"}},
     "pt": {"title": "Atlas Evolution {version} · perfil `{profile}`", "since": "Observando desde",
            "tool_calls": ("{n} chamada de ferramenta", "{n} chamadas de ferramentas"),
            "turns": ("{n} turno", "{n} turnos"), "model_calls": ("{n} chamada ao modelo", "{n} chamadas ao modelo"),
@@ -883,6 +965,14 @@ _TEXT = {
                                    "minutos). Veja quem mais os usa: `ps -eo pcpu,comm --sort=-pcpu | head`.",
            "hermes_unused_tools": "Versões antigas das ferramentas do Hermes ocupam {size} e nada as usa: "
                                   "`hermes evolution care gc` as remove (pergunta antes).",
+           "hermes_tools_in_use_unreferenced": "O Hermes não aponta mais para {in_use_pt} nas ferramentas dele "
+                                               "(`tools/facts.json`), mas algo ainda sobe a partir dali: o "
+                                               "`hermes pm gc` apagaria isso e esse serviço falharia na próxima vez que "
+                                               "subisse (status 203/EXEC). Versões antigas de ferramentas não são "
+                                               "removidas até lá. Primeiro aponte o serviço para o Python atual (o "
+                                               "`hermes evolution care fix-gateway` faz isso no serviço do gateway) ou, "
+                                               "se for o processo do Hermes em execução, reinicie-o "
+                                               "(`hermes gateway restart`); depois, `hermes evolution care gc`.",
            "hermes_gateway_not_at_boot": "O gateway roda como serviço do usuário sem o `linger` ligado: depois de um "
                                          "reinício ele não sobe. Correção: `loginctl enable-linger {user}`.",
            "hermes_gateway_exec_missing": "O serviço do gateway `{unit}` não consegue subir: o ExecStart dele roda "
@@ -927,6 +1017,18 @@ _TEXT = {
                                  "fim de sessão). Agende o resumo semanal no seu chat com "
                                  "`hermes evolution schedule-digest --deliver <canal>`: ele vira uma tarefa agendada do "
                                  "Hermes (cron), sem agente.",
+           "index": "Índice de evolução", "index_week": "em 7 dias",
+           "index_wait": "ainda não: precisa de alguns dias de turnos e chamadas de ferramentas",
+           "index_parts": {"tools": "ferramentas", "turns": "turnos", "you": "você", "lessons": "lições",
+                           "health": "saúde"},
+           "cost": "Quanto o plugin custa ao agente", "cost_item": "{hook} {mean} (p95 {p95})",
+           "cost_hooks": {"post_tool_call": "por chamada de ferramenta", "pre_tool_call": "proteção",
+                          "prompt_section": "por prompt", "pre_llm_call": "por turno"},
+           "self_slow": "O Atlas Evolution está somando {p95} a {hook} na sua cauda lenta (p95). Um disco lento ou um "
+                        "banco ocupado por outro processo é a causa comum: veja `hermes evolution care check`.",
+           "db_recovered": "O banco do plugin estava danificado e foi recomeçado ({when}); a cópia danificada fica em "
+                           "`evolution/{copy}`. Lições, propostas e o histórico recomeçam; o próprio Hermes não foi "
+                           "afetado.",
            "settings_reload": "Estas configurações mudaram e valem depois de `hermes gateway restart` (no terminal, na "
                               "próxima sessão): {keys}.",
            "settings_ignored": "Estes valores do `settings.json` são ignorados: {keys}. Eles ampliariam em quem o plugin confia ou desligariam uma proteção, e as ferramentas de arquivo do próprio agente conseguem gravar esse arquivo. Defina os que você quer no formulário de configurações do Hermes, com o `hermes evolution owner` (ids de remetente e plataformas) ou com `hermes config set plugins.entries.hermes-atlas-evolution.settings.<chave> <valor>` no seu próprio terminal.",
@@ -942,7 +1044,8 @@ _TEXT = {
            "first_pass": "Primeira rodada de aprendizado feita agora: {sessions} sessões e {tool_calls} chamadas de "
                          "ferramentas do histórico lidas.",
            "statuses": {"done": "lido", "running": "em leitura", "waiting": "aguardando a primeira rodada",
-                        "no_history": "sem histórico", "unreadable": "ilegível", "unsupported_history": "formato não suportado"}},
+                        "no_history": "sem histórico", "unreadable": "ilegível", "unsupported_history": "formato não suportado",
+                        "damaged_history": "o histórico do Hermes está danificado; replay encerrado"}},
 }
 
 # The words for the gateway, the session database and the memory, the same in `status` and `care`.
@@ -1038,15 +1141,28 @@ def _care_values(report: dict) -> dict:
             "security_pt": plural(security, "1 atualização de segurança do sistema espera",
                                   "{n} atualizações de segurança do sistema esperam"),
             "held": ", ".join(system.get("plugin_holds") or ()) or "?",
-            "busy": busy, "busy_pt": _comma(busy), **_unit_values(report)}
+            "busy": busy, "busy_pt": _comma(busy), **_in_use_values(care), **_unit_values(report)}
+
+
+def _in_use_values(care: dict) -> dict:
+    """The tool folders `hermes pm gc` would delete while something starts from them, and what does, in both
+    languages: `python-3.14.9` (used by `hermes-gateway.service`)."""
+    users = care.get("in_use_by") if isinstance(care.get("in_use_by"), dict) else {}
+    said = {"en": [], "pt": []}
+    for folder in [str(item) for item in care.get("in_use_unreferenced") or () if item][:8]:
+        who = [item for item in users.get(folder) or () if isinstance(item, str)][:3]
+        for lang, by, process, joined in (("en", "used by", "the running Hermes process", " and "),
+                                          ("pt", "usada por", "o processo do Hermes em execução", " e ")):
+            names = joined.join(process if item == "process" else f"`{item}`" for item in who)
+            said[lang].append(f"`{folder}`" + (f" ({by} {names})" if names else ""))
+    return {"in_use_en": ", ".join(said["en"]) or "?", "in_use_pt": ", ".join(said["pt"]) or "?"}
 
 
 def _trouble(report: dict) -> tuple[dict, list[dict]]:
     """The unit that cannot start (or loops), and every looping unit, from a look now first, then the stored
     checks: the gateway's own unit before any other."""
-    care, system = report.get("care") or {}, report.get("system") or {}
-    units = [unit for unit in [*((report.get("live") or {}).get("units") or ()), care.get("gateway_unit"),
-                               *(system.get("units") or ())] if isinstance(unit, dict) and unit.get("unit")]
+    # a unit the look now saw is described as it is now, never as the stored checks saw it before a repair
+    units = _current_units(report.get("care"), report.get("system"), report.get("live"))
     units.sort(key=lambda unit: "gateway" not in str(unit.get("unit")))   # stable: the live look stays first
     missing = [unit for unit in units if unit.get("exec_missing")
                or unit.get("exec_main_status") == 203 and unit.get("active_state") != "active"]
@@ -1144,6 +1260,16 @@ def _doctor_lines(report: dict, t: dict, lang: str) -> list[str]:
     return lines
 
 
+def _ms(value, lang: str) -> str:
+    """A duration in milliseconds for a person: 0.04 ms, 1.2 ms, 38 ms (decimal comma in Portuguese)."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    text = f"{value:.2f}" if value < 1 else f"{value:.1f}" if value < 10 else f"{value:.0f}"
+    return (text.replace(".", ",") if lang == "pt" else text) + " ms"
+
+
 def markdown(report: dict, lang: str = "en") -> str:
     lang = lang if lang in _TEXT else "en"
     t = _TEXT[lang]
@@ -1172,6 +1298,26 @@ def markdown(report: dict, lang: str = "en") -> str:
                  f"{_p(t['retired'], playbook['retired'])}"
                  + (f" · {_p(t['withdrawn'], playbook['withdrawn'])}" if playbook.get("withdrawn") else ""))
     lines.append(f"- **{t['proposals']}:** {report['proposals_open']}")
+    index = report.get("evolution_index") or {}
+    if index.get("score") is not None:
+        from .evolution_index import sparkline
+
+        trend = index.get("trend_7d")
+        moved = "" if trend is None else f" ({'+' if trend > 0 else ''}{trend} {t['index_week']})"
+        named = " · ".join(f"{t['index_parts'][name]} {value}" for name, value in (index.get("parts") or {}).items()
+                           if value is not None)
+        line = sparkline(index.get("series") or [])
+        lines.append(f"- **{t['index']}:** {index['score']}/100{moved}" + (f" `{line}`" if len(line) > 1 else "")
+                     + (f" · {named}" if named else ""))
+    elif index:
+        lines.append(f"- **{t['index']}:** {t['index_wait']}")
+    cost = (report.get("self_cost") or {}).get("hooks") or {}
+    shown = [(hook, cost[hook]) for hook in ("post_tool_call", "pre_tool_call", "prompt_section", "pre_llm_call")
+             if hook in cost and cost[hook]["calls"]]
+    if shown:
+        lines.append(f"- **{t['cost']}:** " + " · ".join(
+            t["cost_item"].format(hook=t["cost_hooks"].get(hook, hook), mean=_ms(item.get("p50_ms", item["mean_ms"]), lang),
+                                  p95=_ms(item["p95_ms"], lang)) for hook, item in shown))
     guard = report["runtime_guard"]
     if guard.get("state") == "host":
         state = t["guard_host"]
@@ -1200,6 +1346,15 @@ def markdown(report: dict, lang: str = "en") -> str:
             continue
         if code == "settings_reload":
             lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report["settings_reload"])))
+            continue
+        if code == "self_slow":
+            cost = report["self_cost"]
+            hook = cost["slow"][0]
+            lines.append("- " + t[code].format(hook=hook, p95=_ms(cost["hooks"][hook]["p95_ms"], lang)))
+            continue
+        if code == "db_recovered":
+            found = report.get("db_recovered") or {}
+            lines.append("- " + t[code].format(copy=found.get("copy") or "?", when=_iso(found.get("at")) or "?"))
             continue
         lines.append(f"- {t[code]}")
         if code == "legacy_install":
@@ -1409,5 +1564,5 @@ def _environment_markdown(home: Path, lang: str = "en", *, mode: str = "auto") -
             lines.append(f"  - {t['advice']}: {told['advice']}")
         if item.get("command"):
             lines.append(f"  - {t['run']}: `{item['command']}`")
-    lines += ["", t["where"].format(lead=name, p="" if name == "default" else f" -p {name}")]
+    lines += ["", t["where"].format(lead=name, p=f" -p {name}")]
     return "\n".join(lines) + "\n"

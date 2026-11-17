@@ -60,6 +60,13 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
             before = experiments.window_metrics(conn, None, previous_start, previous_end)
             usage = None
     report["self_improvement"]["skills"] = skill_health(home, now=now, days=days, limit=8)
+    try:
+        from .evolution_index import current as evolution_now   # `current` is this function's metrics window
+
+        with experience(home) as conn:
+            report["evolution_index"] = evolution_now(conn, now=now)
+    except (sqlite3.Error, ValueError):
+        report["evolution_index"] = None
     report["comparison"] = {"current": current, "previous": before, "verdict": experiments.compare(before, current)}
     if usage is not None:
         main = [row for row in usage["groups"] if row["lane"] == "main" and row["outcome"] == "ok"]
@@ -81,8 +88,11 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
         native = native_billing(home, days=days, now=now)
         totals = native.get("totals") if isinstance(native, dict) else None
         if isinstance(totals, dict):
+            crossing = (native.get("coverage") or {}).get("rows_crossing_window_start")
             report["native_cost"] = {"estimated_cost_usd": totals.get("estimated_cost_usd"),
-                                     "api_call_count": totals.get("api_call_count"), "basis": "hermes_session_accounting"}
+                                     "api_call_count": totals.get("api_call_count"), "basis": "hermes_session_accounting",
+                                     # Hermes counts a session's cost whole: one that began earlier brings it along
+                                     "sessions_started_before": crossing if type(crossing) is int else 0}
     except (sqlite3.Error, ValueError, OSError):
         pass
     return report
@@ -94,6 +104,8 @@ _TEXT = {
         "summary": "Summary", "turns": "Interactive turns", "of": "of", "failed": ("{n} failed", "{n} failed"),
         "interrupted": ("{n} interrupted", "{n} interrupted"), "slow": ("{n} slow", "{n} slow"), "turn_time": "Turn time", "typical": "half within", "p95": "1 in 20 takes more than",
         "tools": "Tool calls", "errors": ("{n} error", "{n} errors"), "cost": "Estimated cost (Hermes accounting)",
+        "cost_earlier": ("includes {n} session that began before this period, counted whole",
+                         "includes {n} sessions that began before this period, counted whole"),
         "feedback": "Owner signals", "corrections": "corrections", "reasks": "repeated questions", "thanks": "thanks",
         "vs": "Versus the previous {days} days", "verdict": "Verdict", "failures": "Failures that repeat",
         "failures_none": "No recurring tool failure in this window.", "times": ("1 time", "{n} times"),
@@ -109,6 +121,8 @@ _TEXT = {
         "outcomes": "Skills by outcome", "outcomes_none": "Not enough turns with a loaded skill yet.",
         "whole_profile": "whole profile", "turns_word": "turns", "failed_short": "failed", "corrected_short": "corrected",
         "interrupted_short": "interrupted", "tool_errors_short": "with tool errors", "below": "worse than the profile",
+        "hidden": "(text hidden: read it in your own terminal)",
+        "index": "Evolution index", "index_week": "in 7 days",
         "lessons": "Lessons", "active": "active", "candidate": "awaiting approval", "retired": "retired",
         "withdrawn": "dropped from the queue without a decision",
         "effect": "measured effect", "before": "before", "after": "after", "changes": "Changes and their measured effect",
@@ -145,6 +159,8 @@ _TEXT = {
         "summary": "Resumo", "turns": "Turnos interativos", "of": "de", "failed": ("{n} falhou", "{n} falharam"),
         "interrupted": ("{n} interrompido", "{n} interrompidos"), "slow": ("{n} lento", "{n} lentos"), "turn_time": "Duração dos turnos", "typical": "metade até", "p95": "1 em cada 20 passa de",
         "tools": "Chamadas de ferramentas", "errors": ("{n} erro", "{n} erros"), "cost": "Custo estimado (contabilidade do Hermes)",
+        "cost_earlier": ("inclui {n} sessão que começou antes deste período, contada inteira",
+                         "inclui {n} sessões que começaram antes deste período, contadas inteiras"),
         "feedback": "Sinais do dono", "corrections": "correções", "reasks": "perguntas repetidas", "thanks": "agradecimentos",
         "vs": "Comparado aos {days} dias anteriores", "verdict": "Veredito", "failures": "Falhas que se repetem",
         "failures_none": "Nenhuma falha de ferramenta se repetiu neste período.", "times": ("1 vez", "{n} vezes"),
@@ -160,6 +176,8 @@ _TEXT = {
         "outcomes": "Skills pelo resultado", "outcomes_none": "Ainda não há turnos suficientes com skill carregada.",
         "whole_profile": "perfil inteiro", "turns_word": "turnos", "failed_short": "falharam", "corrected_short": "corrigidos",
         "interrupted_short": "interrompidos", "tool_errors_short": "com erro de ferramenta", "below": "pior que o perfil",
+        "hidden": "(texto oculto: leia no seu próprio terminal)",
+        "index": "Índice de evolução", "index_week": "em 7 dias",
         "lessons": "Lições", "active": "ativas", "candidate": "aguardando aprovação", "retired": "aposentadas",
         "withdrawn": "descartadas sem decisão (fila limpa)",
         "effect": "efeito medido", "before": "antes", "after": "depois", "changes": "Mudanças e o efeito medido",
@@ -495,9 +513,16 @@ def markdown(report: dict, lang: str = "en") -> str:
                      f"{_seconds(turns['p95_ms'], lang)}")
     lines.append(f"- **{t['tools']}:** {_number(tools['calls'], lang)} · {_plural(t['errors'], tools['errors'], lang)}"
                  + (f" ({_number(tools['error_pct'], lang, 1)}%)" if tools["error_pct"] is not None else ""))
+    index = report.get("evolution_index") or {}
+    if index.get("score") is not None:
+        trend = index.get("trend_7d")
+        lines.append(f"- **{t['index']}:** {index['score']}/100"
+                     + ("" if trend is None else f" ({'+' if trend > 0 else ''}{trend} {t['index_week']})"))
     cost = report.get("native_cost", {}).get("estimated_cost_usd")
     if cost is not None:
-        lines.append(f"- **{t['cost']}:** US$ {_number(cost, lang, 2)}")
+        earlier = report.get("native_cost", {}).get("sessions_started_before") or 0
+        lines.append(f"- **{t['cost']}:** US$ {_number(cost, lang, 2)}"
+                     + (" (" + _plural(t["cost_earlier"], earlier, lang) + ")" if earlier else ""))
     lines.append(f"- **{t['feedback']}:** {t['corrections']} {feedback['correction']} · {t['reasks']} {feedback['reask']}"
                  f" · {t['thanks']} {feedback['positive']}")
     comparison = report["comparison"]
@@ -569,7 +594,7 @@ def markdown(report: dict, lang: str = "en") -> str:
         effect = verdicts[item["verdict"]]
         numbers = (f" ({t['before']} {_number(item['rate_before'], lang, 3)} → {t['after']} {_number(item['rate_after'], lang, 3)})"
                    if item["rate_before"] is not None and item["rate_after"] is not None else "")
-        lines.append(f"- #{item['id']} {item['lesson']} · {t['effect']}: {effect}{numbers}")
+        lines.append(f"- #{item['id']} {item['lesson'] or t['hidden']} · {t['effect']}: {effect}{numbers}")
 
     lines += ["", "## " + t["changes"], ""]
     measured = [item for item in report["changes"] if item["verdict"]]

@@ -13,10 +13,6 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from .advisory import EFFORTS, KINDS
-from .diagnostics import snapshot
-from .memory import CATEGORIES, GLOBAL_SCOPE, MemoryStore
-from .native_actions import PLAYBOOKS
 from .operations import RETENTION_DAYS, database, recommendations, run_policy, summarize
 
 RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
@@ -222,8 +218,19 @@ def _portuguese_help(parser: argparse.ArgumentParser) -> None:
                 _portuguese_help(child)
 
 
+def snapshot(*args, **kwargs):
+    """diagnostics.snapshot, imported on first use: only `ops`, `tick` and the legacy `health` read it, and every Hermes
+    process imports this module (the plugin's command line) when the plugin loads."""
+    from .diagnostics import snapshot as take
+
+    return take(*args, **kwargs)
+
+
 def setup(parser: argparse.ArgumentParser) -> None:
+    from .advisory import EFFORTS, KINDS
     from .i18n import resolve, text
+    from .memory import CATEGORIES
+    from .native_actions import PLAYBOOKS
 
     language = resolve()   # help follows the profile language; output follows --lang or the settings
 
@@ -260,10 +267,12 @@ def setup(parser: argparse.ArgumentParser) -> None:
     care.add_argument("care_action", nargs="?", default="check", choices=("check", "pm-doctor", "doctor", "fix", "gc", "fix-gateway", "undo-gateway"),
                       help=_b("check (default): read Hermes' health without running anything · pm-doctor: `hermes pm "
                               "doctor` · doctor: `hermes doctor` · fix: `hermes doctor --fix` after a quick backup · gc: "
-                              "`hermes pm gc`",
+                              "`hermes pm gc` · fix-gateway: point the gateway's service at the Python Hermes uses now "
+                              "(a copy of the file is kept) · undo-gateway: put that file back",
                               "check (padrão): lê a saúde do Hermes sem rodar nada · pm-doctor: `hermes pm doctor` · "
                               "doctor: `hermes doctor` · fix: `hermes doctor --fix` depois de um backup rápido · gc: "
-                              "`hermes pm gc`"))
+                              "`hermes pm gc` · fix-gateway: aponta o serviço do gateway para o Python que o Hermes usa "
+                              "agora (guarda uma cópia do arquivo) · undo-gateway: põe esse arquivo de volta"))
     care.add_argument("--yes", action="store_true", help=_("Do not ask before running Hermes' command"))
     env = commands.add_parser("environment", help=_("Every profile of this Hermes: plugins, skills, conflicts and what to do"))
     env.add_argument("environment_action", nargs="?", default="show", choices=("show", "scan", "catalog"),
@@ -310,13 +319,13 @@ def setup(parser: argparse.ArgumentParser) -> None:
         "Optional id of the platform's organization or workspace, for --dm",
         "Id opcional da organização ou do espaço de trabalho da plataforma, para --dm"))
     tasks = memory.add_subparsers(dest="memory_action", required=True)
-    add = tasks.add_parser("remember")
+    add = tasks.add_parser("remember", help=_b("Keep a 0.1 note (deprecated)", "Guarda uma nota da 0.1 (obsoleto)"))
     add.add_argument("category", choices=CATEGORIES)
     add.add_argument("text")
     add.add_argument("--confidence", type=float, default=1.0)
     add.add_argument("--tag", action="append", default=[])
     add.add_argument("--promote", action="store_true", help=_("Explicitly confirm a personal profile entry"))
-    recall = tasks.add_parser("recall")
+    recall = tasks.add_parser("recall", help=_b("Search the 0.1 notes (deprecated)", "Busca nas notas da 0.1 (obsoleto)"))
     recall.add_argument("query")
     recall.add_argument("--category", action="append", default=[], choices=CATEGORIES)
     recall.add_argument("--include-shared", action="store_true")
@@ -325,8 +334,9 @@ def setup(parser: argparse.ArgumentParser) -> None:
     evaluate.add_argument("cases", type=Path)
     evaluate.add_argument("--limit", type=int, default=5)
     evaluate.add_argument("--include-shared", action="store_true")
-    tasks.add_parser("audit")
-    remove = tasks.add_parser("forget")
+    tasks.add_parser("audit", help=_b("List every 0.1 note, to keep what you need (deprecated)",
+                                      "Lista todas as notas da 0.1, para guardar o que precisar (obsoleto)"))
+    remove = tasks.add_parser("forget", help=_b("Delete a 0.1 note (deprecated)", "Apaga uma nota da 0.1 (obsoleto)"))
     remove.add_argument("id", type=int)
 
     feedback = commands.add_parser("feedback", help=_b("Record whether an operational alert helped",
@@ -451,16 +461,20 @@ def setup(parser: argparse.ArgumentParser) -> None:
 
     ops = commands.add_parser("ops", help=_("Inspect and supervise Hermes and Linux resource contention"))
     ops_commands = ops.add_subparsers(dest="ops_action", required=True)
+    ops_help = {"inspect": _b("Read the host and the workload now (deprecated)", "Lê o host e a carga agora (obsoleto)"),
+                "tick": _b("Run one supervision step (deprecated)", "Roda um passo da supervisão (obsoleto)")}
     for name in ("inspect", "tick"):
-        command = ops_commands.add_parser(name)
+        command = ops_commands.add_parser(name, help=ops_help[name])
         command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
         command.add_argument("--upstream-tag")
         command.add_argument("--hermes-source", type=Path, help=_("Include the bundled Hermes source inventory"))
         command.add_argument("--sensitivity", choices=("low", "balanced", "high"))
         if name == "tick":
             command.add_argument("--notify-only", action="store_true", help=_("Print only new alerts and action transitions"))
-    ops_commands.add_parser("history")
-    ops_commands.add_parser("rollback")
+    ops_commands.add_parser("history", help=_b("Past supervision alerts (deprecated)",
+                                                "Alertas passados da supervisão (obsoleto)"))
+    ops_commands.add_parser("rollback", help=_b("Undo an active Linux trial (deprecated)",
+                                                 "Desfaz um ensaio ativo no Linux (obsoleto)"))
     similar = ops_commands.add_parser("similar", help=_("Find previous diagnostic patterns"))
     similar.add_argument("query")
     similar.add_argument("--limit", type=int, choices=range(1, 11), default=5, metavar="1..10")
@@ -485,6 +499,8 @@ def setup(parser: argparse.ArgumentParser) -> None:
 
 
 def _memory(conn, args):
+    from .memory import GLOBAL_SCOPE, MemoryStore
+
     scope = "local"
     if args.namespace and not args.dm:
         raise ValueError("--namespace requires --dm")
@@ -551,6 +567,15 @@ _OWNER_TEXT = {
 }
 
 
+def _stdin_tty() -> bool:
+    """Whether someone can answer a question on stdin (menu.tty: NUL is no terminal on Windows)."""
+    import sys
+
+    from .menu import tty
+
+    return tty(sys.stdin)
+
+
 def _owner(args, home: Path, *, now: float, runtime_config, lang: str) -> str:
     """`hermes evolution owner`: the chat channels and senders, and who counts as the owner. Operator only: it
     shows sender ids. A change is printed as the `hermes config set` command that makes it, never written here:
@@ -562,6 +587,12 @@ def _owner(args, home: Path, *, now: float, runtime_config, lang: str) -> str:
     t = _OWNER_TEXT[lang if lang in _OWNER_TEXT else "en"]
     action = getattr(args, "owner_action", None) or "list"
     chosen = options(effective_settings(home, runtime_config), runtime_config, strict=False)
+    from .evolve import CONFIG_UNREAD
+
+    if action != "list" and isinstance(runtime_config, dict) and runtime_config.get(CONFIG_UNREAD):
+        # the owners in config.yaml are unknown here: a printed list built on "none" would drop them all
+        raise ValueError("The Hermes configuration could not be read here, so the owners already set are unknown: "
+                         "run it as hermes evolution owner")
     if action != "list":
         key = "owner_platforms" if action.endswith("platform") else "owner_sender_ids"
         value = str(args.value).strip()
@@ -646,9 +677,14 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
     if action == "learn":
         from .autopilot import run_exclusive
 
+        from .autopilot import LEASE_SECONDS
+
+        # within the pass's lease, as the autopilot's: past it another process could start a second pass
         result = run_exclusive(home, lambda: cycle(home, now=now, runtime_config=runtime_config, config=config,
-                                                   lang=lang, reflect=reflect, backfill_budget_s=120.0))
-        return notify_view(result) if args.notify_only else result
+                                                   lang=lang, reflect=reflect, backfill_budget_s=120.0,
+                                                   deadline=time.monotonic() + LEASE_SECONDS - 180))
+        view = notify_view(result) if args.notify_only else result
+        return _masked_pass(view) if _agent_shell() else view
     if action == "skills":
         from .experience import day_offset, utc_day
         from .skill_health import skill_outcomes
@@ -666,6 +702,9 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
         chosen = options(config, runtime_config, strict=False)
         report = build(home, now=now, days=args.days, lang=lang, rates=config.get("rates_usd_per_million", {}),
                        own_transform=chosen["tool_hints"] and chosen["lessons"] != "off")
+        if _agent_shell():   # a stranger's chat with a terminal reads counts, never the text written for the owner
+            report = {**report, "lessons": _hidden_from_agent(report.get("lessons") or [], "lesson"),
+                      "proposals": _hidden_from_agent(report.get("proposals") or [], "evidence")}
         return markdown(report, lang) if args.format == "md" else report
     with experience(home) as conn:
         if action == "experiments":
@@ -784,6 +823,33 @@ def _is_hermes(argv: list[str]) -> bool:
     return any("hermes-agent" in part or "hermes_cli" in part for part in argv[:8])
 
 
+def _own_launcher(argv: list[str]) -> bool:
+    """Whether a Hermes process is this very command's launcher: `hermes [global options] evolution ...`, read from
+    the structure of its arguments. The word "evolution" anywhere (a profile named evolution, a one-shot prompt that
+    mentions it) does not make a gateway or a chat session this command's own."""
+    words = list(argv[1:])
+    if "-c" in words[:4] and words.index("-c") + 1 < len(words):
+        # Hermes relaunching itself: python -c "...; sys.argv = ['hermes', 'evolution', ...]; runpy.run_path(...)"
+        found = re.search(r"sys\.argv\s*=\s*(\[[^\]]{0,2000}\])", words[words.index("-c") + 1])
+        if not found:
+            return False
+        try:
+            import ast
+
+            relaunched = ast.literal_eval(found.group(1))
+        except (ValueError, SyntaxError):
+            return False
+        return isinstance(relaunched, list) and all(isinstance(item, str) for item in relaunched) \
+            and _own_launcher(["python", *relaunched])
+    if words[:1] == ["-m"]:
+        words = words[2:]   # python -m hermes_cli.main ...
+    elif words and os.path.basename(words[0]) in ("hermes", "hermes-agent"):
+        words = words[1:]   # python .../bin/hermes ...
+    while words and words[0].startswith("-"):
+        words = words[2:] if words[0] in ("-p", "--profile") else words[1:]
+    return words[:1] == ["evolution"]
+
+
 def _in_hermes_cgroup(*, text: str | None = ...) -> bool:
     """True when this process sits in the cgroup of a Hermes gateway service. Detaching with setsid or a
     double fork changes the parent, not the cgroup."""
@@ -809,8 +875,11 @@ def _under_hermes(*, start: int | None = None, read=_process, depth: int = 24) -
         if entry is None:
             return False
         parent, argv = entry
-        own = own and bool(_OWN_COMMAND.search(" ".join(argv)))
-        if _is_hermes(argv) and not own:
+        hermes = _is_hermes(argv)
+        # a Hermes process is this command's own only by the shape of its arguments; a shell or `env` in between
+        # (sh -c "hermes evolution ...") by the word
+        own = own and (_own_launcher(argv) if hermes else bool(_OWN_COMMAND.search(" ".join(argv))))
+        if hermes and not own:
             return True
         if parent <= 1 or parent == pid:
             return False
@@ -821,6 +890,27 @@ def _under_hermes(*, start: int | None = None, read=_process, depth: int = 24) -
 def _agent_shell() -> bool:
     """True when this command runs in a shell of an agent session: what _operator_only refuses."""
     return any(os.environ.get(name, "").strip() for name in AGENT_MARKERS) or _under_hermes() or _in_hermes_cgroup()
+
+
+def _masked_pass(view):
+    """A learning pass's result as an agent's shell may print it: no lesson or draft text, no proposal's lesson."""
+    if not isinstance(view, dict):
+        return view
+    view = dict(view)
+    if isinstance(view.get("new_lessons"), list):
+        view["new_lessons"] = _hidden_from_agent(view["new_lessons"], "lesson")
+    for key in ("open_proposals", "high_risk_proposals"):
+        if isinstance(view.get(key), list):
+            view[key] = _hidden_from_agent(view[key], "evidence")
+
+    def drafts(items):   # written by a model: always hidden
+        return [{**item, "lesson": None, "text_hidden": True} for item in items if isinstance(item, dict)]
+
+    if isinstance(view.get("reflector_drafts"), list):
+        view["reflector_drafts"] = drafts(view["reflector_drafts"])
+    if isinstance(view.get("reflector"), dict) and isinstance(view["reflector"].get("drafted"), list):
+        view["reflector"] = {**view["reflector"], "drafted": drafts(view["reflector"]["drafted"])}
+    return view
 
 
 def _hidden_from_agent(rows: list[dict], field: str) -> list[dict]:
@@ -857,7 +947,7 @@ def _review_lessons(conn, lang: str, *, now: float) -> dict:
     from . import decisions
     from . import lessons as playbook
 
-    if not sys.stdin.isatty():
+    if not _stdin_tty():
         raise ValueError("Run lessons review in your own terminal")
     order = "CASE origin WHEN 'derived' THEN 0 WHEN 'operator' THEN 1 WHEN 'reflector' THEN 2 ELSE 3 END, id"
     rows = conn.execute(f"SELECT * FROM lesson WHERE status IN ('candidate','quarantined') ORDER BY {order}").fetchall()
@@ -900,7 +990,7 @@ def _confirm(text: str, lang: str, *, yes: bool, apply: bool = False, again: str
 
     if yes:
         return
-    if not sys.stdin.isatty():
+    if not _stdin_tty():
         about = (_say(lang, f" before running `{what}`", f" antes de rodar `{what}`")) if what else ""
         step = (_say(lang, f"Read it with `{read}`, then run", f"Leia com `{read}` e depois rode") if read
                 else _say(lang, "To go ahead, run", "Para seguir, rode"))
@@ -918,8 +1008,9 @@ def _confirm(text: str, lang: str, *, yes: bool, apply: bool = False, again: str
 
 
 def _profile_name(home: Path) -> str:
-    home = Path(home).resolve()
-    return home.name if home.parent.name == "profiles" else "default"
+    from .admin import profile_name
+
+    return profile_name(home)   # read before links are followed: a linked profile keeps its own name
 
 
 def _export_lessons(conn, home: Path, *, now: float, out: str | None = None, lang: str = "en") -> dict:
@@ -964,7 +1055,7 @@ def _import_lessons(conn, home: Path, args, *, now: float, mode: str, lang: str)
         return result
     activate = bool(getattr(args, "activate", False))
     if not getattr(args, "yes", False):
-        if not sys.stdin.isatty():
+        if not _stdin_tty():
             raise ValueError("Confirm with --yes after reading the lessons with --dry-run")
         prompt = _IMPORT_PROMPT.get(lang, _IMPORT_PROMPT["en"])[1 if activate else 0]
         shown = "\n".join(f"  - [{item['tool']}] {item['lesson']}" for item in planned["add"])
@@ -994,7 +1085,7 @@ def _approve_all(conn, lang: str, *, now: float, yes: bool) -> dict:
     if not chosen:
         return result
     if not yes:
-        if not sys.stdin.isatty():
+        if not _stdin_tty():
             raise ValueError("Confirm with --yes after reading the lessons with 'lessons list'")
         shown = "\n".join(f"  #{item['id']} [{item['tool']}] {item['lesson']}" for item in chosen)
         sys.stderr.write(f"\n{shown}\n\n{_APPROVE_ALL_PROMPT.get(lang, _APPROVE_ALL_PROMPT['en']).format(count=len(chosen))}")
@@ -1096,7 +1187,7 @@ def _fleet_update(args, home: Path, lang: str) -> dict:
         wanted = "all"
     elif args.profiles.strip():
         wanted = [name for name in args.profiles.split(",")]
-    elif sys.stdin.isatty() and not args.yes:
+    elif _stdin_tty() and not args.yes:
         picked = _pick_profiles(rows, lang)
         wanted = "all" if picked == ["all"] else picked
     else:
@@ -1106,8 +1197,11 @@ def _fleet_update(args, home: Path, lang: str) -> dict:
     if not chosen:
         _fail(lang, "No profile to update.", "Nenhum perfil para atualizar.")
     names = ", ".join(row["profile"] for row in chosen)
+    again = "hermes evolution update " + ("--all" if wanted == "all" else
+                                          "--profiles " + ",".join(row["profile"] for row in chosen)) \
+        + (" --install-missing" if args.install_missing else "") + " --yes"
     _confirm(_say(lang, f"Update {fleet_update.PLUGIN} in: {names}", f"Atualizar {fleet_update.PLUGIN} em: {names}"),
-             lang, yes=args.yes, apply=True, again="hermes evolution update --all --yes")
+             lang, yes=args.yes, apply=True, again=again)
 
     def progress(name):
         sys.stderr.write(_say(lang, f"  updating {name}...\n", f"  atualizando {name}...\n"))
@@ -1140,13 +1234,31 @@ def _gateway_repair(home: Path, task: str, lang: str, *, yes: bool, now: float) 
         result = system_update.undo_unit_exec(host, saved)
         if result.get("ok"):
             record.unlink(missing_ok=True)
+        from . import hermes_care
+
+        hermes_care.refresh_after_repair(home, now)   # status says it again from systemd, not from a 6-hour-old look
         return {**result, "task": task}
-    probe = system_update.probe_units(GATEWAY_UNITS, host=host, timeout=10)
-    broken = [unit for unit in probe["units"] if unit.get("exec_exists") is False]
+    from . import hermes_care
+
+    served = bool(hermes_care.gateway(home, now=now).get("served_by_root"))
+    names = hermes_care.expected_gateway_units(home, served=served) or GATEWAY_UNITS["user"]
+    probe = system_update.probe_units({"user": names, "system": names}, host=host, timeout=10)
+    # a missing Python, or one facts.json dropped (the next `hermes pm gc` deletes it)
+    broken = [unit for unit in probe["units"] if unit.get("exec_exists") is False or unit.get("exec_unreferenced")]
     if not broken:
+        if probe.get("unverified") and not probe["units"]:
+            _fail(lang, "systemd could not be asked about the gateway's service here (run this as the user the "
+                        "service belongs to, with its session): nothing was changed.",
+                  "Não deu para perguntar ao systemd sobre o serviço do gateway aqui (rode isto como o usuário dono "
+                  "do serviço, na sessão dele): nada foi mudado.")
         return {"ok": True, "task": task, "reason": "nothing_to_fix", "units": probe["units"],
                 "unverified": probe.get("unverified")}
-    unit = broken[0]
+    unit = hermes_care.pick_gateway_unit(broken, home=home, served=served) or broken[0]
+    running = [item for item in probe["units"] if item.get("active") and item is not unit]
+    if running and unit.get("enabled") is False and not unit.get("active"):
+        # a leftover unit that is off, while another one runs the gateway: starting it would run a second gateway
+        return {"ok": True, "task": task, "reason": "nothing_to_fix", "units": probe["units"],
+                "unverified": probe.get("unverified"), "leftover": unit.get("unit")}
     if not unit.get("replacement"):
         _fail(lang, "The gateway service starts a Python that no longer exists and no newer Hermes Python was found: "
                     "reinstall Hermes' service.",
@@ -1158,11 +1270,15 @@ def _gateway_repair(home: Path, task: str, lang: str, *, yes: bool, now: float) 
                   "daemon-reload, reset-failed e iniciar o gateway"),
              lang, yes=yes, apply=True, again=_hermes_cmd(home, "evolution care fix-gateway --yes"))
     result = system_update.fix_unit_exec(host, unit, now=now)
-    try:
-        record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(json.dumps(result.get("undo") or {}), encoding="utf-8")
-    except OSError:
-        pass
+    if result.get("undo"):   # a reload-only repair changed no file: an earlier record must not become {}
+        try:
+            record.parent.mkdir(parents=True, exist_ok=True)
+            temporary = record.with_name(f".{record.name}.tmp")
+            temporary.write_text(json.dumps(result["undo"]), encoding="utf-8")
+            os.replace(temporary, record)
+        except OSError:
+            pass
+    hermes_care.refresh_after_repair(home, now)   # status stops saying it cannot start once it runs
     return {**result, "task": task}
 
 
@@ -1217,6 +1333,17 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
         if task in ("fix-gateway", "undo-gateway"):
             return _gateway_repair(home, task, lang, yes=args.yes, now=now)
         key = {"pm-doctor": "pm_doctor", "doctor": "doctor", "fix": "doctor_fix", "gc": "pm_gc"}[task]
+        if key == "pm_gc":
+            with experience(home) as conn:
+                care = hermes_care.cached(conn, home, now=now, force=True)
+            if hermes_care.gc_blocked(care):
+                folders = ", ".join(str(item) for item in (care or {}).get("in_use_unreferenced") or ()) or "?"
+                _fail(lang, f"Not now: `hermes pm gc` would delete {folders}, which a Hermes service still starts "
+                            f"from. Point the service at the current Python first: "
+                            f"`{_hermes_cmd(home, 'evolution care fix-gateway')}`.",
+                      f"Agora não: o `hermes pm gc` apagaria {folders}, de onde um serviço do Hermes ainda inicia. "
+                      f"Aponte o serviço para o Python atual antes: "
+                      f"`{_hermes_cmd(home, 'evolution care fix-gateway')}`.")
         command = "hermes " + " ".join(hermes_care.ACTIONS[key][0])
         _confirm(command, lang, yes=args.yes, apply=True, what=command,
                  again=_hermes_cmd(home, f"evolution care {task} --yes"))
@@ -1344,6 +1471,8 @@ def _report(args, home: Path, *, running_version=None, provider=None, now: float
                                      "observed_estimate_usd": amount, "daily_budget_usd": budget,
                                      "action": "Optional Evolution context paused. Review current provider and job usage."})
             legacy_table = conn.execute("SELECT 1 FROM sqlite_master WHERE name='evolution_memories' AND type='table'").fetchone()
+            from .memory import MemoryStore
+
             quality = MemoryStore(conn).audit("local", include_global=True) if legacy_table else None
             if quality and (quality["quality"]["low_confidence"] or quality["quality"]["repeated_across_categories"]):
                 findings.append({"code": "evolution_memory_review", "severity": "info", "evidence": quality["quality"],
@@ -1483,7 +1612,7 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
 # ── what a person reads (0.9.0) ──────────────────────────────────────────────────────────────────────────────────
 # Every command a person runs prints Markdown in the profile's language by default; `--format json` keeps the machine
 # output (the same structure as before 0.9.0). A caller that builds the arguments itself, without `format`, gets the
-# structure: the menu, the panel and the tests call `execute` that way.
+# structure: the menu and the panel call `execute` that way.
 HUMAN_ACTIONS = ("care", "environment", "decisions", "lessons", "proposals", "learn", "skills", "experiments", "system",
                  "health", "usage", "history", "tick", "schedule-digest", "update")
 
@@ -1504,7 +1633,7 @@ def _fail(lang: str, en: str, pt: str):
 def _hermes_cmd(home: Path, rest: str) -> str:
     """`hermes [-p profile] <rest>`, as the owner types it in this profile."""
     name = _profile_name(home)
-    return f"hermes {'' if name == 'default' else f'-p {name} '}{rest}"
+    return f"hermes -p {name} {rest}"   # explicit even for default: `hermes profile use` makes another one sticky
 
 
 _H = {
@@ -1541,13 +1670,20 @@ _H = {
         "did": {"approve": "approved", "reject": "rejected", "retire": "retired", "reactivate": "reactivated",
                 "apply": "applied", "set": "changed", "undo": "undid", "dedupe": "removed a duplicate memory entry"},
         "what_lesson": "{did} lesson #{target}", "what_proposal": "{did} proposal #{target}",
+        "what_cron": "scheduled `{target}` ({schedule}) as a Hermes task",
         "what_setting": "changed `{target}`: {before} → {after}",
         "what_memory": "removed a duplicate memory entry from `{target}` (a copy of the file was kept first)",
         "what_maintenance": "ran Hermes' own maintenance: `hermes {target}` (nothing to undo)",
+        "what_sync": "brought Atlas Evolution in profile `{profile}` to the lead's code ({before} → {after}){failed}",
+        "sync_failed": "; Hermes refused it, tried again tomorrow",
+        "what_gateway": ("pointed the gateway's service `{unit}` at the Python Hermes uses now (`{before}` → "
+                         "`{after}`){failed}; undo: `hermes evolution care undo-gateway`"),
+        "gateway_failed": " (the gateway did not come up)",
         "undone_mark": "undone", "hidden": "(text hidden: read it in your own terminal)",
         "undo_hint": "Undo one with `{command}`.",
         "undo_done": "Decision #{id} undone.", "undo_not": "Decision #{id} was not undone: {reason}",
         "undo_reasons": {"changed_since": "it changed since (a later decision or a pass); nothing changed.",
+                         "nothing_to_undo": "there is nothing to undo for this one (Hermes' own maintenance).",
                          "already_undone": "it was already undone.", "unknown": "there is no decision with that number.",
                          "not_undoable": "this kind of decision cannot be undone."},
         "undo_run": "Hermes' configuration is yours to change: run this in your own terminal to put it back:",
@@ -1624,7 +1760,8 @@ _H = {
         "history": "Hermes history", "history_states": {"done": "read", "running": "being read",
                                                         "waiting": "waiting for the first learning pass",
                                                         "no_history": "no history", "unreadable": "unreadable",
-                                                        "unsupported_history": "unsupported format"},
+                                                        "unsupported_history": "unsupported format",
+                                                        "damaged_history": "Hermes' history is damaged; replay ended"},
         "history_counts": "{sessions} sessions · {tool_calls} tool calls",
         "new_lessons": "New lessons", "drafts": "Reflector drafts to read", "regressions": "Changes that made things worse",
         "retired_lessons": "Lessons retired because they did not help", "risky": "High-risk proposals",
@@ -1731,13 +1868,20 @@ _H = {
         "did": {"approve": "aprovou", "reject": "rejeitou", "retire": "aposentou", "reactivate": "reativou",
                 "apply": "aplicou", "set": "mudou", "undo": "desfez", "dedupe": "removeu uma entrada repetida da memória"},
         "what_lesson": "{did} a lição #{target}", "what_proposal": "{did} a proposta #{target}",
+        "what_cron": "agendou `{target}` ({schedule}) como tarefa do Hermes",
         "what_setting": "mudou `{target}`: {before} → {after}",
         "what_memory": "removeu uma entrada repetida da memória `{target}` (guardou uma cópia do arquivo antes)",
         "what_maintenance": "rodou a manutenção do próprio Hermes: `hermes {target}` (nada a desfazer)",
+        "what_sync": "levou o Atlas Evolution do perfil `{profile}` ao código do perfil que cuida de todos ({before} → {after}){failed}",
+        "sync_failed": "; o Hermes recusou, nova tentativa amanhã",
+        "what_gateway": ("apontou o serviço do gateway `{unit}` para o Python que o Hermes usa agora (`{before}` "
+                         "→ `{after}`){failed}; desfazer: `hermes evolution care undo-gateway`"),
+        "gateway_failed": " (o gateway não subiu)",
         "undone_mark": "desfeita", "hidden": "(texto oculto: leia no seu próprio terminal)",
         "undo_hint": "Para desfazer uma: `{command}`.",
         "undo_done": "Decisão #{id} desfeita.", "undo_not": "A decisão #{id} não foi desfeita: {reason}",
         "undo_reasons": {"changed_since": "mudou depois (outra decisão ou uma rodada); nada mudou.",
+                         "nothing_to_undo": "não há nada a desfazer nesta (manutenção do próprio Hermes).",
                          "already_undone": "ela já tinha sido desfeita.", "unknown": "não há decisão com esse número.",
                          "not_undoable": "esse tipo de decisão não se desfaz."},
         "undo_run": "A configuração do Hermes é sua: rode isto no seu próprio terminal para voltar ao valor anterior:",
@@ -1810,7 +1954,8 @@ _H = {
         "history": "Histórico do Hermes", "history_states": {"done": "lido", "running": "em leitura",
                                                              "waiting": "aguardando a primeira rodada",
                                                              "no_history": "sem histórico", "unreadable": "ilegível",
-                                                             "unsupported_history": "formato não suportado"},
+                                                             "unsupported_history": "formato não suportado",
+                                                             "damaged_history": "o histórico do Hermes está danificado; replay encerrado"},
         "history_counts": "{sessions} sessões · {tool_calls} chamadas de ferramentas",
         "new_lessons": "Lições novas", "drafts": "Rascunhos do refletor para ler", "regressions": "Mudanças que pioraram",
         "retired_lessons": "Lições aposentadas porque não ajudaram", "risky": "Propostas de risco alto",
@@ -1955,11 +2100,26 @@ def _care_action_md(result: dict, task: str, lang: str) -> str:
     t = _H[lang]
     if task in ("fix-gateway", "undo-gateway"):
         pt = lang == "pt"
+        if result.get("reason") == "nothing_to_fix" and result.get("leftover"):
+            name = result["leftover"]
+            return (f"Outro serviço roda o gateway; `{name}` é uma sobra desligada: nada a reparar (remova-a se "
+                    "quiser).\n" if pt else f"Another service runs the gateway; `{name}` is a leftover that is off: "
+                                             "nothing to repair (remove it if you like).\n")
         if result.get("reason") == "nothing_to_fix":
             return ("O serviço do gateway já aponta para um programa que existe: nada a reparar.\n" if pt else
                     "The gateway service already points at a program that exists: nothing to repair.\n")
         if task == "undo-gateway":
             return (f"{'Restaurado' if pt else 'Restored'}: {result.get('file')}\n")
+        if result.get("reload_only"):   # the file was right already: systemd had not read it again
+            head = (("Gateway ativo: o arquivo já estava certo, o systemd só precisava relê-lo." if pt else
+                     "Gateway active: the file was right already, systemd only had to read it again.")
+                    if result.get("ok") else
+                    ("O systemd releu o arquivo, mas o gateway não ficou ativo." if pt else
+                     "systemd read the file again, but the gateway is not active."))
+            lines = [head, "", f"- {result.get('file')}"]
+            if not result.get("ok"):
+                lines.append("- `journalctl --user -u hermes-gateway -n 30`")
+            return "\n".join(lines) + "\n"
         head = (("Gateway reparado e ativo." if pt else "Gateway repaired and active.") if result.get("ok") else
                 ("Arquivo corrigido, mas o gateway não ficou ativo." if pt else "File fixed, but the gateway is not active."))
         lines = [head, "", f"- {result.get('file')}: `{result.get('from')}` -> `{result.get('to')}`",
@@ -2020,12 +2180,23 @@ def _describe_decision(row: dict, lang: str) -> str:
                                         after=_value((row.get("after") or {}).get("value")))
     if kind == "memory":
         return t["what_memory"].format(target=row["target"])
+    if kind == "maintenance" and row.get("target") == "gateway_repair":
+        before, after = row.get("before") or {}, row.get("after") or {}
+        return t["what_gateway"].format(unit=before.get("unit") or "?", before=before.get("path") or "?",
+                                        after=after.get("path") or "?", failed="" if after.get("ok") else
+                                        t["gateway_failed"])
+    if kind == "maintenance" and row.get("target") == "plugin_sync":
+        before, after = row.get("before") or {}, row.get("after") or {}
+        return t["what_sync"].format(profile=before.get("profile") or "?", before=before.get("sha") or "?",
+                                     after=after.get("sha") or "?", failed="" if after.get("ok") else t["sync_failed"])
     if kind == "maintenance":
         return t["what_maintenance"].format(target=str(row["target"]).replace("_", " "))
     if kind == "proposal" and isinstance((row.get("after") or {}).get("applied"), list):
         from .explain import command_text
 
         return f"{did}: `" + command_text(row["after"]["applied"], lang) + "`"
+    if kind == "cron":
+        return t["what_cron"].format(target=row["target"], schedule=(row.get("after") or {}).get("schedule") or "?")
     return t["what_lesson" if kind == "lesson" else "what_proposal"].format(did=did, target=row["target"])
 
 
@@ -2284,7 +2455,7 @@ def _learn_md(result: dict | None, home: Path, lang: str, *, quiet: bool) -> str
         lines.append("")
     sections = [
         (t["new_lessons"], [_lesson_line(item, lang) for item in result.get("new_lessons") or ()]),
-        (t["drafts"], [[f"- #{item.get('lesson_id')} `{item.get('tool')}`: {item.get('lesson')}"]
+        (t["drafts"], [[f"- #{item.get('lesson_id')} `{item.get('tool')}`: {item.get('lesson') or t['hidden']}"]
                        for item in result.get("reflector_drafts") or (result.get("reflector") or {}).get("drafted") or ()
                        if isinstance(item, dict)]),
         (t["regressions"], [[f"- {t['change_kinds'].get(item.get('kind'), item.get('kind'))} `{item.get('subject')}`: "
@@ -2890,7 +3061,7 @@ def _human(args, result, home: Path, lang: str):
     return result
 
 
-# English keeps the supervisor's own state words (scripts and tests match "Active trial recovery: rolled_back").
+# English keeps the supervisor's own state words (scripts match "Active trial recovery: rolled_back").
 _TRIAL_STATES = {"en": {"active": "still running", "rolled_back": "undone", "released": "released",
                         "not_applied": "not applied", "observing": "being observed", "pending": "pending",
                         "skipped": "skipped", "improved": "kept: it helped"},
@@ -2938,6 +3109,11 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
         result = _report(args, home, running_version=running_version, provider=provider, now=now,
                          runtime_config=runtime_config, hermes_source=hermes_source, kanban_home=kanban_home,
                          reflect=reflect)
+    except KeyboardInterrupt:
+        hint = (_say(language, " A system update goes on in the background: `hermes evolution system report`.",
+                     " Uma atualização do sistema continua em segundo plano: `hermes evolution system report`.")
+                if getattr(args, "evolution_action", None) == "system" else "")
+        raise SystemExit("Evolution: " + _say(language, "Interrupted.", "Interrompido.") + hint) from None
     except (OSError, ValueError, sqlite3.Error) as error:
         recovery = ""
         if args.evolution_action == "ops" and args.ops_action == "tick":
@@ -2950,6 +3126,7 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
             except (OSError, ValueError, sqlite3.Error):
                 recovery = "\n" + text("Trial recovery is unverified. Run ops rollback to recheck.", language)
         raise SystemExit(f"Evolution: {text(str(error), language)}{recovery}") from None
+    failed = _failed(args, result)
     if _wants_text(args):
         from .status import decimal_comma
 
@@ -2958,6 +3135,48 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
         print(result, end="" if result.endswith("\n") else "\n")
     elif result is not None:
         print(json.dumps(localize(result, language), indent=2, ensure_ascii=False, allow_nan=False))
+    notice = deprecation(getattr(args, "evolution_action", None), language)
+    if notice:
+        print(notice, file=sys.stderr)
+    if failed:
+        raise SystemExit(1)
+
+
+# Commands that only the 0.1 notes and the 0.3 ops supervisor use, none of them by default: deprecated in 0.10.0,
+# removed in 0.11.0. Each says so, with what replaces it, on stderr (a JSON answer on stdout stays parseable).
+DEPRECATED = {
+    "health": ("use `hermes evolution care check`", "use `hermes evolution care check`"),
+    "history": ("use `hermes evolution decisions`", "use `hermes evolution decisions`"),
+    "tick": ("the learning pass runs by itself (`hermes evolution learn` runs one now)",
+             "a rodada de aprendizado roda sozinha (`hermes evolution learn` roda uma agora)"),
+    "feedback": ("", ""),
+    "memory": ("keep what you need of these 0.1 notes: `hermes evolution memory audit`",
+               "guarde o que precisar dessas notas da 0.1: `hermes evolution memory audit`"),
+    "ops": ("", ""),
+}
+
+
+def deprecation(action, lang: str, *, name: str | None = None) -> str | None:
+    """The notice a deprecated command prints, in `lang` (`name`: how the owner typed it); None for any other."""
+    if action not in DEPRECATED:
+        return None
+    en, pt = DEPRECATED[action]
+    name = name or f"hermes evolution {action}"
+    if lang == "pt":
+        return f"Aviso: `{name}` está obsoleto e sai na versão 0.11.0" + (f"; {pt}." if pt else ".")
+    return f"Note: `{name}` is deprecated and goes away in 0.11.0" + (f"; {en}." if en else ".")
+
+
+def _failed(args, result) -> bool:
+    """Whether a command that changes something did not do it (the exit code then says so)."""
+    if not isinstance(result, dict):
+        return False
+    action = getattr(args, "evolution_action", None)
+    if action == "update":
+        return any(isinstance(item, dict) and item.get("status") == "failed" for item in result.get("results") or ())
+    if action == "care" and getattr(args, "care_action", "check") != "check":
+        return result.get("ok") is False
+    return False
 
 
 def _standalone_config(home: Path) -> dict:
@@ -3003,17 +3222,21 @@ def main():
         return text(sentence, resolve())
 
     parser = argparse.ArgumentParser(prog="python -m hermes_atlas_evolution")
-    parser.add_argument("--home", type=Path, default=os.environ.get("HERMES_HOME"), help=_("Explicit Hermes profile path"))
+    parser.add_argument("--home", type=Path, default=os.environ.get("HERMES_HOME") or None,
+                        help=_("Explicit Hermes profile path"))
     parser.add_argument("--hermes-version", help=_("Installed version if running outside Hermes"))
     setup(parser)
     args = parser.parse_args()
     if args.home is None:
         parser.error(_("Pass --home or set HERMES_HOME"))
-    home = args.home.expanduser().resolve()
+    from .environment import root_of
+
+    given = args.home.expanduser()
+    home = given.resolve()
     config = _standalone_config(home)
     memory = config.get("memory")
     provider = memory.get("provider") if isinstance(memory, dict) else None
     # Named profiles live in <root>/profiles/<name>; shared Kanban boards belong to the root.
-    root = home.parent.parent if home.parent.name == "profiles" else home
+    root = root_of(given)
     execute(args, home, running_version=args.hermes_version, provider=provider if isinstance(provider, str) else None,
             runtime_config=config, kanban_home=root)

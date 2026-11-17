@@ -139,7 +139,12 @@ def _entries(folder: Path, limit: int) -> list[os.DirEntry]:
 
 # ── profiles and the lead ────────────────────────────────────────────────────────────────────────────────────────
 def root_of(home: Path) -> Path:
-    home = Path(home).resolve()
+    # <root>/profiles/<name> as Hermes names it, before links are followed: a profile folder that links elsewhere
+    # still belongs to <root>, and is never taken for a root (and a default profile) of its own
+    plain = Path(os.path.abspath(home))
+    if plain.parent.name == "profiles":
+        return plain.parent.parent.resolve()
+    home = plain.resolve()
     return home.parent.parent if home.parent.name == "profiles" else home
 
 
@@ -339,12 +344,22 @@ def _raw_state(root: Path) -> dict:
     return {"seen": _ordered(data.get("seen"), 1000), "skip": _ordered(data.get("skip"), 5000)}
 
 
-def _remember(root: Path, folder: Path, seen, skip) -> None:
+def forget_skip(root: Path, code: str) -> None:
+    """Take a situation out of the shared skip list (the owner took back the "no" that put it there)."""
+    folder = Path(root) / "evolution"
+    if folder.is_symlink() or not _is_dir(folder):
+        return
+    with _locked(folder):
+        _remember(root, folder, (), (), drop={str(code)})
+
+
+def _remember(root: Path, folder: Path, seen, skip, drop=frozenset()) -> None:
     current = _raw_state(root)
     # added at the end, and past the limit the oldest go first: a new entry is never the one dropped (a sorted list
     # cut at its limit dropped whatever sorted last, often what was just added)
     merged = {"seen": _ordered([*current["seen"], *[str(item) for item in seen]], 1000),
-              "skip": _ordered([*current["skip"], *[str(item) for item in skip]], 5000)}
+              "skip": [item for item in _ordered([*current["skip"], *[str(item) for item in skip]], 5000)
+                       if item not in drop]}
     if merged == current:
         return
     try:
@@ -455,7 +470,9 @@ def _pin_of(record: dict) -> str:
     """The commit an install record pins to, whatever Hermes names the key; "" when it pins nothing."""
     if not isinstance(record, dict) or record.get("pinned") is False:
         return ""
-    for key in ("pinned", "pin", "pinned_ref", "pinned_sha", "ref", "commit"):
+    # Hermes' own record: {"pinned": true, "revision": "<sha>"} (the revision is there unpinned too: only with the flag)
+    keys = ("revision",) if record.get("pinned") is True else ()
+    for key in (*keys, "pinned", "pin", "pinned_ref", "pinned_sha", "ref", "commit"):
         value = record.get(key)
         if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{7,40}", value.strip().lower()):
             return value.strip().lower()
@@ -935,6 +952,33 @@ def _skill_files(base: Path) -> list[Path]:
     return sorted(found)
 
 
+_SKILL_CACHE: dict[str, tuple] = {}
+_SKILL_CACHE_MAX = 20_000
+
+
+def _skill_text(path: Path) -> tuple[str, str, str, str] | None:
+    """(name, description, sha, body sha) of a SKILL.md, from the cache while its size and change time are the same."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    key, stamp = os.fspath(path), (info.st_size, info.st_mtime_ns, getattr(info, "st_ino", 0))
+    cached = _SKILL_CACHE.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    text = read_text(path, 256 * 1024)
+    if text is None:
+        _SKILL_CACHE.pop(key, None)
+        return None
+    name, description, body = _front(text)
+    parsed = (name, description, hashlib.sha256(text.encode()).hexdigest()[:16],
+              hashlib.sha256(body.strip().encode()).hexdigest()[:16])
+    if len(_SKILL_CACHE) >= _SKILL_CACHE_MAX:
+        _SKILL_CACHE.clear()   # bounded: a gateway that looked at a huge Hermes once does not keep it all
+    _SKILL_CACHE[key] = (stamp, parsed)
+    return parsed
+
+
 def _skills_of(home: Path) -> list[dict]:
     base = Path(home) / "skills"
     if not _is_dir(base):
@@ -947,15 +991,14 @@ def _skills_of(home: Path) -> list[dict]:
     usage = usage if isinstance(usage, dict) else {}
     found = []
     for path in _skill_files(base):
-        text = read_text(path, 256 * 1024)
-        if text is None:
+        parsed = _skill_text(path)
+        if parsed is None:
             continue
-        name, description, body = _front(text)
+        name, description, sha, body_sha = parsed
         folder = path.parent.name
         record = usage.get(folder) if isinstance(usage.get(folder), dict) else {}
         found.append({"folder": folder, "path": path.parent.relative_to(base).as_posix(), "name": name or folder,
-                      "description": description, "sha": hashlib.sha256(text.encode()).hexdigest()[:16],
-                      "body_sha": hashlib.sha256(body.strip().encode()).hexdigest()[:16],
+                      "description": description, "sha": sha, "body_sha": body_sha,
                       "last_used": _iso(record.get("last_used_at")), "created": _iso(record.get("created_at")),
                       "uses": record.get("use_count") if type(record.get("use_count")) is int else 0,
                       "pinned": record.get("pinned") is True, "locked": record.get("locked") is True,
@@ -1032,9 +1075,38 @@ def _words(text: str) -> set[str]:
     return set(_WORD.findall(text.casefold()))
 
 
-def _similar(left: dict, right: dict) -> float:
-    a, b = _words(left["description"] or left["name"]), _words(right["description"] or right["name"])
-    return len(a & b) / len(a | b) if a and b else 0.0
+def similar_pairs(word_sets: list[set[str]], bodies: list[str] | None = None,
+                  threshold: float | None = None) -> list[tuple[int, int]]:
+    """(i, j) with i < j for every two word sets whose Jaccard similarity is at least `threshold` (SIMILAR), leaving
+    out pairs with the same body. Each set becomes an int bitmask over the words seen, so a pair costs an AND, an OR
+    and a popcount instead of two set operations: the same pairs, several times faster on a few hundred skills."""
+    threshold = SIMILAR if threshold is None else threshold
+    positions: dict[str, int] = {}
+    masks, sizes = [], []
+    for words in word_sets:
+        mask = 0
+        for word in words:
+            mask |= 1 << positions.setdefault(word, len(positions))
+        masks.append(mask)
+        sizes.append(len(words))
+    # By size, smallest first: a set this size can only reach the threshold with sets up to size / threshold, so the
+    # inner loop stops there instead of looking at every later set.
+    order = sorted((index for index in range(len(masks)) if sizes[index]), key=sizes.__getitem__)
+    found = []
+    for position, left in enumerate(order):
+        a, size_a = masks[left], sizes[left]
+        widest = size_a / threshold
+        for right in order[position + 1:]:
+            size_b = sizes[right]
+            if size_b > widest:
+                break
+            shared = (a & masks[right]).bit_count()
+            if shared and shared >= threshold * (size_a + size_b - shared) \
+                    and not (bodies is not None and bodies[left] == bodies[right]):
+                found.append((left, right) if left < right else (right, left))
+    found.sort()
+    return found
+
 
 
 def _finding(kind: str, profile: str, subject: str, *, risk: str, evidence: dict, command: str = "", key: str = "") -> dict:
@@ -1215,19 +1287,10 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
                                   evidence={"keep": group[0]["folder"], "copies": [item["folder"] for item in group],
                                             "used": bool(group[0]["uses"])},
                                   command=_cmd(profile, f"curator archive {_q(group[1]['folder'])}")))
-    pairs = []
     ordered = sorted(skills, key=lambda item: item["folder"])[:400]
-    words = [_words(item["description"] or item["name"]) for item in ordered]   # once each, not per pair
-    for index, left in enumerate(ordered):
-        a = words[index]
-        if not a:
-            continue
-        for offset, right in enumerate(ordered[index + 1:], start=index + 1):
-            b = words[offset]
-            if not b or left["body_sha"] == right["body_sha"] or min(len(a), len(b)) < SIMILAR * max(len(a), len(b)):
-                continue
-            if len(a & b) / len(a | b) >= SIMILAR:
-                pairs.append((left["folder"], right["folder"]))
+    pairs = similar_pairs([_words(item["description"] or item["name"]) for item in ordered],
+                          [item["body_sha"] for item in ordered])
+    pairs = [(ordered[left]["folder"], ordered[right]["folder"]) for left, right in pairs]
     if pairs:
         found.append(_finding("skills_similar", profile, "", risk="low",
                               evidence={"pairs": [list(pair) for pair in pairs[:15]], "count": len(pairs)},
@@ -1238,15 +1301,21 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
 SELF_URL = f"https://github.com/{REPOSITORY}.git"
 
 
-def _reinstall(profile: str) -> str:
-    """This plugin installed again from its repository, over the profile's copy: drops a pin (no --ref), so the
-    profile follows the default branch and the next `plugins update` works again."""
-    return _cmd(profile, f"plugins install {SELF_URL} --force")
+def _bring_current(profile: str, pinned: bool, sha: str = "") -> str:
+    """The command that brings this plugin's copy in `profile` to current code. Hermes keeps a pin when a plugin is
+    installed again without --ref (it reinstalls the pinned commit) and `plugins update` refuses a pinned copy, so a
+    pin moves with `--ref <commit>`: the lead's own commit when known, else the plugin's own update, which reads the
+    repository's latest one."""
+    if pinned:
+        if _SHA.fullmatch(sha or ""):
+            return _cmd(profile, f"plugins install {SELF_URL} --force --ref {sha}")
+        return f"hermes evolution update --profiles {profile}"
+    return _cmd(profile, f"plugins update {PLUGIN_ID} --force")
 
 
 def _update_command(name: str, item: dict) -> str:
     if name == PLUGIN_ID and item.get("pinned"):
-        return _reinstall(item["profile"])   # `plugins update` refuses a pinned install ("is pinned to <sha>")
+        return _bring_current(item["profile"], True)   # `plugins update` refuses a pinned install ("is pinned to")
     return _cmd(item["profile"], f"plugins update {name}")
 
 
@@ -1268,7 +1337,7 @@ def _self_drift(reading: dict, self_sha: str, *, already=()) -> list[dict]:
     if not rows:
         return []
     reasons = sorted({item["reason"] for item in rows})
-    commands = [_reinstall(item["profile"]) for item in rows]
+    commands = [_bring_current(item["profile"], item["reason"] == "pinned", self_sha) for item in rows]
     return [_finding("plugin_update", "all", PLUGIN_ID, risk="medium" if "pinned" in reasons else "low", key="drift",
                      evidence={"catalog": lead_version or "?", "tier": "lead", "reason": reasons[0] if len(reasons) == 1
                                else "pinned", "reasons": reasons, "lead_sha": self_sha[:12], "profiles": rows[:20],

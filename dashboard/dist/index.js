@@ -36,7 +36,8 @@
                 optional: "{n} optional piece not set up|{n} optional pieces not set up",
                 failed: "Hermes doctor did not run: {why}",
                 errors: { timeout: "it took too long", unavailable: "not available in this Hermes", no_answer: "it did not answer",
-                          disabled: "turned off", not_a_profile: "not a Hermes profile" } },
+                          disabled: "turned off", not_a_profile: "not a Hermes profile",
+                          runtime_moved: "Hermes' Python changed meanwhile; it runs again after the gateway restarts" } },
       tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", health: "Health", environment: "Environment", settings: "Settings", history: "History",
               digest: "Digest", status: "Status" },
       mode: { auto: "Lessons: automatic", suggest: "Lessons: on approval", off: "Lessons: off" },
@@ -44,7 +45,8 @@
       guardOn: "Runtime guard on", guardOff: "Runtime guard off", reflectorOn: "reflector on", reflectorOff: "reflector off",
       kpi: { active: "Active lessons", waiting: "Waiting for you", calls: "Tool calls", errors: "errors", turns: "Turns",
              failed: "failed", vetoed: "Runtime guard vetoes (7 d)", lastPass: "Last learning pass", passFailed: "failed: see Status",
-             proposals: "Open proposals", flag: "needs attention" },
+             proposals: "Open proposals", flag: "needs attention", index: "Evolution index", week: "in 7 days",
+             indexWait: "needs a few days of use" },
       never: "never", none: "—",
       readOnly: "Read-only: this dashboard has no login, so any program on this machine, the agent included, could act here as you. Turn on the dashboard login (a public dashboard.public_url turns it on) to decide from this panel.",
       readOnlyShared: "Read-only: this session was opened with the dashboard's shared session token (HERMES_DASHBOARD_SESSION_TOKEN), not with a login.",
@@ -107,6 +109,10 @@
       applyAll: "Apply the change|Apply the {n} changes", applyAllHint: "Reversible changes to Hermes, each one recorded with its undo.",
       applyNow: "Apply now", dismiss: "Dismiss", seen: "What was seen", advice: "What to do", undoHow: "To undo",
       maintenanceRan: "ran Hermes' own maintenance (nothing to undo):",
+      pluginSynced: "brought Atlas Evolution in profile {profile} to the lead's code ({before} → {after})",
+      pluginSyncFailed: "; Hermes refused it, tried again tomorrow",
+      gatewayRepaired: "pointed the gateway's service {unit} at the Python Hermes uses now ({before} → {after}); undo: hermes evolution care undo-gateway",
+      gatewayRepairFailed: " (the gateway did not come up)",
       category: { change: "the plugin applies it", lesson: "lesson", manual: "you apply it", advice: "observation" },
       autoLine: "Mode", autoNames: { auto: "Auto", assist: "Assisted", manual: "Manual" },
       copy: "Copy", copied: "Copied", copyManual: "Text selected: press Ctrl+C (⌘C on a Mac) to copy it.",
@@ -165,7 +171,8 @@
                 optional: "{n} opcional não configurado|{n} opcionais não configurados",
                 failed: "A checagem do Hermes não rodou: {why}",
                 errors: { timeout: "demorou demais", unavailable: "não existe neste Hermes", no_answer: "não respondeu",
-                          disabled: "está desligado", not_a_profile: "não é um perfil do Hermes" } },
+                          disabled: "está desligado", not_a_profile: "não é um perfil do Hermes",
+                          runtime_moved: "o Python do Hermes mudou nesse meio-tempo; volta a rodar depois que o gateway reiniciar" } },
       tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", health: "Saúde", environment: "Ambiente", settings: "Configurações", history: "Histórico",
               digest: "Resumo", status: "Situação" },
       mode: { auto: "Lições: automáticas", suggest: "Lições: com aprovação", off: "Lições: desligadas" },
@@ -173,7 +180,8 @@
       guardOn: "Proteção do Hermes ligada", guardOff: "Proteção do Hermes desligada", reflectorOn: "refletor ligado", reflectorOff: "refletor desligado",
       kpi: { active: "Lições ativas", waiting: "Esperando você", calls: "Chamadas de ferramentas", errors: "erros", turns: "Turnos",
              failed: "falharam", vetoed: "Vetos da Proteção do Hermes (7 d)", lastPass: "Última rodada", passFailed: "falhou: veja a Situação",
-             proposals: "Propostas abertas", flag: "pede atenção" },
+             proposals: "Propostas abertas", flag: "pede atenção", index: "Índice de evolução", week: "em 7 dias",
+             indexWait: "precisa de alguns dias de uso" },
       never: "nunca", none: "—",
       readOnly: "Só leitura: este dashboard não pede login, então qualquer programa desta máquina, inclusive o agente, poderia agir aqui como você. Ative o login do dashboard (um dashboard.public_url público o liga) para decidir por este painel.",
       readOnlyShared: "Só leitura: esta sessão foi aberta com o token de sessão compartilhado do dashboard (HERMES_DASHBOARD_SESSION_TOKEN), não com um login.",
@@ -236,6 +244,10 @@
       applyAll: "Aplicar a mudança|Aplicar as {n} mudanças", applyAllHint: "Mudanças reversíveis no Hermes, cada uma registrada com o desfazer.",
       applyNow: "Aplicar agora", dismiss: "Dispensar", seen: "O que foi visto", advice: "O que fazer", undoHow: "Para desfazer",
       maintenanceRan: "rodou a manutenção do próprio Hermes (nada a desfazer):",
+      pluginSynced: "levou o Atlas Evolution do perfil {profile} ao código do perfil que cuida de todos ({before} → {after})",
+      pluginSyncFailed: "; o Hermes recusou, nova tentativa amanhã",
+      gatewayRepaired: "apontou o serviço do gateway {unit} para o Python que o Hermes usa agora ({before} → {after}); desfazer: hermes evolution care undo-gateway",
+      gatewayRepairFailed: " (o gateway não subiu)",
       category: { change: "o plugin aplica", lesson: "lição", manual: "você aplica", advice: "observação" },
       autoLine: "Modo", autoNames: { auto: "Auto", assist: "Assistido", manual: "Manual" },
       copy: "Copiar", copied: "Copiado", copyManual: "Texto selecionado: tecle Ctrl+C (⌘C no Mac) para copiar.",
@@ -716,8 +728,14 @@
         return count(t.done.all, (result.approved || []).length, lang) + (skipped ? " " + count(t.skippedChanged, skipped, lang) : "");
       });
     };
+    const index = state.evolution_index || {};
+    const trend = index.trend_7d;
     return h("div", { className: "hae-stack" },
       h("div", { className: "hae-kpis" },
+        h(Kpi, { t: t, label: t.kpi.index, alert: typeof trend === "number" && trend <= -10,
+                 value: typeof index.score === "number" ? fmt(index.score, 0, lang) + "/100" : t.none,
+                 detail: typeof trend === "number" ? (trend > 0 ? "+" : "") + fmt(trend, 0, lang) + " " + t.kpi.week
+                   : (typeof index.score === "number" ? null : t.kpi.indexWait) }),
         h(Kpi, { t: t, label: t.kpi.active, value: fmt(lessons.active || 0, 0, lang) }),
         h(Kpi, { t: t, label: t.kpi.waiting, value: fmt(waiting, 0, lang), alert: waiting > 0 }),
         h(Kpi, { t: t, label: t.kpi.calls + " (" + data.days + " d)", value: fmt(tools.calls || 0, 0, lang),
@@ -1018,7 +1036,13 @@
               settingValue(t, row.target, before.value, row.values_hidden) + " → " + settingValue(t, row.target, after.value, row.values_hidden)
           : row.kind === "memory" ? t.memoryRemoved + " " + row.target
           : row.kind === "cron" ? fill(t.cronCreated, { name: row.target, schedule: after.schedule || "?" })
-          : row.kind === "maintenance" ? t.maintenanceRan + " hermes " + String(row.target).replace("_", " ")
+          : row.kind === "maintenance" && row.target === "gateway_repair"
+            ? fill(t.gatewayRepaired, { unit: before.unit || "?", before: before.path || "?", after: after.path || "?" })
+              + (after.ok ? "" : t.gatewayRepairFailed)
+          : row.kind === "maintenance" && row.target === "plugin_sync"
+            ? fill(t.pluginSynced, { profile: before.profile || "?", before: before.sha || "?", after: after.sha || "?" })
+              + (after.ok ? "" : t.pluginSyncFailed)
+          : row.kind === "maintenance" ? t.maintenanceRan + " hermes " + String(row.target).replace(/_/g, " ")
           : row.kind === "proposal" ? (applied ? t.action.apply : (t.action[row.action] || row.action)) + " " + fill(t.proposalRef, { id: row.target })
           : (t.action[row.action] || row.action) + " " + row.target;
         return h("tr", { key: row.id, className: row.undone ? "hae-row-muted" : "" },

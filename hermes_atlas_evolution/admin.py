@@ -29,7 +29,6 @@ SETTINGS = ("lessons", "language", "tool_hints", "feedback_signals", "agent_tool
             "runtime_guard", "mode")
 BOOLEANS = ("tool_hints", "feedback_signals", "agent_tools", "reflector", "runtime_guard")
 CHOICES = {"lessons": ("auto", "suggest", "off"), "language": ("auto", "en", "pt"), "mode": ("auto", "assist", "manual")}
-LISTS = ("owner_sender_ids", "owner_platforms")
 NUMBERS = ("slow_turn_seconds", "reflector_daily_limit", "autopilot_minutes")
 RELOAD_KEYS = ("runtime_guard", "tool_hints")   # applied at the next load of the plugin (integration.RELOAD_KEYS)
 
@@ -67,8 +66,6 @@ def hermes_executable() -> str | None:
     """The `hermes` command that runs this profile's Hermes (a .bat or .cmd shim is never run with a list argv)."""
     import shutil
 
-    if os.environ.get("ATLAS_EVOLUTION_NO_HERMES") == "1":   # the test suite: never the machine's real Hermes
-        return None
     import sys
 
     found = shutil.which("hermes")
@@ -94,20 +91,27 @@ def _decision_id(body: dict) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         raise ValueError("Invalid decision")
     try:
-        return int(value)
+        number = int(value)
     except ValueError:
         raise ValueError("Invalid decision") from None
+    if not 0 < number < 2**63:
+        raise ValueError("Invalid decision")
+    return number
 
 
 def profile_name(home: Path) -> str:
-    home = Path(home).resolve()
+    plain = Path(os.path.abspath(home))   # before links: a linked profile folder keeps its own name
+    if plain.parent.name == "profiles":
+        return plain.name
+    home = plain.resolve()
     return home.name if home.parent.name == "profiles" else "default"
 
 
 def launch_home(home: Path) -> Path:
-    """The root Hermes home of a profile (<root>/profiles/<name> belongs to <root>)."""
-    home = Path(home).resolve()
-    return home.parent.parent if home.parent.name == "profiles" else home
+    """The root Hermes home of a profile (<root>/profiles/<name> belongs to <root>): environment.root_of."""
+    from .environment import root_of
+
+    return root_of(home)
 
 
 def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout: int = 60, what: str = "setting") -> None:
@@ -220,7 +224,7 @@ def recommended_settings(current: dict, suggestions: list[dict]) -> dict:
 def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: str = "en", writer=None,
            actor: str = "dashboard", runner=None) -> dict:
     """One decision. `body`: {"kind": lesson|all|proposal|apply|apply_all|schedule_digest|undo|settings|memory, ...}. `runner` replaces
-    subprocess.run for the Hermes commands of "apply" and of its undo (tests)."""
+    subprocess.run for the Hermes commands of "apply" and of its undo."""
     from . import decisions, memory_care
     from .experience import experience
 

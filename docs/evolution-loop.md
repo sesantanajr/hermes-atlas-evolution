@@ -21,16 +21,17 @@ This document describes the loop that Atlas Evolution adds to Hermes Agent: how 
 13. [Learning yield](#learning-yield)
 14. [Health radar](#health-radar)
 15. [Proposals](#proposals)
-16. [Digest](#digest)
-17. [Status and owner notice](#status-and-owner-notice)
-18. [Commands](#commands)
-19. [The terminal menu](#the-terminal-menu)
-20. [The mode and automatic actions](#the-mode-and-automatic-actions)
-21. [The environment](#the-environment)
-22. [Hermes memory](#hermes-memory)
-23. [Settings and language](#settings-and-language)
-24. [Agent tools and the bundled skill](#agent-tools-and-the-bundled-skill)
-25. [Storage](#storage)
+16. [The Evolution index](#the-evolution-index)
+17. [Digest](#digest)
+18. [Status and owner notice](#status-and-owner-notice)
+19. [Commands](#commands)
+20. [The terminal menu](#the-terminal-menu)
+21. [The mode and automatic actions](#the-mode-and-automatic-actions)
+22. [The environment](#the-environment)
+23. [Hermes memory](#hermes-memory)
+24. [Settings and language](#settings-and-language)
+25. [Agent tools and the bundled skill](#agent-tools-and-the-bundled-skill)
+26. [Storage](#storage)
 
 ## Overview
 
@@ -579,6 +580,24 @@ The agent can only propose. With `agent_tools` on it can store up to 5 lessons p
 
 `skill_rollback` and `config_review` are built from the stored verdicts of the changes of the last 30 days (`REGRESSION_DAYS`), provisional or final. The proposal stays open while the verdict stays `regressed` and the change is less than 30 days old; its evidence says whether the verdict is final. `learn --notify-only` prints a high-risk proposal once, in the pass that opens it, and a regression once, in the pass where its verdict becomes final.
 
+## The Evolution index
+
+`status`, the digest and the panel's Overview show one number from 0 to 100 for the profile: is the agent getting better? It is computed by `evolution_index` from what the plugin already measures over the last 7 days, as five parts (each 0 to 100, higher is better), each counted only with enough data behind it:
+
+| Part | From | Scale | Needs |
+|---|---|---|---|
+| tools | tool calls that did not fail | 10% failing is 75, 40% is 0 | 40 calls |
+| turns | interactive turns that neither failed nor ran slow | each % failed costs 2.5 points, each % slow 1 | 20 turns |
+| you | your corrections and repeated questions per 100 turns | 10 per 100 turns is 70 | 20 turns |
+| lessons | of the active lessons already judged, the share that halved their failure (`effective`) | 0 to 100 | 1 judged lesson |
+| health | the latest Hermes and system checks | what stops the agent (gateway down or unable to start, a damaged session database, a full disk, a broken package system) costs 25 points; what to fix soon (low disk, memory, swap, a security update) 8; housekeeping (old tool versions, lists to refresh) nothing | a check |
+
+The index is the weighted mean of the parts that have data (tools 30%, turns 25%, you 20%, lessons 10%, health 15%, renormalized over the parts present); with fewer than two parts it says "not yet". Each learning pass stores the day's value (one entry per UTC day, the latest of the day wins, 90 days kept in the `cursor` row `evolution_index`), so `status` shows the last 14 days as a small line and the trend against the latest value at least 7 days old. It counts only aggregates the plugin already keeps: no message text, no tool output.
+
+### What the plugin costs the agent
+
+Every hook the plugin registers is timed where it runs (`selfcost`: two clock reads per call; the last 512 durations per hook are kept in memory). Each process writes its numbers every 10 minutes, as one `cursor` row `self_cost:<pid>` (a row older than a day is removed), and `status` shows the median and the p95 per tool call (`post_tool_call`), for the guard (`pre_tool_call`), per prompt (the lessons section) and per turn (`pre_llm_call`). A p95 above 50 ms over at least 200 calls is listed under what needs attention: a slow disk or a database another process keeps busy is the usual cause.
+
 ## Digest
 
 `hermes evolution report` builds the digest for the last 1 to 35 days (default 7) and compares it with the same span before it.
@@ -805,7 +824,7 @@ You see both entries in full and choose which one stays. The other is taken out 
 | `language` | `auto`, `en`, `pt` | `auto` | `auto` follows `HERMES_LANGUAGE`, `display.language`, the locale, then English. |
 | `tool_hints` | boolean | `false` | Adds the matching lesson to a failing tool result. Off by default because Hermes keeps only the first plugin's change to a tool result. |
 | `feedback_signals` | boolean | `true` | Counts owner corrections, repeated questions and thanks. |
-| `agent_tools` | boolean | `false` | Offers `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` to the agent, in the owner's own sessions only. Registered when the plugin loads: after turning it on, run `hermes gateway restart`; turning it off applies at once. |
+| `agent_tools` | boolean | `false` | Offers `hermes_atlas_evolution_lessons` to the agent, in the owner's own sessions only. Registered when the plugin loads: after turning it on, run `hermes gateway restart`; turning it off applies at once. |
 | `slow_turn_seconds` | integer, 5 to 3600 | `60` | A turn at least this long counts as slow. |
 | `owner_sender_ids` | up to 20 ids, text or whole numbers | `[]` | Gateway senders whose turns serve the owner (see [Who is served](#who-is-served)). Local sessions always do. |
 | `owner_platforms` | up to 20 platform names, such as `telegram` or `api_server` | `[]` | Platforms where every chat serves the owner, from the first message. |
@@ -839,7 +858,7 @@ Values saved under the old name, `plugins.entries.hermes-evolution.settings`, st
 
 Validation differs by caller (`evolve.options`). The commands reject an invalid `lessons`, `mode`, `slow_turn_seconds`, `owner_sender_ids`, `owner_platforms`, `reflector`, `reflector_daily_limit`, `autopilot_minutes` or `runtime_guard` with an error. Inside the gateway and in the autopilot each invalid value is replaced by a safe value on its own, and a warning is logged once when the plugin loads: an invalid `lessons` means `off`, an invalid `mode` means `manual`, an invalid `reflector` switches the reflector off, an invalid `autopilot_minutes` means 0 (passes only when you ask), an invalid `runtime_guard` keeps the guard on, and the others take their defaults. An unreadable `settings.json` turns lessons off until it is fixed; the values set in the Hermes form still apply to every other option. `tool_hints` is on only when set to `true`, and `feedback_signals` is on unless set to `false`; `reflector` and `runtime_guard` take `true` or `false`; `autopilot_minutes` takes 0 or an integer from 15 to 1440.
 
-**Language** (`i18n`). Everything a person or the agent reads is in English or Brazilian Portuguese: lessons, the prompt section header, hints, the digest, diagnoses, plans, recommendations, Kanban cards, the replies of the agent tools, error messages and the command help. The language is chosen in this order: `--lang en|pt` on the command line, the plugin's `language` option, the profile's `HERMES_LANGUAGE`, `display.language` of the profile configuration, the locale (`LC_ALL`, `LC_MESSAGES`, `LANG`), and finally English. The command help is built before the options are read, so it follows `HERMES_LANGUAGE`, `display.language` and the locale only. The dashboard panel follows the `language` setting too; with `auto`, it takes the language chosen for the profile in Hermes, then the dashboard's language, then the machine's locale ([The dashboard panel](hermes-integration.md#the-dashboard-panel)). Codes such as `pt`, `pt-BR` and `pt_br` all select Portuguese. Field names, codes and identifiers in JSON output stay in English. A gettext-style catalog of sentence pairs (`catalog`) translates the rest, and `tests/test_i18n.py` fails when a diagnostic sentence, a help text, a Kanban card text or a plan sentence lacks its pair.
+**Language** (`i18n`). Everything a person or the agent reads is in English or Brazilian Portuguese: lessons, the prompt section header, hints, the digest, diagnoses, plans, recommendations, Kanban cards, the replies of the agent tools, error messages and the command help. The language is chosen in this order: `--lang en|pt` on the command line, the plugin's `language` option, the profile's `HERMES_LANGUAGE`, `display.language` of the profile configuration, the locale (`LC_ALL`, `LC_MESSAGES`, `LANG`), and finally English. The command help is built before the options are read, so it follows `HERMES_LANGUAGE`, `display.language` and the locale only. The dashboard panel follows the `language` setting too; with `auto`, it takes the language chosen for the profile in Hermes, then the dashboard's language, then the machine's locale ([The dashboard panel](hermes-integration.md#the-dashboard-panel)). Codes such as `pt`, `pt-BR` and `pt_br` all select Portuguese. Field names, codes and identifiers in JSON output stay in English. A gettext-style catalog of sentence pairs (`catalog`) translates the rest, and every diagnostic sentence, help text, Kanban card text and plan sentence must have its pair there.
 
 ## Agent tools and the bundled skill
 
@@ -848,7 +867,6 @@ Both tools belong to the toolset `hermes-atlas-evolution` and are registered onl
 | Tool | Actions |
 |---|---|
 | `hermes_atlas_evolution_lessons` | `search`: up to 5 active lessons for a tool, `general` ones included. `propose`: stores a quarantined lesson for operator review, at most 5 per hour for the whole profile. `status`: lesson counts by status and up to 20 open proposals. |
-| `hermes_atlas_evolution_plan` | returns a bounded plan for research, delegation or operational diagnosis. It is described in [Operations](operations.md). |
 
 The skill `hermes-atlas-evolution:evolution-review` is registered with the plugin. It tells the agent how to run the review with the owner: read the digest, explain failures, skills by outcome and lessons, walk through the open proposals from the highest risk down with the exact lesson text, and hand the decisions to the owner as commands to run in their own terminal. The agent informs and recommends; the commands it runs cannot approve, reject or activate anything.
 

@@ -22,6 +22,9 @@ Um Hermes que roda há semanas acumula problemas que ninguém vê: o agente repe
 | **Mantém o Hermes saudável** | Roda as checagens do próprio `hermes doctor` em cada perfil em uso, uma vez por dia, sem rede, e transforma o que elas encontram em passos simples: ferramentas ligadas sem chave, pasta de cache que o Hermes nunca limpa, pontos de restauração acima do limite, config para migrar, alerta de segurança. Também acompanha o gateway (vivo ou travado), o banco de sessões, o disco (e o dia em que ele enche), memória, swap, CPU e versões antigas de ferramentas. Repara com o `doctor --fix` do próprio Hermes, com backup antes. |
 | **Mantém o servidor atualizado** | Atualiza o Ubuntu ou o Debian com checagens antes e depois, cópia de segurança, os seus arquivos de configuração mantidos e um reparo se a energia cair no meio. |
 | **Protege o Hermes do próprio agente** | Barra comandos do agente que derrubariam ou apagariam aquilo em que o Hermes roda. |
+| **Mostra se o agente está evoluindo** | O Índice de evolução: um número de 0 a 100 por dia, por perfil, a partir das falhas de ferramentas do agente, dos turnos que falharam ou foram lentos, de quantas vezes você precisou corrigi-lo, das lições que funcionaram e da saúde do Hermes, com a tendência contra uma semana atrás. |
+| **Mede quanto custa** | Cada gancho do plugin é cronometrado onde roda: o `status` diz quanto ele soma por chamada de ferramenta, por turno e por prompt (em geral bem menos de um milissegundo) e avisa se isso crescer. |
+| **Repara a si mesmo e todos os perfis** | Um banco danificado é posto de lado e recomeçado; a cópia do plugin em cada outro perfil é levada ao mesmo código; um gateway que não sobe porque o Hermes trocou o Python é apontado para o novo, com desfazer. |
 
 ### O Modo Auto (padrão)
 
@@ -31,11 +34,14 @@ Em cada perfil onde ele roda (com o modo daquele perfil):
 
 - remove entradas repetidas da memória (guarda uma cópia do arquivo);
 - trava skills que o curador reescreve sem parar;
-- libera versões antigas de ferramentas, no máximo uma vez por semana.
+- libera versões antigas de ferramentas, no máximo uma vez por semana (nunca uma de onde um serviço do Hermes ainda inicia);
+- se repara sozinho: um banco do plugin danificado é posto de lado e recomeçado.
 
 Nos outros perfis, a partir do perfil que cuida do Hermes inteiro:
 
-- se instala, na mesma versão, nos perfis em uso que nunca o tiveram (nunca onde você o desligou ou removeu); o Hermes o baixa do GitHub;
+- se instala nos perfis em uso que nunca o tiveram (nunca onde você o desligou ou removeu); o Hermes o baixa do GitHub;
+- mantém a cópia de cada perfil no código dele: uma cópia fixada em outro commit, mais antiga ou deixada pela metade por uma atualização interrompida é levada ao commit do líder com o comando do próprio Hermes (nunca onde o plugin está desligado ou o modo daquele perfil é Assistido ou Manual, nunca um link de desenvolvimento; nada mais novo do que o líder roda é baixado sozinho);
+- repara o serviço do gateway quando o Hermes trocou o Python embutido e o serviço ainda chama o antigo (systemd `status=203/EXEC`), guardando uma cópia do arquivo, com `hermes evolution care undo-gateway` para desfazer;
 - move para a lixeira as pastas deixadas por instalações que falharam (guardadas 30 dias);
 - roda a checagem do Hermes (`hermes doctor`) uma vez por dia e lista o que ela encontrar, com o que fazer e o comando (um cache de pacotes grande vai para a lixeira com uma tecla; pastas com dados das conversas ficam com você).
 
@@ -91,6 +97,14 @@ git clone https://github.com/sesantanajr/hermes-atlas-evolution.git && sh hermes
 
 Ele lista seus perfis e pergunta quais (Enter = todos). Sem perguntas: `sh install.sh --all --yes --install-missing --restart`. Depois de instalado, `hermes evolution update` faz o mesmo pelo Hermes (`--all`, `--profiles a,b`, `--list`). Se o gateway não voltar depois de o Hermes se atualizar: `hermes evolution care fix-gateway`.
 
+## Novidades da 0.10.0
+
+- **O Índice de evolução.** O `status`, o resumo e a Visão geral do painel mostram um número de 0 a 100 para este perfil, montado com o que o plugin já mede (ferramentas, turnos, suas correções, lições, saúde), com as partes e a tendência contra uma semana atrás, para você ver se uma lição, uma skill ou uma configuração deixou o agente melhor.
+- **O plugin mede a si mesmo.** Quanto cada gancho soma ao turno do agente, medido onde roda e mostrado no `status`; um aviso se a cauda lenta dele passar de 50 ms.
+- **Mais rápido onde importa.** A seção de lições do prompt não é mais lida do banco a cada turno (3,8 ms → 0,02 ms); cada chamada de ferramenta é uma gravação em vez de duas; skills quase iguais são achadas 8 vezes mais rápido, e arquivos de skill sem mudança não são lidos de novo.
+- **Mais leve ao carregar.** Os módulos que só os antigos `ops`, `tick`, `history`, `health` e `memory` usam só carregam quando eles rodam; esses comandos estão obsoletos e saem na 0.11.0.
+- Cada mudança, com o autoreparo e as correções da 0.9.2: [Mudanças](CHANGELOG.pt-BR.md).
+
 ## Novidades da 0.9.0
 
 - **A checagem do próprio Hermes, todo dia, em todos os perfis.** O plugin roda as checagens do `hermes doctor` em cada perfil em uso uma vez por dia, sem rede e sem mudar nada, e transforma cada problema em palavras simples, com o que fazer e o comando: ferramentas ligadas sem chave, `.env` faltando, um cache grande que o Hermes nunca limpa, pontos de restauração acima do limite, config para migrar, provedor de memória desligado, alerta de segurança (sempre primeiro). Peças opcionais que você nunca configurou são só contadas. Um problema da máquina inteira aparece uma vez só.
@@ -111,13 +125,16 @@ Subcomandos de `hermes evolution`. `--lang en|pt` funciona com qualquer um.
 | `lessons list`, `lessons review`, `lessons approve <id>`, `lessons approve --all` | As lições, e a sua decisão sobre as que esperam. |
 | `proposals list`, `proposals approve <id>`, `proposals reject <id>` | As propostas; aprovar uma mudança que o plugin consegue fazer a aplica com o próprio comando do Hermes. |
 | `decisions`, `decisions undo <id>` | As suas decisões e as ações automáticas, do terminal, do dashboard e da rodada automática, e o desfazer de uma. |
-| `care [check \| pm-doctor \| doctor \| fix \| gc]` | A saúde do Hermes, lida dos próprios arquivos dele; e as checagens e reparos do próprio Hermes. |
+| `care [check \| pm-doctor \| doctor \| fix \| gc \| fix-gateway \| undo-gateway]` | A saúde do Hermes, lida dos próprios arquivos dele; as checagens e reparos do próprio Hermes; e o reparo de um serviço do gateway que ainda chama um Python que o Hermes removeu (com o desfazer). |
+| `update [--all \| --profiles a,b] [--install-missing] [--list]` | Este plugin atualizado em todos os perfis, ou nos que você nomear; um perfil fixado passa para o último commit. |
 | `system [check \| plan \| upgrade \| repair \| report] [--full] [--skip PACOTE...]` | A atualização do sistema operacional (Linux com apt). |
 | `environment [show \| scan \| catalog]` | Todos os perfis deste Hermes: plugins, skills, conflitos e o que fazer; `scan` olha de novo agora; `catalog` o catálogo de plugins do Hermes guardado no banco do plugin. |
 | `schedule-digest [--deliver local\|<canal>]` | O resumo semanal como uma tarefa agendada do Hermes (cron), sem agente. |
 | `lessons export`, `lessons import` | Lições compartilhadas com outro perfil ou máquina, depois de mostrar cada uma. |
 | `learn` | Uma rodada de aprendizado na hora. |
 | `owner` | Cada canal de chat com os remetentes, e o comando que marca um como você. |
+
+Obsoletos na 0.10.0 e removidos na 0.11.0 (cada um avisa quando roda): `health` (use `care check`), `history` (use `decisions`), `tick` e `feedback`, `memory` e o comando de chat `/evolution` (as notas da 0.1: `memory audit` lista todas para você guardar o que precisar) e `ops` (o supervisor de Linux da 0.3).
 
 Todos os comandos e opções: [Comandos](docs/pt-BR/evolution-loop.md#comandos).
 

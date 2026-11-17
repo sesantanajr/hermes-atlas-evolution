@@ -4,8 +4,9 @@
 command may start Hermes' own maintenance): the gateway's state and heartbeat (alive, its memory, the machine's
 memory and swap), the session database (journal mode, a write-ahead log that grew, a quick integrity check once a
 week), room on the disk Hermes writes to and how fast each of its folders grows (with the day the disk would be full
-at that pace), old versions of Hermes' tools nothing uses anymore, and whether the gateway comes back after a
-reboot. The learning pass runs it at most every 6 hours and keeps a short history to see trends.
+at that pace), old versions of Hermes' tools nothing uses anymore (and the ones facts.json dropped that a service
+still starts, which hold back `hermes pm gc`: gc_blocked), and whether the gateway comes back after a reboot. The
+learning pass runs it at most every 6 hours and keeps a short history to see trends.
 
 What fixes things stays with the owner, in their terminal, with Hermes' own commands, each explained first:
 `hermes pm doctor` (integrity of Hermes' installed files; offline), `hermes doctor` (Hermes' full check; it calls
@@ -106,12 +107,28 @@ def _started(pid: int) -> int | None:
         return None
 
 
+def _served_by_root(home: Path) -> Path | None:
+    """The root of the Hermes when its gateway serves this named profile: Hermes 0.23.1 runs one gateway for every
+    profile, and a profile it serves has no gateway_state.json or gateway.pid of its own (both stay in the root, whose
+    state lists it in `served_profiles`). None otherwise."""
+    home = Path(home)
+    if home.parent.name != "profiles" or (home / "gateway_state.json").exists() or (home / "gateway.pid").exists():
+        return None
+    root = home.parent.parent
+    marker = _read_json(root / "gateway_state.json")
+    served = marker.get("served_profiles") if isinstance(marker, dict) else None
+    return root if isinstance(served, list) and home.name in served else None
+
+
 def gateway(home: Path, *, now: float) -> dict:
-    state = _read_json(Path(home) / "gateway_state.json") or {}
-    beat = _read_json(Path(home) / "state" / "gateway.heartbeat") or {}
+    root = _served_by_root(Path(home))
+    where = root or Path(home)   # a served profile's gateway is the root's: its state and heartbeat are there
+    state = _read_json(where / "gateway_state.json")
+    beat = _read_json(where / "state" / "gateway.heartbeat")
+    state, beat = (state if isinstance(state, dict) else {}), (beat if isinstance(beat, dict) else {})
     updated = None
     try:
-        updated = (Path(home) / "state" / "gateway.heartbeat").stat().st_mtime
+        updated = (where / "state" / "gateway.heartbeat").stat().st_mtime
     except OSError:
         pass
     mem = beat.get("mem") if isinstance(beat.get("mem"), dict) else {}
@@ -135,7 +152,7 @@ def gateway(home: Path, *, now: float) -> dict:
         if gone:
             running, crashed = False, True
     return {"state": state.get("gateway_state"), "version": state.get("code_version"), "running": running,
-            "crashed": crashed,
+            "crashed": crashed, "served_by_root": root is not None,
             "active_agents": state.get("active_agents"),
             "heartbeat_age": None if updated is None else round(now - updated),
             "stale": bool(running and (updated is None or now - updated > HEARTBEAT_STALE_SECONDS)),
@@ -181,21 +198,24 @@ def database(home: Path, *, quick: bool) -> dict:
 _VERSIONED = re.compile(r"^(?P<name>[a-z][a-z0-9-]*?)-(?P<version>\d[\w.+-]*)$")
 
 
-def _in_use(store: Path, paths) -> set[str]:
-    """The folders of the tool store that a running program or a service's ExecStart points into: never unused,
-    whatever facts.json says (removing one would delete the interpreter a service starts)."""
-    names = set()
+def _in_use_by(store: Path, sources) -> dict[str, list[str]]:
+    """{folder: [who]}: the folders of the tool store that a running program or a service's ExecStart points into
+    (`sources`: paths, or (who, path) pairs). Never unused, whatever facts.json says (removing one would delete the
+    interpreter a service starts)."""
+    found: dict[str, list[str]] = {}
     try:
         base = os.path.normcase(os.path.realpath(store)).replace("\\", "/").rstrip("/") + "/"
     except (OSError, ValueError):
-        return names
-    for raw in paths:
+        return found
+    for source in sources:
+        who, raw = source if isinstance(source, tuple) and len(source) == 2 else (None, source)
         if not raw:
             continue
         try:
             candidates = {str(raw), os.path.realpath(str(raw))}
         except (OSError, ValueError):
             candidates = {str(raw)}
+        names = set()
         for candidate in candidates:
             folded = os.path.normcase(candidate).replace("\\", "/")
             if folded.startswith(base):
@@ -204,40 +224,68 @@ def _in_use(store: Path, paths) -> set[str]:
             for index in range(1, len(parts)):   # any .../tools/<folder>/... (a unit names the root's own store)
                 if parts[index - 1] == "tools" and parts[index]:
                     names.add(parts[index])
-    return names
+        for name in names:
+            users = found.setdefault(name, [])
+            if who and who not in users:
+                users.append(str(who)[:120])
+    return found
 
 
-def unused_tools(home: Path, *, budget: float = 4.0, in_use=()) -> list[dict]:
-    """Versions of Hermes' managed tools that `tools/facts.json` no longer points at (what `hermes pm gc` removes).
-    Only names Hermes manages count; anything else in the folder is left out, and so is any folder a Hermes service
-    starts a program from (`in_use`: the ExecStart paths of the hermes* units) or this process runs from."""
+
+def tool_store(home: Path, *, budget: float = 4.0, in_use=()) -> dict:
+    """What `hermes pm gc` would do to the tool store: {"unused": [...] (unused_tools), "in_use_unreferenced":
+    [folder, ...], "in_use_by": {folder: [who]}}. `in_use_unreferenced`: folders facts.json no longer points at, so
+    `pm gc` deletes them, that a Hermes service starts a program from or this process runs from: a gc now would
+    leave that service failing at its next start (status=203/EXEC)."""
     import sys
 
     from .environment import root_of
 
+    report: dict = {"unused": [], "in_use_unreferenced": [], "in_use_by": {}}
     store = root_of(Path(home)) / "tools"   # one store for every profile of a Hermes, at its root
-    protected = _in_use(store, [*in_use, sys.executable])
+    protected = _in_use_by(store, [*in_use, ("process", sys.executable)])
     facts = _read_json(store / "facts.json")
     packages = facts.get("packages") if isinstance(facts, dict) else None
     if not isinstance(packages, dict):
-        return []
+        return report
     used = {entry.get("entry") for entry in packages.values() if isinstance(entry, dict)}
     deadline = time.monotonic() + budget
-    found = []
     try:
         children = sorted(store.iterdir())
     except OSError:
-        return []
+        return report
     for child in children:
-        if not child.is_dir() or child.is_symlink() or child.name in used or child.name in protected:
+        if not child.is_dir() or child.is_symlink() or child.name in used:
             continue
         match = _VERSIONED.match(child.name)
         name = match["name"] if match else None
         base = next((key for key in packages if name and (name == key or name.startswith(key + "-"))), None)
         if base is None:
+            continue   # not a version Hermes manages: `pm gc` leaves it
+        if child.name in protected:   # `pm gc` would remove it all the same: what starts from it must move first
+            report["in_use_unreferenced"].append(child.name)
+            report["in_use_by"][child.name] = protected[child.name][:5]
             continue
-        found.append({"folder": child.name, "package": base, "bytes": _size(child, deadline)})
-    return found
+        report["unused"].append({"folder": child.name, "package": base, "bytes": _size(child, deadline)})
+    return report
+
+
+def unused_tools(home: Path, *, budget: float = 4.0, in_use=()) -> list[dict]:
+    """Versions of Hermes' managed tools that `tools/facts.json` no longer points at (what `hermes pm gc` removes).
+    Only names Hermes manages count; anything else in the folder is left out, and so is any folder a Hermes service
+    starts a program from (`in_use`: the ExecStart paths of the hermes* units) or this process runs from: those are
+    tool_store's `in_use_unreferenced`, which stop `pm gc` altogether (gc_blocked)."""
+    return tool_store(home, budget=budget, in_use=in_use)["unused"]
+
+
+def gc_blocked(care) -> bool:
+    """Whether `hermes pm gc` must not run now (the Auto mode's reclaim, `care gc`, the menu): by the health check
+    `care` (check or cached), a tools folder facts.json no longer points at is one a Hermes service or a running
+    process still starts from, and gc would delete it. A check without that answer (none yet, or stored by an
+    older version) proves nothing: blocked until a new one."""
+    if not isinstance(care, dict) or not isinstance(care.get("in_use_unreferenced"), list):
+        return True
+    return bool(care["in_use_unreferenced"])
 
 
 def _growth(history: list[dict], current: dict) -> list[dict]:
@@ -265,16 +313,61 @@ def _when(item) -> float | None:
     return value if value == value and abs(value) != float("inf") else None
 
 
-def _gateway_unit(units: list[dict]) -> dict | None:
-    """The unit that runs the gateway: a user one first (Hermes installs it there), then a system one."""
-    found = [unit for unit in units if isinstance(unit, dict) and "gateway" in str(unit.get("unit") or "")]
-    found.sort(key=lambda unit: (unit.get("scope") != "user", str(unit.get("unit"))))
-    return found[0] if found else None
+def expected_gateway_units(home: Path | None, *, served: bool = False) -> list[str]:
+    """The names Hermes gives the gateway's unit of this profile: `hermes-gateway.service` for the root profile,
+    `hermes-gateway-<profile>.service` for a named one (and the root's, when its gateway serves this profile)."""
+    if home is None or Path(home).parent.name != "profiles":
+        return ["hermes-gateway.service"]
+    return [f"hermes-gateway-{Path(home).name}.service", *(["hermes-gateway.service"] if served else [])]
 
 
-GATEWAY_UNIT_KEYS = ("unit", "scope", "active", "active_state", "sub_state", "n_restarts", "exec_main_status",
-                     "exec_path", "exec_exists", "exec_source", "replacement", "need_reload", "exec_missing",
-                     "restart_loop")
+def _other_profiles(home: Path | None, *, served: bool = False) -> set[str]:
+    """The gateway unit names of the other profiles of this Hermes: never this profile's gateway."""
+    if home is None:
+        return set()
+    home = Path(home)
+    named = home.parent.name == "profiles"
+    root = home.parent.parent if named else home
+    try:
+        names = [entry.name for entry in (root / "profiles").iterdir() if entry.is_dir()][:200]
+    except OSError:
+        names = []
+    found = {f"hermes-gateway-{name}.service" for name in names if not named or name != home.name}
+    if named and not served:
+        found.add("hermes-gateway.service")   # the root profile's own
+    return found
+
+
+def pick_gateway_unit(units, *, home: Path | None = None, served: bool = False, prefer=()) -> dict | None:
+    """The unit that runs this profile's gateway, among Hermes' units: one of `prefer` ((scope, unit) pairs, say the
+    one the last check picked) first, then the name Hermes gives this profile's gateway, never another profile's
+    while there is a better one, then one that runs, comes back after a reboot or fails (a leftover that is off says
+    nothing), a user one before a system one (Hermes installs it there)."""
+    found = [unit for unit in units or () if isinstance(unit, dict) and "gateway" in str(unit.get("unit") or "")]
+    if not found:
+        return None
+    expected, others = expected_gateway_units(home, served=served), _other_profiles(home, served=served)
+    preferred = [tuple(item) for item in prefer or () if isinstance(item, (tuple, list)) and len(item) == 2]
+
+    def rank(unit: dict):
+        name, scope = str(unit.get("unit")), unit.get("scope")
+        failing = bool(unit.get("exec_missing") or unit.get("restart_loop") or unit.get("active_state") == "failed"
+                       or unit.get("exec_main_status") == 203 and unit.get("active_state") != "active")
+        return ((scope, name) not in preferred, expected.index(name) if name in expected else len(expected),
+                name in others, not unit.get("active"), unit.get("enabled") is not True, not failing, scope != "user",
+                name)
+
+    return min(found, key=rank)
+
+
+def _gateway_unit(units: list[dict], home: Path | None = None, *, served: bool = False) -> dict | None:
+    """The unit that runs the gateway of the profile at `home` (pick_gateway_unit)."""
+    return pick_gateway_unit(units, home=home, served=served)
+
+
+GATEWAY_UNIT_KEYS = ("unit", "scope", "enabled", "active", "active_state", "sub_state", "n_restarts", "exec_main_status",
+                     "exec_path", "exec_exists", "exec_unreferenced", "exec_source", "replacement", "need_reload",
+                     "exec_missing", "restart_loop")
 
 
 def check(home: Path, *, now: float | None = None, history: list[dict] | None = None, quick: bool = False,
@@ -290,7 +383,8 @@ def check(home: Path, *, now: float | None = None, history: list[dict] | None = 
     if host is not None or (os.name == "posix" and Path("/run/systemd/system").is_dir()):
         unit_host = host or Host(root=root)
         units = _user_units(unit_host)
-    unit = _gateway_unit(units)
+    # this profile's own unit (or the root's, when its gateway serves this profile), never another profile's
+    unit = _gateway_unit(units, home, served=bool(report["gateway"].get("served_by_root")))
     report["gateway_unit"] = {key: unit.get(key) for key in GATEWAY_UNIT_KEYS} if unit else None
     try:
         stat = os.statvfs(home)
@@ -308,7 +402,9 @@ def check(home: Path, *, now: float | None = None, history: list[dict] | None = 
     except (OSError, AttributeError):
         report["load"] = None
     report["sizes"] = sizes(home)
-    report["unused_tools"] = unused_tools(home, in_use=[item.get("exec_path") for item in units])
+    store = tool_store(home, in_use=[(item.get("unit"), item.get("exec_path")) for item in units])
+    report["unused_tools"] = store["unused"]
+    report["in_use_unreferenced"], report["in_use_by"] = store["in_use_unreferenced"], store["in_use_by"]
     report["reclaimable"] = sum(item["bytes"] or 0 for item in report["unused_tools"])
     past = [item for item in history or () if isinstance(item, dict) and _when(item) is not None
             and now - _when(item) <= 8 * 86_400]
@@ -359,7 +455,10 @@ def check(home: Path, *, now: float | None = None, history: list[dict] | None = 
         findings.append("swap_full")
     if report["load"] and report["load"]["cpus"] and report["load"]["15m"] > 2 * report["load"]["cpus"]:
         findings.append("cpu_saturated")
-    if report["reclaimable"] >= 300 * 2**20:
+    if report["in_use_unreferenced"]:
+        # `hermes pm gc` would delete a Python a service still starts: no gc (nor its suggestion) until it moved
+        findings.append("tools_in_use_unreferenced")
+    elif report["reclaimable"] >= 300 * 2**20:
         findings.append("unused_tools")
     from .system_update import owner_of
 
@@ -372,8 +471,9 @@ def check(home: Path, *, now: float | None = None, history: list[dict] | None = 
     return report
 
 
-def cached(conn, home: Path, *, now: float, force: bool = False) -> dict | None:
-    """The latest check, taken at most every CHECK_EVERY_SECONDS by the learning pass, with its history."""
+def cached(conn, home: Path, *, now: float, force: bool = False, host=None) -> dict | None:
+    """The latest check, taken at most every CHECK_EVERY_SECONDS by the learning pass, with its history. `host`:
+    the machine whose units are read (check)."""
     row = conn.execute("SELECT value FROM cursor WHERE key='care_check'").fetchone()
     try:
         last = json.loads(row[0]) if row else None
@@ -393,7 +493,8 @@ def cached(conn, home: Path, *, now: float, force: bool = False) -> dict | None:
         quick = quick_row is None or now - float(quick_row[0] or 0) >= QUICK_CHECK_EVERY_SECONDS   # weekly, even when asked
     except (TypeError, ValueError):
         quick = True
-    found = check(home, now=now, history=history, quick=quick)
+    found = check(home, now=now, history=history, quick=quick,
+                  **({} if host is None else {"host": host, "root": Path(host.root)}))
     if quick:
         conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('care_quick_check', ?)", (str(now),))
     record = {"at": now, "sizes": found["sizes"], "free": found["free"], "rss": found["gateway"]["rss"]}
@@ -403,6 +504,36 @@ def cached(conn, home: Path, *, now: float, force: bool = False) -> dict | None:
     conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('care_history', ?)", (json.dumps(keep[-HISTORY_DAYS:]),))
     conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('care_check', ?)", (json.dumps(found),))
     return found
+
+
+def refresh_after_repair(home: Path, now: float | None = None, *, host=None) -> dict:
+    """After the owner's `care fix-gateway` or `care undo-gateway`: a new health check now (not up to 6 hours later)
+    and the stored system check's units as systemd says they are now (system_update.refresh_units), so `status`, the
+    menu and the panel stop saying the gateway cannot start once it runs, and say it again after an undo. Never
+    raises: {"care": the new check or None, "system": the updated system check or None}."""
+    from . import system_update
+    from .experience import experience
+
+    now = time.time() if now is None else now
+    system_update._UNIT_CACHE.clear()   # what the units were a minute ago is what the repair changed
+    result: dict = {"care": None, "system": None}
+    try:
+        with experience(home) as conn:
+            result["care"] = cached(conn, home, now=now, force=True, host=host)
+    except Exception:   # the repair is done: a check that could not be taken now is taken by the next pass
+        pass
+    try:
+        with experience(home) as conn:
+            row = conn.execute("SELECT value FROM cursor WHERE key='system_check'").fetchone()
+            stored = json.loads(row[0]) if row else None
+            if isinstance(stored, dict) and isinstance(stored.get("units"), list):
+                updated = system_update.refresh_units(stored, host=host)
+                conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('system_check', ?)",
+                             (json.dumps(updated),))
+                result["system"] = updated
+    except Exception:
+        pass
+    return result
 
 
 # What the owner can run from the menu, each with Hermes' own command. (key, arguments, needs a backup first)

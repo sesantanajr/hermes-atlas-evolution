@@ -6,7 +6,7 @@ locale, then English. Hermes codes such as `pt`, `pt-BR` and `pt_br` all select 
 
 Diagnostic modules write their sentences in one language and `localize` maps them to the other through
 the pairs in `catalog`, gettext style: the source sentence is the key. Codes, numbers and identifiers
-are never translated. A test keeps the catalog complete.
+are never translated.
 """
 
 from __future__ import annotations
@@ -30,9 +30,9 @@ def normalize(value) -> str | None:
     if not isinstance(value, str):
         return None
     tag = value.strip().lower().replace("_", "-").split(".")[0]
-    if tag.startswith("pt"):
+    if tag.startswith(("pt", "portuguese")):   # Windows names its locales Portuguese_Brazil, English_United States
         return "pt"
-    if tag.startswith("en"):
+    if tag.startswith(("en", "english")):
         return "en"
     return None
 
@@ -75,6 +75,15 @@ def resolve(preferred=None, runtime_config=None) -> str:
         found = normalize(candidate)
         if found:
             return found
+    if os.name == "nt":   # Windows sets no LANG: its user locale says it (pt_BR, or Portuguese_Brazil)
+        try:
+            import locale
+
+            found = normalize(locale.getlocale()[0])
+            if found:
+                return found
+        except (ValueError, TypeError, AttributeError):
+            pass
     return "en"
 
 

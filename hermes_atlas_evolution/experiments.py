@@ -88,6 +88,7 @@ def detect_changes(conn: sqlite3.Connection, home: Path, runtime_config, *, now:
                                     (f"config:{key}:{utc_day(now)}", key, detail, now)).rowcount:
                         found.append({"kind": "config", "subject": key, "from": previous[key], "to": value})
         conn.execute("INSERT OR REPLACE INTO cursor VALUES ('config_snapshot', ?)", (json.dumps(snapshot),))
+        conn.commit()   # the Curator ledger (up to 8 MiB) is read with no write lock held: hook writers never wait on it
     saved = conn.execute("SELECT value FROM cursor WHERE key='ledger_at'").fetchone()
     try:
         since = float(saved[0]) if saved else now - WINDOW_DAYS * 86_400

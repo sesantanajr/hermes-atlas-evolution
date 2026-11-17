@@ -101,8 +101,10 @@ def from_profile(home: Path, name: str, *, now: float) -> dict:
     """The pack of another profile of the same Hermes, read from its Evolution database without writing to it."""
     if not isinstance(name, str) or not _PROFILE.fullmatch(name):
         raise ValueError("Name a profile of this Hermes, such as default or work")
+    from .environment import root_of
+
+    root = root_of(home)
     home = Path(home).resolve()
-    root = home.parent.parent if home.parent.name == "profiles" else home
     folder = root if name == "default" else root / "profiles" / name
     if folder.resolve() == home:
         raise ValueError("That is this profile; name another one")

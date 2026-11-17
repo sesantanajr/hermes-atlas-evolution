@@ -12,7 +12,6 @@ import sqlite3
 
 from . import lessons as playbook
 
-RISKS = ("low", "medium", "high")
 REOPEN_AFTER_SECONDS = 30 * 86_400
 REGRESSION_DAYS = 30
 INVESTIGATE_MIN_COUNT = 5   # failures in the window before an untemplated one is worth an investigation
@@ -159,7 +158,11 @@ def decide(conn: sqlite3.Connection, proposal_id: int, decision: str, *, now: fl
         playbook.keep(conn, evidence["lesson_id"], now=now)
     note = " ".join(note.split())[:200] if isinstance(note, str) and note.strip() else None
     conn.execute("UPDATE proposal SET status=?, updated=?, note=? WHERE id=?", (status, now, note, proposal_id))
-    return {"id": proposal_id, "kind": row["kind"], "status": status, "applied": applied,
+    if status == "rejected" and row["kind"] not in ("lesson", "lesson_retire"):
+        # The owner said no: a change the Mode auto could apply by itself is never applied by it again, also after
+        # the proposal reopens (30 days later, or once the history is pruned). Undoing the rejection lifts it.
+        conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES (?, ?)", (f"auto_skip:{row['code']}", str(now)))
+    return {"id": proposal_id, "kind": row["kind"], "status": status, "applied": applied, "code": row["code"],
             "run_this": row["command"] if status == "approved" else None}
 
 

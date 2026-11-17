@@ -65,7 +65,125 @@ def _database_path(home: Path) -> Path:
     return path
 
 
+# ── self-repair: a damaged database is set aside and started again ─────────────────────────────────────────────
+# A torn write (power loss, a full disk, a sync tool copying the file while it is written) leaves a file SQLite calls
+# "malformed" or "not a database". Every open then failed, quietly, for as long as the process ran: no pass, no lesson,
+# no counter. Now the damage is confirmed on a connection of its own, the file (with its -wal and -shm) is renamed
+# to evolution.sqlite3.corrupt-<time> next to it, a fresh database starts, and `status` says so for a week.
+_DAMAGED = (11, 26)              # SQLITE_CORRUPT, SQLITE_NOTADB
+_REPAIRED: set[str] = set()      # once per file and process: a file that breaks again is not renamed in a loop
+_KEEP_DAMAGED = 2                # the newest damaged copies kept; older ones are removed
+RECOVERED_FILE = "db-recovered.json"
+
+
+def damaged(error: BaseException) -> bool:
+    """Whether a sqlite error says the database file is damaged (not busy, not a schema problem)."""
+    if not isinstance(error, sqlite3.DatabaseError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    if type(code) is int:
+        return code & 0xFF in _DAMAGED
+    text = str(error).lower()
+    return "not a database" in text or "malformed" in text
+
+
+def _confirmed(path: Path) -> bool:
+    """Read the file again on a connection of its own: True only when SQLite itself finds it damaged."""
+    from urllib.parse import quote
+
+    try:
+        probe = sqlite3.connect(f"file:{quote(os.fspath(path))}?mode=ro", uri=True, timeout=1)
+    except sqlite3.Error as error:
+        return damaged(error)
+    try:
+        row = probe.execute("PRAGMA quick_check(1)").fetchone()
+        return not (row and str(row[0]).lower() == "ok")
+    except sqlite3.Error as error:
+        return damaged(error)
+    finally:
+        probe.close()
+
+
+def recover_damaged(path: Path, error: BaseException) -> bool:
+    """Set a damaged database aside so the next open starts a fresh one. True when it was set aside."""
+    key = os.fspath(path)
+    if key in _REPAIRED or not damaged(error) or not Path(path).is_file() or not _confirmed(Path(path)):
+        return False
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    target = Path(path).with_name(f"{Path(path).name}.corrupt-{stamp}")
+    for extra in range(1, 100):   # never over an earlier damaged copy set aside in the same second
+        if not target.exists():
+            break
+        target = Path(path).with_name(f"{Path(path).name}.corrupt-{stamp}-{extra}")
+    try:
+        os.replace(path, target)
+    except OSError:
+        return False   # open elsewhere where a rename is refused (Windows), or gone: the next failure tries again
+    for suffix in ("-wal", "-shm"):   # they belong to the damaged file: a fresh one must never replay them
+        try:
+            os.replace(f"{key}{suffix}", f"{target}{suffix}")
+        except FileNotFoundError:
+            pass
+        except OSError:
+            try:
+                os.unlink(f"{key}{suffix}")
+            except OSError:
+                pass
+    _REPAIRED.add(key)
+    _ADDITIVE_READY.discard(key)
+    try:
+        copies = sorted(Path(path).parent.glob(f"{Path(path).name}.corrupt-*[0-9]"),
+                        key=lambda item: item.stat().st_mtime)
+        for old in copies[:-_KEEP_DAMAGED]:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.unlink(f"{old}{suffix}")
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    try:
+        import json
+
+        note = Path(path).parent / RECOVERED_FILE
+        temporary = note.with_name(f".{RECOVERED_FILE}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps({"at": time.time(), "copy": target.name,
+                                         "error": getattr(error, "sqlite_errorname", None) or type(error).__name__}),
+                             encoding="utf-8")
+        os.replace(temporary, note)
+    except OSError:
+        pass
+    from logging import getLogger
+
+    getLogger(__name__).warning("Atlas Evolution found its database damaged (%s); it was set aside as %s and a new "
+                                "one started", getattr(error, "sqlite_errorname", None) or type(error).__name__,
+                                target.name)
+    return True
+
+
+def recovered(home: Path, *, now: float, days: int = 7) -> dict | None:
+    """The last self-repair of this profile's database, when it was in the last `days`."""
+    import json
+
+    try:
+        found = json.loads((Path(home) / "evolution" / RECOVERED_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(found, dict) or not isinstance(found.get("at"), (int, float)) or now - found["at"] > days * 86_400:
+        return None
+    return {"at": float(found["at"]), "copy": str(found.get("copy") or "")[:120], "error": str(found.get("error") or "")[:40]}
+
+
 def _open(path: Path, timeout: float, **options) -> sqlite3.Connection:
+    try:
+        return _open_once(path, timeout, **options)
+    except sqlite3.DatabaseError as error:
+        if not recover_damaged(path, error):
+            raise
+    return _open_once(path, timeout, **options)
+
+
+def _open_once(path: Path, timeout: float, **options) -> sqlite3.Connection:
     connection = sqlite3.connect(path, timeout=timeout, **options)
     try:
         connection.row_factory = sqlite3.Row
@@ -142,6 +260,11 @@ def database(home: Path, *, observer: bool = False, timeout: float = 2):
     try:
         with connection:
             yield connection
+    except sqlite3.DatabaseError as error:
+        if damaged(error):
+            connection.close()   # closed first: Windows refuses to rename a file that is open
+            recover_damaged(_database_path(home), error)
+        raise
     finally:
         connection.close()
 
@@ -188,6 +311,7 @@ class _Observer:
         self.identity = None
         self.closed = False   # set once: a closed observer never opens a connection again
         self._depth = 0       # nested holds of `lock` by its owner thread
+        self._checked = float("-inf")   # when the file's identity was last read (time.monotonic)
 
     def _file(self):
         try:
@@ -197,8 +321,13 @@ class _Observer:
         return os.getpid(), info.st_dev, info.st_ino
 
     def _connect(self) -> sqlite3.Connection:
-        # A removed or replaced file, or a forked process, needs a handle of its own.
+        # A removed or replaced file, or a forked process, needs a handle of its own. The file is looked at again
+        # at most every IDENTITY_SECONDS: a stat on every hook write was a third of its cost.
+        if self.connection is not None and self.identity is not None and self.identity[0] == os.getpid() \
+                and 0 <= time.monotonic() - self._checked < IDENTITY_SECONDS:
+            return self.connection
         current = self._file()
+        self._checked = time.monotonic()
         if self.connection is not None and current is not None and current == self.identity:
             return self.connection
         self._release()
@@ -258,6 +387,8 @@ class _Observer:
                 _rollback(connection)
                 if isinstance(error, sqlite3.Error) and not _busy(error):
                     self._release()
+                    if damaged(error):
+                        recover_damaged(_database_path(self.home), error)
                 raise
             try:
                 self._write(None, time.time())  # Events that arrived during the caller's transaction.
@@ -287,16 +418,17 @@ class _Observer:
         with self.guard:
             if self.closed:
                 return False
-            if len(self.pending) < _OBSERVER_QUEUE:
-                self.pending.append(job)
-            else:
-                self.dropped += 1
+            for item in (job if isinstance(job, list) else [job]):
+                if len(self.pending) < _OBSERVER_QUEUE:
+                    self.pending.append(item)
+                else:
+                    self.dropped += 1
             return True
 
     def _write(self, job, now: float) -> None:
         with self.guard:
             waiting, dropped = list(self.pending), self.dropped
-        jobs = waiting + ([job] if job is not None else [])
+        jobs = waiting + (list(job) if isinstance(job, list) else [job] if job is not None else [])
         if not jobs and not dropped:
             return
         day = _day(now)
@@ -319,6 +451,8 @@ class _Observer:
                 return
             self._release()
             self._settle(waiting, lost=len(waiting))
+            if damaged(error):
+                recover_damaged(_database_path(self.home), error)
             raise
         lost = 0
         try:
@@ -395,6 +529,7 @@ def _observer(home: Path) -> _Observer:
 
 
 _BATCH = threading.local()
+IDENTITY_SECONDS = 2.0   # how often the shared writer checks that the database file is still the one it opened
 
 
 def record(home: Path, job, *, now: float | None = None) -> None:
@@ -411,6 +546,27 @@ def record(home: Path, job, *, now: float | None = None) -> None:
     for _ in range(3):   # an observer closed meanwhile (evicted, or at exit) hands the job to the current one
         if _observer(home).record(job, now):
             return
+
+
+@contextmanager
+def coalesced(home: Path):
+    """Collect this thread's counter updates for `home` (one hook call: its usage counters and its outcome) and hand
+    them to the shared writer together: one write transaction instead of one per update, each update still in a
+    savepoint of its own. Inside `batched()` the updates go with that batch instead."""
+    if getattr(_BATCH, "jobs", None) is not None:
+        yield
+        return
+    jobs: list = []
+    _BATCH.jobs, _BATCH.home = jobs, Path(home)
+    try:
+        yield
+    finally:
+        _BATCH.jobs = _BATCH.home = None
+        if jobs:
+            now = time.time()
+            for _ in range(3):   # an observer closed meanwhile hands the jobs to the current one
+                if _observer(home).record(jobs, now):
+                    break
 
 
 @contextmanager

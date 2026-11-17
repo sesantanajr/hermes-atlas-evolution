@@ -1,5 +1,5 @@
 name: hermes-atlas-evolution
-version: "0.9.1"
+version: "0.10.0"
 requires_hermes: ">=0.23.1"
 description: >-
   Looks after your whole Hermes Agent, every profile at once. Every day it runs Hermes' own doctor checks
@@ -22,7 +22,6 @@ tags:
   - skills
   - operations
 provides_tools:
-  - hermes_atlas_evolution_plan
   - hermes_atlas_evolution_lessons
 provides_hooks:
   - pre_tool_call
@@ -86,9 +85,9 @@ config_schema:
     default: false
     label: "Let the agent read and propose lessons · Deixar o agente ler e propor lições"
     description: >-
-      Gives the agent the tools hermes_atlas_evolution_plan and hermes_atlas_evolution_lessons; lessons it proposes
+      Gives the agent the tool hermes_atlas_evolution_lessons (search the lessons, propose one); lessons it proposes
       wait for you. Turning it on applies after hermes gateway restart (in the terminal, at the next session).
-      — Dá ao agente as ferramentas hermes_atlas_evolution_plan e hermes_atlas_evolution_lessons; as lições que ele
+      — Dá ao agente a ferramenta hermes_atlas_evolution_lessons (buscar lições, propor uma); as lições que ele
       propõe esperam você. Ligar vale depois de hermes gateway restart (no terminal, na próxima sessão).
   slow_turn_seconds:
     type: int
@@ -152,13 +151,15 @@ config_schema:
     description: >-
       auto = Auto mode (default): looks after every profile of this Hermes and does by itself what is safe and can be
       undone: it removes duplicate memory entries (keeps a copy of the file first), locks skills the curator keeps
-      rewriting, installs itself in profiles in use, cleans failed installs and frees old tool versions; the rest waits
-      for you. assist = Assisted: on its own it only removes duplicate memory entries; everything else waits for you.
+      rewriting, installs itself in profiles in use and keeps every profile's copy on the same code, cleans failed
+      installs, repairs the gateway's service when Hermes removed the Python it started, and frees old tool versions;
+      the rest waits for you. assist = Assisted: on its own it only removes duplicate memory entries; everything else waits for you.
       manual = Manual: only measures and proposes. Every action is in the history with its undo.
       — auto = Modo Auto (padrão): cuida de todos os perfis deste Hermes e faz sozinho o que é seguro e tem desfazer:
       remove entradas repetidas da memória (guarda uma cópia do arquivo antes), trava skills que o curador reescreve
-      sem parar, instala-se nos perfis em uso, limpa instalações que falharam e libera versões antigas de ferramentas;
-      o resto espera você. assist = Assistido: sozinho, só remove entradas repetidas da memória; o resto espera você.
+      sem parar, instala-se nos perfis em uso e mantém a cópia de cada perfil no mesmo código, limpa instalações que
+      falharam, repara o serviço do gateway quando o Hermes removeu o Python que ele iniciava e libera versões antigas
+      de ferramentas; o resto espera você. assist = Assistido: sozinho, só remove entradas repetidas da memória; o resto espera você.
       manual = Manual: só mede e propõe. Cada ação fica no histórico com o seu desfazer.
   runtime_guard:
     type: bool

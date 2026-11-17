@@ -1,6 +1,6 @@
 # Contributing to Atlas Evolution
 
-[![Checks](https://github.com/sesantanajr/hermes-atlas-evolution/actions/workflows/tests.yml/badge.svg)](https://github.com/sesantanajr/hermes-atlas-evolution/actions/workflows/tests.yml)
+[![Checks](https://github.com/sesantanajr/hermes-atlas-evolution/actions/workflows/checks.yml/badge.svg)](https://github.com/sesantanajr/hermes-atlas-evolution/actions/workflows/checks.yml)
 
 Thank you for considering a contribution. This project is a plugin for Hermes Agent that runs inside other people's agents, so three things matter more than anything else: it must never slow down or break a turn, it must never store what users say, and the operator decides what reaches the agent.
 
@@ -24,7 +24,7 @@ python -m compileall -q hermes_atlas_evolution dashboard __init__.py
 python -m hermes_atlas_evolution --home /tmp/evolution-test --hermes-version 0.23.1 update --list
 ```
 
-The unit test suite is maintained outside this repository, so the published plugin carries only what Hermes loads. GitHub Actions ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs `ruff` for undefined names, unused imports and syntax the oldest supported Python refuses, byte-compiles everything with Python 3.11, checks `install.sh` and runs a smoke test of the standalone CLI on Linux (Python 3.11 to 3.14), macOS and Windows. Compute dates with `experience.utc_datetime` or `utc_day`, never `datetime.fromtimestamp`, which refuses times before 1970 on Windows.
+The unit test suite is maintained outside this repository, so the published plugin carries only what Hermes loads. GitHub Actions ([`.github/workflows/checks.yml`](.github/workflows/checks.yml)) runs `ruff` for undefined names, unused imports and syntax the oldest supported Python refuses, byte-compiles everything with Python 3.11, checks `install.sh` and runs a smoke test of the standalone CLI on Linux (Python 3.11 to 3.14), macOS and Windows. Compute dates with `experience.utc_datetime` or `utc_day`, never `datetime.fromtimestamp`, which refuses times before 1970 on Windows.
 
 With a Hermes Agent 0.23.1 installation, also run the admission checks. `validate` must report the security scan as `safe`:
 

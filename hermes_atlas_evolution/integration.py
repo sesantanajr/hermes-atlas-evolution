@@ -11,12 +11,11 @@ import json
 import sqlite3
 import sys
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 
-from .advisory import TOOL, tool_handler
 from .cli import execute, safe_settings, setup
-from .memory import GLOBAL_SCOPE, MemoryStore, make_scope
 from .native_signals import HOOKS, observe_native
 from .operations import database, observe
 from .telemetry import ResearchTracker
@@ -29,6 +28,8 @@ def dm_scope(platform, user, chat, namespace="") -> str:
         raise ValueError("A platform, user and direct chat are required")
     if not isinstance(namespace, str) or len(namespace) > 300:
         raise ValueError("Invalid direct chat namespace")
+    from .memory import make_scope   # the 0.1 notes: imported only when used
+
     return make_scope(platform, json.dumps([namespace, chat, user], separators=(",", ":")))
 
 
@@ -47,8 +48,17 @@ def _private_scope(source, platform):
 
 
 def slash(home, raw_args: str, *, source=None, platform="", lang: str = "en") -> str:
-    """The legacy /evolution command. Every reply is in the profile's language."""
+    """The legacy /evolution command (deprecated in 0.10.0, removed in 0.11.0). Every reply is in the profile's
+    language, and ends with the notice."""
+    from .cli import deprecation
+
+    answer = _slash(home, raw_args, source=source, platform=platform, lang=lang)
+    return answer + "\n\n" + deprecation("memory", lang, name="/evolution")
+
+
+def _slash(home, raw_args: str, *, source=None, platform="", lang: str = "en") -> str:
     from .i18n import text
+    from .memory import MemoryStore
 
     try:
         scope = _private_scope(source, platform)
@@ -84,6 +94,8 @@ def shared_context(home, payload: dict, config: dict):
         return None
     if config.get("legacy_memory_commands") is not True or config.get("automatic_shared_recall") is not True:
         return None
+    from .memory import GLOBAL_SCOPE, MemoryStore
+
     with database(home, observer=True) as conn:
         mode = conn.execute("SELECT value FROM control WHERE key='mode'").fetchone()
         if mode and mode[0] == "conservative":
@@ -104,6 +116,7 @@ def shared_context(home, payload: dict, config: dict):
 
 SETTINGS_CHECK_SECONDS = 30   # how often a hook or the clock may look for a change of the settings
 RELOAD_KEYS = ("runtime_guard", "tool_hints")   # these decide which hooks are registered: next load of the plugin
+PLAYBOOK_TTL_SECONDS = 30   # the playbook as rendered is reused this long
 PLAYBOOK_BUSY_SECONDS = 0.25   # the lessons section reads on the prompt path: a busy database leaves it empty
 
 
@@ -265,6 +278,16 @@ class _Plugin:
         self._settings_checked = float("-inf")   # never: the monotonic clock may be under 30 s on a fresh machine
         self._settings_stamp = _settings_stamp(home)
         self._settings_lock = threading.Lock()
+        # (lang, templates only) -> (monotonic time, text, lesson ids shown): the playbook as last rendered
+        self._playbook: dict[tuple, tuple] = {}
+        from .selfcost import Meter
+
+        self.meter = Meter()   # what each hook costs the turn, measured where it runs (selfcost)
+
+    def forget_playbook(self) -> None:
+        """Render the playbook again at the next prompt (lessons or settings changed in this process)."""
+        with self.recent_lock:
+            self._playbook.clear()
 
     @property
     def lang(self) -> str:
@@ -383,6 +406,15 @@ class _Plugin:
         return entry[1] if entry is not None else None
 
     def after_tool(self, **payload):
+        from .operations import coalesced
+
+        try:
+            with coalesced(self.home):   # the call's usage counters and its outcome: one write transaction
+                self._after_tool(payload)
+        except Exception:   # the shared write at the end of the batch: an unusable store never fails the tool call
+            self.warn("tool_outcome")
+
+    def _after_tool(self, payload: dict) -> None:
         from .signals import classify, reclassify, record_tool
 
         try:
@@ -517,8 +549,43 @@ class _Plugin:
         finally:
             self._settings_lock.release()
 
+    def tick(self) -> None:
+        """The idle clock's nudge (every 10 minutes): settings first, this process's cost per hook written; then, with
+        the learning pass by hand only (autopilot_minutes 0), the retention the pass would run, once a UTC day."""
+        self.refresh_settings()
+        self.save_cost()
+        autopilot = getattr(self, "autopilot", None)
+        if autopilot is None or autopilot.interval_s:
+            return
+        import time
+
+        now = time.time()
+        if getattr(self, "_retained_day", None) == int(now // 86_400):
+            return
+        self._retained_day = int(now // 86_400)
+        try:
+            from .operations import _prune, database
+            from .reflector import prune_samples
+
+            with database(self.home) as conn:
+                _prune(conn, now)
+                prune_samples(conn, now=now)
+        except Exception:   # busy now, or the store is unusable: the next day tries again
+            self.warn("retention")
+
+    def save_cost(self) -> None:
+        try:
+            from .selfcost import persist
+            from .status import process_kind
+
+            persist(self.home, self.meter, kind=process_kind())
+        except Exception:   # a measurement that cannot be written is simply not shown
+            pass
+
     def apply_settings(self, config: dict, evolution: dict) -> None:
         from .signals import FeedbackSensor
+
+        self.forget_playbook()   # the language, the lessons mode or who the owner is may have changed
 
         previous = self.evolution
         with self.recent_lock:
@@ -612,10 +679,21 @@ class _Plugin:
             else:
                 others = surface == "gateway" and not self.served_owner(info.get("session_id")) \
                     and not (isinstance(origin, str) and origin.lower() in self.owner_platforms)
-            # Its own connection: WAL readers never wait for a writer. The short busy wait bounds the rare one-time
-            # schema step, so a prompt is never held up by this section; a busy database leaves it empty.
-            with database(self.home, timeout=PLAYBOOK_BUSY_SECONDS) as conn:
-                text = playbook.playbook(conn, lang=self.lang, chosen=shown, templates_only=others)
+            # Rendered at most every PLAYBOOK_TTL_SECONDS per kind of session: a prompt was built on every turn,
+            # each time opening the database. Lessons change in the learning pass or by the owner's decision, so a
+            # change reaches new prompts within the TTL (at once when this process made it).
+            key = (self.lang, bool(others))
+            with self.recent_lock:
+                cached = self._playbook.get(key)
+            if cached is not None and 0 <= time.monotonic() - cached[0] < PLAYBOOK_TTL_SECONDS:
+                text, shown = cached[1], list(cached[2])
+            else:
+                # Its own connection: WAL readers never wait for a writer. The short busy wait bounds the rare
+                # one-time schema step, so a prompt is never held up by this section; a busy database leaves it empty.
+                with database(self.home, timeout=PLAYBOOK_BUSY_SECONDS) as conn:
+                    text = playbook.playbook(conn, lang=self.lang, chosen=shown, templates_only=others)
+                with self.recent_lock:
+                    self._playbook[key] = (time.monotonic(), text, tuple(shown))
             session = info.get("session_id")
             if isinstance(session, str) and session:
                 with self.recent_lock:
@@ -662,13 +740,6 @@ class _Plugin:
             return json.dumps(localize(json.loads(payload), self.lang), ensure_ascii=False)
         except (TypeError, ValueError):
             return payload
-
-    def advisory_tool(self, args, **context):
-        if not self.advice:
-            return self.in_language(json.dumps({"error": "Planning permission has not been enabled for this Hermes profile."}))
-        if not self.served_owner(context.get("session_id")):
-            return self.in_language(json.dumps({"error": _OWNER_ONLY_TOOL}))
-        return self.in_language(tool_handler(args, **context))
 
     def playbook_tool(self, args, **context):
         if not self.advice:
@@ -742,6 +813,37 @@ def _start(plugin: _Plugin) -> None:
             plugin.warn(name)
 
 
+def _preload() -> None:
+    """In a long-running host (a gateway, the dashboard), import every module of the plugin soon after it loads.
+
+    Hermes replaces a plugin's files when it updates it (by hand, or in another profile by the Mode auto) while a
+    running gateway keeps the code it loaded. Most modules are imported on first use, so one first used after an
+    update would come from the new files and run next to old ones. Loaded at start, the process runs one version
+    until it is restarted, and `status` says when that version is behind the files."""
+    from .status import process_kind
+
+    if process_kind() == "cli":
+        return   # a short-lived process ends before an update could matter
+
+    def load():
+        import importlib
+        import pkgutil
+
+        package = sys.modules.get(__package__)
+        for info in pkgutil.iter_modules(getattr(package, "__path__", ()) or ()):
+            if info.name.startswith("_"):
+                continue   # __main__ runs the standalone command line
+            try:
+                importlib.import_module(f"{__package__}.{info.name}")
+            except Exception:   # a module that cannot load here is imported, and fails, where it is used
+                pass
+
+    try:
+        threading.Thread(target=load, name="hermes-atlas-evolution-preload", daemon=True).start()
+    except RuntimeError:   # the interpreter is shutting down
+        pass
+
+
 def _register_guard(ctx, plugin: _Plugin) -> None:
     """pre_tool_call, only with runtime_guard on: veto what would take Hermes down, and remember what the agent
     wrote (a rewrite by another plugin is then told from the agent's own command).
@@ -769,7 +871,7 @@ def _register_guard(ctx, plugin: _Plugin) -> None:
                                 trees=protected_trees(), own=(Path(__file__).resolve().parent.parent,),
                                 process=own_process(), home=Path.home(), profile=home, lang=plugin.lang,
                                 on_block=lambda kind: record_guard(home, kind))
-    ctx.register_hook("pre_tool_call", plugin.pre_tool)
+    ctx.register_hook("pre_tool_call", plugin.meter.wrap("pre_tool_call", plugin.pre_tool))
 
 
 def _register_session_marker(ctx) -> None:
@@ -813,30 +915,37 @@ def register(ctx):
                                     ", ".join(problems), evolution["lessons"])
     plugin = _Plugin(home, config, evolution)
     plugin.reflect = _reflector(ctx, evolution)
-    plugin.autopilot = Autopilot(home, lambda: autopilot_pass(home, plugin.reflect,
-                                                              cancelled=lambda: plugin.autopilot.stopped),
-                                 interval_minutes=evolution["autopilot_minutes"])
-    _start(plugin)
+    def learning_pass():
+        try:
+            return autopilot_pass(home, plugin.reflect, cancelled=lambda: plugin.autopilot.stopped)
+        finally:
+            plugin.forget_playbook()   # lessons may have been activated or retired: new prompts show them now
 
+    plugin.autopilot = Autopilot(home, learning_pass, interval_minutes=evolution["autopilot_minutes"])
+    _start(plugin)
+    _preload()
+
+    measured = plugin.meter.wrap   # every hook is timed where it runs: `status` says what the plugin costs the turn
     for hook, event in (("post_api_request", "api"), ("api_request_error", "api_error"), ("post_auxiliary_call", "aux")):
-        ctx.register_hook(hook, plugin.observer(event))
+        ctx.register_hook(hook, measured(hook, plugin.observer(event)))
     for hook in HOOKS:
-        ctx.register_hook(hook, plugin.native(hook))
+        ctx.register_hook(hook, measured(hook, plugin.native(hook)))
     _register_guard(ctx, plugin)
-    ctx.register_hook("on_session_finalize", plugin.session_finalized)
+    ctx.register_hook("on_session_finalize", measured("on_session_finalize", plugin.session_finalized))
     ctx.register_hook("on_kanban_dispatch_tick", plugin.poke)   # the gateway's own profile: a 60-second clock
-    ctx.register_hook("post_tool_call", plugin.after_tool)
-    ctx.register_hook("pre_llm_call", plugin.before_turn)
-    ctx.register_hook("post_llm_call", plugin.after_turn)
-    ctx.register_hook("on_session_end", plugin.turn_ended)
-    ctx.register_hook("on_skill_lifecycle", plugin.skill_event)
+    ctx.register_hook("post_tool_call", measured("post_tool_call", plugin.after_tool))
+    ctx.register_hook("pre_llm_call", measured("pre_llm_call", plugin.before_turn))
+    ctx.register_hook("post_llm_call", measured("post_llm_call", plugin.after_turn))
+    ctx.register_hook("on_session_end", measured("on_session_end", plugin.turn_ended))
+    ctx.register_hook("on_skill_lifecycle", measured("on_skill_lifecycle", plugin.skill_event))
     lessons_on = evolution["lessons"] != "off"
     if lessons_on and evolution["tool_hints"]:
         # Only with tool_hints on: while any plugin listens, Hermes reads every tool result for this hook and runs
         # it in a thread of its own. (`hermes plugins validate` notes it as declared but not registered.)
-        ctx.register_hook("transform_tool_result", plugin.with_lesson)
+        ctx.register_hook("transform_tool_result", measured("transform_tool_result", plugin.with_lesson))
     if lessons_on:   # with lessons off at load there is no surface at all; switching them off later empties it
-        ctx.register_system_prompt_section("hermes-atlas-evolution.playbook", plugin.playbook_section, max_chars=1400)
+        ctx.register_system_prompt_section("hermes-atlas-evolution.playbook",
+                                           measured("prompt_section", plugin.playbook_section), max_chars=1400)
         plugin.section_registered = True
     if plugin.legacy:
         ctx.register_command("evolution", plugin.command, description="Access legacy Evolution notes", args_hint="<command>")
@@ -848,16 +957,15 @@ def register(ctx):
 
         on_unload(close_observers)            # write queued counters and release the shared connection
         on_unload(plugin.autopilot.stop)      # stop the idle clock of this load before a reload starts another
+        on_unload(plugin.save_cost)           # what this load measured, before it goes
         plugin.clock_allowed = True
-        plugin.autopilot.on_tick = plugin.refresh_settings
+        plugin.autopilot.on_tick = plugin.tick
         plugin.autopilot.start_clock()        # only where it can be stopped: a host with on_unload
     plugin.tools_registered = plugin.advice
     if plugin.advice:
         # Only when the owner turned the agent's tools on (`agent_tools`): a toolset registered while off reads in
         # `hermes doctor` as "system dependency not met" on every Hermes. Turning them on later takes effect at the
         # next load of the plugin (`hermes gateway restart`); turning them off works at once (check_fn).
-        ctx.register_tool(name=TOOL["name"], toolset="hermes-atlas-evolution", schema=TOOL,
-                          handler=plugin.advisory_tool, check_fn=lambda: plugin.advice)
         ctx.register_tool(name=LESSONS_TOOL["name"], toolset="hermes-atlas-evolution", schema=LESSONS_TOOL,
                           handler=plugin.playbook_tool, check_fn=lambda: plugin.advice)
     ctx.register_cli_command("evolution", "Review Hermes health, learning and operations", setup,

@@ -60,7 +60,7 @@ hermes evolution ops similar "slow disk and long research"
 | `ops inspect` | Collects and explains the signals at this moment. It records no observation and changes nothing in Hermes. |
 | `ops tick [--notify-only]` | Collects, compares with history, records hypotheses and baselines, and carries out only the actions the settings allow. It also runs one evolution pass at most once an hour and returns it in the field `evolution`; the pass is claimed like the autopilot's, so the two never run at the same time, and it has a deadline of 200 seconds, inside the 300 seconds the `schedule-spec` script gives the tick. If the tick fails, it tries to end an active Linux trial. |
 | `ops history` | Shows up to 100 incidents and 100 trials with their state. |
-| `ops review [--days N]` | Cross-checks adaptive measurements, feedback and trial outcomes. Default 14 days, from 1 to 90. |
+| `ops review [--days N]` | Cross-checks adaptive measurements, feedback and trial outcomes. Default 14 days, from 1 to 35. |
 | `ops feedback CODE helpful\|dismissed\|reset` | Rates an adaptive alert that was already reported. |
 | `ops similar "<text>" [--limit 1..10]` | Looks up earlier incidents similar to the text. Default 5. |
 | `ops plan research\|delegation\|operations [--effort quick\|standard\|deep] [--durable]` | Returns a read-only plan. Default effort `standard`. |
@@ -121,7 +121,7 @@ The provider, the model and the prices above are placeholders.
 
 `ops plan` returns a read-only plan with a suggested budget: search queries, page extracts and parallel lanes for research, parallel lanes and review passes for delegation, and comparable samples for operations. Research plans include source discovery, evidence verification and a record of uncertainties. Delegation plans point to `delegate_task` for answers the current agent must wait for and to Kanban for work that must survive restarts (`--durable`).
 
-Turn on `agent_tools` in the Hermes plugin settings (or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.agent_tools true` from your own terminal), then run `hermes gateway restart`: the plugin registers `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` for the profile when it loads. Turning it off applies at once. Include `hermes-atlas-evolution` when the profile uses an explicit list of toolsets. The plan tool returns only the plan.
+Turn on `agent_tools` in the Hermes plugin settings (or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.agent_tools true` from your own terminal), then run `hermes gateway restart`: the plugin registers `hermes_atlas_evolution_lessons` for the profile when it loads. Turning it off applies at once. Include `hermes-atlas-evolution` when the profile uses an explicit list of toolsets. (The plan tool `hermes_atlas_evolution_plan` was removed in 0.10.0: it returned fixed text and read no data; `hermes evolution ops plan` still prints the same plan.)
 
 Reading shared Kanban boards requires `"inspect_shared_kanban": true`. Creating a card requires your own handoff authorization, independently of that key. The example assigns verifications to the profile `reviewer` on the existing board `ops`.
 

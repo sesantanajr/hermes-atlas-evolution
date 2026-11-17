@@ -41,7 +41,9 @@ SLICE_SESSIONS = 25
 # after the update) never redoes, and never undoes, the replay this one made.
 VERSION = "3"
 _COMPAT_VERSION = "2"
-SETTLED = frozenset({"done", "no_history", "unsupported_history"})
+# damaged_history: Hermes' own state.db is damaged where the replay must read it (SQLite says corrupt or not a
+# database): the replay ends there, so the lessons' baselines and tidying no longer wait for it for ever.
+SETTLED = frozenset({"done", "no_history", "unsupported_history", "damaged_history"})
 _TOTALS = ("sessions", "turns", "tool_calls", "failures", "skipped")
 # Daily tables the replay writes. Whole UTC days before the first observed day hold nothing else.
 _REPLAYED_DAILY = ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "skill_outcome_daily",
@@ -166,6 +168,18 @@ def _columns(source: sqlite3.Connection, table: str) -> set[str]:
 
 class _CursorMoved(Exception):
     """Another pass advanced the backfill while this slice was read: the slice is dropped, not counted twice."""
+
+
+def _busy(error: BaseException) -> bool:
+    from .operations import _busy as busy
+
+    return isinstance(error, sqlite3.Error) and busy(error)
+
+
+def _damaged(error: BaseException) -> bool:
+    from .operations import damaged
+
+    return damaged(error)
 
 
 class _Unreadable(Exception):
@@ -456,7 +470,9 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
         source.row_factory = sqlite3.Row
         try:
             present = {table: _columns(source, table) for table in _REQUIRED}
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as error:
+            if _damaged(error):
+                return _settle(home, "damaged_history", state["totals"], fingerprint, floor)
             return {"status": "unreadable", **state["totals"]}
         if any(not need <= present[table] for table, need in _REQUIRED.items()):
             return _settle(home, "unsupported_history", state["totals"], fingerprint, floor)
@@ -479,7 +495,9 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
                       AND (? IS NULL OR started_at > ? OR (started_at = ? AND id > ?))
                     ORDER BY started_at, id LIMIT ?""", (until, now, start, cursor_start, cursor_start, cursor_start,
                                                            cursor_id, slice_sessions)).fetchall()
-            except sqlite3.DatabaseError:
+            except sqlite3.DatabaseError as error:
+                if _damaged(error):
+                    return _settle(home, "damaged_history", totals, fingerprint, floor)
                 return {"status": "unreadable", **totals}
             if not rows:
                 return _settle(home, "done", totals, fingerprint, floor)
@@ -494,7 +512,11 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
                         try:
                             replay.session(source, dict(row), start=start, until=until)
                         except sqlite3.Error as error:
-                            raise _Unreadable from error
+                            if _busy(error):
+                                raise _Unreadable from error   # Hermes is writing: the slice is read again next pass
+                            # a damaged page in one session's messages: that session is skipped, never the backfill
+                            del jobs[mark:]
+                            replay.counts = {**counts, "skipped": counts["skipped"] + 1}
                         except Exception:   # one session that cannot be replayed is skipped, not the backfill
                             del jobs[mark:]
                             replay.counts = {**counts, "skipped": counts["skipped"] + 1}

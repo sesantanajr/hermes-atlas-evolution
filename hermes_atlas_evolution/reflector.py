@@ -191,17 +191,23 @@ def reflect(conn: sqlite3.Connection, ask, *, now: float, lang: str = "en", dail
         except Exception:   # provider, trust or network failure: try again on a later run
             failed += 1
             continue
-        conn.execute("DELETE FROM reflector_backoff WHERE signature=?", (row["signature"],))
         text = answer.get("lesson") if isinstance(answer, dict) else None
-        if not isinstance(answer, dict) or answer.get("applies") is not True or not isinstance(text, str):
+        if isinstance(text, str):
+            text = " ".join(text.split())
+        usable = isinstance(answer, dict) and answer.get("applies") is True and isinstance(text, str) \
+            and lessons.valid_text(text) and not _INJECTION.search(text) and "<" not in text \
+            and not lessons.generic_advice(text)
+        if not usable:
+            # Declined, or a draft that cannot be used: this failure waits SAMPLE_DAYS before it is asked about again.
+            # Forgetting the answer let the same most frequent failures take every call, day after day, and the
+            # others never got one.
             declined += 1
+            conn.execute("INSERT OR REPLACE INTO reflector_backoff VALUES (?, ?, ?, ?)",
+                         (row["signature"], row["failed_calls"], now, now + SAMPLE_DAYS * 86_400))
             conn.execute("DELETE FROM failure_sample WHERE signature=?", (row["signature"],))
+            conn.commit()
             continue
-        text = " ".join(text.split())
-        if not lessons.valid_text(text) or _INJECTION.search(text) or "<" in text or lessons.generic_advice(text):
-            declined += 1
-            conn.execute("DELETE FROM failure_sample WHERE signature=?", (row["signature"],))
-            continue
+        conn.execute("DELETE FROM reflector_backoff WHERE signature=?", (row["signature"],))
         lesson_id = lessons.add_reflected(conn, signature=row["signature"], tool=row["tool"], klass=row["klass"],
                                           hint=row["hint"], text=text, now=now)
         conn.execute("DELETE FROM failure_sample WHERE signature=?", (row["signature"],))

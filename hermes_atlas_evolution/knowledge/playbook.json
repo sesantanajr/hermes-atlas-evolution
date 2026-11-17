@@ -65,12 +65,12 @@
   "self_missing": {
    "level": "auto",
    "risk": "low",
-   "action": "hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable --ref <commit of this profile's copy>",
+   "action": "hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable",
    "undo": "hermes -p <profile> plugins remove hermes-atlas-evolution",
    "title_en": "A profile in use without Atlas Evolution",
    "title_pt": "Perfil em uso sem o Atlas Evolution",
-   "advice_en": "Its errors, skills and memory are not learned from. Auto mode installs it there by itself, at the same version as this profile (Hermes downloads it), only in a profile that never had it.",
-   "advice_pt": "Os erros, as skills e a memória dele não são aproveitados. No Modo Auto o plugin se instala lá sozinho, na mesma versão deste perfil (o Hermes baixa), só num perfil que nunca o teve."
+   "advice_en": "Its errors, skills and memory are not learned from. Auto mode installs it there by itself from the repository's default branch, not pinned to a commit (Hermes downloads it), only in a profile that never had it; from then on it keeps that copy on this profile's code.",
+   "advice_pt": "Os erros, as skills e a memória dele não são aproveitados. No Modo Auto o plugin se instala lá sozinho a partir do ramo principal do repositório, sem fixar um commit (o Hermes baixa), só num perfil que nunca o teve; daí em diante mantém essa cópia no código deste perfil."
   },
   "profile_idle": {
    "level": "advice",
