@@ -90,29 +90,34 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
 
 _TEXT = {
     "en": {
-        "title": "Atlas Evolution · {days}-day digest ({start} to {end}, UTC)",
-        "summary": "Summary", "turns": "Interactive turns", "of": "of", "failed": "failed", "interrupted": "interrupted",
-        "slow": "slow", "typical": "typical turn (p50) up to", "p95": "1 in 20 takes more than",
-        "tools": "Tool calls", "errors": "errors", "cost": "Estimated cost (Hermes accounting)",
+        "title": "Atlas Evolution · {days}-day digest ({span}, UTC)",
+        "summary": "Summary", "turns": "Interactive turns", "of": "of", "failed": ("{n} failed", "{n} failed"),
+        "interrupted": ("{n} interrupted", "{n} interrupted"), "slow": ("{n} slow", "{n} slow"), "turn_time": "Turn time", "typical": "half within", "p95": "1 in 20 takes more than",
+        "tools": "Tool calls", "errors": ("{n} error", "{n} errors"), "cost": "Estimated cost (Hermes accounting)",
         "feedback": "Owner signals", "corrections": "corrections", "reasks": "repeated questions", "thanks": "thanks",
-        "vs": "Versus the previous {days} days", "verdict": "verdict", "failures": "Failures that repeat",
-        "failures_none": "No recurring tool failure in this window.", "times": "times", "days": "days",
+        "vs": "Versus the previous {days} days", "verdict": "Verdict", "failures": "Failures that repeat",
+        "failures_none": "No recurring tool failure in this window.", "times": ("1 time", "{n} times"),
+        "days": ("1 day", "{n} days"),
         "lesson_state": "lesson", "no_lesson": "no lesson yet", "learning": "Self-improvement loop",
         "never_lesson": "never a lesson: the user's approval decides",
         "other_plugin": "never a lesson: another plugin caused it",
-        "reviews": "background reviews", "empty": "produced nothing", "review_tokens": "review tokens (input / output)",
+        "reviews": ("{n} background review", "{n} background reviews"), "empty": "produced nothing", "review_tokens": "review tokens (input / output)",
         "share": "of the uncached input and output tokens went to learning (approximate)",
-        "rewrites": "skill rewrites", "by_review": "by the automatic review", "skills": "skills",
+        "rewrites": ("{n} skill rewrite", "{n} skill rewrites"), "by_review": "by the automatic review",
+        "skills": ("{n} skill", "{n} skills"),
         "churn": "Skills rewritten the most", "flipflops": "flip-flops", "uses": "uses",
         "outcomes": "Skills by outcome", "outcomes_none": "Not enough turns with a loaded skill yet.",
         "whole_profile": "whole profile", "turns_word": "turns", "failed_short": "failed", "corrected_short": "corrected",
         "interrupted_short": "interrupted", "tool_errors_short": "with tool errors", "below": "worse than the profile",
-        "lessons": "Playbook", "active": "active", "candidate": "awaiting approval", "retired": "retired",
+        "lessons": "Lessons", "active": "active", "candidate": "awaiting approval", "retired": "retired",
+        "withdrawn": "dropped from the queue without a decision",
         "effect": "measured effect", "before": "before", "after": "after", "changes": "Changes and their measured effect",
         "changes_none": "No change evaluated yet.", "proposals": "Proposals awaiting a decision",
         "proposals_none": "Nothing is waiting for you.", "risk": "risk", "run": "apply with", "look": "next step",
+        "proposal": "Proposal", "trash": "approving moves `{place}` to the plugin's trash",
         "no_data": "not measured", "footer": "Aggregates only. No conversation text, tool output or memory content is stored.",
-        "decide": "Decide with `hermes evolution proposals approve <id>` or `reject <id>`.",
+        "decide": "Decide on each of these in your terminal with `hermes evolution proposals approve <id>` or "
+                  "`hermes evolution proposals reject <id>`.",
         "lessons_waiting": "{count} lessons await approval (decide on each in your terminal with `hermes evolution lessons review`)",
         "lessons_waiting_one": "1 lesson awaits approval (decide on it in your terminal with `hermes evolution lessons review`)",
         "health": "Hermes health", "sessions_line": "Sessions", "ended": "ended", "orphaned": "ended as orphans",
@@ -122,6 +127,7 @@ _TEXT = {
         "plugins_line": "Plugins of this process", "enabled": "enabled", "load_errors": "failed to load",
         "undeclared": "register hooks they do not declare", "overlap": "compete for", "first_wins": "only the first result counts",
         "guard_line": "Runtime guard", "vetoed": "commands vetoed", "gateway_stop": "gateway restart or kill",
+        "change_kinds": {"lesson": "lesson", "skill": "skill", "config": "setting"},
         "runtime_removal": "removal of the running Hermes", "plugin_settings": "changes to this plugin's settings",
         "health_none": "Nothing measured yet.",
         "external_line": "Failures caused by other plugins",
@@ -129,35 +135,40 @@ _TEXT = {
         "slow_line": "Slowest tools", "slow_mean": "s on average", "slow_calls": "calls",
         "approvals_decided": "decided by",
         "approvals_hint": "review those settings with `hermes config get`, and the `command_allowlist`; never approve everything",
-        "external_fault": "calls blocked because a plugin's pre_tool_call hung or failed",
+        "external_fault": "calls blocked because a plugin's `pre_tool_call` hung or failed",
         "external_rewrite": "commands rewritten by a plugin that then failed (never turned into lessons)",
         "research_line": "Web research", "research_turns": "turns", "research_slow": "over {limit} s",
         "research_errors": "errors in", "research_calls": "calls", "research_p95": "1 in 20 takes more than",
     },
     "pt": {
-        "title": "Atlas Evolution · resumo de {days} dias ({start} a {end}, UTC)",
-        "summary": "Resumo", "turns": "Turnos interativos", "of": "de", "failed": "falharam", "interrupted": "interrompidos",
-        "slow": "lentos", "typical": "turno típico (p50) até", "p95": "1 em cada 20 passa de",
-        "tools": "Chamadas de ferramentas", "errors": "erros", "cost": "Custo estimado (contabilidade do Hermes)",
+        "title": "Atlas Evolution · resumo de {days} dias ({span}, UTC)",
+        "summary": "Resumo", "turns": "Turnos interativos", "of": "de", "failed": ("{n} falhou", "{n} falharam"),
+        "interrupted": ("{n} interrompido", "{n} interrompidos"), "slow": ("{n} lento", "{n} lentos"), "turn_time": "Duração dos turnos", "typical": "metade até", "p95": "1 em cada 20 passa de",
+        "tools": "Chamadas de ferramentas", "errors": ("{n} erro", "{n} erros"), "cost": "Custo estimado (contabilidade do Hermes)",
         "feedback": "Sinais do dono", "corrections": "correções", "reasks": "perguntas repetidas", "thanks": "agradecimentos",
-        "vs": "Comparado aos {days} dias anteriores", "verdict": "veredito", "failures": "Falhas que se repetem",
-        "failures_none": "Nenhuma falha de ferramenta recorrente nesta janela.", "times": "vezes", "days": "dias",
+        "vs": "Comparado aos {days} dias anteriores", "verdict": "Veredito", "failures": "Falhas que se repetem",
+        "failures_none": "Nenhuma falha de ferramenta se repetiu neste período.", "times": ("1 vez", "{n} vezes"),
+        "days": ("1 dia", "{n} dias"),
         "lesson_state": "lição", "no_lesson": "sem lição ainda", "learning": "Ciclo de automelhoria",
         "never_lesson": "nunca vira lição: quem decide é a aprovação do usuário",
         "other_plugin": "nunca vira lição: outro plugin causou a falha",
-        "reviews": "revisões em segundo plano", "empty": "não produziram nada", "review_tokens": "tokens das revisões (entrada / saída)",
+        "reviews": ("{n} revisão em segundo plano", "{n} revisões em segundo plano"), "empty": "não produziram nada", "review_tokens": "tokens das revisões (entrada / saída)",
         "share": "dos tokens de entrada sem cache e de saída foram para o aprendizado (aproximado)",
-        "rewrites": "reescritas de skills", "by_review": "pela revisão automática", "skills": "skills",
+        "rewrites": ("{n} reescrita de skill", "{n} reescritas de skills"), "by_review": "pela revisão automática",
+        "skills": ("{n} skill", "{n} skills"),
         "churn": "Skills mais reescritas", "flipflops": "vai-e-volta", "uses": "usos",
         "outcomes": "Skills pelo resultado", "outcomes_none": "Ainda não há turnos suficientes com skill carregada.",
         "whole_profile": "perfil inteiro", "turns_word": "turnos", "failed_short": "falharam", "corrected_short": "corrigidos",
         "interrupted_short": "interrompidos", "tool_errors_short": "com erro de ferramenta", "below": "pior que o perfil",
-        "lessons": "Playbook", "active": "ativas", "candidate": "aguardando aprovação", "retired": "aposentadas",
+        "lessons": "Lições", "active": "ativas", "candidate": "aguardando aprovação", "retired": "aposentadas",
+        "withdrawn": "descartadas sem decisão (fila limpa)",
         "effect": "efeito medido", "before": "antes", "after": "depois", "changes": "Mudanças e o efeito medido",
         "changes_none": "Nenhuma mudança avaliada ainda.", "proposals": "Propostas aguardando decisão",
         "proposals_none": "Nada aguardando você.", "risk": "risco", "run": "aplique com", "look": "próximo passo",
+        "proposal": "Proposta", "trash": "aprovar move `{place}` para a lixeira do plugin",
         "no_data": "não medido", "footer": "Só agregados. Nenhum texto de conversa, saída de ferramenta ou conteúdo de memória é guardado.",
-        "decide": "Decida com `hermes evolution proposals approve <id>` ou `reject <id>`.",
+        "decide": "Decida cada uma no seu terminal com `hermes evolution proposals approve <id>` ou "
+                  "`hermes evolution proposals reject <id>`.",
         "lessons_waiting": "{count} lições aguardam aprovação (decida cada uma no seu terminal com `hermes evolution lessons review`)",
         "lessons_waiting_one": "1 lição aguarda aprovação (decida no seu terminal com `hermes evolution lessons review`)",
         "health": "Saúde do Hermes", "sessions_line": "Sessões", "ended": "encerradas", "orphaned": "terminaram como órfãs",
@@ -165,8 +176,9 @@ _TEXT = {
         "context_line": "Contexto por chamada do agente", "avg": "média de", "tokens": "tokens", "cached": "servido do cache",
         "calls": "chamadas", "compaction_line": "Compactações", "kept": "mantiveram", "of_context": "do contexto",
         "plugins_line": "Plugins deste processo", "enabled": "ativos", "load_errors": "falharam ao carregar",
-        "undeclared": "registram hooks que não declaram", "overlap": "disputam", "first_wins": "só o primeiro resultado vale",
-        "guard_line": "Guarda de runtime", "vetoed": "comandos barrados", "gateway_stop": "reinício ou kill do gateway",
+        "undeclared": "registram ganchos (hooks) que não declaram", "overlap": "disputam", "first_wins": "só o primeiro resultado vale",
+        "guard_line": "Proteção do Hermes", "vetoed": "comandos barrados", "gateway_stop": "reinício ou encerramento do gateway",
+        "change_kinds": {"lesson": "lição", "skill": "skill", "config": "configuração"},
         "runtime_removal": "remoção do Hermes em execução", "plugin_settings": "mudanças nas configurações deste plugin",
         "health_none": "Nada medido ainda.",
         "external_line": "Falhas causadas por outros plugins",
@@ -174,7 +186,7 @@ _TEXT = {
         "slow_line": "Ferramentas mais lentas", "slow_mean": "s em média", "slow_calls": "chamadas",
         "approvals_decided": "decididas por",
         "approvals_hint": "revise essas configurações com `hermes config get`, e o `command_allowlist`; nunca aprove tudo",
-        "external_fault": "chamadas bloqueadas porque o pre_tool_call de um plugin travou ou falhou",
+        "external_fault": "chamadas bloqueadas porque o `pre_tool_call` de um plugin travou ou falhou",
         "external_rewrite": "comandos reescritos por um plugin que depois falharam (nunca viram lição)",
         "research_line": "Pesquisas na web", "research_turns": "turnos", "research_slow": "acima de {limit} s",
         "research_errors": "erros em", "research_calls": "chamadas", "research_p95": "1 em cada 20 passa de",
@@ -188,6 +200,85 @@ _VERDICT = {
            "insufficient_data": "dados insuficientes", "effective": "funcionou", "ineffective": "não funcionou",
            "inconclusive": "inconclusivo", None: "pendente"},
 }
+
+
+# The failure classes of signals.CLASSES in words: a person never reads `missing_argument`.
+FAILURE_CLASSES = {
+    "en": {"missing_argument": "a required argument was missing", "approval_refused": "the approval was refused",
+           "locked_resource": "the owner locked what it tried to change",
+           "review_precondition": "the automatic review was not allowed to change it",
+           "edit_precondition": "it tried to edit a file without reading it first",
+           "edit_mismatch": "the text to replace was not found", "blocked_by_policy": "the safety policy blocked it",
+           "rate_limited": "the provider's rate limit", "timeout": "it took too long",
+           "missing_dependency": "a program or module was missing", "permission_denied": "permission was denied",
+           "auth": "authentication was refused", "backend_unavailable": "the service it needs was down",
+           "not_found": "what it asked for was not found", "limit_exceeded": "a size limit was exceeded",
+           "invalid_argument": "an argument was invalid", "code_exception": "the code raised an error",
+           "network": "the network failed", "command_failed": "the command failed", "other": "another error",
+           "plugin_fault": "another plugin hung or failed before the call",
+           "rewritten_command": "a command another plugin rewrote failed"},
+    "pt": {"missing_argument": "faltou um argumento obrigatório", "approval_refused": "a aprovação foi recusada",
+           "locked_resource": "o dono travou o que ele tentou mudar",
+           "review_precondition": "a revisão automática não podia mudar isso",
+           "edit_precondition": "tentou editar um arquivo sem lê-lo antes",
+           "edit_mismatch": "o trecho a trocar não foi encontrado", "blocked_by_policy": "a política de segurança barrou",
+           "rate_limited": "o limite de uso do provedor", "timeout": "demorou demais",
+           "missing_dependency": "faltou um programa ou módulo", "permission_denied": "faltou permissão",
+           "auth": "a autenticação foi recusada", "backend_unavailable": "o serviço de que precisa estava fora do ar",
+           "not_found": "o que pediu não foi encontrado", "limit_exceeded": "passou de um limite de tamanho",
+           "invalid_argument": "um argumento era inválido", "code_exception": "o código deu erro",
+           "network": "a rede falhou", "command_failed": "o comando falhou", "other": "outro erro",
+           "plugin_fault": "outro plugin travou ou falhou antes da chamada",
+           "rewritten_command": "um comando que outro plugin reescreveu falhou"},
+}
+
+
+def failure_words(klass, hint, lang: str = "en") -> str:
+    """faltou um argumento obrigatório (`servico`); o comando falhou (código de saída 1)."""
+    lang = lang if lang in FAILURE_CLASSES else "en"
+    words = FAILURE_CLASSES[lang].get(klass) or FAILURE_CLASSES[lang]["other"]
+    if not isinstance(hint, str) or not hint:
+        return words
+    if hint == "exit_signal":
+        return words + (" (encerrado por um sinal)" if lang == "pt" else " (ended by a signal)")
+    if hint.startswith("exit_") and hint[5:].isdigit():
+        return words + (f" (código de saída {hint[5:]})" if lang == "pt" else f" (exit code {hint[5:]})")
+    return f"{words} (`{hint}`)"
+
+
+# The measurements `experiments.compare` weighs, in words.
+_METRIC = {
+    "en": {"turn_failed_pct": "failed turns (%)", "turn_slow_pct": "slow turns (%)", "turn_mean_ms": "mean turn time (ms)",
+           "tool_error_pct": "tool errors (%)", "owner_corrections_per_100_turns": "your corrections per 100 turns",
+           "uncached_input_tokens_per_call": "uncached input tokens per call"},
+    "pt": {"turn_failed_pct": "turnos com falha (%)", "turn_slow_pct": "turnos lentos (%)",
+           "turn_mean_ms": "duração média do turno (ms)", "tool_error_pct": "erros de ferramenta (%)",
+           "owner_corrections_per_100_turns": "correções suas a cada 100 turnos",
+           "uncached_input_tokens_per_call": "tokens de entrada sem cache por chamada"},
+}
+# Where refused approvals came from (Hermes' session sources), in words; a chat platform keeps its name.
+_ORIGINS = {
+    "en": {"oneshot": "one-shot runs", "subagent": "subagents", "local": "your terminal", "cli": "your terminal",
+           "cron": "scheduled tasks", "tui": "your terminal", "desktop": "Desktop", "kanban": "Kanban"},
+    "pt": {"oneshot": "execuções únicas", "subagent": "subagentes", "local": "o seu terminal", "cli": "o seu terminal",
+           "cron": "tarefas agendadas", "tui": "o seu terminal", "desktop": "Desktop", "kanban": "Kanban"},
+}
+
+
+def _date(day: str, lang: str) -> str:
+    """2026-11-16 as 16/11/2026 in Portuguese."""
+    if lang == "pt" and isinstance(day, str) and len(day) == 10 and day[4] == day[7] == "-":
+        return f"{day[8:10]}/{day[5:7]}/{day[:4]}"
+    return str(day)
+
+
+def _span(start: str, end: str, lang: str) -> str:
+    """The window of the title: 10/11 a 16/11/2026 in Portuguese, 2026-11-10 to 2026-11-16 in English."""
+    if lang != "pt":
+        return f"{start} to {end}"
+    first, last = _date(start, lang), _date(end, lang)
+    return f"{first[:5] if first[6:] == last[6:] else first} a {last}"
+
 
 
 _STATUS = {
@@ -218,7 +309,9 @@ _KIND = {
            "self_missing": "Profile in use without Atlas Evolution", "profile_idle": "Profile unused for 30 days",
            "skills_unused": "Skills unused for 30 days", "skills_duplicate": "The same skill under two names",
            "skills_similar": "Skills that look like the same job", "skills_shared": "Skills copied into many profiles",
-           "plugin_obsolete": "Archived or unmaintained plugin"},
+           "plugin_obsolete": "Archived or unmaintained plugin",
+           "doctor_cache": "Hermes doctor: large cache folder", "doctor_checkpoints": "Rollback snapshots above the cap",
+           "doctor_issue": "Hermes doctor lists a problem", "doctor_security": "Hermes doctor: security problem"},
     "pt": {"lesson": "Ativar lição", "lesson_retire": "Aposentar lição que não ajudou",
            "skill_lock": "Travar skill reescrita em excesso", "skill_review": "Revisar reescritas nunca usadas",
            "skill_archive": "Arquivar skill nunca usada", "skill_rollback": "Desfazer alteração de skill que piorou",
@@ -241,7 +334,11 @@ _KIND = {
            "plugin_update": "Versão revisada mais nova de plugin", "self_missing": "Perfil em uso sem o Atlas Evolution",
            "profile_idle": "Perfil sem uso há 30 dias", "skills_unused": "Skills sem uso há 30 dias",
            "skills_duplicate": "A mesma skill com dois nomes", "skills_similar": "Skills que parecem fazer o mesmo trabalho",
-           "skills_shared": "Skills copiadas em vários perfis", "plugin_obsolete": "Plugin arquivado ou sem manutenção"},
+           "skills_shared": "Skills copiadas em vários perfis", "plugin_obsolete": "Plugin arquivado ou sem manutenção",
+           "doctor_cache": "Checagem do Hermes: pasta de cache grande",
+           "doctor_checkpoints": "Pontos de restauração acima do limite",
+           "doctor_issue": "A checagem do Hermes (`hermes doctor`) aponta um problema",
+           "doctor_security": "Checagem do Hermes: problema de segurança"},
 }
 _ADVISORY = ("skill_review", "investigate_failure", "investigate_latency", "config_review", "skill_outcome",
              "session_lifecycle", "context_weight", "compaction", "plugin_health", "plugin_conflict", "approval_policy",
@@ -254,6 +351,11 @@ def _number(value, lang: str, digits: int = 0) -> str:
         return _TEXT[lang]["no_data"]
     text = f"{value:,.{digits}f}"
     return text.replace(",", "X").replace(".", ",").replace("X", ".") if lang == "pt" else text
+
+
+def _plural(entry, count, lang: str) -> str:
+    """A (singular, plural) pair with the count written for a person."""
+    return (entry[0] if count == 1 else entry[1]).format(n=_number(count, lang))
 
 
 def _seconds(ms, lang: str) -> str:
@@ -298,7 +400,8 @@ def _health(report: dict, lang: str) -> list[str]:
             f"{t['slow_calls']})" for item in slowest))
     refusals = health.get("approvals") or {}
     if refusals.get("refused"):
-        origins = ", ".join(f"{name} {_number(count, lang)}" for name, count in list(refusals["by_origin"].items())[:5])
+        origins = ", ".join(f"{_ORIGINS[lang].get(name, f'`{name}`')} {_number(count, lang)}"
+                            for name, count in list(refusals["by_origin"].items())[:5])
         line = (f"- **{t['approvals_line']}:** {_number(refusals['refused'], lang)} ({origins}) · "
                 f"{_number(refusals['unattended'], lang)} {t['approvals_unattended']}")
         if refusals["unattended"]:
@@ -322,8 +425,40 @@ def _health(report: dict, lang: str) -> list[str]:
     return lines
 
 
+def _step(item: dict, lang: str) -> str:
+    """What approving a proposal runs, as the owner would type it, or its next step; never the plugin's own codes."""
+    from .explain import command_text, plan
+
+    t = _TEXT[lang]
+    found = plan(item)
+    if found is not None:
+        text = command_text(found[0], lang)
+        if text.startswith("hermes "):
+            return f"{t['run']}: `{text}`"
+        args = list(found[0])
+        profile = str(args[0])[1:] if args and str(args[0]).startswith("@") else "default"
+        folder = str(args[-1])
+        place = f"{profile}/{folder}" if folder.startswith("cache/") else f"{profile}/plugins/{folder}"
+        return t["trash"].format(place=place)   # the plugin's trash, said in words
+    command = item.get("command")
+    if isinstance(command, str) and command.strip() and not command.startswith("__"):
+        return f"{t['look']}: `{command}`"
+    return ""
+
+
+def subject_words(item: dict, lang: str = "en") -> str:
+    """What a proposal is about, for a person: a finding of Hermes' doctor names its profile ("perfil `work`"), not
+    its internal key (`work/security.GHSA-x`); anything else shows its subject."""
+    subject = str(item.get("subject") or "")
+    if str(item.get("kind") or "").startswith("doctor_"):
+        return ("perfil" if lang == "pt" else "profile") + f" `{subject.split('/', 1)[0]}`"
+    return f"`{subject}`"
+
+
 def _proposal_lines(report: dict, lang: str) -> list[str]:
     """Lessons awaiting approval on one line (their text is in `lessons list`), then the other proposals."""
+    from .explain import describe
+
     t = _TEXT[lang]
     lines = ["", "## " + t["proposals"], ""]
     waiting = [item for item in report["proposals"] if item["kind"] == "lesson"]
@@ -331,13 +466,16 @@ def _proposal_lines(report: dict, lang: str) -> list[str]:
         listed = ", ".join(f"#{item['evidence'].get('lesson_id', item['id'])} `{item['subject']}`" for item in waiting[:10])
         heading = t["lessons_waiting_one"] if len(waiting) == 1 else t["lessons_waiting"].format(count=len(waiting))
         lines.append(f"- {heading}: {listed}")
-    if report["proposals"]:
-        for item in [entry for entry in report["proposals"] if entry["kind"] != "lesson"][:20]:
-            step = t["look"] if item["kind"] in _ADVISORY else t["run"]
-            lines.append(f"- #{item['id']} [{t['risk']}: {_RISK[lang][item['risk']]}] {_KIND[lang].get(item['kind'], item['kind'])}"
-                         f" · `{item['subject']}`" + (f" · {step}: `{item['command']}`" if item.get("command") else ""))
+    others = [entry for entry in report["proposals"] if entry["kind"] != "lesson"]
+    for item in others[:20]:
+        title = describe(item, lang)["title"]   # the title the Proposals screens show
+        step = _step(item, lang)
+        lines.append(f"- {t['proposal']} #{item['id']} [{t['risk']}: {_RISK[lang].get(item['risk'], item['risk'])}] "
+                     f"{title if title != item['kind'] else _KIND[lang].get(item['kind'], item['kind'])} · "
+                     f"{subject_words(item, lang)}" + (f" · {step}" if step else ""))
+    if others:   # lessons are decided with `lessons review` (said above); every other proposal with this
         lines += ["", t["decide"]]
-    else:
+    if not report["proposals"]:
         lines.append(t["proposals_none"])
     return lines
 
@@ -348,13 +486,14 @@ def markdown(report: dict, lang: str = "en") -> str:
     t, verdicts = _TEXT[lang], _VERDICT[lang]
     window = report["window"]
     turns, tools, feedback = report["turns"]["interactive"], report["tools"], report["owner_feedback"]
-    lines = ["# " + t["title"].format(days=window["days"], start=window["from_utc"], end=window["to_utc"]), "",
+    lines = ["# " + t["title"].format(days=window["days"], span=_span(window["from_utc"], window["to_utc"], lang)), "",
              "## " + t["summary"], ""]
-    lines.append(f"- **{t['turns']}:** {_number(turns['turns'], lang)} · {_number(turns['failed'], lang)} {t['failed']}"
-                 f" · {_number(turns['interrupted'], lang)} {t['interrupted']} · {_number(turns['slow'], lang)} {t['slow']}")
+    lines.append(f"- **{t['turns']}:** {_number(turns['turns'], lang)} · {_plural(t['failed'], turns['failed'], lang)}"
+                 f" · {_plural(t['interrupted'], turns['interrupted'], lang)} · {_plural(t['slow'], turns['slow'], lang)}")
     if turns["turns"]:
-        lines.append(f"- **p50/p95:** {t['typical']} {_seconds(turns['p50_ms'], lang)} · {t['p95']} {_seconds(turns['p95_ms'], lang)}")
-    lines.append(f"- **{t['tools']}:** {_number(tools['calls'], lang)} · {_number(tools['errors'], lang)} {t['errors']}"
+        lines.append(f"- **{t['turn_time']}:** {t['typical']} {_seconds(turns['p50_ms'], lang)} · {t['p95']} "
+                     f"{_seconds(turns['p95_ms'], lang)}")
+    lines.append(f"- **{t['tools']}:** {_number(tools['calls'], lang)} · {_plural(t['errors'], tools['errors'], lang)}"
                  + (f" ({_number(tools['error_pct'], lang, 1)}%)" if tools["error_pct"] is not None else ""))
     cost = report.get("native_cost", {}).get("estimated_cost_usd")
     if cost is not None:
@@ -366,27 +505,27 @@ def markdown(report: dict, lang: str = "en") -> str:
     if comparison["verdict"]["metrics"]:
         for name, values in comparison["verdict"]["metrics"].items():
             mark = "▲" if name in comparison["verdict"]["worse"] else "▼" if name in comparison["verdict"]["better"] else "·"
-            lines.append(f"- `{name}`: {_number(values['before'], lang, 1)} → {_number(values['after'], lang, 1)} {mark}")
+            lines.append(f"- {_METRIC[lang].get(name, f'`{name}`')}: {_number(values['before'], lang, 1)} → "
+                         f"{_number(values['after'], lang, 1)} {mark}")
     lines.append(f"- **{t['verdict']}:** {verdicts[comparison['verdict']['verdict']]}")
 
     lines += ["", "## " + t["failures"], ""]
     if report["recurring_failures"]:
         for item in report["recurring_failures"][:8]:
-            detail = f" (`{item['hint']}`)" if item["hint"] else ""
             if item["class"] == "approval_refused":
                 state = t["never_lesson"]
             elif item["class"] in ("plugin_fault", "rewritten_command"):
                 state = t["other_plugin"]
             else:
                 state = f"{t['lesson_state']}: {_STATUS[lang].get(item['lesson'], t['no_lesson'])}"
-            lines.append(f"- `{item['tool']}` · {item['class']}{detail}: {item['count']} {t['times']}, {item['days']} {t['days']}"
-                         f" · {state}")
+            lines.append(f"- `{item['tool']}` · {failure_words(item['class'], item['hint'], lang)}: "
+                         f"{_plural(t['times'], item['count'], lang)}, {_plural(t['days'], item['days'], lang)} · {state}")
     else:
         lines.append(t["failures_none"])
 
     reviews, skills = report["self_improvement"]["background_reviews"], report["self_improvement"]["skills"]
     lines += ["", "## " + t["learning"], ""]
-    lines.append(f"- {_number(reviews['reviews'], lang)} {t['reviews']}"
+    lines.append(f"- {_plural(t['reviews'], reviews['reviews'], lang)}"
                  + (f" · {_number(reviews['empty_pct'], lang, 1)}% {t['empty']}" if reviews["empty_pct"] is not None else ""))
     if reviews["reviews"]:
         lines.append(f"- {t['review_tokens']}: {_number(reviews['input_tokens'], lang)} / {_number(reviews['output_tokens'], lang)}")
@@ -394,8 +533,8 @@ def markdown(report: dict, lang: str = "en") -> str:
     if share is not None:
         lines.append(f"- {_number(share, lang, 1)}% {t['share']}")
     by_review = skills["rewrites_by_actor"].get("curator", 0)
-    lines.append(f"- {_number(skills['rewrites'], lang)} {t['rewrites']} ({_number(by_review, lang)} {t['by_review']})"
-                 f" · {skills['skills_rewritten']} {t['skills']}")
+    lines.append(f"- {_plural(t['rewrites'], skills['rewrites'], lang)} ({_number(by_review, lang)} {t['by_review']})"
+                 f" · {_plural(t['skills'], skills['skills_rewritten'], lang)}")
     if skills["top"]:
         lines += ["", "### " + t["churn"], ""]
         for item in skills["top"][:5]:
@@ -421,9 +560,11 @@ def markdown(report: dict, lang: str = "en") -> str:
 
     playbook = report["lessons"]
     counts = {status: sum(item["status"] == status for item in playbook) for status in ("active", "candidate", "quarantined", "retired")}
+    withdrawn = sum(item["status"] == "retired" and item.get("verdict") == "withdrawn" for item in playbook)
     lines += ["", "## " + t["lessons"], "",
               f"- {t['active']}: {counts['active']} · {t['candidate']}: {counts['candidate'] + counts['quarantined']}"
-              f" · {t['retired']}: {counts['retired']}"]
+              f" · {t['retired']}: {counts['retired'] - withdrawn}"
+              + (f" · {t['withdrawn']}: {withdrawn}" if withdrawn else "")]
     for item in [entry for entry in playbook if entry["status"] == "active"][:8]:
         effect = verdicts[item["verdict"]]
         numbers = (f" ({t['before']} {_number(item['rate_before'], lang, 3)} → {t['after']} {_number(item['rate_after'], lang, 3)})"
@@ -434,7 +575,8 @@ def markdown(report: dict, lang: str = "en") -> str:
     measured = [item for item in report["changes"] if item["verdict"]]
     if measured:
         for item in measured[:8]:
-            lines.append(f"- {item['kind']} `{item['subject']}` ({utc_day(item['at'])}): {verdicts[item['verdict']]}")
+            lines.append(f"- {t['change_kinds'].get(item['kind'], item['kind'])} `{item['subject']}` "
+                         f"({_date(utc_day(item['at']), lang)}): {verdicts[item['verdict']]}")
     else:
         lines.append(t["changes_none"])
 

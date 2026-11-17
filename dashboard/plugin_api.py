@@ -120,10 +120,123 @@ def current_settings(home: Path, runtime_config: dict) -> dict:
     return _module("admin").current_settings(home, runtime_config)
 
 
+# What the panel says when a request is refused before the plugin's own rules run (the panel maps the same codes).
+_MESSAGES = {
+    "en": {"busy": "The Evolution store is busy right now. Try again in a moment.",
+           "open_dashboard": "Read-only: this dashboard has no login, so decisions are taken in the terminal.",
+           "shared_token": "Read-only: this session uses the dashboard's shared token, not a login.",
+           "other_profile": "This profile is decided from the dashboard's own profile, with a login.",
+           "missing_header": "The request did not come from the panel; reload the page and try again.",
+           "managed": "Your administrator manages this, so it cannot be changed here.",
+           "refused": "It was not done"},
+    "pt": {"busy": "O banco do Evolution está ocupado agora. Tente de novo em instantes.",
+           "open_dashboard": "Só leitura: este dashboard não tem login, então as decisões ficam no terminal.",
+           "shared_token": "Só leitura: esta sessão usa o token compartilhado do dashboard, não um login.",
+           "other_profile": "Este perfil se decide pelo perfil do próprio dashboard, com login.",
+           "missing_header": "O pedido não veio do painel; recarregue a página e tente de novo.",
+           "managed": "O seu administrador gerencia isto, então não dá para mudar aqui.",
+           "refused": "Não foi feito"},
+}
+
+
+def message(code: str, lang: str) -> str:
+    """The sentence for a refusal code, in `lang` (English for an unknown language)."""
+    texts = _MESSAGES.get(lang, _MESSAGES["en"])
+    return texts.get(code) or _MESSAGES["en"].get(code) or code
+
+
+def panel_language(setting, hint=None, profile=None, chosen=None) -> str:
+    """The language the panel speaks for a profile: the plugin's own `language` setting when it is `en` or `pt`;
+    with `auto` (or nothing set), the language chosen for the profile in Hermes (`chosen`: HERMES_LANGUAGE or
+    display.language), then the dashboard's language (`hint`, what the panel sends as `lang`; the dashboard says
+    English until someone picks another), then the profile's language as Hermes resolves it with the machine's locale
+    (`profile`), then English."""
+    i18n = _module("i18n")
+    return (i18n.normalize(setting) or i18n.normalize(chosen) or i18n.normalize(hint) or i18n.normalize(profile)
+            or "en")
+
+
+def profile_language(home: Path, runtime_config: dict, hint=None) -> str:
+    """panel_language for the profile at `home`, read from its settings. Never raises."""
+    i18n = _module("i18n")
+    config = runtime_config if isinstance(runtime_config, dict) else {}
+    try:
+        setting = current_settings(home, config).get("language")
+    except Exception:   # a broken settings file still gets an answer in a language
+        setting = None
+    try:
+        resolved = i18n.resolve(None, config)
+        chosen = i18n.normalize(i18n._hermes_env_language()) or i18n.normalize(i18n._display_language(config))
+    except Exception:
+        resolved = chosen = None
+    return panel_language(setting, hint, resolved, chosen)
+
+
+def localized_result(result, lang: str):
+    """A decision's result with its sentences in `lang`: a `reason` (or a skipped item's) that is a sentence, as the
+    plugin's own refusals are, is translated; a reason that is a code stays a code (the panel words it)."""
+    if not isinstance(result, dict):
+        return result
+    i18n = _module("i18n")
+
+    def sentence(value):
+        return i18n.text(value, lang) if isinstance(value, str) and " " in value else value
+
+    result = dict(result)
+    if "reason" in result:
+        result["reason"] = sentence(result["reason"])
+    if isinstance(result.get("skipped"), list):
+        result["skipped"] = [{**item, "reason": sentence(item.get("reason"))} if isinstance(item, dict) else item
+                             for item in result["skipped"]]
+    return result
+
+
+def decide_reply(home: Path, runtime_config: dict, body, *, now: float, hint=None, writer=None) -> tuple[int, dict]:
+    """(HTTP status, JSON body) of one decision the route already allowed: the plugin's refusals and errors in the
+    profile's language (panel_language), never as raw text of another language."""
+    import sqlite3
+
+    i18n = _module("i18n")
+    lang = profile_language(home, runtime_config, hint)
+    try:
+        return 200, localized_result(decide(home, runtime_config, body, now=now, lang=lang, writer=writer), lang)
+    except PermissionError as error:   # an administrator-managed key or a managed install
+        detail = i18n.text(" ".join(str(error).split())[:200], lang)
+        text = message("managed", lang) + (f" ({detail})" if detail else "")
+        return 403, {"error": "managed", "message": text}
+    except (KeyError, TypeError, ValueError) as error:
+        detail = str(error.args[0]) if isinstance(error, KeyError) and error.args else str(error)
+        if " " not in detail:   # a missing key or a bare value: the body was not a decision
+            text = i18n.text("Invalid decision", lang)
+        else:   # the plugin's sentences are catalogued; anything else (Hermes' own output) is quoted as it came
+            text = i18n.text(detail, lang)
+            if text == detail and lang != "en":
+                text = f"{message('refused', lang)}: {detail}"
+        return 400, {"error": "invalid", "message": text}
+    except (OSError, sqlite3.Error):
+        return 503, {"error": "busy", "message": message("busy", lang)}
+
+
+def environment_extra(home: Path) -> dict:
+    """What the Environment tab shows beside its text: Hermes' own doctor per profile (0.9.0), when the lead
+    profile's last look recorded it. Never raises; empty when there is nothing."""
+    try:
+        found = _module("status")._environment(home)
+    except Exception:
+        return {}
+    doctor = found.get("doctor") if isinstance(found, dict) else None
+    if not isinstance(doctor, dict):
+        return {}
+    return {"doctor": {str(name): entry for name, entry in doctor.items() if isinstance(entry, dict)}}
+
+
 def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang: str | None = None,
-             days: int = 7, can_decide: bool = False, decide_reason: str = "open_dashboard") -> dict:
+             days: int = 7, can_decide: bool = False, decide_reason: str = "open_dashboard",
+             ui_lang: str | None = None) -> dict:
     """Everything the panel shows, for one profile. Raises OSError or sqlite3.Error when the store is busy.
-    The sender ids of the chat channels are included only for a request that may decide (the owner's login)."""
+    The sender ids of the chat channels are included only for a request that may decide (the owner's login).
+    `lang` forces a language; otherwise the profile's own setting decides and, with `auto`, `ui_lang` (the
+    dashboard's language), then the profile's (panel_language)."""
     cli, evolve, status, report = _module("cli"), _module("evolve"), _module("status"), _module("report")
     lessons, proposals, experience = _module("lessons"), _module("proposals"), _module("experience")
     decisions = _module("decisions")
@@ -131,7 +244,8 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
     days = days if isinstance(days, int) and 1 <= days <= 35 else 7
     config, settings_problems = cli.safe_settings(home, runtime_config)
     opts = evolve.options(config, runtime_config, strict=False, problems=settings_problems)
-    lang = lang if lang in ("en", "pt") else opts["language"]
+    values = current_settings(home, runtime_config)
+    lang = lang if lang in ("en", "pt") else panel_language(values.get("language"), ui_lang, opts["language"])
     state = status.build(home, now=now, config=config, runtime_config=runtime_config)
     digest = report.build(home, now=now, days=days, lang=lang, rates=config.get("rates_usd_per_million", {}),
                           own_transform=opts["tool_hints"] and opts["lessons"] != "off")
@@ -146,7 +260,6 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
     channels = status.chat_senders(home, since=now - 30 * 86_400, owners=opts["owner_sender_ids"],
                                    platforms=opts["owner_platforms"])
     suggestions = status.owner_suggestions(channels, owners=opts["owner_sender_ids"], platforms=opts["owner_platforms"])
-    values = current_settings(home, runtime_config)
     recommended = _module("admin").recommended_settings(values, suggestions) if can_decide else None
     if not can_decide:   # counts only, as `status` shows them
         channels = [{**channel, "senders": [{"id": None, "sessions": item["sessions"], "owner": item["owner"]}
@@ -173,6 +286,7 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
         "owner": {"channels": channels, "suggestions": suggestions},
         "status_md": status.markdown(state, lang), "report_md": report.markdown(digest, lang), "health_md": health_md,
         "environment_md": status.environment_markdown(home, lang, mode=opts["mode"]),
+        "environment": environment_extra(home),
         "commands": {"menu": f"{hermes} evolution", "review": f"{hermes} evolution lessons review",
                      "learn": f"{hermes} evolution learn",
                      "approve_lesson": f"{hermes} evolution lessons approve {{id}}",
@@ -259,45 +373,47 @@ def _router():
     router = APIRouter()
 
     @router.get("/snapshot")
-    def get_snapshot(request: Request, days: int = Query(7, ge=1, le=35), lang: str = Query("", max_length=2)):
+    def get_snapshot(request: Request, days: int = Query(7, ge=1, le=35), lang: str = Query("", max_length=8)):
         # A plain def: FastAPI runs it in a worker thread, so reading the store never blocks the event loop.
+        # `lang` is the dashboard's language: it counts only where the profile's own language setting is `auto`.
         import sqlite3
 
         i18n = _module("i18n")
         try:
             home, config = _current(_target(request))
         except ValueError as error:
-            return JSONResponse({"error": "invalid", "message": i18n.text(str(error), lang or "en")}, status_code=400)
+            told = i18n.normalize(lang) or "en"
+            return JSONResponse({"error": "invalid", "message": i18n.text(str(error), told)}, status_code=400)
         allowed, why = _policy(request)
         if allowed and not _ticket_allows(request, home):
             allowed, why = False, "other_profile"
         try:
-            return snapshot(home, now=time.time(), runtime_config=config, lang=lang or None, days=days,
+            return snapshot(home, now=time.time(), runtime_config=config, ui_lang=lang or None, days=days,
                             can_decide=allowed, decide_reason=why)
         except (OSError, sqlite3.Error):
-            return JSONResponse({"error": "busy"}, status_code=503)
+            told = profile_language(home, config, lang)
+            return JSONResponse({"error": "busy", "message": message("busy", told)}, status_code=503)
 
     @router.post("/decide")
-    def post_decide(request: Request, body: dict = Body(...), lang: str = Query("", max_length=2)):
-        import sqlite3
-
-        allowed, why = _policy(request)
-        if not allowed:
-            return JSONResponse({"error": why}, status_code=403)
-        if request.headers.get("x-atlas-evolution") != "1":
-            return JSONResponse({"error": "missing_header"}, status_code=403)
+    def post_decide(request: Request, body: dict = Body(...), lang: str = Query("", max_length=8)):
         i18n = _module("i18n")
+        allowed, why = _policy(request)
+        told = i18n.normalize(lang) or "en"   # until the profile is known
+        if not allowed:
+            return JSONResponse({"error": why, "message": message(why, told)}, status_code=403)
+        if request.headers.get("x-atlas-evolution") != "1":
+            return JSONResponse({"error": "missing_header", "message": message("missing_header", told)}, status_code=403)
         try:
             home, config = _current(_target(request))
-            if not _ticket_allows(request, home):
-                return JSONResponse({"error": "other_profile"}, status_code=403)
-            return decide(home, config, body, now=time.time(), lang=lang if lang in ("en", "pt") else "en")
-        except (KeyError, TypeError, ValueError) as error:
-            return JSONResponse({"error": "invalid", "message": i18n.text(str(error), lang or "en")}, status_code=400)
-        except PermissionError as error:   # an administrator-managed key or a managed install
-            return JSONResponse({"error": "managed", "message": str(error)[:200]}, status_code=403)
-        except (OSError, sqlite3.Error):
-            return JSONResponse({"error": "busy"}, status_code=503)
+        except ValueError as error:
+            return JSONResponse({"error": "invalid", "message": i18n.text(str(error), told)}, status_code=400)
+        except OSError:
+            return JSONResponse({"error": "busy", "message": message("busy", told)}, status_code=503)
+        if not _ticket_allows(request, home):
+            told = profile_language(home, config, lang)
+            return JSONResponse({"error": "other_profile", "message": message("other_profile", told)}, status_code=403)
+        code, reply = decide_reply(home, config, body, now=time.time(), hint=lang or None)
+        return reply if code == 200 else JSONResponse(reply, status_code=code)
 
     return router
 

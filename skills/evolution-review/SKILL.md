@@ -5,44 +5,50 @@ description: Run the Atlas Evolution review with the owner - read the digest, ex
 
 # Evolution review
 
-Atlas Evolution measures this profile and proposes improvements. In its default Mode auto it applies by itself
-only safe changes that can be undone (identical memory copies, locks of skills the curator keeps rewriting, its own
-install in profiles that never had it, cleaning failed installs, a weekly `hermes pm gc`), each in the history with
-its undo; everything else waits for the owner. This skill is the conversation in which the owner decides. You inform
-and recommend; the owner runs the decisions in their own terminal (`hermes evolution`, screen 14 for every profile).
+Atlas Evolution measures this profile and proposes improvements. In Auto mode (the default) it applies by itself only
+safe changes that can be undone: it removes duplicate memory entries (keeps a copy of the file first), locks skills the
+curator keeps rewriting, installs itself in profiles that never had it, cleans failed installs and runs a weekly
+`hermes pm gc`, each in the history with its undo; everything else waits for the owner. In this conversation you
+inform and recommend; the owner decides in their own terminal. Answer in the owner's language (Brazilian Portuguese
+or English), with the plugin's names for things: "Auto mode / Modo Auto", "Assisted / Assistido", "Manual / Manual",
+"lessons waiting for you / lições esperando você", "learning pass / rodada de aprendizado", "built-in template /
+padrão fixo", "Runtime guard / Proteção do Hermes", "Hermes doctor / checagem do Hermes (`hermes doctor`)", "the menu
+/ o menu". In Portuguese, never write English words inside the sentence; quote Hermes' own English text as such
+("texto do Hermes, em inglês").
 
 ## Steps
 
-1. Check that the plugin is working here with `hermes evolution status` (add `--lang pt` for Portuguese). It
-   shows today's events, the last background pass and any busy profile that lacks the plugin; mention those
-   first. Then get the digest with
-   `hermes evolution report --days 7`. The loop runs by itself in the background, so the numbers are recent.
-   `report` only reads; `status` only reads too, except in a profile where no pass ever ran, where it runs
-   the first one. `hermes evolution learn` runs a pass now: it measures and, with the reflector on, may ask
-   the model for up to 3 lesson drafts, which stay in quarantine.
-2. Summarize it in the owner's language, in this order:
-   - what changed versus the previous week (the verdict line);
-   - the failures that repeat, most frequent first, and whether each already has a lesson;
-   - skills by outcome: which skills go worse than the profile as a whole;
-   - the self-improvement loop: how many background reviews ran, how many produced nothing, and which
-     skills were rewritten the most;
-   - lessons with a measured effect, naming the ones that worked and the ones that did not;
-   - the "Hermes health" section: sessions that end as orphans, the context per call, weak compactions,
-     plugin problems and commands the runtime guard vetoed.
-3. List the open proposals with `hermes evolution proposals list`, highest risk first. For each one, read
-   out the exact lesson text when there is one, the evidence behind it, and what its command does. Give your
-   recommendation and the reason.
-4. Hand the decisions to the owner. Give them the commands to run in their own terminal, for example
-   `hermes evolution proposals approve 12` or `hermes evolution proposals reject 12`, and for native changes
-   the command the proposal prints, such as `hermes curator lock <skill>`. Commands you run yourself cannot
-   approve, reject or activate anything; the plugin refuses them by design.
-5. Close with what was decided and what will be measured next week.
+1. Run `hermes evolution status` (add `--lang pt` for Portuguese). Mention first what it lists under "Needs
+   attention" (no events today, a failed learning pass, a busy profile without the plugin). Then read the digest:
+   `hermes evolution report --days 7`. Both only read (except `status` in a profile that never had a learning pass,
+   where it runs the first one). `hermes evolution learn` runs a learning pass now; with the reflector on it may ask
+   the model for up to 3 lesson drafts, which wait for the owner.
+2. Summarize the digest in this order: what changed versus the previous week (the verdict line); the failures that
+   repeat, most frequent first, and whether each has a lesson; skills that do worse than the profile as a whole; the
+   self-improvement loop (background reviews, how many changed nothing, the most rewritten skills); lessons with a
+   measured effect, the ones that helped and the ones that did not; the Hermes health section.
+3. List the open proposals with `hermes evolution proposals list`, highest risk first. For each one say, in plain
+   words, what it is about, the numbers behind it, what approving does, and the risk as a word ("high risk / risco
+   alto", "medium / médio", "low / baixo"), never as a code. Give your recommendation and why.
+   - Lesson text: from your shell the plugin leaves out text written by the owner, a model or an agent (`lesson:
+     null`, `text_hidden: true`), because this shell may be answering someone else's chat. Do not guess it. Say it is
+     hidden here and that the owner reads it in the menu `hermes evolution` (option 1 "Lessons waiting for you /
+     Lições esperando você", option 2 "Open proposals / Propostas abertas"). Lessons from the plugin's built-in
+     templates are shown in `hermes evolution lessons list`.
+4. Hand the decisions to the owner, to run in their own terminal: the menu `hermes evolution`, or a command such
+   as `hermes evolution proposals approve 12` or `hermes evolution proposals reject 12`. For a change the plugin can apply (a skill lock, a
+   change in another profile) approving applies it at once with Hermes' own command and records its undo; the owner
+   does not run `hermes curator lock` separately. For a change only the owner can apply (archiving a skill, a
+   Hermes setting) approving shows the command to run. Your own shell cannot approve, reject or activate anything:
+   the plugin refuses it by design.
+5. Close with what was decided, what will be measured next week, and the one next step the owner takes (a command
+   to run or a menu option), so every recommendation ends with something to do.
 
 ## Rules
 
-- Report only numbers that appear in the digest. Where it says "not measured", say so.
-- A verdict compares the week before with the week after a change. It is a correlation: mention the
-  number of concurrent changes when it is not zero.
-- Never present a lesson without its exact text, and never call a high-risk proposal routine.
-- To suggest a new lesson, use the `hermes_atlas_evolution_lessons` tool with `action: propose`. It is stored in
-  quarantine and appears in the queue for the owner.
+- Report only numbers that appear in the digest or the status. Where they say "not measured", say so.
+- A verdict compares the week before with the week after a change: a correlation. Mention concurrent changes when
+  there are any.
+- Never call a high-risk proposal routine, and never present a hidden lesson as if you had read it.
+- To suggest a new lesson, use the `hermes_atlas_evolution_lessons` tool with `action: propose` (when the owner has
+  turned the agent tools on). It waits in the owner's queue.

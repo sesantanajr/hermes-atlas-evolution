@@ -341,7 +341,7 @@ class MenuTest(Base):
         shown = self.menu("1", "3", "a", "t", "y", "", "0")
         self.assertIn("Lessons waiting for you (3)", shown)
         self.assertIn(WRITTEN, shown)
-        self.assertIn("proposed by the agent: approve it on its own", shown)
+        self.assertIn("proposed by the agent: decide it separately", shown)
         self.assertIn("Approved: the agent reads it from its next session on.", shown)
         self.assertIn("Approved 2.", shown)
         self.assertIn("Bye.", shown)
@@ -375,14 +375,15 @@ class MenuTest(Base):
         self.assertEqual(written[0], {"lessons": "suggest"})
         self.assertEqual(written[1], {"language": "pt"})
         self.assertEqual(written[2], {"tool_hints": True})
-        self.assertIn("Applies the next time the plugin loads: tool_hints", shown)
+        self.assertIn("Applies after hermes gateway restart (in the terminal, at the next session): “Add the lesson to"
+                      " the failing tool result”", shown)
         # the recommended setup, after the change above, one setting at a time
         self.assertEqual(written[3:], [{"lessons": "auto"}])   # the mode is already auto by default
         with experience(self.home) as conn:
             logged = [row[0] for row in conn.execute("SELECT target FROM decision_log ORDER BY id")]
         self.assertEqual(logged, ["lessons", "language", "tool_hints", "lessons"])
         refused = self.menu("6", "4", "abc", "", "0", runtime=runtime, writer=writer)
-        self.assertIn("Not done: autopilot_minutes must be a whole number", refused)
+        self.assertIn("Not done: “Learning pass every” takes a whole number, such as 10.", refused)
         out_of_range = self.menu("6", "3", "500", "", "0", runtime=runtime, writer=writer)
         self.assertIn("Not done:", out_of_range)
         self.assertEqual(len(written), 4)   # nothing written for a refused value
@@ -391,7 +392,7 @@ class MenuTest(Base):
         path = write_memory(self.home, "MEMORY.md", [MemoryCareTest.FACT, "Other.", MemoryCareTest.SIMILAR])
         shown = self.menu("8", "1", "1", "", "0")
         self.assertIn("very similar entries", shown)
-        self.assertIn("Taken out.", shown)
+        self.assertIn("Removed. A copy of the file is in evolution/memory-backups", shown)
         self.assertEqual(memory_care.parse(path.read_text(encoding="utf-8")), [MemoryCareTest.FACT, "Other."])
         quiet = self.menu("8", "", "0")
         self.assertIn("Nothing repeats.", quiet)

@@ -1,4 +1,4 @@
-"""What exists around Hermes (0.8.5): Hermes' own plugin catalog and the plugin's knowledge base, in its database.
+"""What exists around Hermes: Hermes' own plugin catalog and the plugin's knowledge base, in its database.
 
 - Hermes' plugin catalog: the curated list Hermes ships and refreshes by itself (the copy Hermes caches in
   `<profile>/cache/plugin-catalog.json`, else the one in its source, `plugin-catalog/*.yaml`), with three tiers

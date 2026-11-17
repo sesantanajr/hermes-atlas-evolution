@@ -301,7 +301,9 @@ class StatusAttentionTest(Base):
         self.assertEqual({item["origin"]: (item["sessions"], item["senders"]) for item in report["chats"]},
                          {"telegram": (2, 1), "api_server": (1, 1)})
         text = status.markdown(report, "pt")
-        self.assertIn("`telegram`: 2 sessões em 7 dias de 1 remetente(s)", text)
+        self.assertIn("`telegram`: 2 sessões em 7 dias de 1 remetente", text)
+        self.assertIn("`api_server`: 1 sessão em 7 dias de 1 remetente", text)
+        self.assertNotIn("(s)", text)
         self.assertNotIn("555", text)                      # ids stay in the operator's owner command
         (self.home / "cron").mkdir()
         (self.home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [{"name": "hermes-atlas-evolution-digest",
@@ -343,7 +345,8 @@ class OwnerCommandTest(Base):
         key = "plugins.entries.hermes-atlas-evolution.settings"
         saved = self.run_cli(owner_action="add", value="555")
         self.assertIn(f"hermes --profile default config set {key}.owner_sender_ids '[\"555\"]'", saved)
-        self.assertIn("hermes gateway restart", saved)
+        self.assertNotIn("hermes gateway restart", saved)   # 0.9.0: refresh_settings picks it up, no restart
+        self.assertIn("não precisa reiniciar", saved)
         self.assertFalse((self.home / "evolution" / "settings.json").exists())   # printed for the owner, never written
         form = {"plugins": {"entries": {"hermes-atlas-evolution": {"settings": {"owner_sender_ids": ["555"],
                                                                                 "owner_platforms": ["telegram"]}}}}}

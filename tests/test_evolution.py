@@ -47,7 +47,7 @@ class EvolutionTest(unittest.TestCase):
         with patch("hermes_atlas_evolution.cli._report", side_effect=ValueError("broken settings")), patch(
             "hermes_atlas_evolution.cli._rollback_trial", return_value={"status": "rolled_back"}
         ) as recover:
-            with self.assertRaisesRegex(SystemExit, "broken settings\\nActive trial recovery: rolled_back"):
+            with self.assertRaisesRegex(SystemExit, "broken settings\\nActive trial recovery: undone"):
                 execute(tick, self.home)
             recover.assert_called_once()
 

@@ -69,8 +69,20 @@ def hermes_executable() -> str | None:
 
     if os.environ.get("ATLAS_EVOLUTION_NO_HERMES") == "1":   # the test suite: never the machine's real Hermes
         return None
+    import sys
+
     found = shutil.which("hermes")
-    for candidate in (found, "/usr/local/bin/hermes", str(Path.home() / ".local" / "bin" / "hermes")):
+    candidates = [found]
+    # A service (the gateway, the dashboard) may run with a PATH that lacks it: the launcher this process came from,
+    # then the launchers inside Hermes' own install, then the usual places.
+    if Path(sys.argv[0] if sys.argv else "").name == "hermes":
+        candidates.append(sys.argv[0])
+    module = sys.modules.get("hermes_cli")
+    if getattr(module, "__file__", None):
+        root = Path(module.__file__).resolve().parent.parent
+        candidates += [str(root / ".hermes" / "bin" / "hermes"), str(root / "venv" / "bin" / "hermes")]
+    candidates += ["/usr/local/bin/hermes", str(Path.home() / ".local" / "bin" / "hermes")]
+    for candidate in candidates:
         if candidate and Path(candidate).is_file() and Path(candidate).suffix.lower() not in (".bat", ".cmd"):
             return candidate
     return None
@@ -93,7 +105,7 @@ def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout:
     profile = Path(home).resolve()
     command_path = executable() if callable(executable) else (executable or hermes_executable())
     if command_path is None:
-        raise ValueError("Hermes command not found")
+        raise ValueError("The hermes command was not found: run this where `hermes --version` works")
     if runner is None and not (profile / "config.yaml").is_file():
         # Hermes bootstraps a home it has never seen (and its shared install with it): only real profiles.
         raise ValueError("Not a Hermes profile (no config.yaml)")
@@ -122,7 +134,7 @@ def hermes_output(home: Path, args: list, *, runner=None, executable=None, timeo
     profile = Path(home).resolve()
     command_path = executable() if callable(executable) else (executable or hermes_executable())
     if command_path is None:
-        return 127, "Hermes command not found"
+        return 127, "The hermes command was not found: run this where `hermes --version` works"
     if runner is None and not (profile / "config.yaml").is_file():
         return 127, "Not a Hermes profile (no config.yaml)"
     env = dict(os.environ, HERMES_HOME=str(profile), NO_COLOR="1")
@@ -173,7 +185,9 @@ def write_settings(home: Path, runtime_config: dict, values: dict, *, now: float
             with experience(home) as conn:
                 decisions.record_setting(conn, done, before.get(done), changed[done], now=now, actor=actor)
             written.append(done)
-    return {"written": written, "reload": [key for key in written if key in RELOAD_KEYS]}
+    # agent tools are registered at load: turning them on waits for the next load, turning them off is immediate
+    return {"written": written, "reload": [key for key in written if key in RELOAD_KEYS
+                                           or key == "agent_tools" and changed.get(key) is True]}
 
 
 def recommended_settings(current: dict, suggestions: list[dict]) -> dict:

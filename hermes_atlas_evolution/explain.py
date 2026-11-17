@@ -1,12 +1,12 @@
-"""Each proposal in plain words (0.8.3): what was seen, with its numbers, what applying it does and how to undo it.
+"""Each proposal in plain words: what was seen, with its numbers, what applying it does and how to undo it.
 
 The terminal menu and the dashboard panel show this instead of codes such as `skill_lock` or `[medium]`.
 A proposal falls in one of four groups:
 - "lesson": a lesson to activate or retire; the plugin decides it in its own playbook;
 - "change": a reversible change to Hermes that the plugin applies itself, with Hermes' own command, on the
-  owner's approval or, with `auto_actions: full`, by itself (`AUTOMATIC`); each one has its undo command;
+  owner's approval or, in the Mode auto, by itself (`AUTOMATIC`); each one has its undo command;
 - "manual": a change to Hermes the owner applies, because its undo is not certain (a rollback, a setting);
-- "advice": something worth looking at, with the numbers; dismissing it keeps it closed while nothing changes.
+- "advice": something worth looking at, with the numbers; dismissing it hides it for 30 days.
 """
 
 from __future__ import annotations
@@ -23,13 +23,14 @@ APPLY = {"skill_lock": (("curator", "lock"), ("curator", "unlock"))}
 # recorded as ["@<profile>", ...] and runs with that profile's own `hermes --profile <profile>`. Before it runs,
 # actions.apply_proposal reads the profile again from disk (environment.verify): a stored proposal is never trusted.
 FLEET = {"plugin_transform_overlap": "disable", "plugin_duplicate": "disable", "self_missing": "install",
-         "plugin_leftover": "trash"}
+         "plugin_leftover": "trash", "doctor_cache": "trash"}
 AUTOMATIC = ("skill_lock", "self_missing", "plugin_leftover")   # what the Mode auto applies by itself
-NOT_BULK = ("plugin_transform_overlap", "plugin_duplicate")     # which plugin to keep is the owner's call, one by one
+NOT_BULK = ("plugin_transform_overlap", "plugin_duplicate", "doctor_cache")   # the owner's call, one by one
 _SUBJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
-_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")   # Hermes' rule for a profile name
 _PLUGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
 _LEFTOVER = re.compile(r"\.install-[A-Za-z0-9_-]{1,64}")
+_CACHE = re.compile(r"cache/([A-Za-z0-9][A-Za-z0-9._-]{0,95})")
 _SHA = re.compile(r"[0-9a-f]{40}")
 SELF, SOURCE = "hermes-atlas-evolution", "sesantanajr/hermes-atlas-evolution"
 
@@ -42,7 +43,8 @@ def _fleet_undo(forward: list) -> list | None:
     if forward[:4] == ["plugins", "install", SOURCE, "--enable"] and (
             len(forward) == 4 or len(forward) == 6 and forward[4] == "--ref" and _SHA.fullmatch(forward[5])):
         return ["plugins", "remove", SELF]
-    if len(forward) == 2 and forward[0] == "__trash__" and _LEFTOVER.fullmatch(forward[1]):
+    if len(forward) == 2 and forward[0] == "__trash__" and (_LEFTOVER.fullmatch(forward[1]) or (
+            _CACHE.fullmatch(forward[1]) and _CACHE.fullmatch(forward[1]).group(1) not in ("scratch", "terminal"))):
         return ["__restore__", forward[1]]
     return None
 
@@ -108,9 +110,18 @@ def plan(proposal: dict) -> tuple[list, list] | None:
             ref = evidence.get("ref")
             forward = ["plugins", "install", SOURCE, "--enable"] + (["--ref", ref] if isinstance(ref, str) and _SHA.fullmatch(ref) else [])
         elif fleet == "trash":
-            if not _LEFTOVER.fullmatch(name):
+            if proposal.get("kind") == "doctor_cache":
+                from .doctor import REGENERABLE
+
+                folder = name[len("cache."):]
+                # only a package cache that rebuilds itself; any other cache folder holds state Hermes still uses
+                if not name.startswith("cache.") or folder not in REGENERABLE or evidence.get("regenerable") is not True:
+                    return None
+                forward = ["__trash__", "cache/" + name[len("cache."):]]
+            elif _LEFTOVER.fullmatch(name):
+                forward = ["__trash__", name]
+            else:
                 return None
-            forward = ["__trash__", name]
         else:
             if name == SELF or not _PLUGIN.fullmatch(name) or (proposal.get("kind") == "plugin_transform_overlap"
                                                                and evidence.get("off") not in (None, name)):
@@ -176,12 +187,13 @@ def _what(kind: str, subject: str, evidence: dict, lang: str) -> str:
         return (f"Nos {_n(e.get('turns'), lang)} turnos que carregaram {s}: " + "; ".join(parts) + "." if pt else
                 f"In the {_n(e.get('turns'), lang)} turns that loaded {s}: " + "; ".join(parts) + ".")
     if kind == "investigate_failure":
-        cause = _FAILURE[lang].get(e.get("class"), e.get("class") or "?")
-        hint = f" ({e['hint']})" if isinstance(e.get("hint"), str) and e["hint"] else ""
+        from .report import failure_words
+
+        cause, hint = failure_words(e.get("class"), e.get("hint"), lang), ""
         return (f"{s} falhou {_n(e.get('count'), lang)} vezes em {_n(e.get('days'), lang)} dias: {cause}{hint}. Nenhum"
-                " modelo fixo de lição cobre essa falha." if pt else
-                f"{s} failed {_n(e.get('count'), lang)} times in {_n(e.get('days'), lang)} days: {cause}{hint}. No fixed"
-                " lesson template covers this failure.")
+                " padrão fixo de lição cobre essa falha." if pt else
+                f"{s} failed {_n(e.get('count'), lang)} times in {_n(e.get('days'), lang)} days: {cause}{hint}. No"
+                " built-in lesson template covers this failure.")
     if kind == "investigate_latency":
         return (f"{_n(e.get('slow_pct'), lang, 1)}% de {_n(e.get('turns'), lang)} turnos foram lentos; metade levou até"
                 f" {_duration(e.get('p50_ms'), lang)} e os 5% mais lentos, {_duration(e.get('p95_ms'), lang)} ou mais." if pt else
@@ -273,10 +285,12 @@ def _does(kind: str, subject: str, lang: str) -> str:
         "lesson": ("Ativa a lição: o agente passa a lê-la no começo de cada sessão.",
                    "Activates the lesson: the agent reads it at the start of every session."),
         "lesson_retire": ("Aposenta a lição: o agente deixa de lê-la.", "Retires the lesson: the agent stops reading it."),
-        "investigate_failure": ("Escreva uma lição com o que fazer no lugar (o menu pergunta o texto), ou deixe o"
-                                " refletor rascunhar uma quando a falha acontecer nos seus turnos.",
-                                "Write a lesson with what to do instead (the menu asks for the text), or let the"
-                                " reflector draft one when the failure happens in your own turns."),
+        "investigate_failure": ("Escreva uma lição com o que fazer no lugar (`hermes evolution lessons add`, ou pelo"
+                                " menu, que pede o texto), ou deixe o refletor rascunhar uma quando a falha acontecer"
+                                " nos seus turnos.",
+                                "Write a lesson with what to do instead (`hermes evolution lessons add`, or in the menu,"
+                                " which asks for the text), or let the reflector draft one when the failure happens in"
+                                " your own turns."),
         "review_interval": ("Espaça a revisão automática de skills (skills.creation_nudge_interval 20), economizando"
                             " tokens.", "Spaces out the automatic skill review (skills.creation_nudge_interval 20), saving"
                             " tokens."),
@@ -286,11 +300,23 @@ def _does(kind: str, subject: str, lang: str) -> str:
     if kind in texts:
         return texts[kind][0 if pt else 1]
     if kind in _ADVISORY:
-        return ("É uma observação: nada muda sozinho. Veja os números com o comando abaixo; dispensar a fecha enquanto"
-                " nada mudar." if pt else
-                "It is an observation: nothing changes by itself. See the numbers with the command below; dismissing it"
-                " closes it while nothing changes.")
+        return ("É uma observação: nada muda sozinho. Veja os números com o comando abaixo; se você dispensar, ela some"
+                " por 30 dias e só volta se a situação continuar." if pt else
+                "It is an observation: nothing changes by itself. See the numbers with the command below; if you dismiss"
+                " it, it is hidden for 30 days and comes back only if the situation is still there.")
     return ""
+
+
+def _applying(args, lang: str) -> str:
+    """What applying does, in one sentence."""
+    pt = lang == "pt"
+    if isinstance(args, (list, tuple)) and len(args) == 3 and args[1] == "__trash__":
+        profile, folder = str(args[0])[1:], str(args[2])
+        place = f"{profile}/{folder}" if folder.startswith("cache/") else f"{profile}/plugins/{folder}"
+        return (f"Ao aplicar, a pasta `{place}` vai para a lixeira do plugin (volta pelo desfazer por 30 dias)." if pt else
+                f"Applying moves `{place}` to the plugin's trash (undo brings it back for 30 days).")
+    return (f"Ao aplicar, o plugin roda `{command_text(args, lang)}`." if pt else
+            f"Applying runs `{command_text(args, lang)}`.")
 
 
 def command_text(args, lang: str = "en") -> str:
@@ -302,10 +328,12 @@ def command_text(args, lang: str = "en") -> str:
     if str(args[0]).startswith("@"):
         profile, args = str(args[0])[1:], list(args[1:])
     if args and args[0] in ("__trash__", "__restore__"):
-        verb = ({"en": "move to the plugin's trash", "pt": "mover para a lixeira do plugin"} if args[0] == "__trash__"
-                else {"en": "put back from the plugin's trash", "pt": "trazer de volta da lixeira do plugin"})
-        verb = verb.get(lang, verb["en"])
-        return f"{verb}: {profile or 'default'}/plugins/{args[-1]}"
+        place = args[-1] if str(args[-1]).startswith("cache/") else f"plugins/{args[-1]}"
+        where = f"{profile or 'default'}/{place}"
+        words = ({"en": f"move {where} to the plugin's trash", "pt": f"mover {where} para a lixeira do plugin"}
+                 if args[0] == "__trash__" else
+                 {"en": f"put {where} back from the plugin's trash", "pt": f"trazer {where} de volta da lixeira do plugin"})
+        return words.get(lang, words["en"])
     prefix = f"hermes -p {profile} " if profile else "hermes "
     return prefix + " ".join(str(item) for item in args)
 
@@ -332,6 +360,16 @@ def _scope_text(scope, tools, lang: str) -> str:
     if scope == "except" and listed:
         return f"em todas as ferramentas menos {listed}" if pt else f"on every tool but {listed}"
     return "em qualquer ferramenta" if pt else "on any tool"
+
+
+def _size(value, lang: str) -> str:
+    if not isinstance(value, (int, float)) or value < 0:
+        return "?"
+    for unit, size in (("GB", 2**30), ("MB", 2**20), ("KB", 2**10)):
+        if value >= size:
+            amount = value / size
+            return f"{_n(amount, lang, 0 if abs(amount - round(amount)) < 0.05 else 1)} {unit}"
+    return f"{_n(value, lang)} B"
 
 
 def _env_what(kind: str, subject: str, e: dict, lang: str) -> str:
@@ -468,12 +506,64 @@ def _env_what(kind: str, subject: str, e: dict, lang: str) -> str:
         pairs = "; ".join(f"`{a}` ≈ `{b}`" for a, b in (e.get("pairs") or ())[:8])
         return (f"No perfil `{where}`, {_n(e.get('count'), lang)} par(es) de skills com descrições quase iguais: {pairs}." if pt else
                 f"In profile `{where}`, {_n(e.get('count'), lang)} pair(s) of skills with nearly the same description: {pairs}.")
+    if kind == "doctor_cache":
+        from .doctor import CACHE_ROLES
+
+        role = CACHE_ROLES.get(str(e.get("role") or ""))
+        held = ""
+        if e.get("regenerable"):
+            held = (" É um cache de pacotes: ele se refaz sozinho quando algo precisa." if pt else
+                    " It is a package cache: it rebuilds itself when something needs it.")
+        elif role:
+            held = f" Ela guarda {role[1]}." if pt else f" It holds {role[0]}."
+        return (f"No perfil `{where}`, a pasta `{e.get('folder')}` tem {_size(e.get('bytes'), lang)} e fica fora da limpeza"
+                " automática do Hermes (ele só limpa `cache/scratch` e `cache/terminal`), então só cresce." + held if pt else
+                f"In profile `{where}`, the folder `{e.get('folder')}` holds {_size(e.get('bytes'), lang)} and is outside"
+                " Hermes' automatic cleanup (it only cleans `cache/scratch` and `cache/terminal`), so it only grows." + held)
+    if kind == "doctor_checkpoints":
+        return (f"No perfil `{where}`, os pontos de restauração (`/rollback`) ocupam {_size(e.get('bytes'), lang)} em"
+                f" {_n(e.get('projects'), lang)} projeto(s), acima do limite de {_size(e.get('cap'), lang)} do próprio"
+                " Hermes." if pt else
+                f"In profile `{where}`, the rollback snapshots (`/rollback`) take {_size(e.get('bytes'), lang)} across"
+                f" {_n(e.get('projects'), lang)} project(s), above Hermes' own {_size(e.get('cap'), lang)} cap.")
+    if kind in ("doctor_issue", "doctor_security"):
+        from .doctor import explain as doctor_explain
+
+        hermes = str(e.get("hermes") or "")
+        told = doctor_explain(hermes, lang, profile=where,
+                              tools=[item for item in e.get("tools") or () if isinstance(item, str)])
+        quote = (f"O `hermes doctor` diz, em inglês: “{hermes}”" if pt else f"`hermes doctor` says: “{hermes}”")
+        others = [item for item in e.get("profiles") or () if isinstance(item, str) and item != where]
+        machine = ((" Vale para a máquina inteira" + (f" (também em {', '.join(others[:6])})" if others else "") + ".")
+                   if pt else (" It concerns the whole machine" + (f" (also in {', '.join(others[:6])})" if others else "")
+                               + ".")) if e.get("host") else ""
+        if told["key"] and kind == "doctor_issue":
+            return f"{told['fact']}{machine} ({quote})"
+        return (f"No perfil `{where}`: " if pt else f"In profile `{where}`: ") + quote + "." + machine
     if kind == "skills_shared":
         return (f"{_n(e.get('skills'), lang)} skill(s) estão copiadas, idênticas, em 3 ou mais dos {_n(e.get('profiles'), lang)}"
                 " perfis (as que vêm com o Hermes não contam)." if pt else
                 f"{_n(e.get('skills'), lang)} skill(s) are copied, identical, into 3 or more of the {_n(e.get('profiles'), lang)}"
                 " profiles (the ones that come with Hermes do not count).")
     return ""
+
+
+_COUNTED = re.compile(r"(?<![\w.,])(\d[\d.]*(?:,\d+)?)([^.;:\d]*)")
+_FORMS = ((re.compile(r"(\w*)ão\(ões\)"), r"\1ão", r"\1ões"), (re.compile(r"(\w*)il\(is\)"), r"\1il", r"\1is"),
+          (re.compile(r"(\w*)á\(ão\)"), r"\1á", r"\1ão"), (re.compile(r"(\w+)\((s|es|m)\)"), r"\1", r"\1\2"))
+
+
+def agree(text: str) -> str:
+    """Words written as "plugin(s) ligado(s)" or "sessão(ões)" after a number, said in the number's form."""
+    def one_count(match):
+        rest = match.group(2)
+        if "(" not in rest:
+            return match.group(0)
+        single = match.group(1) == "1"
+        for pattern, one, many in _FORMS:
+            rest = pattern.sub(one if single else many, rest)
+        return match.group(1) + rest
+    return _COUNTED.sub(one_count, text) if isinstance(text, str) else text
 
 
 def describe(proposal: dict, lang: str = "en") -> dict:
@@ -491,16 +581,38 @@ def describe(proposal: dict, lang: str = "en") -> dict:
             evidence = {}
     found = plan(proposal)
     undo = command_text(found[1], lang) if found is not None else None
-    entry = playbook().get(kind) if kind.startswith(("plugin_", "skills_", "self_", "profile_")) or kind in FLEET else None
+    entry = playbook().get(kind) if kind.startswith(("plugin_", "skills_", "self_", "profile_", "doctor_")) \
+        or kind in FLEET else None
     if isinstance(entry, dict):
         title, advice = entry.get(f"title_{lang}") or kind, entry.get(f"advice_{lang}") or ""
+        if kind == "doctor_issue" and isinstance(evidence, dict):
+            from .doctor import explain as doctor_explain, title as doctor_title
+
+            title = doctor_title(str(evidence.get("key") or ""), lang) or title
+            told = doctor_explain(str(evidence.get("hermes") or ""), lang, profile=str(evidence.get("profile") or "?"),
+                                  tools=[item for item in evidence.get("tools") or () if isinstance(item, str)])
+            if told["do"]:
+                advice = told["do"] + " " + advice
+        if kind == "doctor_cache" and isinstance(evidence, dict) and not evidence.get("regenerable"):
+            advice = ("Veja o que há dentro com o comando abaixo e apague só o que não precisa mais. O plugin não move esta"
+                      " pasta: o Hermes ou as sessões ainda a usam." if lang == "pt" else
+                      "See what is inside with the command below and delete only what is no longer needed. The plugin does"
+                      " not move this folder: Hermes or the sessions still use it.")
+        profile_name = str((evidence or {}).get("profile") or "") if isinstance(evidence, dict) else ""
+        if profile_name:
+            advice = advice.replace("<perfil>", profile_name).replace("<profile>", profile_name)
         what = _env_what(kind, subject, evidence if isinstance(evidence, dict) else {}, lang)
-        does = ("Aplicar roda: " if lang == "pt" else "Applying runs: ") + command_text(found[0], lang) if found else ""
+        does = _applying(found[0], lang) if found else ""
+        if kind.startswith("doctor_") and found is None and proposal.get("command"):
+            does = ("Rode no seu terminal: " if lang == "pt" else "Run in your terminal: ") + f"`{proposal['command']}`"
     else:
         title, advice = _KIND[lang].get(kind, kind), ""
         what = _what(kind, subject, evidence if isinstance(evidence, dict) else {}, lang)
         does = _does(kind, subject, lang)
+    group = category(kind)
+    if group == "change" and found is None:
+        group = "manual"   # a change the plugin cannot make here (a cache folder that is not a package cache): yours
     return {"title": title, "risk": _RISK[lang].get(proposal.get("risk"), proposal.get("risk")),
-            "category": category(kind), "what": what, "advice": advice, "does": does, "undo": undo,
+            "category": group, "what": agree(what), "advice": advice, "does": does, "undo": undo,
             "can_apply": found is not None, "bulk": found is not None and kind not in NOT_BULK,
             "automatic": kind in AUTOMATIC and found is not None}

@@ -146,8 +146,9 @@ class GuardStateTest(unittest.TestCase):
 
         report = status.build(self.home, now=NOW, config={})
         self.assertEqual(report["runtime_guard"]["state"], "on")
-        self.assertIn("LaunchAgent", status.markdown(report, "en"))
-        self.assertIn("serviço ou tarefa do Windows", status.markdown(report, "pt"))
+        self.assertIn("stops commands that would stop the gateway", status.markdown(report, "en"))
+        self.assertIn("barra comandos que parariam o gateway", status.markdown(report, "pt"))
+        self.assertNotIn("LaunchAgent", status.markdown(report, "en"))   # 0.9.0: plain words, no service jargon
         isolation = types.ModuleType("hermes_cli.plugin_isolation")
         isolation.isolation_mode = lambda config=None: "host"
         with patch.dict(sys.modules, {"hermes_cli.plugin_isolation": isolation}):

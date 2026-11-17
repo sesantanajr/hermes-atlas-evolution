@@ -1,19 +1,18 @@
 name: hermes-atlas-evolution
-version: "0.8.5"
+version: "0.9.0"
 requires_hermes: ">=0.23.1"
 description: >-
-  A measured self-improvement loop for Hermes Agent. Learns from Hermes' own history on the first pass,
-  runs by itself in the background, turns recurring tool failures into short lessons, measures every lesson,
-  skill rewrite and setting change before and after, points out what slows Hermes down (tools slow call after
-  call, approvals nobody could answer, heavy context, weak compaction) and stops the agent from taking down
-  the gateway it runs on. Lessons from fixed templates apply at once (after the owner's own
-  turns hit the failure) and are retired when they do not help; text written by a model or by the agent waits
-  for your approval. Lessons travel between profiles as packs; `hermes evolution` opens an interactive menu in
-  your terminal, and an Evolution tab in the dashboard shows what was learned and what waits for you. It also
-  finds what repeats in Hermes' memory and, by itself where it is safe, takes out identical copies and locks skills
-  the curator keeps rewriting, each action with its undo. It reads Hermes' own health without the agent or tokens
-  (gateway, session database, disk growth, memory, swap, old tools) and updates the operating system safely
-  (Ubuntu, Debian: checks before and after, a copy of /etc, a repair for an interrupted update).
+  Looks after your whole Hermes Agent, every profile at once. Every day it runs Hermes' own doctor checks
+  offline and explains each problem with the command that fixes it; turns tool errors that keep coming back
+  into short lessons the agent reads, and drops the ones that do not help; removes duplicate memory entries;
+  points out plugins that conflict, duplicate or never load and skills that are unused or repeated; watches the
+  gateway, the disk and the server's updates; and stops the agent from taking Hermes down. Safe changes happen
+  by themselves with undo; the rest waits for one key in `hermes evolution` or the dashboard's Evolution tab.
+  Português: cuida do seu Hermes inteiro, de todos os perfis. Todo dia roda as checagens do próprio
+  `hermes doctor` sem rede e explica cada problema com o comando que resolve; transforma erros repetidos em
+  lições curtas; remove entradas repetidas da memória; aponta plugins em conflito, duplicados ou que nunca
+  carregam e skills sem uso; cuida do gateway, do disco e das atualizações do servidor. O que é seguro ele faz
+  sozinho, com desfazer; o resto espera uma tecla.
 license: MIT
 homepage: https://github.com/sesantanajr/hermes-atlas-evolution
 author: "Sérgio Sant'Ana Júnior"
@@ -48,95 +47,127 @@ config_schema:
     type: str
     choices: ["off", suggest, auto]
     default: auto
-    label: Lessons
+    label: "Lessons · Lições"
     description: >-
-      auto (default): recurring failures become active lessons written from fixed templates, each one is measured
-      and the ineffective ones are retired; drafts written by a model still wait for your approval.
-      suggest: every lesson waits for your approval. off: measure only.
+      auto = automatic (default): recurring failures become lessons from a built-in template, each one measured and
+      retired when it does not help; drafts written by a model still wait for you. suggest = on approval: every lesson
+      waits for you. off = off: only measure.
+      — auto = automáticas (padrão): falhas que se repetem viram lições de padrão fixo, cada uma medida e aposentada
+      quando não ajuda; rascunhos escritos por um modelo continuam esperando você. suggest = com aprovação: toda lição
+      espera você. off = desligadas: só medir.
   language:
     type: str
     choices: [auto, en, pt]
     default: auto
-    label: Language
-    description: Language of lessons, messages and the digest. auto follows HERMES_LANGUAGE and display.language.
+    label: "Language · Idioma"
+    description: >-
+      Language of lessons, messages, the menu and the digest; auto follows Hermes' language.
+      — Idioma das lições, mensagens, do menu e do resumo; auto segue o idioma do Hermes.
   tool_hints:
     type: bool
     default: false
-    label: Lesson on failure
+    label: "Add the lesson to the failing tool result · Juntar a lição ao resultado da ferramenta que falhou"
     description: >-
-      Also add the matching lesson to a failing tool result, once per session. Off by default: Hermes keeps only
-      the first plugin's change to a tool result, so a hint would discard another plugin's change to that result.
+      Once per session. Off by default: Hermes keeps only the first plugin's change to a tool result, so this would
+      discard another plugin's change. Applies after hermes gateway restart (in the terminal, at the next session).
+      — Uma vez por sessão. Desligado por padrão: o Hermes fica só com a mudança do primeiro plugin no resultado de uma
+      ferramenta, então isto descartaria a mudança de outro plugin. Vale depois de hermes gateway restart (no terminal,
+      na próxima sessão).
   feedback_signals:
     type: bool
     default: true
-    label: Owner signals
-    description: Count your corrections, repeated questions and thanks as numbers. No message text is stored.
+    label: "Count your corrections and thanks · Contar as suas correções e agradecimentos"
+    description: >-
+      Counts your corrections, repeated questions and thanks as numbers only; no message text is stored.
+      — Conta as suas correções, perguntas repetidas e agradecimentos só como números; nenhum texto de mensagem é
+      guardado.
   agent_tools:
     type: bool
     default: false
-    label: Agent tools
-    description: Offer hermes_atlas_evolution_plan and hermes_atlas_evolution_lessons to the agent. Proposed lessons stay quarantined.
+    label: "Let the agent read and propose lessons · Deixar o agente ler e propor lições"
+    description: >-
+      Gives the agent the tools hermes_atlas_evolution_plan and hermes_atlas_evolution_lessons; lessons it proposes
+      wait for you. Turning it on applies after hermes gateway restart (in the terminal, at the next session).
+      — Dá ao agente as ferramentas hermes_atlas_evolution_plan e hermes_atlas_evolution_lessons; as lições que ele
+      propõe esperam você. Ligar vale depois de hermes gateway restart (no terminal, na próxima sessão).
   slow_turn_seconds:
     type: int
     default: 60
-    label: Slow turn (seconds)
-    description: A turn longer than this counts as slow. From 5 to 3600.
+    label: "A turn is slow after (seconds) · Um turno é lento depois de (segundos)"
+    description: >-
+      A turn longer than this counts as slow. From 5 to 3600.
+      — Um turno mais longo que isso conta como lento. De 5 a 3600.
   owner_sender_ids:
     type: list
     default: []
-    label: Owner sender ids
+    label: "Senders that count as you · Remetentes que contam como você"
     description: >-
-      Your sender ids on messaging platforms (text or numbers, such as a Telegram id). Turns from these senders
-      count as yours (feedback, failures that may activate a lesson, the agent tools); the local CLI, TUI and
-      Desktop always do. Anyone else in a chat gets template lessons only. `hermes evolution owner` lists the
-      senders of each chat channel.
+      Your sender ids in chat channels (such as a Telegram id). Their turns count as yours: you get every lesson
+      there, and the failures teach. Your CLI, TUI and Desktop always count. To see and mark the senders: hermes
+      evolution, option 7 (Which chats count as you).
+      — Os seus ids de remetente nos canais de chat (como um id do Telegram). Os turnos deles contam como seus: ali
+      você recebe todas as lições, e as falhas ensinam. A sua CLI, TUI e Desktop sempre contam. Para ver e marcar os
+      remetentes: hermes evolution, opção 7 (Quem é você nos chats).
   owner_platforms:
     type: list
     default: []
-    label: Owner platforms
+    label: "Channels where every chat counts as you · Canais em que todo chat conta como você"
     description: >-
-      Platforms where every chat is yours, such as a private bot or your own interface through the API server
-      (telegram, api_server, ...). Their chats count as yours from the first message, so they get all your
-      lessons. `hermes evolution owner add-platform <name>` prints the command that sets it.
+      Channels where every chat is yours, such as a private bot (telegram) or your own interface through the API
+      server (api_server). Mark only what nobody else uses.
+      — Canais em que todo chat é seu, como um bot privado (telegram) ou a sua própria interface pelo servidor de API
+      (api_server). Marque só o que ninguém mais usa.
   reflector:
     type: bool
     default: true
-    label: Reflector
+    label: "Reflector · Refletor"
     description: >-
-      Draft lessons for recurring failures that have no template, using the model of Hermes' auxiliary task
-      evolution_reflector (it inherits the compression model). Keeps one scrubbed error excerpt per failure until a
-      draft exists, for failures in the owner's own turns only. Drafts always wait for your approval.
+      An AI model (Hermes' auxiliary task evolution_reflector) drafts lessons for failures with no built-in template,
+      in your own turns only; it keeps one excerpt of the error, without sensitive data, per failure until a draft
+      exists. Drafts always wait for you.
+      — Um modelo de IA (a tarefa auxiliar evolution_reflector do Hermes) rascunha lições para falhas sem padrão fixo,
+      só nos seus próprios turnos; guarda um trecho do erro sem dados sensíveis por falha até haver um rascunho. Os
+      rascunhos sempre esperam você.
   reflector_daily_limit:
     type: int
     default: 6
-    label: Reflector calls per day
-    description: Upper limit of model calls the reflector makes per day. From 1 to 50.
+    label: "Reflector calls per day · Chamadas do refletor por dia"
+    description: >-
+      Most model calls the reflector makes in a day. From 1 to 50.
+      — Máximo de chamadas ao modelo que o refletor faz por dia. De 1 a 50.
   autopilot_minutes:
     type: int
     default: 60
-    label: Autopilot (minutes)
+    label: "Learning pass every (minutes) · Rodada de aprendizado a cada (minutos)"
     description: >-
-      Run the learning pass by itself in the background, at most once per interval, from 15 to 1440 minutes.
-      0 turns the background pass off; passes then run only from hermes evolution learn, ops tick, the weekly
-      digest recipe and the first status.
+      Runs the learning pass by itself in the background, at most once per interval, from 15 to 1440 minutes; 0 = only
+      by hand (hermes evolution learn, or option 11 of the hermes evolution menu).
+      — Faz a rodada de aprendizado sozinho em segundo plano, no máximo uma vez por intervalo, de 15 a 1440 minutos;
+      0 = só à mão (hermes evolution learn, ou a opção 11 do menu hermes evolution).
   mode:
     type: str
     choices: [auto, assist, manual]
     default: auto
-    label: Mode
+    label: "Mode · Modo"
     description: >-
-      auto (default): Atlas Evolution looks at every profile of this Hermes (plugins, skills, memory, health) and does
-      by itself what is safe and can be undone (identical memory copies, locking skills the curator keeps rewriting,
-      installing itself in profiles in use that never had it, cleaning failed installs, freeing old tool versions); the rest
-      waits for you as a proposal with its reason. assist: only identical memory copies by itself. manual: it only
-      measures and proposes. Every action is in the history with its undo.
+      auto = Auto mode (default): looks after every profile of this Hermes and does by itself what is safe and can be
+      undone: it removes duplicate memory entries (keeps a copy of the file first), locks skills the curator keeps
+      rewriting, installs itself in profiles in use, cleans failed installs and frees old tool versions; the rest waits
+      for you. assist = Assisted: on its own it only removes duplicate memory entries; everything else waits for you.
+      manual = Manual: only measures and proposes. Every action is in the history with its undo.
+      — auto = Modo Auto (padrão): cuida de todos os perfis deste Hermes e faz sozinho o que é seguro e tem desfazer:
+      remove entradas repetidas da memória (guarda uma cópia do arquivo antes), trava skills que o curador reescreve
+      sem parar, instala-se nos perfis em uso, limpa instalações que falharam e libera versões antigas de ferramentas;
+      o resto espera você. assist = Assistido: sozinho, só remove entradas repetidas da memória; o resto espera você.
+      manual = Manual: só mede e propõe. Cada ação fica no histórico com o seu desfazer.
   runtime_guard:
     type: bool
     default: true
-    label: Runtime guard
+    label: "Runtime guard · Proteção do Hermes"
     description: >-
-      Stop the agent from taking down the Hermes it runs in. Vetoes terminal commands that restart or kill the
-      gateway (systemd, launchd or a Windows service or task; the agent is told to leave the restart to the owner,
-      whose hermes gateway restart asks before interrupting running turns), that delete the running Python, the
-      Hermes code or this profile, or that change this plugin's settings or switch it off. Off where plugins run
-      in a plugin host.
+      Keeps the agent from taking down the Hermes it runs in: vetoes terminal commands that restart or kill the
+      gateway, delete the running Python, Hermes' code or this profile, or change or switch off this plugin. Off where
+      plugins run in a plugin host. Applies after hermes gateway restart (in the terminal, at the next session).
+      — Impede o agente de derrubar o Hermes em que roda: barra comandos de terminal que reiniciam ou matam o gateway,
+      apagam o Python em uso, o código do Hermes ou este perfil, ou mudam ou desligam este plugin. Desligada onde os
+      plugins rodam num host de plugins. Vale depois de hermes gateway restart (no terminal, na próxima sessão).

@@ -198,6 +198,30 @@ def _accept_lang_everywhere(parser: argparse.ArgumentParser, help_text: str) -> 
                 _accept_lang_everywhere(child, help_text)
 
 
+_PT_FORMATTERS: dict = {}
+
+
+def _portuguese_help(parser: argparse.ArgumentParser) -> None:
+    """argparse's own words in Portuguese ("uso:", "opções:", "mostra esta ajuda e sai"), in this parser and every
+    subcommand of it. Its formatter keeps the parser's own (a subclass of it), so the layout does not change."""
+    base = parser.formatter_class
+    formatter = _PT_FORMATTERS.get(base)
+    if formatter is None:
+        def add_usage(self, usage, actions, groups, prefix=None):
+            return base.add_usage(self, usage, actions, groups, "uso: " if prefix is None else prefix)
+
+        formatter = _PT_FORMATTERS[base] = type("PortugueseHelp", (base,), {"add_usage": add_usage})
+    parser.formatter_class = formatter
+    parser._positionals.title = "argumentos posicionais"   # argparse exposes the two default groups only this way
+    parser._optionals.title = "opções"
+    for action in parser._actions:
+        if isinstance(action, argparse._HelpAction):
+            action.help = "mostra esta ajuda e sai"
+        elif isinstance(action, argparse._SubParsersAction):
+            for child in dict.fromkeys(action.choices.values()):
+                _portuguese_help(child)
+
+
 def setup(parser: argparse.ArgumentParser) -> None:
     from .i18n import resolve, text
 
@@ -206,37 +230,72 @@ def setup(parser: argparse.ArgumentParser) -> None:
     def _(sentence: str) -> str:
         return text(sentence, language)
 
+    def _b(english: str, portuguese: str) -> str:   # help written here in both languages (0.9.0)
+        return portuguese if language == "pt" else english
+
+    def output(command, *, top: bool = True) -> None:
+        """`--format md|json`: readable text by default, the JSON structure for scripts. A subcommand repeats it
+        without a default of its own, so `lessons --format json list` and `lessons list --format json` both work."""
+        command.add_argument("--format", choices=("md", "json"), default="md" if top else argparse.SUPPRESS,
+                             help=_b("Output: md, readable (default), or json, for scripts",
+                                     "Saída: md, legível (padrão), ou json, para scripts"))
+
     parser.add_argument("--lang", choices=("en", "pt"), default=None, help=_("Language of lessons, messages and the digest"))
     # Without a command: the interactive menu in the owner's terminal, the status anywhere else (0.8.2).
     commands = parser.add_subparsers(dest="evolution_action", required=False)
     commands.add_parser("menu", help=_("Open the interactive menu: decide, configure, organize Hermes' memory and see "
                                        "the state, step by step"))
     system = commands.add_parser("system", help=_("Check, plan and run the operating system's update safely (Linux with apt)"))
-    system.add_argument("system_action", nargs="?", default="check", choices=("check", "plan", "upgrade", "repair", "report"))
+    system.add_argument("system_action", nargs="?", default="check", choices=("check", "plan", "upgrade", "repair", "report"),
+                        help=_b("check (default): what is waiting and what is in the way · plan: refresh the package "
+                                "lists and show what an update would change · upgrade: update, after asking · repair: "
+                                "finish an update that stopped half-way · report: the last update's report",
+                                "check (padrão): o que espera e o que atrapalha · plan: atualiza as listas de pacotes e "
+                                "mostra o que uma atualização mudaria · upgrade: atualiza, depois de perguntar · repair: "
+                                "termina uma atualização que parou no meio · report: o relatório da última atualização"))
     system.add_argument("--full", action="store_true", help=_("Use apt's full-upgrade, which may remove packages"))
     system.add_argument("--skip", nargs="*", default=[], help=_("Packages to leave out of this update"))
     system.add_argument("--yes", action="store_true", help=_("Do not ask before updating or repairing"))
     care = commands.add_parser("care", help=_("Check Hermes' own health without the agent or tokens, and run Hermes' repairs"))
-    care.add_argument("care_action", nargs="?", default="check", choices=("check", "pm-doctor", "doctor", "fix", "gc"))
+    care.add_argument("care_action", nargs="?", default="check", choices=("check", "pm-doctor", "doctor", "fix", "gc"),
+                      help=_b("check (default): read Hermes' health without running anything · pm-doctor: `hermes pm "
+                              "doctor` · doctor: `hermes doctor` · fix: `hermes doctor --fix` after a quick backup · gc: "
+                              "`hermes pm gc`",
+                              "check (padrão): lê a saúde do Hermes sem rodar nada · pm-doctor: `hermes pm doctor` · "
+                              "doctor: `hermes doctor` · fix: `hermes doctor --fix` depois de um backup rápido · gc: "
+                              "`hermes pm gc`"))
     care.add_argument("--yes", action="store_true", help=_("Do not ask before running Hermes' command"))
     env = commands.add_parser("environment", help=_("Every profile of this Hermes: plugins, skills, conflicts and what to do"))
-    env.add_argument("environment_action", nargs="?", default="show", choices=("show", "scan", "catalog"))
-    digest = commands.add_parser("schedule-digest", help=_("Schedule the weekly digest as a Hermes cron job with no agent"))
+    env.add_argument("environment_action", nargs="?", default="show", choices=("show", "scan", "catalog"),
+                     help=_b("show (default): the last check · scan: check every profile now · catalog: the Hermes "
+                             "plugin catalog", "show (padrão): a última verificação · scan: verifica todos os perfis "
+                             "agora · catalog: o catálogo de plugins do Hermes"))
+    for command in (system, care, env):
+        output(command)
+    digest = commands.add_parser("schedule-digest", help=_b(
+        "Schedule the weekly digest as a Hermes scheduled task (cron), no agent",
+        "Agenda o resumo semanal como tarefa agendada do Hermes (cron), sem agente"))
     digest.add_argument("--deliver", default="local", help=_("Where to deliver it: local, or a channel such as telegram"))
-    health = commands.add_parser("health", help=_("Inspect Hermes files and host signals"))
+    health = commands.add_parser("health", help=_b("Inspect Hermes' files and the machine's signals",
+                                                   "Examina os arquivos do Hermes e os sinais da máquina"))
     usage = commands.add_parser("usage", help=_("Summarize provider and tool measurements"))
     tick = commands.add_parser("tick", help=_("Run maintenance and record decisions"))
     for command in (health, tick):
-        command.add_argument("--upstream-tag", help=_("Reference version to compare against offline"))
+        command.add_argument("--upstream-tag", help=_b("Reference version to compare against, without the network",
+                                                       "Versão de referência para comparar, sem rede"))
     for command in (usage, tick):
         command.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=7, metavar="1..35")
     tick.add_argument("--changes-only", action="store_true", help=_("Only print when a decision changes"))
+    for command in (digest, health, usage, tick):
+        output(command)
 
-    memory = commands.add_parser("memory", help=_("Access legacy 0.1 note data"))
+    memory = commands.add_parser("memory", help=_b("Access the plugin's old notes", "Acessa as notas antigas do plugin"))
     audience = memory.add_mutually_exclusive_group()
     audience.add_argument("--shared", action="store_true", help=_("Explicitly select the profile-wide store"))
     audience.add_argument("--dm", nargs=3, metavar=("PLATFORM", "USER", "CHAT"), help=_("Select a direct chat store"))
-    memory.add_argument("--namespace", default="", help=_("Optional platform tenant or workspace ID for --dm"))
+    memory.add_argument("--namespace", default="", help=_b(
+        "Optional id of the platform's organization or workspace, for --dm",
+        "Id opcional da organização ou do espaço de trabalho da plataforma, para --dm"))
     tasks = memory.add_subparsers(dest="memory_action", required=True)
     add = tasks.add_parser("remember")
     add.add_argument("category", choices=CATEGORIES)
@@ -257,15 +316,17 @@ def setup(parser: argparse.ArgumentParser) -> None:
     remove = tasks.add_parser("forget")
     remove.add_argument("id", type=int)
 
-    feedback = commands.add_parser("feedback", help=_("Record how an operational finding performed"))
+    feedback = commands.add_parser("feedback", help=_b("Record whether an operational alert helped",
+                                                       "Registra se um alerta operacional ajudou"))
     feedback.add_argument("code")
     feedback.add_argument("result", choices=("helpful", "dismissed", "reset"))
-    commands.add_parser("history", help=_("Show learned maintenance priorities and feedback"))
+    output(commands.add_parser("history", help=_("Show learned maintenance priorities and feedback")))
 
     state = commands.add_parser("status", help=_("Show whether the plugin is observing, learning and protecting this profile"))
     state.add_argument("--format", choices=("md", "json"), default="md")
     state.add_argument("--no-learn", action="store_true",
-                       help=_("Only read; do not run the first pass when this profile never had one"))
+                       help=_b("Only read; do not run the first learning pass when this profile never had one",
+                               "Só lê; não roda a primeira rodada de aprendizado quando este perfil nunca teve uma"))
     owner = commands.add_parser("owner", help=_("Show the chat channels and senders, and the command that chooses "
                                                 "which ones are you"))
     owner_commands = owner.add_subparsers(dest="owner_action")
@@ -277,25 +338,39 @@ def setup(parser: argparse.ArgumentParser) -> None:
                                                      "(a private bot, your own UI)")).add_argument("value")
     owner_commands.add_parser("remove-platform", help=_("Print the command that stops counting every chat of a platform "
                                                         "as you")).add_argument("value")
-    learn = commands.add_parser("learn", help=_("Run one evolution pass: derive lessons, measure changes, refresh proposals"))
+    learn = commands.add_parser("learn", help=_b(
+        "Run one learning pass: derive lessons, measure changes, refresh proposals",
+        "Faz uma rodada de aprendizado: tira lições das falhas, mede as mudanças e atualiza as propostas"))
     learn.add_argument("--notify-only", action="store_true", help=_("Print only new lessons, regressions and high-risk proposals"))
-    playbook = commands.add_parser("lessons", help=_("Review the playbook learned from recurring tool failures"))
+    playbook = commands.add_parser("lessons", help=_b("Review the lessons learned from recurring tool failures",
+                                                      "Revisa as lições aprendidas com falhas repetidas de ferramentas"))
     playbook_commands = playbook.add_subparsers(dest="lessons_action")
-    listing = playbook_commands.add_parser("list")
-    listing.add_argument("--status", choices=("candidate", "active", "quarantined", "retired"))
-    listing.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS)
-    playbook_commands.add_parser("review", help=_("Decide on each lesson that waits for approval, one by one, in your terminal"))
+    listing = playbook_commands.add_parser("list", help=_b("List the lessons with their exact text (the default)",
+                                                           "Lista as lições com o texto exato (o padrão)"))
+    listing.add_argument("--status", choices=("candidate", "active", "quarantined", "retired"),
+                         help=_b("Only lessons in this state", "Só as lições nesta situação"))
+    listing.add_argument("--lang", choices=("en", "pt"), default=argparse.SUPPRESS,
+                         help=_("Language of lessons, messages and the digest"))
+    playbook_commands.add_parser("review", help=_b("Decide on each lesson that waits for approval, one by one, in your "
+                                                   "terminal", "Decide, uma a uma, cada lição que aguarda aprovação, no "
+                                                               "seu terminal"))
     for name in ("approve", "retire"):
-        decided = playbook_commands.add_parser(name)
+        decided = playbook_commands.add_parser(name, help=_b(
+            "Activate a lesson, after showing its text" if name == "approve" else "Retire an active lesson: the agent "
+                                                                                    "stops seeing it",
+            "Ativa uma lição, depois de mostrar o texto" if name == "approve" else "Aposenta uma lição ativa: o agente "
+                                                                                     "deixa de vê-la"))
         if name == "approve":   # one lesson, or --all: every lesson waiting except the agent's, after showing each
             chosen = decided.add_mutually_exclusive_group(required=True)
-            chosen.add_argument("id", type=int, nargs="?")
+            chosen.add_argument("id", type=int, nargs="?", help=_b("The lesson's number (#), from lessons list",
+                                                                   "O número (#) da lição, do lessons list"))
             chosen.add_argument("--all", action="store_true", help=_("Approve every lesson that waits, after showing "
                                                                      "each one; the agent's own proposals are left out"))
         else:
-            decided.add_argument("id", type=int)
+            decided.add_argument("id", type=int, help=_b("The lesson's number (#), from lessons list",
+                                                         "O número (#) da lição, do lessons list"))
         decided.add_argument("--yes", action="store_true", help=_("Confirm without the interactive question"))
-    custom = playbook_commands.add_parser("add", help=_("Add an operator lesson"))
+    custom = playbook_commands.add_parser("add", help=_b("Add a lesson of your own", "Adiciona uma lição sua"))
     custom.add_argument("text")
     custom.add_argument("--tool", default="general")
     custom.add_argument("--activate", action="store_true", help=_("Activate it now instead of leaving it for approval"))
@@ -311,27 +386,47 @@ def setup(parser: argparse.ArgumentParser) -> None:
     imported.add_argument("--dry-run", action="store_true", help=_("Show what would be imported and change nothing"))
     imported.add_argument("--activate", action="store_true", help=_("Activate them now instead of leaving them for approval"))
     imported.add_argument("--yes", action="store_true", help=_("Confirm without the interactive question"))
-    history = commands.add_parser("decisions", help=_("List your decisions on lessons, proposals and settings, "
-                                                       "from the terminal and the dashboard, and undo one"))
+    history = commands.add_parser("decisions", help=_b(
+        "List your decisions on lessons, proposals and settings, from the terminal and the panel, and undo one",
+        "Lista as suas decisões sobre lições, propostas e configurações, do terminal e do painel, e desfaz uma"))
     history_commands = history.add_subparsers(dest="decisions_action")
-    history_commands.add_parser("list").add_argument("--limit", type=int, default=50)
+    history_commands.add_parser("list", help=_b("List the latest decisions, newest first (the default)",
+                                                "Lista as últimas decisões, das mais novas para as mais antigas (o padrão)")
+                                ).add_argument("--limit", type=int, default=50,
+                                               help=_b("How many to show (default 50)", "Quantas mostrar (padrão 50)"))
     history_commands.add_parser("undo", help=_("Undo one decision while what it changed is still as it left it")) \
         .add_argument("id", type=int)
     skills = commands.add_parser("skills", help=_("Show skill churn, flip-flops and rewrites that were never exercised"))
     queue = commands.add_parser("proposals", help=_("Review and decide what the evolution loop proposes"))
     queue_commands = queue.add_subparsers(dest="proposals_action")
-    queue_list = queue_commands.add_parser("list")
+    queue_list = queue_commands.add_parser("list", help=_b("List the proposals that wait for you (the default)",
+                                                           "Lista as propostas que esperam você (o padrão)"))
     queue_list.add_argument("--all", action="store_true", help=_("Include decided and expired proposals"))
     for name in ("approve", "reject"):
-        decision = queue_commands.add_parser(name)
-        decision.add_argument("id", type=int)
-        decision.add_argument("--note")
+        decision = queue_commands.add_parser(name, help=_b(
+            "Approve a proposal: a change the plugin applies with Hermes' own command is applied now, after showing "
+            "it; otherwise the command to run is printed" if name == "approve" else
+            "Reject a proposal: it is hidden for 30 days; it comes back only if the situation is still there",
+            "Aprova uma proposta: uma mudança que o plugin aplica com o comando do próprio Hermes é aplicada agora, "
+            "depois de mostrada; senão, o comando a rodar é impresso" if name == "approve" else
+            "Rejeita uma proposta: ela some por 30 dias e só volta se a situação continuar"))
+        decision.add_argument("id", type=int, help=_b("The proposal's number (#), from proposals list",
+                                                      "O número (#) da proposta, do proposals list"))
+        decision.add_argument("--note", help=_b("A note kept with your decision", "Uma nota guardada com a sua decisão"))
         decision.add_argument("--yes", action="store_true", help=_("Confirm without the interactive question"))
-    commands.add_parser("experiments", help=_("Show tracked changes with their before-and-after verdicts"))
+    experiments_command = commands.add_parser("experiments", help=_("Show tracked changes with their before-and-after verdicts"))
+    for command in (learn, skills, experiments_command):
+        output(command)
+    for parent, children in ((playbook, playbook_commands), (queue, queue_commands), (history, history_commands)):
+        output(parent)
+        for child in dict.fromkeys(children.choices.values()):
+            output(child, top=False)
     digest = commands.add_parser("report", help=_("Print the evolution digest"))
     digest.add_argument("--format", choices=("md", "json"), default="md")
-    digest.add_argument("--schedule-spec", action="store_true",
-                        help=_("Print a no-agent cron recipe that delivers this digest weekly, without creating it"))
+    digest.add_argument("--schedule-spec", action="store_true", help=_b(
+        "Print the recipe of a Hermes scheduled task (cron), no agent, that delivers this digest weekly, without "
+        "creating it", "Imprime a receita de uma tarefa agendada do Hermes (cron), sem agente, que entrega este resumo "
+                       "toda semana, sem criá-la"))
     digest.add_argument("--weekday", type=int, choices=range(0, 7), default=1, metavar="0..6")
     digest.add_argument("--hour", type=int, choices=range(0, 24), default=8, metavar="0..23")
     digest.add_argument("--deliver", default="local", help=_("Hermes delivery target for the scheduled digest"))
@@ -372,6 +467,8 @@ def setup(parser: argparse.ArgumentParser) -> None:
     scheduler.add_argument("--every-minutes", type=int, default=5)
     scheduler.add_argument("--upstream-tag")
     _accept_lang_everywhere(parser, _("Language of lessons, messages and the digest"))
+    if language == "pt":
+        _portuguese_help(parser)
 
 
 def _memory(conn, args):
@@ -406,29 +503,32 @@ def _memory(conn, args):
 
 
 _OWNER_TEXT = {
-    "en": {"title": "Who is you in chats", "current": "Counted as you now", "senders": "sender ids", "platforms": "platforms",
-           "none": "none", "channels": "Chat channels in the last 30 days", "col_channel": "channel",
+    "en": {"title": "Which chats count as you", "current": "Counted as you now", "senders": "sender ids",
+           "platforms": "platforms", "none": "none", "none_platforms": "none",
+           "channels": "Chat channels in the last 30 days", "col_channel": "channel",
            "col_sessions": "sessions", "col_senders": "senders (sessions)", "col_you": "counts as you",
            "yes": "yes", "no": "no", "empty": "No chat session in 30 days: your CLI, TUI and Desktop always count as you.",
            "add": "To count a sender as you", "platform": "To count every chat of a channel as you (a private bot, your own UI)",
            "channel": "<channel>",
-           "restart": "Then restart the gateway so the running hooks see it",
-           "run": "Run this in your own terminal (it writes the Hermes settings form's value), then restart the gateway:",
+           "run": "Run this in your own terminal (it writes the value of the Hermes settings form):",
+           "applies": "A running gateway picks the change up by itself at its next check, usually within a minute "
+                      "(up to 10 minutes when it is idle); no restart is needed.",
            "why": "The plugin does not write it itself: who counts as you decides what reaches the agent, so it lives in "
                   "the Hermes configuration, which the agent's file tools cannot change.",
            "unchanged": "Nothing to change: {key} is already {value}.",
            "ignored": "Ignored in `settings.json`, because the agent's file tools can write that file: {keys}. To keep a "
                       "value, add it again with `hermes evolution owner add <id>` or `add-platform <channel>`."},
     "pt": {"title": "Quem é você nos chats", "current": "Contam como você agora", "senders": "ids de remetente",
-           "platforms": "plataformas", "none": "nenhum", "channels": "Canais de chat dos últimos 30 dias",
+           "platforms": "plataformas", "none": "nenhum", "none_platforms": "nenhuma",
+           "channels": "Canais de chat dos últimos 30 dias",
            "col_channel": "canal", "col_sessions": "sessões", "col_senders": "remetentes (sessões)",
            "col_you": "conta como você", "yes": "sim", "no": "não",
-           "empty": "Nenhuma sessão de chat em 30 dias: o seu CLI, TUI e Desktop sempre contam como você.",
+           "empty": "Nenhuma sessão de chat em 30 dias: a sua CLI, TUI e Desktop sempre contam como você.",
            "add": "Para contar um remetente como você", "channel": "<canal>",
            "platform": "Para contar todo chat de um canal como você (um bot privado, a sua própria interface)",
-           "restart": "Depois reinicie o gateway para os hooks em execução verem a mudança",
-           "run": "Rode isto no seu próprio terminal (grava o valor do formulário de configurações do Hermes) e depois "
-                  "reinicie o gateway:",
+           "run": "Rode isto no seu próprio terminal (grava o valor do formulário de configurações do Hermes):",
+           "applies": "Um gateway em execução pega a mudança sozinho na próxima verificação, em geral em até um minuto "
+                      "(até 10 minutos se estiver parado); não precisa reiniciar.",
            "why": "O plugin não grava isso sozinho: quem conta como você decide o que chega ao agente, então isso fica na "
                   "configuração do Hermes, que as ferramentas de arquivo do agente não conseguem alterar.",
            "unchanged": "Nada a mudar: {key} já é {value}.",
@@ -465,13 +565,15 @@ def _owner(args, home: Path, *, now: float, runtime_config, lang: str) -> str:
             raise ValueError("Up to 20 entries are kept; remove one first")
         if updated == current:
             return t["unchanged"].format(key=key, value=json.dumps(current, ensure_ascii=False)) + "\n"
-        return "\n".join([t["run"], "", f"    {settings_command(home, key, updated)}", "    hermes gateway restart", "",
+        # integration.refresh_settings re-reads who the owner is on the hooks and the autopilot's clock: no restart
+        return "\n".join([t["run"], "", f"    {settings_command(home, key, updated)}", "", t["applies"], "",
                           t["why"]]) + "\n"
     channels = chat_senders(home, since=now - 30 * 86_400, owners=chosen["owner_sender_ids"],
                             platforms=chosen["owner_platforms"])
     lines = [f"# {t['title']}", "",
              f"- **{t['current']}:** {t['senders']}: {', '.join(f'`{item}`' for item in chosen['owner_sender_ids']) or t['none']}"
-             f" · {t['platforms']}: {', '.join(f'`{item}`' for item in chosen['owner_platforms']) or t['none']}", ""]
+             f" · {t['platforms']}: {', '.join(f'`{item}`' for item in chosen['owner_platforms']) or t['none_platforms']}",
+             ""]
     if not channels:
         lines.append(t["empty"])
     else:
@@ -562,7 +664,7 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
                 return {"mode": opts["lessons"], "lessons": _hidden_from_agent(listed, "lesson") if _agent_shell() else listed}
             _operator_only()
             if task == "export":
-                return _export_lessons(conn, home, now=now, out=getattr(args, "out", None))
+                return _export_lessons(conn, home, now=now, out=getattr(args, "out", None), lang=lang)
             if task == "import":
                 return _import_lessons(conn, home, args, now=now, mode=opts["lessons"], lang=lang)
             if task == "review":
@@ -570,8 +672,12 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
             if task == "add":
                 activate = bool(getattr(args, "activate", False))
                 if activate:
+                    import shlex
+
                     text = lessons.clean_text(args.text)
-                    _confirm(text or "", lang, yes=getattr(args, "yes", False))
+                    _confirm(text or "", lang, yes=getattr(args, "yes", False), again=_hermes_cmd(
+                        home, f"evolution lessons add {shlex.quote(args.text)} --tool {shlex.quote(args.tool)} "
+                              "--activate --yes"))
                 lesson_id = lessons.add_custom(conn, args.text, tool=args.tool, origin="operator", now=now, active=activate)
                 return {"id": lesson_id, "status": "active" if activate else "quarantined"}
             if task == "approve" and getattr(args, "all", False):
@@ -580,9 +686,18 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
             if row is None:
                 raise ValueError(f"Unknown lesson id {args.id}")
             if task == "approve":
-                _confirm(lessons.render(row, lang), lang, yes=getattr(args, "yes", False))
+                if row["status"] == "active":   # nothing to ask: it is already where the command would put it
+                    return {"id": args.id, "status": "active", "previous": "active"}
+                _confirm(lessons.render(row, lang), lang, yes=getattr(args, "yes", False),
+                         read=_hermes_cmd(home, "evolution lessons list"),
+                         again=_hermes_cmd(home, f"evolution lessons approve {args.id} --yes"))
                 withdrawn = row["status"] == "retired" and row["verdict"] == lessons.WITHDRAWN
                 action = "approve" if row["status"] in decisions.WAITING or withdrawn else "reactivate"
+            elif row["status"] == "retired" and row["verdict"] != lessons.WITHDRAWN:
+                # already retired (by the owner or the measurement): nothing is recorded, so there is no empty
+                # decision to undo. One the queue cleaning withdrew is still decided below: from then on it stays
+                # retired instead of coming back when its failure repeats.
+                return {"id": args.id, "status": "retired", "previous": "retired"}
             else:
                 action = "retire" if row["status"] == "active" else "reject"
             outcome = decisions.decide_lesson(conn, args.id, action, now=now, actor="terminal", lang=lang)
@@ -595,6 +710,11 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
             listed = proposals.listing(conn, status=None if getattr(args, "all", False) else "open")
             return _hidden_from_agent(listed, "evidence") if _agent_shell() else listed
         _operator_only()
+        state = conn.execute("SELECT status FROM proposal WHERE id=?", (args.id,)).fetchone()
+        if state is not None and state["status"] not in ("open", "approved"):   # said in words, never as a state code
+            known = _H["en"]["already"].get(state["status"])
+            if known:
+                _fail(lang, known.format(id=args.id), _H["pt"]["already"][state["status"]].format(id=args.id))
         if task == "approve":
             from . import explain
 
@@ -602,15 +722,21 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
             if row is None:
                 raise ValueError(f"Unknown proposal id {args.id}")
             evidence = json.loads(row["evidence"])
+            read, again = (_hermes_cmd(home, "evolution proposals list"),
+                           _hermes_cmd(home, f"evolution proposals approve {args.id} --yes"))
             if explain.plan(dict(row)) is not None:   # a reversible change the plugin applies with Hermes' command
-                told = explain.describe({**dict(row), "evidence": evidence}, lang)
-                _confirm(f"{told['title']}: {row['subject']}\n  {told['does']}\n  {told['undo']}", lang,
-                         yes=getattr(args, "yes", False), apply=True)
+                item = {**dict(row), "evidence": evidence}
+                told = explain.describe(item, lang)
+                shown = [f"{told['title']} · {row['subject']}", _if_approved(item, told, home, lang)]
+                if told.get("undo"):
+                    shown.append(f"{_H[lang if lang in _H else 'en']['undo_label']}: {_undo_words(told['undo'])}")
+                _confirm("\n  ".join(part for part in shown if part), lang,
+                         yes=getattr(args, "yes", False), apply=True, read=read, again=again)
                 conn.commit()
                 from .actions import apply_proposal
 
                 return apply_proposal(home, args.id, now=now, actor="terminal")
-            _confirm(evidence.get("lesson") or row["command"], lang, yes=getattr(args, "yes", False))
+            _confirm(evidence.get("lesson") or row["command"], lang, yes=getattr(args, "yes", False), read=read, again=again)
         return decisions.decide_proposal(conn, args.id, task, now=now, actor="terminal", lang=lang, note=args.note)
 
 
@@ -726,7 +852,10 @@ def _review_lessons(conn, lang: str, *, now: float) -> dict:
     conn.commit()   # nothing is held while the owner reads: the gateway's hooks keep writing meanwhile
     for row in rows:
         shown = playbook.render(row, lang)
-        sys.stderr.write(f"\n#{row['id']} · {row['tool']} · {row['klass']} · {row['origin']}\n  "
+        from .report import failure_words
+
+        origin = _H.get(lang, _H["en"])["origins"].get(row["origin"], row["origin"])
+        sys.stderr.write(f"\n#{row['id']} · {row['tool']} · {failure_words(row['klass'], '', lang)} · {origin}\n  "
                          f"{shown}\n{_REVIEW_PROMPT.get(lang, _REVIEW_PROMPT['en'])}")
         sys.stderr.flush()
         answer = sys.stdin.readline().strip().lower()[:1]
@@ -749,14 +878,21 @@ def _review_lessons(conn, lang: str, *, now: float) -> dict:
     return decided
 
 
-def _confirm(text: str, lang: str, *, yes: bool, apply: bool = False) -> None:
-    """Show exactly what the agent would read and ask before it takes effect."""
+def _confirm(text: str, lang: str, *, yes: bool, apply: bool = False, again: str = "", read: str = "",
+             what: str = "") -> None:
+    """Show exactly what the agent would read, or what will run, and ask before it takes effect. Without a terminal
+    to ask in, nothing happens and the message names the command that goes ahead (`again`, with --yes), what to read
+    first (`read`) and what would run (`what`)."""
     import sys
 
     if yes:
         return
     if not sys.stdin.isatty():
-        raise ValueError("Confirm with --yes after reading the text with 'proposals list' or 'lessons list'")
+        about = (_say(lang, f" before running `{what}`", f" antes de rodar `{what}`")) if what else ""
+        step = (_say(lang, f"Read it with `{read}`, then run", f"Leia com `{read}` e depois rode") if read
+                else _say(lang, "To go ahead, run", "Para seguir, rode"))
+        _fail(lang, f"Nothing changed: there is no terminal here to ask you{about}. {step} `{again or '... --yes'}`.",
+              f"Nada mudou: não há um terminal aqui para perguntar{about}. {step} `{again or '... --yes'}`.")
     if apply:
         question = "Aplicar esta mudança no Hermes agora? [s/N] " if lang == "pt" else "Apply this change to Hermes now? [y/N] "
     else:
@@ -773,7 +909,7 @@ def _profile_name(home: Path) -> str:
     return home.name if home.parent.name == "profiles" else "default"
 
 
-def _export_lessons(conn, home: Path, *, now: float, out: str | None = None) -> dict:
+def _export_lessons(conn, home: Path, *, now: float, out: str | None = None, lang: str = "en") -> dict:
     """The active lessons as a pack: printed, or written to a new file (never over an existing one)."""
     from .packs import export
     from .status import plugin_version
@@ -787,8 +923,9 @@ def _export_lessons(conn, home: Path, *, now: float, out: str | None = None) -> 
             handle.write("\n")
     except FileExistsError:
         raise ValueError("That file already exists; choose another name or remove it first") from None
-    except OSError as error:
-        raise ValueError(f"Cannot write the lesson pack: {type(error).__name__}") from None
+    except OSError:
+        _fail(lang, "Cannot write the lesson pack there: check that the folder exists and that you can write in it",
+              "Não foi possível gravar o pacote de lições aí: confira se a pasta existe e se você pode gravar nela")
     return {"written": str(Path(out).resolve()), "lessons": len(pack["lessons"])}
 
 
@@ -912,7 +1049,7 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
         from . import environment, explain
 
         lead = environment.lead_home(home)
-        if lead is None:
+        if lead is None:   # the JSON keeps its reason code; people read status.environment_markdown's sentence
             return {"lead": None, "reason": "no profile has Atlas Evolution on"}
         task = getattr(args, "environment_action", "show")
         if task == "scan":
@@ -930,11 +1067,18 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
             from .admin import profile_name
 
             return {"lead": profile_name(lead), "scanned": False}
-        return {**{key: found[key] for key in ("at", "lead", "summary", "catalog", "profiles")},
+        return {**{key: found.get(key) for key in ("at", "lead", "summary", "catalog", "profiles", "doctor")},
                 "findings": [{**item, "explain": explain.describe(item, lang)} for item in found.get("findings") or ()]}
     if args.evolution_action == "schedule-digest":
         _operator_only()
-        return actions.schedule_digest(home, deliver=args.deliver, lang=lang, now=now, actor="terminal")
+        try:
+            return actions.schedule_digest(home, deliver=args.deliver, lang=lang, now=now, actor="terminal")
+        except ValueError as error:
+            if str(error) == "The hermes command was not found: run this where `hermes --version` works":
+                _fail(lang, "The `hermes` command is not on this terminal's PATH: run this from where "
+                            "`hermes --version` works.",
+                      "O comando `hermes` não está no PATH deste terminal: rode de onde `hermes --version` funciona.")
+            raise
     if args.evolution_action == "care":
         task = args.care_action
         if task == "check":
@@ -942,7 +1086,9 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
                 return hermes_care.cached(conn, home, now=now, force=True)
         _operator_only()
         key = {"pm-doctor": "pm_doctor", "doctor": "doctor", "fix": "doctor_fix", "gc": "pm_gc"}[task]
-        _confirm("hermes " + " ".join(hermes_care.ACTIONS[key][0]), lang, yes=args.yes, apply=True)
+        command = "hermes " + " ".join(hermes_care.ACTIONS[key][0])
+        _confirm(command, lang, yes=args.yes, apply=True, what=command,
+                 again=_hermes_cmd(home, f"evolution care {task} --yes"))
         return hermes_care.run_action(home, key)
     host, task = system_update.Host(), args.system_action
     if task == "check":
@@ -954,7 +1100,8 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
     if task == "plan":
         return system_update.plan(host, refresh=True, full=args.full)
     if task == "repair":
-        _confirm("dpkg --configure -a && apt-get -f install", lang, yes=args.yes, apply=True)
+        _confirm("dpkg --configure -a && apt-get -f install", lang, yes=args.yes, apply=True,
+                 what="dpkg --configure -a && apt-get -f install", again=_hermes_cmd(home, "evolution system repair --yes"))
         return system_update.repair(home, host)
     skip = system_update.clean_skip(args.skip)   # refused, never dropped in silence
     planned = system_update.plan(host, refresh=True, full=args.full)
@@ -963,8 +1110,11 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
     count = len(planned["upgrade"]) + len(planned["install"]) + len(planned["remove"])
     if not count:
         return {"planned": planned, "upgraded": False, "reason": "nothing_to_do"}
-    _confirm(f"apt-get {'full-upgrade' if args.full else '--with-new-pkgs upgrade'}: {count} "
-             + ("pacote(s)" if lang == "pt" else "package(s)"), lang, yes=args.yes, apply=True)
+    upgrade = f"apt-get {'full-upgrade' if args.full else '--with-new-pkgs upgrade'}"
+    flags = (" --full" if args.full else "") + (" --skip " + " ".join(skip) if skip else "")
+    _confirm(f"{upgrade}: " + _p(("1 pacote", "{n} pacotes") if lang == "pt" else ("1 package", "{n} packages"), count),
+             lang, yes=args.yes, apply=True, what=upgrade, read=_hermes_cmd(home, "evolution system plan" + (" --full" if args.full else "")),
+             again=_hermes_cmd(home, f"evolution system upgrade{flags} --yes"))
     folder, before, _snapshot = system_update.prepare(home, host, now=now)
     started = system_update.start(host, folder, full=args.full, skip=skip)
     while system_update.progress(host, folder) == "running":
@@ -1199,6 +1349,1399 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
             "maintenance": maintenance["decision"], "learning": adaptive, "evolution": evolution}
 
 
+# ── what a person reads (0.9.0) ──────────────────────────────────────────────────────────────────────────────────
+# Every command a person runs prints Markdown in the profile's language by default; `--format json` keeps the machine
+# output (the same structure as before 0.9.0). A caller that builds the arguments itself, without `format`, gets the
+# structure: the menu, the panel and the tests call `execute` that way.
+HUMAN_ACTIONS = ("care", "environment", "decisions", "lessons", "proposals", "learn", "skills", "experiments", "system",
+                 "health", "usage", "history", "tick", "schedule-digest")
+
+
+def _wants_text(args) -> bool:
+    return getattr(args, "evolution_action", None) in HUMAN_ACTIONS and getattr(args, "format", "json") == "md"
+
+
+def _say(lang: str, en: str, pt: str) -> str:
+    return pt if lang == "pt" else en
+
+
+def _fail(lang: str, en: str, pt: str):
+    """A refusal in the person's language (the sentence is chosen here, not looked up in the catalog)."""
+    raise ValueError(pt if lang == "pt" else en)
+
+
+def _hermes_cmd(home: Path, rest: str) -> str:
+    """`hermes [-p profile] <rest>`, as the owner types it in this profile."""
+    name = _profile_name(home)
+    return f"hermes {'' if name == 'default' else f'-p {name} '}{rest}"
+
+
+_H = {
+    "en": {
+        "attention": "Needs attention", "nothing": "Nothing needs attention.", "yes": "yes", "no": "no",
+        "more": "For scripts: add `--format json`.",
+        # care
+        "care_title": "Hermes health · profile `{profile}`", "gateway": "Gateway", "db": "Session database",
+        "disk": "Disk", "free": "{free} free of {total}", "pace": "{per_day} less each day: full in about {days} days",
+        "memory": "Memory", "cpu": "Processors",
+        "load": "load {load} on {cpus} CPUs over 15 minutes", "folders": "Largest folders",
+        "unused": "Old tool versions nothing uses", "checked": "Checked {when}.",
+        "care_run": "What you can run (each one asks first)",
+        "care_actions": {"pm-doctor": "checks Hermes' installed files (offline)",
+                         "doctor": "the full Hermes doctor; it also calls your providers' APIs, npm's registry and GitHub, and takes minutes",
+                         "fix": "`hermes doctor --fix`, after a quick backup Hermes can restore",
+                         "gc": "removes tool versions nothing uses"},
+        "ran_ok": "`{command}` finished.", "ran_code": "`{command}` ended with code {code}.",
+        "backup_failed": "The backup did not work (code {code}), so `hermes doctor --fix` was not run.",
+        "doctor_clean": "Hermes doctor found no problem.",
+        "doctor_found": ("Hermes doctor found 1 problem.", "Hermes doctor found {n} problems."),
+        "doctor_todo": "What Hermes suggests", "doctor_listed": "What it listed", "tail": "Last lines it printed",
+        "fixed": "`hermes doctor --fix` finished.",
+        # environment
+        "scanned": "Looked at every profile now.",
+        "catalog_title": "Hermes plugin catalog", "catalog_tiers": "Plugins by tier",
+        "catalog_none": "The catalog has not been read yet: it is read in the next learning pass of the profile that "
+                        "looks after the whole Hermes.",
+        "catalog_removed": "Removed from the catalog", "tiers": {"official": "official", "verified": "verified",
+                                                                 "community": "community"},
+        # decisions
+        "decisions_title": "Your decisions", "decisions_none": "No decision recorded yet.",
+        "where": {"terminal": "terminal", "dashboard": "panel", "automatic": "automatic"},
+        "did": {"approve": "approved", "reject": "rejected", "retire": "retired", "reactivate": "reactivated",
+                "apply": "applied", "set": "changed", "undo": "undid", "dedupe": "removed a duplicate memory entry"},
+        "what_lesson": "{did} lesson #{target}", "what_proposal": "{did} proposal #{target}",
+        "what_setting": "changed `{target}`: {before} → {after}",
+        "what_memory": "removed a duplicate memory entry from `{target}` (a copy of the file was kept first)",
+        "what_maintenance": "ran Hermes' own maintenance: `hermes {target}` (nothing to undo)",
+        "undone_mark": "undone", "hidden": "(text hidden: read it in your own terminal)",
+        "undo_hint": "Undo one with `{command}`.",
+        "undo_done": "Decision #{id} undone.", "undo_not": "Decision #{id} was not undone: {reason}",
+        "undo_reasons": {"changed_since": "it changed since (a later decision or a pass); nothing changed.",
+                         "already_undone": "it was already undone.", "unknown": "there is no decision with that number.",
+                         "not_undoable": "this kind of decision cannot be undone."},
+        "undo_run": "Hermes' configuration is yours to change: run this in your own terminal to put it back:",
+        "agent_tools_restart": "Turning the agent's tools on applies after `hermes gateway restart` (in the terminal, "
+                               "at the next session); turning them off applies within a minute.",
+        "applies_soon": "A running gateway picks it up by itself, usually within a minute; no restart is needed.",
+        # lessons
+        "lessons_title": "Lessons", "lessons_mode": "**Lessons:** {mode}",
+        "lesson_modes": {"auto": ("automatic", "built-in templates apply by themselves; the rest waits for you"),
+                         "suggest": ("on approval", "every lesson waits for you"),
+                         "off": ("off", "measured only; nothing is shown to the agent")},
+        "lessons_none": "No lesson yet.",
+        "status_names": {"active": "Active", "candidate": "Awaiting approval", "quarantined": "Awaiting approval",
+                         "retired": "Retired", "withdrawn": "Dropped from the queue without a decision"},
+        "origins": {"derived": "built-in template", "operator": "you", "reflector": "reflector", "agent": "agent"},
+        "seen": ("seen once in {s}", "seen {n} times in {s}"), "sessions": ("1 session", "{n} sessions"),
+        "verdicts": {"effective": "it helped", "ineffective": "it did not help", "inconclusive": "inconclusive",
+                     "withdrawn": "dropped from the queue without a decision"},
+        "rates": "failure rate {before} → {after}",
+        "lessons_decide": "Decide on the waiting ones with `{review}` (one by one, in your own terminal), or "
+                          "`{approve}` / `{retire}`.",
+        "approved": "Lesson #{id} is active now: the agent reads it from its next session.",
+        "reactivated": "Lesson #{id} is active again.",
+        "retired_now": "Lesson #{id} is retired: the agent no longer sees it.",
+        "rejected": "Lesson #{id} was rejected: it will not be shown to the agent.",
+        "already_active": "Lesson #{id} is already active; nothing changed.",
+        "already_retired": "Lesson #{id} is already retired; nothing changed.",
+        "kept_retired": "Lesson #{id} had been dropped from the queue without a decision; now it stays retired and does "
+                        "not come back when its failure repeats.",
+        "not_changed": "Lesson #{id} is {status}; nothing changed.",
+        "added": "Lesson #{id} added and active now.", "added_waiting": "Lesson #{id} added: it waits for your approval "
+                                                                          "(`{command}`).",
+        "review_done": "Approved: {approved} · rejected: {rejected} · skipped: {skipped}.",
+        "all_done": ("1 lesson approved.", "{n} lessons approved."), "all_none": "No lesson was waiting.",
+        "all_left": "Left for a decision of their own (the agent proposed them): {ids}.",
+        "all_skipped": "Not approved because they changed or were decided meanwhile: {ids}.",
+        "written": ("1 lesson written to `{path}`.", "{n} lessons written to `{path}`."),
+        "import_plan": "From {source}", "import_add": "To import", "import_skip": "Already here or turned down",
+        "import_done": ("1 lesson imported.", "{n} lessons imported."), "import_dry": "Nothing was imported (--dry-run).",
+        "import_none": "Nothing new to import.",
+        "kinds": {"lesson": "lesson"},
+        # proposals
+        "proposals_title": "Proposals", "proposals_all": "Proposals (all)", "proposals_none": "Nothing is waiting for you.",
+        "risk": "risk", "seen_label": "Seen", "advice_label": "What to do", "does_label": "If approved",
+        "changes_label": "What it changes",
+        "proposal": "Proposal", "lesson_title": "Activate lesson #{id}", "retire_title": "Retire lesson #{id}",
+        "lesson_on": "If approved: the lesson becomes active and the agent reads it at the start of every session.",
+        "lesson_retire": "If approved: the lesson is retired and the agent stops reading it.",
+        "write_lesson": "write a lesson with `{command}`, or let the reflector draft one when the failure happens in "
+                        "your own turns",
+        "undo_label": "Undo", "command_label": "Command", "state_label": "state",
+        "states": {"open": "open", "approved": "approved, waiting for you to run it", "applying": "being applied",
+                   "applied": "applied", "rejected": "rejected", "expired": "expired"},
+        "already": {"applied": "Proposal {id} is already applied; nothing changed.",
+                    "rejected": "Proposal {id} was already rejected; nothing changed.",
+                    "expired": "Proposal {id} expired (the situation is gone); nothing changed.",
+                    "applying": "Proposal {id} is being applied right now; nothing changed."},
+        "proposals_decide": "Decide on each one in your own terminal with `{approve}` or `{reject}`; lessons can also "
+                            "be decided one by one with `{review}`.",
+        "p_applied": "Proposal #{id} applied.", "p_undo": "To undo: {undo} (or `{command}`).",
+        "p_not_applied": {"not_open": "Proposal #{id} was not applied: it was decided meanwhile.",
+                          "already": "Proposal #{id}: nothing to do, it was already so; it is marked as applied."},
+        "p_approved": "Proposal #{id} approved. Run this in your own terminal to apply it:",
+        "p_lesson_on": "Proposal #{id} approved: its lesson is active now; the agent reads it from its next session.",
+        "p_lesson_off": "Proposal #{id} approved: its lesson is retired now.",
+        "p_approved_plain": "Proposal #{id} approved.",
+        "p_rejected": "Proposal #{id} rejected: hidden for 30 days; it comes back only if the situation is still there.",
+        # learn
+        "learn_title": "Learning pass", "learn_mode": "{mode}: {did}",
+        "modes": {"full": ("Auto mode", "acts by itself in every profile"),
+                  "safe": ("Assisted", "on its own it only removes duplicate memory entries; everything else waits "
+                                       "for you"),
+                  "off": ("Manual", "only measures and proposes")},
+        "history": "Hermes history", "history_states": {"done": "read", "running": "being read",
+                                                        "waiting": "waiting for the first learning pass",
+                                                        "no_history": "no history", "unreadable": "unreadable",
+                                                        "unsupported_history": "unsupported format"},
+        "history_counts": "{sessions} sessions · {tool_calls} tool calls",
+        "new_lessons": "New lessons", "drafts": "Reflector drafts to read", "regressions": "Changes that made things worse",
+        "retired_lessons": "Lessons retired because they did not help", "risky": "High-risk proposals",
+        "automatic": "Done by itself", "automatic_failed": "Tried by itself and failed",
+        "memory_done": ("1 duplicate memory entry removed (a copy of the file was kept first)",
+                        "{n} duplicate memory entries removed (a copy of the file was kept first)"),
+        "open": ("1 proposal waits for you", "{n} proposals wait for you"),
+        "reflector": "Reflector", "reflector_states": {"off": "off", "lessons_off": "off (lessons are off)",
+                                                       "unavailable_without_hermes_llm": "not available outside Hermes",
+                                                       "ran": "ran", "limit": "daily limit reached",
+                                                       "nothing": "nothing to read"},
+        "nothing_new": "Nothing new in this learning pass.", "see_proposals": "See them with `{command}`.",
+        "verdict_label": "verdict", "pass_done": "Pass finished on {when}.",
+        "risky_lesson": "Proposal #{id}: {who} for `{tool}` · decide with `{command}`",
+        "risky_other": "Proposal #{id}: {title} · {subject} · see it with `{command}`",
+        "who": {"agent": "lesson written by the agent", "reflector": "reflector draft", "operator": "your lesson",
+                "derived": "built-in template lesson"},
+        # skills
+        "skills_title": "Skills · last {days} days", "tracked": "Skills Hermes tracks", "rewrites": "Rewrites",
+        "by_review": "{n} by the automatic review", "rewritten": ("1 skill rewritten", "{n} skills rewritten"),
+        "top": "Rewritten the most", "flipflops": ("1 flip-flop", "{n} flip-flops"), "uses": ("1 use", "{n} uses"),
+        "unreused": ("1 rewrite never used since", "{n} rewrites never used since"),
+        "skill_findings": "Worth a look",
+        "skill_codes": {"skill_churn": "`{skill}` keeps being rewritten ({rewrites} rewrites, {flipflops} flip-flops)",
+                        "skill_unexercised_rewrites": "`{skill}` was rewritten {unreused_rewrites} times and not used since",
+                        "skill_never_used": "`{skill}` was created by the agent {age_days} days ago and never used",
+                        "skill_underperforming": "`{skill}`: its turns go worse than the profile's ({worse})"},
+        "outcomes": "Turns that loaded each skill (last {days} days)", "outcomes_none": "Not enough turns with a loaded "
+                                                                                        "skill yet (at least {n}).",
+        "whole": "whole profile", "turns": ("1 turn", "{n} turns"), "failed_pct": "{v}% failed",
+        "corrected_pct": "{v}% corrected", "basis_skills": "Read from Hermes' skill usage records and the Curator's "
+                                                           "ledger; nothing of the skills' text is stored.",
+        # experiments
+        "experiments_title": "Changes and their measured effect", "experiments_none": "No change tracked yet.",
+        "change_kinds": {"lesson": "lesson", "skill": "skill", "config": "setting"},
+        "change_verdicts": {"improved": "improved", "regressed": "got worse", "neutral": "no material change",
+                            "mixed": "mixed", "insufficient_data": "not enough data yet", None: "being measured"},
+        "final": "final", "provisional": "provisional",
+        # system
+        "system_title": "Operating system", "unsupported": "This system is not one the plugin updates (Linux with apt only).",
+        "kernel": "kernel {k}", "updates": "Updates waiting", "updates_line": "{n} ({s} security) · lists refreshed {when}",
+        "reboot": "Reboot waiting", "auto_updates": "Automatic security updates", "pm": "Package manager",
+        "pm_ok": "ok", "pm_busy": "busy: {what}", "pm_broken": "needs a repair", "units": "Hermes services",
+        "unit_ok": "starts at boot", "unit_off": "does not start at boot", "linger": "user services come back after a reboot",
+        "ready": "Ready for an update", "ready_yes": "yes", "ready_no": "not now ({why})",
+        "system_codes": {"package_manager_busy": "a package manager is working", "package_manager_stuck":
+                         "a package manager looks stuck", "dpkg_interrupted": "an update stopped half-way",
+                         "apt_broken": "broken dependencies", "held_by_plugin": "packages held by a stopped update",
+                         "disk_low": "little free disk", "reboot_required": "a reboot is waiting",
+                         "security_updates": "security updates waiting", "unattended_off": "automatic updates off",
+                         "lists_stale": "package lists older than 7 days", "unit_not_enabled": "a Hermes service does "
+                                                                                                 "not start at boot",
+                         "user_units_without_linger": "user services stop after a reboot", "unsupported": "unsupported"},
+        "system_run": "What you can run",
+        "system_actions": {"plan": "refreshes the package lists and shows what an update would change",
+                           "upgrade": "updates the system (a list of every package and a copy of /etc are kept first)",
+                           "repair": "finishes an update that stopped half-way", "report": "the report of the last update"},
+        "plan_title": "What an update would change", "plan_error": "The package manager refused: {error}",
+        "plan_counts": "{upgrade} to update · {install} new · {remove} to remove · {kept} kept back",
+        "plan_new": ("{n}", "{n}"), "plan_kept": ("{n}", "{n}"),
+        "plan_attention": "Worth knowing", "plan_none": "Nothing to update.",
+        "attention_codes": {"restarts_containers": "restarts the containers (Docker)", "needs_reboot": "needs a reboot",
+                            "restarts_web": "restarts the web server", "remote_access": "remote access (SSH/sudo)",
+                            "boot": "the boot loader", "package_manager": "the package manager itself"},
+        "report_none": "No update was run by the plugin yet.", "report_running": "An update is running now.",
+        "report_title": "Last update", "report_line": "exit code {exit} · {changed} · package manager {pm} · Hermes {hermes} · reboot {reboot}",
+        "changed": ("1 package changed", "{n} packages changed"), "folder": "Kept in `{folder}`.",
+        "stopped_units": "Services that stopped", "go_back": "To go back to the old version of a package",
+        "repair_ok": "The repair finished: the package manager is in order.", "repair_bad": "The repair ended with code {code}; "
+                                                                                           "look at `{folder}`.",
+        "released": "Packages released: {names}.", "lost": "The run was interrupted before it wrote its result.",
+        "nothing_to_do": "Nothing to update.",
+        "upgrade_started": "Update finished.",
+    },
+    "pt": {
+        "attention": "Precisa de atenção", "nothing": "Nada precisa de atenção.", "yes": "sim", "no": "não",
+        "more": "Para scripts: acrescente `--format json`.",
+        "care_title": "Saúde do Hermes · perfil `{profile}`", "gateway": "Gateway", "db": "Banco de sessões",
+        "disk": "Disco", "free": "{free} livres de {total}", "pace": "{per_day} a menos por dia: enche em cerca de {days} dias",
+        "memory": "Memória", "cpu": "Processadores",
+        "load": "carga {load} em {cpus} CPUs nos últimos 15 minutos", "folders": "Pastas que mais ocupam",
+        "unused": "Versões antigas de ferramentas que nada usa", "checked": "Conferido em {when}.",
+        "care_run": "O que você pode rodar (cada um pergunta antes)",
+        "care_actions": {"pm-doctor": "confere os arquivos instalados do Hermes (sem rede)",
+                         "doctor": "a checagem completa do Hermes (`hermes doctor`); também consulta as APIs dos seus provedores, o registro do npm e o GitHub, e leva minutos",
+                         "fix": "`hermes doctor --fix`, depois de um backup rápido que o Hermes sabe restaurar",
+                         "gc": "remove versões de ferramentas que nada usa"},
+        "ran_ok": "`{command}` terminou.", "ran_code": "`{command}` terminou com o código {code}.",
+        "backup_failed": "O backup não deu certo (código {code}), então o `hermes doctor --fix` não rodou.",
+        "doctor_clean": "A checagem do Hermes não encontrou nenhum problema.",
+        "doctor_found": ("A checagem do Hermes encontrou 1 problema.", "A checagem do Hermes encontrou {n} problemas."),
+        "doctor_todo": "O que o Hermes sugere (texto do Hermes, em inglês)",
+        "doctor_listed": "O que ela apontou (texto do Hermes, em inglês)",
+        "tail": "Últimas linhas que ele mostrou (texto do Hermes, em inglês)",
+        "fixed": "O `hermes doctor --fix` terminou.",
+        "scanned": "Todos os perfis foram olhados agora.",
+        "catalog_title": "Catálogo de plugins do Hermes", "catalog_tiers": "Plugins por categoria",
+        "catalog_none": "O catálogo ainda não foi lido: ele é lido na próxima rodada de aprendizado do perfil que cuida "
+                        "do Hermes inteiro.",
+        "catalog_removed": "Removidos do catálogo", "tiers": {"official": "oficiais", "verified": "verificados",
+                                                             "community": "da comunidade"},
+        "decisions_title": "Suas decisões", "decisions_none": "Nenhuma decisão registrada ainda.",
+        "where": {"terminal": "terminal", "dashboard": "painel", "automatic": "automático"},
+        "did": {"approve": "aprovou", "reject": "rejeitou", "retire": "aposentou", "reactivate": "reativou",
+                "apply": "aplicou", "set": "mudou", "undo": "desfez", "dedupe": "removeu uma entrada repetida da memória"},
+        "what_lesson": "{did} a lição #{target}", "what_proposal": "{did} a proposta #{target}",
+        "what_setting": "mudou `{target}`: {before} → {after}",
+        "what_memory": "removeu uma entrada repetida da memória `{target}` (guardou uma cópia do arquivo antes)",
+        "what_maintenance": "rodou a manutenção do próprio Hermes: `hermes {target}` (nada a desfazer)",
+        "undone_mark": "desfeita", "hidden": "(texto oculto: leia no seu próprio terminal)",
+        "undo_hint": "Para desfazer uma: `{command}`.",
+        "undo_done": "Decisão #{id} desfeita.", "undo_not": "A decisão #{id} não foi desfeita: {reason}",
+        "undo_reasons": {"changed_since": "mudou depois (outra decisão ou uma rodada); nada mudou.",
+                         "already_undone": "ela já tinha sido desfeita.", "unknown": "não há decisão com esse número.",
+                         "not_undoable": "esse tipo de decisão não se desfaz."},
+        "undo_run": "A configuração do Hermes é sua: rode isto no seu próprio terminal para voltar ao valor anterior:",
+        "agent_tools_restart": "Ligar as ferramentas do agente vale depois de `hermes gateway restart` (no terminal, na "
+                               "próxima sessão); desligar vale em até um minuto.",
+        "applies_soon": "Um gateway em execução pega a mudança sozinho, em geral em até um minuto; não precisa reiniciar.",
+        "lessons_title": "Lições", "lessons_mode": "**Lições:** {mode}",
+        "lesson_modes": {"auto": ("automáticas", "padrões fixos valem sozinhos; o resto espera você"),
+                         "suggest": ("com aprovação", "toda lição espera você"),
+                         "off": ("desligadas", "só medem; nada é mostrado ao agente")},
+        "lessons_none": "Nenhuma lição ainda.",
+        "status_names": {"active": "Ativas", "candidate": "Aguardando aprovação", "quarantined": "Aguardando aprovação",
+                         "retired": "Aposentadas", "withdrawn": "Descartadas sem decisão (fila limpa)"},
+        "origins": {"derived": "padrão fixo", "operator": "você", "reflector": "refletor", "agent": "agente"},
+        "seen": ("vista 1 vez em {s}", "vista {n} vezes em {s}"), "sessions": ("1 sessão", "{n} sessões"),
+        "verdicts": {"effective": "ajudou", "ineffective": "não ajudou", "inconclusive": "inconclusivo",
+                     "withdrawn": "descartada sem decisão (fila limpa)"},
+        "rates": "taxa de falha {before} → {after}",
+        "lessons_decide": "Decida as que esperam com `{review}` (uma a uma, no seu próprio terminal), ou "
+                          "`{approve}` / `{retire}`.",
+        "approved": "A lição #{id} está ativa agora: o agente passa a lê-la a partir da próxima sessão.",
+        "reactivated": "A lição #{id} está ativa de novo.",
+        "retired_now": "A lição #{id} foi aposentada: o agente não a vê mais.",
+        "rejected": "A lição #{id} foi rejeitada: ela não será mostrada ao agente.",
+        "already_active": "A lição #{id} já está ativa; nada mudou.",
+        "already_retired": "A lição #{id} já está aposentada; nada mudou.",
+        "kept_retired": "A lição #{id} tinha sido descartada sem decisão (fila limpa); agora fica aposentada e não "
+                        "volta quando a falha se repetir.",
+        "not_changed": "A lição #{id} está {status}; nada mudou.",
+        "added": "Lição #{id} adicionada e já ativa.", "added_waiting": "Lição #{id} adicionada: ela espera a sua "
+                                                                         "aprovação (`{command}`).",
+        "review_done": "Aprovadas: {approved} · rejeitadas: {rejected} · puladas: {skipped}.",
+        "all_done": ("1 lição aprovada.", "{n} lições aprovadas."), "all_none": "Nenhuma lição estava esperando.",
+        "all_left": "Ficaram para uma decisão própria (o agente as propôs): {ids}.",
+        "all_skipped": "Não aprovadas porque mudaram ou foram decididas nesse meio-tempo: {ids}.",
+        "written": ("1 lição gravada em `{path}`.", "{n} lições gravadas em `{path}`."),
+        "import_plan": "De {source}", "import_add": "Para importar", "import_skip": "Já estão aqui ou foram recusadas",
+        "import_done": ("1 lição importada.", "{n} lições importadas."), "import_dry": "Nada foi importado (--dry-run).",
+        "import_none": "Nada novo para importar.",
+        "kinds": {"lesson": "lição"},
+        "proposals_title": "Propostas", "proposals_all": "Propostas (todas)", "proposals_none": "Nada aguardando você.",
+        "risk": "risco", "seen_label": "Visto", "advice_label": "O que fazer", "does_label": "Se aprovar",
+        "changes_label": "O que muda",
+        "proposal": "Proposta", "lesson_title": "Ativar lição #{id}", "retire_title": "Aposentar lição #{id}",
+        "lesson_on": "Se aprovar: a lição fica ativa e o agente passa a lê-la no começo de cada sessão.",
+        "lesson_retire": "Se aprovar: a lição é aposentada e o agente deixa de lê-la.",
+        "write_lesson": "escreva uma lição com `{command}`, ou deixe o refletor rascunhar uma quando a falha acontecer "
+                        "nos seus turnos",
+        "undo_label": "Desfazer", "command_label": "Comando", "state_label": "situação",
+        "states": {"open": "aberta", "approved": "aprovada, esperando você rodar", "applying": "sendo aplicada",
+                   "applied": "aplicada", "rejected": "rejeitada", "expired": "expirada"},
+        "already": {"applied": "A proposta {id} já foi aplicada; nada mudou.",
+                    "rejected": "A proposta {id} já foi rejeitada; nada mudou.",
+                    "expired": "A proposta {id} expirou (a situação acabou); nada mudou.",
+                    "applying": "A proposta {id} está sendo aplicada agora; nada mudou."},
+        "proposals_decide": "Decida cada uma no seu próprio terminal com `{approve}` ou `{reject}`; as lições também "
+                            "se decidem uma a uma com `{review}`.",
+        "p_applied": "Proposta #{id} aplicada.", "p_undo": "Para desfazer: {undo} (ou `{command}`).",
+        "p_not_applied": {"not_open": "A proposta #{id} não foi aplicada: ela foi decidida nesse meio-tempo.",
+                          "already": "Proposta #{id}: nada a fazer, já estava assim; ficou marcada como aplicada."},
+        "p_approved": "Proposta #{id} aprovada. Rode isto no seu próprio terminal para aplicá-la:",
+        "p_lesson_on": "Proposta #{id} aprovada: a lição dela está ativa agora; o agente passa a lê-la a partir da próxima sessão.",
+        "p_lesson_off": "Proposta #{id} aprovada: a lição dela foi aposentada.",
+        "p_approved_plain": "Proposta #{id} aprovada.",
+        "p_rejected": "Proposta #{id} rejeitada: some por 30 dias e só volta se a situação continuar.",
+        "learn_title": "Rodada de aprendizado", "learn_mode": "{mode}: {did}",
+        "modes": {"full": ("Modo Auto", "age sozinho em todos os perfis"),
+                  "safe": ("Modo Assistido", "sozinho, só remove entradas repetidas da memória; o resto espera você"),
+                  "off": ("Modo Manual", "só mede e propõe")},
+        "history": "Histórico do Hermes", "history_states": {"done": "lido", "running": "em leitura",
+                                                             "waiting": "aguardando a primeira rodada",
+                                                             "no_history": "sem histórico", "unreadable": "ilegível",
+                                                             "unsupported_history": "formato não suportado"},
+        "history_counts": "{sessions} sessões · {tool_calls} chamadas de ferramentas",
+        "new_lessons": "Lições novas", "drafts": "Rascunhos do refletor para ler", "regressions": "Mudanças que pioraram",
+        "retired_lessons": "Lições aposentadas porque não ajudaram", "risky": "Propostas de risco alto",
+        "automatic": "Feito sozinho", "automatic_failed": "Tentado sozinho e falhou",
+        "memory_done": ("1 entrada repetida da memória removida (uma cópia do arquivo foi guardada antes)",
+                        "{n} entradas repetidas da memória removidas (uma cópia do arquivo foi guardada antes)"),
+        "open": ("1 proposta espera você", "{n} propostas esperam você"),
+        "reflector": "Refletor", "reflector_states": {"off": "desligado", "lessons_off": "desligado (as lições estão desligadas)",
+                                                      "unavailable_without_hermes_llm": "indisponível fora do Hermes",
+                                                      "ran": "rodou", "limit": "limite diário atingido",
+                                                      "nothing": "nada para ler"},
+        "nothing_new": "Nada novo nesta rodada.", "see_proposals": "Veja com `{command}`.",
+        "verdict_label": "veredito", "pass_done": "Rodada concluída em {when}.",
+        "risky_lesson": "Proposta #{id}: {who} para `{tool}` · decida com `{command}`",
+        "risky_other": "Proposta #{id}: {title} · {subject} · veja com `{command}`",
+        "who": {"agent": "lição escrita pelo agente", "reflector": "rascunho do refletor", "operator": "lição sua",
+                "derived": "lição de padrão fixo"},
+        "skills_title": "Skills · últimos {days} dias", "tracked": "Skills que o Hermes acompanha", "rewrites": "Reescritas",
+        "by_review": "{n} pela revisão automática", "rewritten": ("1 skill reescrita", "{n} skills reescritas"),
+        "top": "As mais reescritas", "flipflops": ("1 vai-e-volta", "{n} vai-e-voltas"), "uses": ("1 uso", "{n} usos"),
+        "unreused": ("1 reescrita nunca usada depois", "{n} reescritas nunca usadas depois"),
+        "skill_findings": "Vale olhar",
+        "skill_codes": {"skill_churn": "`{skill}` é reescrita sem parar ({rewrites} reescritas, {flipflops} vai-e-voltas)",
+                        "skill_unexercised_rewrites": "`{skill}` foi reescrita {unreused_rewrites} vezes e não foi usada depois",
+                        "skill_never_used": "`{skill}` foi criada pelo agente há {age_days} dias e nunca foi usada",
+                        "skill_underperforming": "`{skill}`: os turnos com ela vão pior que o perfil ({worse})"},
+        "outcomes": "Turnos que carregaram cada skill (últimos {days} dias)",
+        "outcomes_none": "Ainda não há turnos suficientes com skill carregada (pelo menos {n}).",
+        "whole": "perfil inteiro", "turns": ("1 turno", "{n} turnos"), "failed_pct": "{v}% falharam",
+        "corrected_pct": "{v}% corrigidos", "basis_skills": "Lido dos registros de uso de skills do Hermes e do livro do "
+                                                            "Curator; nada do texto das skills é guardado.",
+        "experiments_title": "Mudanças e o efeito medido", "experiments_none": "Nenhuma mudança acompanhada ainda.",
+        "change_kinds": {"lesson": "lição", "skill": "skill", "config": "configuração"},
+        "change_verdicts": {"improved": "melhorou", "regressed": "piorou", "neutral": "sem mudança relevante",
+                            "mixed": "misto", "insufficient_data": "dados insuficientes ainda", None: "em medição"},
+        "final": "final", "provisional": "provisório",
+        "system_title": "Sistema operacional", "unsupported": "Este sistema não é um que o plugin atualiza (só Linux com apt).",
+        "kernel": "kernel {k}", "updates": "Atualizações esperando",
+        "updates_line": "{n} ({s} de segurança) · listas atualizadas em {when}",
+        "reboot": "Reinício pendente", "auto_updates": "Atualizações automáticas de segurança", "pm": "Gerenciador de pacotes",
+        "pm_ok": "ok", "pm_busy": "ocupado: {what}", "pm_broken": "precisa de reparo", "units": "Serviços do Hermes",
+        "unit_ok": "sobe na inicialização", "unit_off": "não sobe na inicialização",
+        "linger": "serviços do usuário voltam depois de reiniciar",
+        "ready": "Pronto para atualizar", "ready_yes": "sim", "ready_no": "agora não ({why})",
+        "system_codes": {"package_manager_busy": "um gerenciador de pacotes está trabalhando",
+                         "package_manager_stuck": "um gerenciador de pacotes parece travado",
+                         "dpkg_interrupted": "uma atualização parou no meio", "apt_broken": "dependências quebradas",
+                         "held_by_plugin": "pacotes retidos por uma atualização interrompida",
+                         "disk_low": "pouco espaço em disco", "reboot_required": "um reinício está pendente",
+                         "security_updates": "atualizações de segurança esperando",
+                         "unattended_off": "atualizações automáticas desligadas",
+                         "lists_stale": "listas de pacotes com mais de 7 dias",
+                         "unit_not_enabled": "um serviço do Hermes não sobe na inicialização",
+                         "user_units_without_linger": "serviços do usuário param depois de reiniciar",
+                         "unsupported": "não suportado"},
+        "system_run": "O que você pode rodar",
+        "system_actions": {"plan": "atualiza as listas de pacotes e mostra o que uma atualização mudaria",
+                           "upgrade": "atualiza o sistema (antes guarda a lista de todos os pacotes e uma cópia do /etc)",
+                           "repair": "termina uma atualização que parou no meio", "report": "o relatório da última atualização"},
+        "plan_title": "O que uma atualização mudaria", "plan_error": "O gerenciador de pacotes recusou: {error}",
+        "plan_counts": "{upgrade} para atualizar · {install} · {remove} para remover · {kept}",
+        "plan_new": ("1 novo", "{n} novos"), "plan_kept": ("1 retido", "{n} retidos"),
+        "plan_attention": "Bom saber", "plan_none": "Nada para atualizar.",
+        "attention_codes": {"restarts_containers": "reinicia os containers (Docker)", "needs_reboot": "pede reinício",
+                            "restarts_web": "reinicia o servidor web", "remote_access": "acesso remoto (SSH/sudo)",
+                            "boot": "o carregador de inicialização (boot)", "package_manager": "o próprio gerenciador de pacotes"},
+        "report_none": "O plugin ainda não rodou nenhuma atualização.", "report_running": "Uma atualização está rodando agora.",
+        "report_title": "Última atualização",
+        "report_line": "código de saída {exit} · {changed} · gerenciador de pacotes {pm} · Hermes {hermes} · reinício {reboot}",
+        "changed": ("1 pacote mudou", "{n} pacotes mudaram"), "folder": "Guardado em `{folder}`.",
+        "stopped_units": "Serviços que pararam", "go_back": "Para voltar à versão antiga de um pacote",
+        "repair_ok": "O reparo terminou: o gerenciador de pacotes está em ordem.",
+        "repair_bad": "O reparo terminou com o código {code}; veja `{folder}`.",
+        "released": "Pacotes liberados: {names}.", "lost": "A execução foi interrompida antes de gravar o resultado.",
+        "nothing_to_do": "Nada para atualizar.",
+        "upgrade_started": "Atualização concluída.",
+    },
+}
+
+
+def _p(entry, count, **values) -> str:
+    """A text of the tables with its count: a (singular, plural) pair, or one form for both."""
+    form = (entry[0] if count == 1 else entry[1]) if isinstance(entry, tuple) else entry
+    return form.format(n=count, **values)
+
+
+def _num(value, lang: str) -> str:
+    """A count or a percentage the way the person writes it (1.234 and 12,5 in Portuguese)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "?" if value is None else str(value)
+    text = f"{value:,}" if isinstance(value, int) else f"{value:,.1f}"
+    return text.replace(",", "X").replace(".", ",").replace("X", ".") if lang == "pt" else text
+
+
+def _value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value) if value else "—"
+    return "—" if value is None else str(value)
+
+
+def _care_md(found: dict | None, home: Path, lang: str) -> str:
+    from .status import _TEXT, _care_values, database_words, gateway_words, human_size, local_time, memory_words
+
+    t, texts = _H[lang], _TEXT[lang]
+    found = found or {}
+    db, memory = found.get("database") or {}, found.get("memory") or {}
+    lines = ["# " + t["care_title"].format(profile=_profile_name(home)), ""]
+    lines.append(f"- **{t['gateway']}:** " + gateway_words(found.get("gateway") or {}, lang, beat=True))
+    lines.append(f"- **{t['db']}:** " + database_words(db, lang))
+    if found.get("free") is not None:
+        line = f"- **{t['disk']}:** " + t["free"].format(free=human_size(found["free"]), total=human_size(found.get("total")))
+        if (found.get("disk_per_day") or 0) > 0 and found.get("days_to_full"):
+            line += " · " + t["pace"].format(per_day=human_size(found["disk_per_day"]), days=_num(found["days_to_full"], lang))
+        lines.append(line)
+    if memory.get("total"):
+        lines.append(f"- **{t['memory']}:** " + memory_words(memory, lang))
+    load = found.get("load") or {}
+    if load.get("cpus"):
+        lines.append(f"- **{t['cpu']}:** " + t["load"].format(load=_num(load.get("15m"), lang), cpus=load["cpus"]))
+    biggest = sorted(((name, size) for name, size in (found.get("sizes") or {}).items() if isinstance(size, int) and size),
+                     key=lambda item: -item[1])[:6]
+    if biggest:
+        lines.append(f"- **{t['folders']}:** " + " · ".join(f"`{name}` {human_size(size)}" for name, size in biggest))
+    if found.get("unused_tools"):
+        lines.append(f"- **{t['unused']}:** {human_size(found.get('reclaimable'))} (" + ", ".join(
+            f"`{item['folder']}`" for item in found["unused_tools"][:8]) + ")")
+    values = _care_values({"care": found, "system": {}})
+    codes = [f"hermes_{code}" for code in found.get("findings") or () if f"hermes_{code}" in texts]
+    lines += ["", f"## {t['attention']}", ""]
+    lines += [f"- {texts[code].format(**values)}" for code in codes] or [t["nothing"]]
+    if found.get("at"):
+        lines += ["", t["checked"].format(when=local_time(found["at"], lang))]
+    lines += ["", f"## {t['care_run']}", ""]
+    for action, does in t["care_actions"].items():
+        lines.append(f"- `{_hermes_cmd(home, 'evolution care ' + action)}`: {does}")
+    return "\n".join(lines) + "\n"
+
+
+def _care_action_md(result: dict, task: str, lang: str) -> str:
+    t = _H[lang]
+    steps = result.get("steps") or []
+    last = steps[-1] if steps else {}
+    if result.get("reason") == "backup_failed":
+        return t["backup_failed"].format(code=last.get("exit")) + "\n"
+    lines = []
+    doctor = result.get("doctor")
+    if doctor is not None:   # `hermes doctor` ends with 1 when it found problems: its answer, not a failure
+        found = result.get("problems_found") or doctor.get("found") or 0
+        if last.get("exit") == 0 and not found:
+            lines.append(t["fixed"] if task == "fix" else t["doctor_clean"])
+        elif result.get("ok") or last.get("exit") in (0, 1):
+            lines.append(_p(t["doctor_found"], found or len(doctor.get("problems") or ()) or 1))
+        else:
+            lines.append(t["ran_code"].format(command=last.get("command", "hermes"), code=last.get("exit")))
+        if doctor.get("actions"):
+            lines += ["", f"## {t['doctor_todo']}", ""] + [f"{n}. {item}" for n, item in enumerate(doctor["actions"], 1)]
+        elif doctor.get("problems"):
+            lines += ["", f"## {t['doctor_listed']}", ""] + [f"- {item}" for item in doctor["problems"][:12]]
+        return "\n".join(lines) + "\n"
+    if last.get("exit") == 0:
+        lines.append(t["ran_ok"].format(command=last.get("command", "hermes")))
+    else:
+        lines.append(t["ran_code"].format(command=last.get("command", "hermes"), code=last.get("exit")))
+    if last.get("tail"):
+        lines += ["", f"{t['tail']}:", ""] + [f"    {line}" for line in last["tail"]]
+    return "\n".join(lines) + "\n"
+
+
+def _catalog_md(result: dict, lang: str) -> str:
+    t = _H[lang]
+    lines = [f"# {t['catalog_title']}", ""]
+    tiers = result.get("tiers") or {}
+    if not tiers:
+        return "\n".join(lines + [t["catalog_none"]]) + "\n"
+    lines.append(f"- **{t['catalog_tiers']}:** " + " · ".join(
+        f"{_num(count, lang)} {t['tiers'].get(tier, tier)}" for tier, count in sorted(tiers.items())))
+    removed = result.get("removed") or []
+    if removed:
+        lines += ["", f"## {t['catalog_removed']}", ""]
+        lines += [f"- `{item.get('name')}`" + (f": {item['reason']}" if item.get("reason") else "") for item in removed[:40]]
+    return "\n".join(lines) + "\n"
+
+
+def _describe_decision(row: dict, lang: str) -> str:
+    t = _H[lang]
+    did = t["did"].get(row.get("action"), row.get("action"))
+    kind = row.get("kind")
+    if kind == "setting":
+        return t["what_setting"].format(target=row["target"], before=_value((row.get("before") or {}).get("value")),
+                                        after=_value((row.get("after") or {}).get("value")))
+    if kind == "memory":
+        return t["what_memory"].format(target=row["target"])
+    if kind == "maintenance":
+        return t["what_maintenance"].format(target=str(row["target"]).replace("_", " "))
+    if kind == "proposal" and isinstance((row.get("after") or {}).get("applied"), list):
+        from .explain import command_text
+
+        return f"{did}: `" + command_text(row["after"]["applied"], lang) + "`"
+    return t["what_lesson" if kind == "lesson" else "what_proposal"].format(did=did, target=row["target"])
+
+
+def _decisions_md(rows: list, home: Path, lang: str) -> str:
+    from .status import local_time
+
+    t = _H[lang]
+    lines = [f"# {t['decisions_title']}", ""]
+    if not rows:
+        return "\n".join(lines + [t["decisions_none"]]) + "\n"
+    for row in rows:
+        mark = f" · _{t['undone_mark']}_" if row.get("undone") else ""
+        lines.append(f"- **#{row['id']}** · {local_time(row['at'], lang)} · {t['where'].get(row['actor'], row['actor'])} · "
+                     f"{_describe_decision(row, lang)}{mark}")
+        if row.get("lesson"):
+            lines.append(f"  - {row['lesson']}")
+        elif row.get("text_hidden"):
+            lines.append(f"  - {t['hidden']}")
+    if any(row.get("undoable", not row.get("undone")) for row in rows):
+        lines += ["", t["undo_hint"].format(command=_hermes_cmd(home, "evolution decisions undo <id>"))]
+    return "\n".join(lines) + "\n"
+
+
+def _undo_md(result: dict, lang: str) -> str:
+    t = _H[lang]
+    number = result.get("id", "?")
+    if result.get("run_this"):
+        lines = [t["undo_run"], "", f"    {result['run_this']}", ""]
+        lines.append(t["agent_tools_restart"] if result.get("key") == "agent_tools" and result.get("restore") is True
+                     else t["applies_soon"])
+        return "\n".join(lines) + "\n"
+    if result.get("undone"):
+        return t["undo_done"].format(id=number) + "\n"
+    reason = t["undo_reasons"].get(result.get("reason"), t["undo_reasons"]["changed_since"])
+    return t["undo_not"].format(id=number, reason=reason) + "\n"
+
+
+def _lesson_line(item: dict, lang: str) -> list[str]:
+    t = _H[lang]
+    origin = t["origins"].get(item.get("origin"), item.get("origin"))
+    parts = [f"`{item.get('tool')}`", origin]
+    if item.get("failures_seen"):
+        parts.append(_p(t["seen"], item["failures_seen"], s=_p(t["sessions"], item.get("sessions") or 0)))
+    if item.get("verdict") in t["verdicts"] and item["verdict"] != "withdrawn":   # its own group says it
+        parts.append(t["verdicts"][item["verdict"]])
+    if item.get("rate_before") is not None and item.get("rate_after") is not None:
+        parts.append(t["rates"].format(before=_num(round(item["rate_before"], 3), lang),
+                                       after=_num(round(item["rate_after"], 3), lang)))
+    text = item.get("lesson") if item.get("lesson") else t["hidden"]
+    return [f"- **#{item['id']}** · " + " · ".join(str(part) for part in parts), f"  {text}"]
+
+
+def _lessons_md(result: dict, home: Path, lang: str) -> str:
+    t = _H[lang]
+    rows = result.get("lessons") or []
+    mode = result.get("mode")
+    name, does = t["lesson_modes"].get(mode, (str(mode), ""))
+    lines = [f"# {t['lessons_title']}", "", t["lessons_mode"].format(mode=name) + (f" ({does})" if does else "")]
+    if not rows:
+        return "\n".join(lines + ["", t["lessons_none"]]) + "\n"
+    groups: dict[str, list] = {}
+    for item in rows:   # a lesson the queue cleaning dropped without a decision is not one the owner retired
+        state = "withdrawn" if item.get("status") == "retired" and item.get("verdict") == "withdrawn" else item.get("status")
+        groups.setdefault(t["status_names"].get(state, str(state)), []).append(item)
+    for title, items in sorted(groups.items(), key=lambda entry: entry[0] == t["status_names"]["withdrawn"]):
+        lines += ["", f"## {title} · {len(items)}", ""]
+        for item in items:
+            lines += _lesson_line(item, lang)
+    if any(item.get("status") in ("candidate", "quarantined") for item in rows):
+        lines += ["", t["lessons_decide"].format(review=_hermes_cmd(home, "evolution lessons review"),
+                                                 approve=_hermes_cmd(home, "evolution lessons approve <id>"),
+                                                 retire=_hermes_cmd(home, "evolution lessons retire <id>"))]
+    return "\n".join(lines) + "\n"
+
+
+def _lesson_task_md(result: dict, task: str, home: Path, lang: str) -> str:
+    t = _H[lang]
+    if task == "add":
+        if result.get("status") == "active":
+            return t["added"].format(id=result["id"]) + "\n"
+        return t["added_waiting"].format(id=result["id"], command=_hermes_cmd(home, f"evolution lessons approve {result['id']}")) + "\n"
+    if task == "review":
+        return t["review_done"].format(**{key: ", ".join(f"#{item}" for item in result.get(key) or ()) or "0"
+                                          for key in ("approved", "rejected", "skipped")}) + "\n"
+    if task == "approve" and "approved" in result and "id" not in result:   # --all
+        lines = [_p(t["all_done"], len(result["approved"])) if result["approved"] else t["all_none"]]
+        if result.get("left_for_one_by_one"):
+            lines.append(t["all_left"].format(ids=", ".join(f"#{item}" for item in result["left_for_one_by_one"])))
+        skipped = [item.get("id") if isinstance(item, dict) else item for item in result.get("skipped") or ()]
+        if skipped:
+            lines.append(t["all_skipped"].format(ids=", ".join(f"#{item}" for item in skipped)))
+        return "\n".join(lines) + "\n"
+    if task == "export":
+        return _p(t["written"], result.get("lessons", 0), path=result.get("written")) + "\n"
+    if task == "import":
+        lines = [t["import_plan"].format(source=f"`{result.get('source')}`"), ""]
+        if result.get("to_import"):
+            lines += [f"## {t['import_add']}", ""] + [f"- `{item['tool']}`: {item['lesson']}" for item in result["to_import"]]
+            lines.append("")
+        if result.get("skipped"):
+            lines += [f"## {t['import_skip']}", ""] + [
+                f"- {item.get('lesson') or item.get('tool') or item}" if isinstance(item, dict) else f"- {item}"
+                for item in result["skipped"][:40]]
+        lines.append("")
+        if result.get("imported"):
+            lines.append(_p(t["import_done"], len(result["imported"])))
+        elif result.get("to_import"):
+            lines.append(t["import_dry"])
+        else:
+            lines.append(t["import_none"])
+        return "\n".join(lines) + "\n"
+    number, status, previous = result.get("id"), result.get("status"), result.get("previous")
+    if result.get("decision") is None:   # nothing changed: say where the lesson already is
+        if status == "active":
+            return t["already_active"].format(id=number) + "\n"
+        if status == "retired":
+            return t["already_retired"].format(id=number) + "\n"
+        return t["not_changed"].format(id=number, status=t["status_names"].get(status, status).lower()) + "\n"
+    if status == "active":
+        return t["reactivated" if previous == "retired" else "approved"].format(id=number) + "\n"
+    if previous == "retired":
+        return t["kept_retired"].format(id=number) + "\n"
+    return t["rejected" if previous in ("candidate", "quarantined") else "retired_now"].format(id=number) + "\n"
+
+
+def _proposals_md(rows: list, home: Path, lang: str, *, everything: bool) -> str:
+    from . import explain
+    from .report import subject_words
+    from .status import local_time
+
+    t = _H[lang]
+    lines = [f"# {t['proposals_all'] if everything else t['proposals_title']}", ""]
+    if not rows:
+        return "\n".join(lines + [t["proposals_none"]]) + "\n"
+    for item in rows:
+        told = explain.describe(item, lang)
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        title = told["title"]
+        if item.get("kind") in ("lesson", "lesson_retire") and evidence.get("lesson_id") is not None:
+            # the lesson's own number, the one `lessons list` and `lessons approve` use; the proposal keeps its own
+            title = t["lesson_title" if item["kind"] == "lesson" else "retire_title"].format(id=evidence["lesson_id"])
+        state = "" if item.get("status") == "open" else f" · {t['state_label']}: {t['states'].get(item['status'], item['status'])}"
+        lines.append(f"- **{t['proposal']} #{item['id']}** [{t['risk']}: {told['risk']}] {title} · "
+                     f"{subject_words(item, lang)}{state}" + (f" · {local_time(item['created'], lang)}" if item.get("created") else ""))
+        if item.get("kind") == "lesson":
+            text = evidence.get("lesson")
+            lines.append(f"  - {text}" if text else f"  - {t['hidden']}")
+        elif told.get("what"):
+            lines.append(f"  - {t['seen_label']}: {told['what']}")
+        if told.get("advice"):
+            lines.append(f"  - {t['advice_label']}: {told['advice']}")
+        waiting = item.get("status") in ("open", "approved")
+        approving = _if_approved(item, told, home, lang) if waiting else ""
+        if approving:
+            lines.append(f"  - {approving}")
+        if told.get("undo") and waiting:
+            lines.append(f"  - {t['undo_label']}: {_undo_words(told['undo'])}")
+        elif item.get("command") and item.get("kind") not in ("lesson", "investigate_failure"):
+            lines.append(f"  - {t['command_label']}: `{item['command']}`")
+    if any(item.get("status") in ("open", "approved") for item in rows):
+        lines += ["", t["proposals_decide"].format(approve=_hermes_cmd(home, "evolution proposals approve <id>"),
+                                                   reject=_hermes_cmd(home, "evolution proposals reject <id>"),
+                                                   menu=_hermes_cmd(home, "evolution"),
+                                                   review=_hermes_cmd(home, "evolution lessons review"))]
+    return "\n".join(lines) + "\n"
+
+
+def _if_approved(item: dict, told: dict, home: Path, lang: str) -> str:
+    """What approving a proposal does, as one sentence that starts with "Se aprovar"/"If approved" (or what to do,
+    for an observation), from explain.describe's `does`."""
+    t = _H[lang]
+    kind = item.get("kind")
+    if kind == "lesson":
+        return t["lesson_on"]
+    if kind == "lesson_retire":
+        return t["lesson_retire"]
+    if kind == "investigate_failure":
+        command = item.get("command") or _hermes_cmd(
+            home, f"evolution lessons add \"<{_say(lang, 'text', 'texto')}>\" --tool {item.get('subject')}")
+        return f"{t['advice_label']}: " + t["write_lesson"].format(command=command) + "."
+    does = str(told.get("does") or "").strip()
+    if not does or does.startswith(("Rode no seu terminal", "Run in your terminal")):
+        return ""   # nothing is applied: the command line below says what to run
+    if does.startswith(("É uma observação", "It is an observation")):
+        return does
+    for prefix, said in (("Ao aplicar, ", "Se aprovar, "), ("Applying ", "If approved, this ")):
+        if does.startswith(prefix):
+            return said + does[len(prefix):]
+    for prefix in ("Aplicar roda: ", "Applying runs: "):
+        if does.startswith(prefix):
+            ran = does[len(prefix):].rstrip(".")
+            return f"{t['does_label']}: " + (("roda " if lang == "pt" else "it runs ") + f"`{ran}`."
+                                              if ran.startswith("hermes ") else ran + ".")
+    head, colon, rest = does.partition(": ")
+    sentence = f"{head} — {rest}" if colon else does
+    # approving applies only what the plugin can apply itself; otherwise it prints the command shown below
+    label = t["does_label"] if told.get("can_apply") else t["changes_label"]
+    return f"{label}: {sentence[:1].lower()}{sentence[1:]}"
+
+
+def _undo_words(undo: str) -> str:
+    """The undo of a proposal: a Hermes command in code, the plugin's own trash move in words."""
+    if undo.startswith("hermes "):
+        return f"`{undo}`"
+    verb, colon, place = undo.partition(": ")
+    return f"{verb} `{place}`" if colon else undo
+
+
+def _proposal_task_md(result: dict, task: str, home: Path, lang: str) -> str:
+    t = _H[lang]
+    number = result.get("id")
+    if "status" not in result and isinstance(result.get("applied"), bool):   # applied with Hermes' own command
+        if not result["applied"]:
+            return t["p_not_applied"].get(result.get("reason"), t["p_not_applied"]["not_open"]).format(id=number) + "\n"
+        from .explain import command_text
+
+        undo = command_text(result.get("undo_args"), lang) if result.get("undo_args") else result.get("undo")
+        lines = [t["p_applied"].format(id=number)]
+        if undo or result.get("decision"):
+            lines.append(t["p_undo"].format(undo=_undo_words(undo) if undo else "—",
+                                            command=_hermes_cmd(home, f"evolution decisions undo {result.get('decision')}")))
+        return "\n".join(lines) + "\n"
+    status = result.get("status")
+    if status == "rejected":
+        return t["p_rejected"].format(id=number) + "\n"
+    if result.get("kind") in ("lesson", "lesson_retire") and status == "applied":
+        return t["p_lesson_on" if result["kind"] == "lesson" else "p_lesson_off"].format(id=number) + "\n"
+    if result.get("run_this"):
+        return "\n".join([t["p_approved"].format(id=number), "", f"    {result['run_this']}"]) + "\n"
+    return t["p_approved_plain"].format(id=number) + "\n"
+
+
+def _learn_md(result: dict | None, home: Path, lang: str, *, quiet: bool) -> str | None:
+    from .status import local_time
+
+    t = _H[lang]
+    if result is None:
+        return None
+    lines = [f"# {t['learn_title']}", ""]
+    automatic = result.get("automatic") or result.get("automatic_actions") or {}
+    if not quiet:
+        mode = automatic.get("mode")
+        if mode in t["modes"]:
+            name, does = t["modes"][mode]
+            lines.append(f"- **{name}:** {does}")
+        history = result.get("history") or {}
+        if history:
+            line = f"- **{t['history']}:** {t['history_states'].get(history.get('status'), history.get('status'))}"
+            if history.get("sessions") or history.get("tool_calls"):
+                line += " · " + t["history_counts"].format(sessions=_num(history.get("sessions", 0), lang),
+                                                           tool_calls=_num(history.get("tool_calls", 0), lang))
+            lines.append(line)
+        reflector = (result.get("reflector") or {}).get("status")
+        if reflector:
+            lines.append(f"- **{t['reflector']}:** {t['reflector_states'].get(reflector, reflector)}")
+        lines.append("")
+    sections = [
+        (t["new_lessons"], [_lesson_line(item, lang) for item in result.get("new_lessons") or ()]),
+        (t["drafts"], [[f"- #{item.get('lesson_id')} `{item.get('tool')}`: {item.get('lesson')}"]
+                       for item in result.get("reflector_drafts") or (result.get("reflector") or {}).get("drafted") or ()
+                       if isinstance(item, dict)]),
+        (t["regressions"], [[f"- {t['change_kinds'].get(item.get('kind'), item.get('kind'))} `{item.get('subject')}`: "
+                             f"{t['change_verdicts']['regressed']}"] for item in result.get("regressions") or
+                            [entry for entry in result.get("change_verdicts") or () if entry.get("verdict") == "regressed"
+                             and entry.get("final")]]),
+        (t["retired_lessons"], [[f"- #{item.get('id')} `{item.get('tool', '')}`"] for item in result.get("lessons_retired") or
+                                [entry for entry in result.get("lesson_effects") or () if entry.get("retired")]]),
+        (t["risky"], [[_risky_line(item, home, lang)] for item in result.get("high_risk_proposals") or
+                      [entry for entry in result.get("open_proposals") or () if entry.get("risk") == "high"
+                       and entry.get("created") == result.get("now")]]),
+    ]
+    done = []
+    if automatic.get("memory"):
+        done.append(_p(t["memory_done"], len(automatic["memory"])))
+    from .explain import describe
+    from .report import subject_words
+
+    for item in automatic.get("applied") or ():
+        title = describe({"kind": item.get("kind"), "subject": item.get("subject")}, lang)["title"]
+        done.append(f"{t['proposal']} #{item.get('proposal')}: {title} · "
+                    + subject_words({"kind": item.get("kind"), "subject": item.get("subject")}, lang))
+    sections.append((t["automatic"], [[f"- {line}"] for line in done]))
+    sections.append((t["automatic_failed"], [[f"- #{item['proposal']}" if item.get("proposal") else f"- {t['memory']}"]
+                                             for item in automatic.get("failed") or ()]))
+    shown = False
+    for title, entries in sections:
+        if entries:
+            shown = True
+            lines += [f"## {title}", ""] + [line for entry in entries for line in entry] + [""]
+    if not shown:
+        lines += [t["nothing_new"], ""]
+    if not quiet and result.get("open_proposals"):
+        lines.append(_p(t["open"], len(result["open_proposals"])) + ". "
+                     + t["see_proposals"].format(command=_hermes_cmd(home, "evolution proposals list")))
+    if result.get("now"):
+        when, _, zone = local_time(result["now"], lang).rpartition(" ")
+        lines += ["", t["pass_done"].format(when=f"{when} ({zone})" if when else zone)]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _risky_line(item: dict, home: Path, lang: str) -> str:
+    """A high-risk proposal of a learning pass, with what it is and the command that decides it."""
+    t = _H[lang]
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    if item.get("kind") == "lesson":
+        who = t["who"].get(evidence.get("origin"), t["kinds"]["lesson"])
+        return "- " + t["risky_lesson"].format(id=item.get("id"), who=who, tool=item.get("subject"),
+                                               command=_hermes_cmd(home, "evolution lessons review"))
+    from .explain import describe
+    from .report import subject_words
+
+    return "- " + t["risky_other"].format(id=item.get("id"), title=describe(item, lang)["title"],
+                                          subject=subject_words(item, lang),
+                                          command=_hermes_cmd(home, "evolution proposals list"))
+
+
+def _skills_md(report: dict, lang: str) -> str:
+    t = _H[lang]
+    days = report.get("window_days", 7)
+    lines = [f"# {t['skills_title'].format(days=days)}", "",
+             f"- **{t['tracked']}:** {_num(report.get('skills_tracked', 0), lang)}",
+             f"- **{t['rewrites']}:** {_num(report.get('rewrites', 0), lang)} ("
+             + t["by_review"].format(n=_num((report.get("rewrites_by_actor") or {}).get("curator", 0), lang)) + ") · "
+             + _p(t["rewritten"], report.get("skills_rewritten", 0))]
+    if report.get("top"):
+        lines += ["", f"## {t['top']}", ""]
+        for item in report["top"]:
+            parts = [f"{item['rewrites']}×", _p(t["flipflops"], item.get("flipflops", 0)), _p(t["uses"], item.get("uses_total", 0))]
+            if item.get("unreused_rewrites"):
+                parts.append(_p(t["unreused"], item["unreused_rewrites"]))
+            lines.append(f"- `{item['skill']}`: " + " · ".join(parts))
+    outcomes = report.get("outcomes") or {}
+    findings = list(report.get("findings") or ()) + list(outcomes.get("findings") or ())
+    if findings:
+        lines += ["", f"## {t['skill_findings']}", ""]
+        for item in findings:
+            template = t["skill_codes"].get(item.get("code"))
+            values = {**item, "worse": ", ".join(str(name).replace("_pct", "") for name in item.get("worse") or ())}
+            try:
+                lines.append("- " + (template.format(**values) if template else f"`{item.get('skill')}`: {item.get('code')}"))
+            except (KeyError, IndexError):
+                lines.append(f"- `{item.get('skill')}`")
+    if outcomes:
+        lines += ["", f"## {t['outcomes'].format(days=days)}", ""]
+        base = outcomes.get("profile") or {}
+        measured = [item for item in outcomes.get("skills") or () if item.get("turns", 0) >= outcomes.get("min_turns", 8)]
+        if not (measured and base.get("turns")):
+            lines.append(t["outcomes_none"].format(n=outcomes.get("min_turns", 8)))
+        else:
+            for name, item in [(t["whole"], base)] + [(f"`{entry['skill']}`", entry) for entry in measured[:12]]:
+                lines.append(f"- {name}: {_p(t['turns'], item['turns'])} · "
+                             + t["failed_pct"].format(v=_num(item.get("failed_pct"), lang)) + " · "
+                             + t["corrected_pct"].format(v=_num(item.get("corrected_pct"), lang)))
+    lines += ["", f"_{t['basis_skills']}_"]
+    return "\n".join(lines) + "\n"
+
+
+def _experiments_md(rows: list, lang: str) -> str:
+    from .status import local_time
+
+    t = _H[lang]
+    lines = [f"# {t['experiments_title']}", ""]
+    if not rows:
+        return "\n".join(lines + [t["experiments_none"]]) + "\n"
+    for item in rows:
+        verdict = t["change_verdicts"].get(item.get("verdict"), item.get("verdict"))
+        final = f" ({t['final'] if item.get('final') else t['provisional']})" if item.get("verdict") else ""
+        lines.append(f"- **#{item['id']}** {t['change_kinds'].get(item.get('kind'), item.get('kind'))} "
+                     f"`{item.get('subject')}` · {local_time(item.get('at'), lang)} · {verdict}{final}")
+    return "\n".join(lines) + "\n"
+
+
+def _system_md(result: dict, task: str, home: Path, lang: str) -> str:
+    from .status import local_time
+
+    t = _H[lang]
+    yes, no = t["yes"], t["no"]
+    if task == "check":
+        lines = [f"# {t['system_title']}", ""]
+        if not result.get("supported"):
+            return "\n".join(lines + [t["unsupported"]]) + "\n"
+        name = (result.get("os") or {}).get("name") or "?"
+        lines.append(f"- **{name}** · " + t["kernel"].format(k=result.get("kernel") or "?"))
+        pending = result.get("upgradable")
+        count = len(pending) if isinstance(pending, list) else pending or 0
+        when = local_time(result["last_refresh"], lang) if result.get("last_refresh") else "?"
+        lines.append(f"- **{t['updates']}:** " + t["updates_line"].format(n=count, s=result.get("security", 0), when=when))
+        if result.get("reboot_required"):
+            packages = ", ".join(result.get("reboot_packages") or ())
+            lines.append(f"- **{t['reboot']}:** {yes}" + (f" ({packages})" if packages else ""))
+        lines.append(f"- **{t['auto_updates']}:** {yes if (result.get('unattended') or {}).get('enabled') else no}")
+        if result.get("busy"):
+            state = t["pm_busy"].format(what=", ".join(result["busy"]))
+        elif result.get("dpkg_ok") is False or result.get("apt_ok") is False:
+            state = t["pm_broken"]
+        else:
+            state = t["pm_ok"]
+        lines.append(f"- **{t['pm']}:** {state}")
+        units = result.get("units") or []
+        if units:
+            lines.append(f"- **{t['units']}:** " + ", ".join(
+                f"`{unit['unit']}` ({t['unit_ok'] if unit.get('enabled') else t['unit_off']})" for unit in units)
+                + (f" · {t['linger']}: {yes if result.get('linger') else no}" if result.get("linger") is not None
+                   and any(unit.get("scope") == "user" for unit in units) else ""))
+        findings = [code for code in result.get("findings") or () if code != "package_manager_busy"]
+        why = ", ".join(t["system_codes"].get(code, code) for code in result.get("findings") or ()
+                        if code in ("dpkg_interrupted", "apt_broken", "package_manager_busy", "disk_low"))
+        lines.append(f"- **{t['ready']}:** " + (t["ready_yes"] if result.get("ready") else t["ready_no"].format(why=why or "?")))
+        from .status import _TEXT, _care_values
+
+        texts, values = _TEXT[lang], _care_values({"care": {}, "system": result})
+        lines += ["", f"## {t['attention']}", ""]
+        lines += [f"- {texts['os_' + code].format(**values) if 'os_' + code in texts else t['system_codes'].get(code, code)}"
+                  for code in findings] or [t["nothing"]]
+        if result.get("at"):
+            lines += ["", t["checked"].format(when=local_time(result["at"], lang))]
+        lines += ["", f"## {t['system_run']}", ""]
+        for action, does in t["system_actions"].items():
+            lines.append(f"- `{_hermes_cmd(home, 'evolution system ' + action)}`: {does}")
+        return "\n".join(lines) + "\n"
+    if task == "plan" or (task == "upgrade" and result.get("reason") == "nothing_to_do"):
+        planned = result.get("planned", result)
+        lines = [f"# {t['plan_title']}", ""]
+        if planned.get("error"):
+            return "\n".join(lines + [t["plan_error"].format(error=planned["error"])]) + "\n"
+        counts = {key: len(planned.get(key) or ()) for key in ("upgrade", "install", "remove")}
+        if not any(counts.values()):
+            return "\n".join(lines + [t["nothing_to_do"]]) + "\n"
+        lines.append(t["plan_counts"].format(upgrade=counts["upgrade"], remove=counts["remove"],
+                                             install=_p(t["plan_new"], counts["install"]),
+                                             kept=_p(t["plan_kept"], len(planned.get("kept_back") or ()))))
+        noted = [item for item in (planned.get("upgrade") or []) + (planned.get("install") or []) + (planned.get("remove") or [])
+                 if item.get("attention")]
+        if noted:
+            lines += ["", f"## {t['plan_attention']}", ""]
+            for item in noted[:40]:
+                notes = ", ".join(t["attention_codes"].get(code, code) for code in item["attention"])
+                lines.append(f"- `{item['name']}` {item.get('from') or ''} → {item.get('to') or '—'}: {notes}")
+        lines += ["", f"`{_hermes_cmd(home, 'evolution system upgrade')}`: {t['system_actions']['upgrade']}"]
+        return "\n".join(lines) + "\n"
+    if task == "repair":
+        lines = []
+        if result.get("released"):
+            lines.append(t["released"].format(names=", ".join(result["released"])))
+        if result.get("state") == "lost":
+            lines.append(t["lost"])
+        lines.append(t["repair_ok"] if result.get("ok") else t["repair_bad"].format(
+            code="?" if result.get("exit") is None else result["exit"], folder=result.get("folder")))
+        return "\n".join(lines) + "\n"
+    report = result.get("report")
+    folder = result.get("folder")
+    lines = [f"# {t['report_title']}", ""]
+    if task == "upgrade":
+        lines = [t["upgrade_started"], ""] + lines
+    if not report:
+        return "\n".join(lines + [t["report_none"]]) + "\n"
+    if report.get("state") == "running":
+        return "\n".join(lines + [t["report_running"]]) + "\n"
+    if report.get("state") == "lost":
+        lines.append(t["lost"])
+    state = {True: "ok", False: "⚠", None: "?"}
+    lines.append(t["report_line"].format(exit=report.get("exit"), changed=_p(t["changed"], len(report.get("changed") or ())),
+                                         pm=state[bool(report.get("dpkg_ok")) and report.get("apt_ok") is not False],
+                                         hermes=state[report.get("hermes_ok")],
+                                         reboot=yes if report.get("reboot_required") else no))
+    if report.get("stopped_units"):
+        lines.append(f"- **{t['stopped_units']}:** " + ", ".join(f"`{unit}`" for unit in report["stopped_units"]))
+    if report.get("go_back"):
+        lines += ["", f"{t['go_back']}:", ""] + [f"    {line}" for line in report["go_back"][:10]]
+    if folder:
+        lines += ["", t["folder"].format(folder=folder)]
+    return "\n".join(lines) + "\n"
+
+
+# `health`, `usage`, `history`, `tick` and `schedule-digest` as text (0.9.0); `--format json` keeps the structure.
+_OPS = {
+    "en": {
+        "health_title": "Hermes' files and the machine · profile `{profile}`",
+        "states": {"starting": "starting", "running": "running", "restarting": "restarting", "stopping": "stopping",
+                   "stopped": "stopped", "startup_failed": "failed to start", "degraded": "degraded"},
+        "no_state": "no state reported",
+        "process": {"confirmed": "process confirmed", "missing_locally": "process not found",
+                    "pid_reused_locally": "its process number now belongs to another program",
+                    "unverified": "process not checked"},
+        "beat": {"recent": "recent sign of life", "stale": "late sign of life"},
+        "version": "version {v}", "served": "served by the main profile's gateway",
+        "platforms": ("1 platform needs attention", "{n} platforms need attention"),
+        "store": {"ok": "session store ok", "unavailable": "session store unavailable",
+                  "retrying": "session store retrying"},
+        "db": "Session database",
+        "db_states": {"ok": "integrity ok", "integrity_error": "failed its integrity check",
+                      "integrity_skipped_large": "too large to check its integrity",
+                      "missing_or_unreadable": "not found or unreadable",
+                      "wal_sidecars_unavailable": "the write-ahead log files are incomplete",
+                      "snapshot_changed": "changed while it was read", "unexpected_schema": "unexpected format",
+                      "check_timed_out": "the check took too long", "busy": "busy", "unreadable": "unreadable"},
+        "wal": "write-ahead log {size}",
+        "notes": "Agent memory files", "provider": "memory provider `{name}`",
+        "file_states": {"empty": "empty", "missing_or_unreadable": "missing", "not_checked_too_large": "too large to read",
+                        "invalid_utf8": "invalid text", "unreadable": "unreadable"},
+        "disk": "Disk", "free": "{free} free of {total}", "memory": "Memory", "swap": "swap: {used} of {total} in use",
+        "cgroup": "process group limit: {free} free of {total}",
+        "load": "Load", "load_line": "{load} on {cpus} CPUs (last minute)",
+        "logs": "Logs of the last 24 h", "logs_none": "nothing unusual",
+        "events": {"warning": ("1 warning", "{n} warnings"), "error": ("1 error", "{n} errors"),
+                   "critical": ("1 critical error", "{n} critical errors"),
+                   "storage_io": ("1 full-disk error", "{n} full-disk errors"),
+                   "resource_exhaustion": ("1 out-of-memory error", "{n} out-of-memory errors"),
+                   "database_locked": ("1 locked database", "{n} locked databases"),
+                   "storage_access": ("1 file access denied", "{n} file accesses denied"),
+                   "rate_limit": ("1 provider rate limit", "{n} provider rate limits"),
+                   "authentication": ("1 authentication refused", "{n} authentications refused"),
+                   "timeout": ("1 timeout", "{n} timeouts"), "tool_result_error": ("1 tool error", "{n} tool errors"),
+                   "memory_failure": ("1 memory failure", "{n} memory failures"),
+                   "plugin_failure": ("1 plugin failure", "{n} plugin failures"),
+                   "plugin_dependency_error": ("1 plugin missing a dependency", "{n} plugins missing a dependency"),
+                   "plugin_contract_error": ("1 plugin calling Hermes the wrong way",
+                                             "{n} plugins calling Hermes the wrong way")},
+        "update": "Hermes update",
+        "update_states": {"not_checked": "not checked (pass `--upstream-tag <version>`)",
+                          "invalid_reference": "the reference version is not valid",
+                          "unknown_version": "the installed version is unknown",
+                          "update_available": "{current} → {reference} available", "ahead": "{current}, newer than {reference}",
+                          "current": "{current}, up to date"},
+        "severity": {"critical": "critical", "error": "error", "warning": "warning", "info": "note"},
+        "read_at": "Read {when}.",
+        # usage
+        "usage_title": "Model and tool use · {days} days ({span}, UTC)",
+        "llm": "Model calls that worked", "llm_line": "{calls} · {measured} with token counts · {priced} with a known price",
+        "estimate": "Estimated cost (prices from the plugin's settings)", "no_price": "no price set",
+        "dropped": "Events not recorded (database busy)",
+        "groups": "By lane and model", "cols": "| lane | provider | model | result | calls | input | output | cache read |",
+        "lanes": {"main": "agent", "tool": "tools"}, "aux": "auxiliary `{name}`",
+        "outcomes": {"ok": "ok", "error": "error", "interrupted": "interrupted", "failed": "failed"},
+        "native": "Hermes' own accounting",
+        "native_states": {"ok": "US$ {cost} in {calls} calls", "empty": "nothing recorded in this window",
+                          "missing_or_unreadable": "not available (the session database could not be read)",
+                          "unreadable": "not available (the session database could not be read)"},
+        "native_other": "not available",
+        "usage_none": "No model call measured in this window.",
+        # history
+        "history_title": "Maintenance alerts the plugin learned",
+        "history_cols": "| alert | state | last seen | days seen | your rating |",
+        "history_none": "No maintenance alert recorded yet.", "open": "open", "cleared": "cleared",
+        "ratings": {"helpful": "helped", "dismissed": "dismissed"},
+        "rate_hint": "Rate one with `{command}`.",
+        # tick
+        "tick_title": "Maintenance", "mode": "Optional context",
+        "modes": {"normal": "normal", "conservative": "paused: the machine or the budget is under pressure"},
+        "changes": "What changed now",
+        "transitions": {"opened": "opened", "cleared": "cleared", "normal": "optional context back to normal",
+                        "conservative": "optional context paused"},
+        "alerts": "Active alerts", "alerts_none": "No active alert.",
+        "days_seen": ("seen on 1 day", "seen on {n} days"),
+        "more_health": "The details of the machine: `{command}`.",
+        # schedule-digest
+        "digest_done": "The weekly digest is scheduled as a Hermes scheduled task (cron), no agent: `{job}`, "
+                       "{schedule}, delivered to `{deliver}`. See it with `hermes cron list`.",
+        "digest_already": "The weekly digest is already scheduled; nothing changed. See it with `hermes cron list`.",
+    },
+    "pt": {
+        "health_title": "Arquivos do Hermes e a máquina · perfil `{profile}`",
+        "states": {"starting": "iniciando", "running": "rodando", "restarting": "reiniciando", "stopping": "parando",
+                   "stopped": "parado", "startup_failed": "falhou ao iniciar", "degraded": "com problemas"},
+        "no_state": "sem estado informado",
+        "process": {"confirmed": "processo confirmado", "missing_locally": "processo não encontrado",
+                    "pid_reused_locally": "o número do processo agora é de outro programa",
+                    "unverified": "processo não verificado"},
+        "beat": {"recent": "sinal de vida recente", "stale": "sinal de vida atrasado"},
+        "version": "versão {v}", "served": "atendido pelo gateway do perfil principal",
+        "platforms": ("1 plataforma pede atenção", "{n} plataformas pedem atenção"),
+        "store": {"ok": "registro de sessões ok", "unavailable": "registro de sessões indisponível",
+                  "retrying": "registro de sessões tentando de novo"},
+        "db": "Banco de sessões",
+        "db_states": {"ok": "integridade ok", "integrity_error": "falhou na checagem de integridade",
+                      "integrity_skipped_large": "grande demais para checar a integridade",
+                      "missing_or_unreadable": "não encontrado ou ilegível",
+                      "wal_sidecars_unavailable": "os arquivos do registro de escrita estão incompletos",
+                      "snapshot_changed": "mudou durante a leitura", "unexpected_schema": "formato inesperado",
+                      "check_timed_out": "a checagem demorou demais", "busy": "ocupado", "unreadable": "ilegível"},
+        "wal": "registro de escrita {size}",
+        "notes": "Arquivos de memória do agente", "provider": "provedor de memória `{name}`",
+        "file_states": {"empty": "vazio", "missing_or_unreadable": "não existe", "not_checked_too_large": "grande demais para ler",
+                        "invalid_utf8": "texto inválido", "unreadable": "ilegível"},
+        "disk": "Disco", "free": "{free} livres de {total}", "memory": "Memória", "swap": "swap: {used} de {total} em uso",
+        "cgroup": "limite do grupo de processos: {free} livres de {total}",
+        "load": "Carga", "load_line": "{load} em {cpus} CPUs (último minuto)",
+        "logs": "Registros das últimas 24 h", "logs_none": "nada fora do comum",
+        "events": {"warning": ("1 aviso", "{n} avisos"), "error": ("1 erro", "{n} erros"),
+                   "critical": ("1 erro crítico", "{n} erros críticos"),
+                   "storage_io": ("1 erro de disco cheio", "{n} erros de disco cheio"),
+                   "resource_exhaustion": ("1 erro de falta de memória", "{n} erros de falta de memória"),
+                   "database_locked": ("1 banco travado", "{n} bancos travados"),
+                   "storage_access": ("1 acesso negado a arquivo", "{n} acessos negados a arquivos"),
+                   "rate_limit": ("1 limite de uso do provedor", "{n} limites de uso do provedor"),
+                   "authentication": ("1 autenticação recusada", "{n} autenticações recusadas"),
+                   "timeout": ("1 tempo esgotado", "{n} tempos esgotados"),
+                   "tool_result_error": ("1 erro de ferramenta", "{n} erros de ferramenta"),
+                   "memory_failure": ("1 falha da memória", "{n} falhas da memória"),
+                   "plugin_failure": ("1 falha de plugin", "{n} falhas de plugin"),
+                   "plugin_dependency_error": ("1 plugin sem uma dependência", "{n} plugins sem uma dependência"),
+                   "plugin_contract_error": ("1 plugin chamando o Hermes do jeito errado",
+                                             "{n} plugins chamando o Hermes do jeito errado")},
+        "update": "Atualização do Hermes",
+        "update_states": {"not_checked": "não verificada (passe `--upstream-tag <versão>`)",
+                          "invalid_reference": "a versão de referência não é válida",
+                          "unknown_version": "a versão instalada é desconhecida",
+                          "update_available": "{current} → {reference} disponível",
+                          "ahead": "{current}, mais nova que {reference}", "current": "{current}, em dia"},
+        "severity": {"critical": "crítico", "error": "erro", "warning": "aviso", "info": "nota"},
+        "read_at": "Lido em {when}.",
+        "usage_title": "Uso de modelos e ferramentas · {days} dias ({span}, UTC)",
+        "llm": "Chamadas ao modelo que deram certo",
+        "llm_line": "{calls} · {measured} com contagem de tokens · {priced} com preço conhecido",
+        "estimate": "Custo estimado (preços das configurações do plugin)", "no_price": "nenhum preço configurado",
+        "dropped": "Eventos não gravados (banco ocupado)",
+        "groups": "Por faixa e modelo",
+        "cols": "| faixa | provedor | modelo | resultado | chamadas | entrada | saída | lido do cache |",
+        "lanes": {"main": "agente", "tool": "ferramentas"}, "aux": "auxiliar `{name}`",
+        "outcomes": {"ok": "ok", "error": "erro", "interrupted": "interrompida", "failed": "falhou"},
+        "native": "Contabilidade do próprio Hermes",
+        "native_states": {"ok": "US$ {cost} em {calls} chamadas", "empty": "nada registrado neste período",
+                          "missing_or_unreadable": "indisponível (o banco de sessões não pôde ser lido)",
+                          "unreadable": "indisponível (o banco de sessões não pôde ser lido)"},
+        "native_other": "indisponível",
+        "usage_none": "Nenhuma chamada ao modelo medida neste período.",
+        "history_title": "Alertas de manutenção que o plugin aprendeu",
+        "history_cols": "| alerta | situação | visto por último | dias em que apareceu | sua avaliação |",
+        "history_none": "Nenhum alerta de manutenção registrado ainda.", "open": "aberto", "cleared": "resolvido",
+        "ratings": {"helpful": "ajudou", "dismissed": "dispensado"},
+        "rate_hint": "Para avaliar um: `{command}`.",
+        "tick_title": "Manutenção", "mode": "Contexto opcional",
+        "modes": {"normal": "normal", "conservative": "pausado: a máquina ou o orçamento estão sob pressão"},
+        "changes": "O que mudou agora",
+        "transitions": {"opened": "aberto", "cleared": "resolvido", "normal": "contexto opcional de volta ao normal",
+                        "conservative": "contexto opcional pausado"},
+        "alerts": "Alertas ativos", "alerts_none": "Nenhum alerta ativo.",
+        "days_seen": ("visto em 1 dia", "visto em {n} dias"),
+        "more_health": "Os detalhes da máquina: `{command}`.",
+        "digest_done": "O resumo semanal foi agendado como tarefa agendada do Hermes (cron), sem agente: `{job}`, "
+                       "{schedule}, entregue em `{deliver}`. Veja com `hermes cron list`.",
+        "digest_already": "O resumo semanal já está agendado; nada mudou. Veja com `hermes cron list`.",
+    },
+}
+
+
+def _health_md(result: dict, home: Path, lang: str) -> str:
+    from .i18n import text
+    from .status import human_size, local_time
+
+    t = _OPS[lang]
+    gate, host, db = result.get("gateway") or {}, result.get("host") or {}, result.get("database") or {}
+    lines = ["# " + t["health_title"].format(profile=_profile_name(home)), ""]
+    parts = [t["states"].get(gate.get("reported_state"), t["no_state"]),
+             t["process"].get(gate.get("process_liveness"), t["process"]["unverified"])]
+    if gate.get("heartbeat") in t["beat"]:
+        parts.append(t["beat"][gate["heartbeat"]])
+    if gate.get("reported_version"):
+        parts.append(t["version"].format(v=gate["reported_version"]))
+    if gate.get("served_by_host_gateway"):
+        parts.append(t["served"])
+    if gate.get("platforms_needing_attention"):
+        parts.append(_p(t["platforms"], gate["platforms_needing_attention"]))
+    if gate.get("reported_session_store") in t["store"]:
+        parts.append(t["store"][gate["reported_session_store"]])
+    lines.append(f"- **{_H[lang]['gateway']}:** " + " · ".join(parts))
+    parts = [t["db_states"].get(db.get("status"), t["db_states"]["unreadable"])]
+    if db.get("bytes") is not None:
+        parts.insert(0, human_size(db["bytes"]))
+    if db.get("wal_bytes"):
+        parts.append(t["wal"].format(size=human_size(db["wal_bytes"])))
+    lines.append(f"- **{t['db']}:** " + " · ".join(parts))
+    notes = (result.get("memory") or {})
+    files = [f"`{name}` " + (human_size(item.get("bytes")) if item.get("status") == "readable"
+                             else t["file_states"].get(item.get("status"), t["file_states"]["unreadable"]))
+             for name, item in (notes.get("native_files") or {}).items() if isinstance(item, dict)]
+    if notes.get("provider"):
+        files.append(t["provider"].format(name=notes["provider"]))
+    if files:
+        lines.append(f"- **{t['notes']}:** " + " · ".join(files))
+    disk = host.get("disk") or {}
+    if disk.get("total_bytes"):
+        lines.append(f"- **{t['disk']}:** " + t["free"].format(free=human_size(disk.get("free_bytes")),
+                                                              total=human_size(disk["total_bytes"])))
+    memory = host.get("memory") or {}
+    if memory.get("total_bytes"):
+        line = t["free"].format(free=human_size(memory.get("available_bytes")), total=human_size(memory["total_bytes"]))
+        if memory.get("swap_total_bytes"):
+            line += " · " + t["swap"].format(used=human_size(memory["swap_total_bytes"] - (memory.get("swap_free_bytes") or 0)),
+                                             total=human_size(memory["swap_total_bytes"]))
+        group = host.get("cgroup_memory") or {}
+        if group.get("total_bytes"):
+            line += " · " + t["cgroup"].format(free=human_size(group.get("available_bytes")),
+                                               total=human_size(group["total_bytes"]))
+        lines.append(f"- **{t['memory']}:** {line}")
+    load = host.get("load") or {}
+    if load.get("logical_cpus"):
+        lines.append(f"- **{t['load']}:** " + t["load_line"].format(load=_num(round(load.get("one_minute") or 0, 1), lang),
+                                                                   cpus=load["logical_cpus"]))
+    events = ((result.get("logs") or {}).get("events") or {})
+    said = [_p(t["events"][name], count) for name, count in events.items() if name in t["events"] and count]
+    lines.append(f"- **{t['logs']}:** " + (" · ".join(said) if said else t["logs_none"]))
+    update = result.get("update") or {}
+    state = t["update_states"].get(update.get("status"), t["update_states"]["not_checked"])
+    lines.append(f"- **{t['update']}:** " + state.format(current=update.get("current") or "?",
+                                                         reference=update.get("reference") or "?"))
+    lines += ["", f"## {_H[lang]['attention']}", ""]
+    findings = result.get("findings") or []
+    lines += [f"- [{t['severity'].get(item.get('severity'), item.get('severity'))}] "
+              f"{text(str(item.get('recommendation') or ''), lang)}" for item in findings] or [_H[lang]["nothing"]]
+    if result.get("observed_at"):
+        lines += ["", t["read_at"].format(when=local_time(result["observed_at"], lang))]
+    return "\n".join(lines) + "\n"
+
+
+def _usage_md(result: dict, lang: str, *, days: int) -> str:
+    from .report import _number, _span
+
+    t = _OPS[lang]
+    usage = result.get("observer_usage") or {}
+    start, end = usage.get("window_start_utc") or "?", usage.get("window_end_utc") or "?"
+    lines = ["# " + t["usage_title"].format(days=days, span=_span(start, end, lang)), ""]
+    lines.append(f"- **{t['llm']}:** " + t["llm_line"].format(calls=_num(usage.get("successful_llm_calls", 0), lang),
+                                                             measured=_num(usage.get("usage_samples", 0), lang),
+                                                             priced=_num(usage.get("priced_calls", 0), lang)))
+    estimate = usage.get("estimated_usd")
+    lines.append(f"- **{t['estimate']}:** " + (f"US$ {_number(estimate, lang, 2)}" if estimate is not None
+                                                else t["no_price"]))
+    if usage.get("dropped_events"):
+        lines.append(f"- **{t['dropped']}:** {_num(usage['dropped_events'], lang)}")
+    native = result.get("hermes_native_billing") or {}
+    totals = native.get("totals") or {}
+    state = t["native_states"].get(native.get("status"))
+    cost = totals.get("actual_cost_usd") if totals.get("actual_cost_usd") is not None else totals.get("estimated_cost_usd")
+    lines.append(f"- **{t['native']}:** " + (state.format(cost=_number(cost or 0, lang, 2),
+                                                           calls=_num(totals.get("api_call_count") or 0, lang))
+                                              if state else t["native_other"]))
+    groups = usage.get("groups") or []
+    if not groups:
+        return "\n".join(lines + ["", t["usage_none"]]) + "\n"
+    lines += ["", f"## {t['groups']}", "", t["cols"], "|---|---|---|---|---:|---:|---:|---:|"]
+    for row in groups[:40]:
+        lane = str(row.get("lane") or "?")
+        lane = t["aux"].format(name=lane[4:]) if lane.startswith("aux:") else t["lanes"].get(lane, f"`{lane}`")
+        lines.append(f"| {lane} | {row.get('provider') or '—'} | {row.get('model') or '—'} | "
+                     f"{t['outcomes'].get(row.get('outcome'), row.get('outcome'))} | {_num(row.get('requests') or 0, lang)} | "
+                     f"{_num(row.get('input_tokens') or 0, lang)} | {_num(row.get('output_tokens') or 0, lang)} | "
+                     f"{_num(row.get('cache_read_tokens') or 0, lang)} |")
+    return "\n".join(lines) + "\n"
+
+
+def _history_md(rows: list, home: Path, lang: str) -> str:
+    from .status import local_time
+
+    t = _OPS[lang]
+    lines = [f"# {t['history_title']}", ""]
+    if not rows:
+        return "\n".join(lines + [t["history_none"]]) + "\n"
+    lines += [t["history_cols"], "|---|---|---|---:|---|"]
+    for row in rows[:80]:
+        lines.append(f"| `{row.get('code')}` | {t['open'] if row.get('active') else t['cleared']} | "
+                     f"{local_time(row.get('last_seen'), lang)} | {row.get('samples', 0)} | "
+                     f"{t['ratings'].get(row.get('feedback'), '—')} |")
+    lines += ["", t["rate_hint"].format(command=_hermes_cmd(home, "evolution feedback <alerta> helpful|dismissed"
+                                                            if lang == "pt" else "evolution feedback <alert> helpful|dismissed"))]
+    return "\n".join(lines) + "\n"
+
+
+def _tick_md(result: dict | None, home: Path, lang: str) -> str | None:
+    from .i18n import text
+
+    if result is None:   # --changes-only and nothing changed
+        return None
+    t = _OPS[lang]
+    decision = result.get("decision") or {}
+    lines = [f"# {t['tick_title']}", "",
+             f"- **{t['mode']}:** {t['modes'].get(decision.get('mode'), decision.get('mode'))}"]
+    changes = decision.get("changes") or []
+    if changes:
+        lines += ["", f"## {t['changes']}", ""]
+        for item in changes:
+            said = t["transitions"].get(item.get("transition"), item.get("transition"))
+            lines.append(f"- {said}" if item.get("code") == "evolution_mode" else f"- `{item.get('code')}`: {said}")
+    lines += ["", f"## {t['alerts']}", ""]
+    findings = decision.get("findings") or []
+    lines += [f"- [{t['severity'].get(item.get('severity'), item.get('severity'))}] "
+              f"{text(str(item.get('action') or ''), lang)} (`{item.get('code')}`, "
+              f"{_p(t['days_seen'], item.get('observed_days') or 1)})" for item in findings] or [t["alerts_none"]]
+    lines += ["", t["more_health"].format(command=_hermes_cmd(home, "evolution health"))]
+    return "\n".join(lines) + "\n"
+
+
+def _digest_md(result: dict, lang: str) -> str:
+    t = _OPS[lang]
+    if not result.get("scheduled"):
+        return t["digest_already"] + "\n"
+    return t["digest_done"].format(job=result.get("job"), schedule=result.get("schedule"),
+                                   deliver=result.get("deliver")) + "\n"
+
+
+def _human(args, result, home: Path, lang: str):
+    """The text a person reads for the result of `args` (a str), or the result unchanged when it is printed as JSON."""
+    from . import status
+
+    lang = lang if lang in _H else "en"
+    action = args.evolution_action
+    if action == "care":
+        if args.care_action == "check":
+            return _care_md(result, home, lang)
+        return _care_action_md(result, args.care_action, lang)
+    if action == "environment":
+        task = getattr(args, "environment_action", "show")
+        if task == "catalog":
+            return _catalog_md(result, lang)
+        text = status.environment_markdown(home, lang)
+        return (_H[lang]["scanned"] + "\n\n" + text) if task == "scan" else text
+    if action == "decisions":
+        if (getattr(args, "decisions_action", None) or "list") == "list":
+            return _decisions_md(result, home, lang)
+        return _undo_md(result, lang)
+    if action == "lessons":
+        task = getattr(args, "lessons_action", None) or "list"
+        if task == "list":
+            return _lessons_md(result, home, lang)
+        if task == "export" and "written" not in result:
+            return result   # the pack itself: data to save, printed as it is imported
+        return _lesson_task_md(result, task, home, lang)
+    if action == "proposals":
+        task = getattr(args, "proposals_action", None) or "list"
+        if task == "list":
+            return _proposals_md(result, home, lang, everything=bool(getattr(args, "all", False)))
+        return _proposal_task_md(result, task, home, lang)
+    if action == "learn":
+        return _learn_md(result, home, lang, quiet=bool(getattr(args, "notify_only", False)))
+    if action == "skills":
+        return _skills_md(result, lang)
+    if action == "experiments":
+        return _experiments_md(result, lang)
+    if action == "system":
+        return _system_md(result, args.system_action, home, lang)
+    if action == "health":
+        return _health_md(result, home, lang)
+    if action == "usage":
+        return _usage_md(result, lang, days=getattr(args, "days", 7))
+    if action == "history":
+        return _history_md(result, home, lang)
+    if action == "tick":
+        return _tick_md(result, home, lang)
+    if action == "schedule-digest":
+        return _digest_md(result, lang)
+    return result
+
+
+# English keeps the supervisor's own state words (scripts and tests match "Active trial recovery: rolled_back").
+_TRIAL_STATES = {"en": {"active": "still running", "rolled_back": "undone", "released": "released",
+                        "not_applied": "not applied", "observing": "being observed", "pending": "pending",
+                        "skipped": "skipped", "improved": "kept: it helped"},
+                 "pt": {"active": "ainda em andamento", "rolled_back": "desfeito", "released": "liberado",
+                        "not_applied": "não aplicado", "observing": "em observação", "pending": "pendente",
+                        "skipped": "pulado", "improved": "mantido: ajudou"}}
+
+
 def _output_language(args, home: Path, runtime_config) -> str:
     """--lang, then the plugin setting, then the profile language Hermes uses."""
     from .i18n import normalize, resolve
@@ -1244,10 +2787,16 @@ def execute(args, home: Path, *, running_version=None, provider=None, runtime_co
             try:
                 outcome = _rollback_trial(home, now)
                 if outcome["status"] != "idle":
-                    recovery = "\n" + text(f"Active trial recovery: {outcome['status']}", language)
+                    states = _TRIAL_STATES.get(language, _TRIAL_STATES["en"])
+                    recovery = "\n" + _say(language, "Active trial recovery: ", "Recuperação do teste ativo: ") + \
+                        states.get(outcome["status"], str(outcome["status"]))
             except (OSError, ValueError, sqlite3.Error):
                 recovery = "\n" + text("Trial recovery is unverified. Run ops rollback to recheck.", language)
         raise SystemExit(f"Evolution: {text(str(error), language)}{recovery}") from None
+    if _wants_text(args):
+        from .status import decimal_comma
+
+        result = decimal_comma(_human(args, result, home, language), language)
     if isinstance(result, str):
         print(result, end="" if result.endswith("\n") else "\n")
     elif result is not None:

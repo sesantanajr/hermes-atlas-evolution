@@ -1,5 +1,5 @@
 """Care of Hermes' built-in memory (MEMORY.md and USER.md of a profile): find what repeats, and take out the copy
-the owner chooses, safely (0.8.2).
+the owner chooses, safely.
 
 Hermes injects both files into every session's system prompt, so an entry said twice costs tokens on every turn
 and leaves less room for new memories. `review` finds:

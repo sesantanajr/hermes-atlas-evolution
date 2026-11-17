@@ -593,7 +593,7 @@ class StatusAndMenuTest(Base):
             text = status.markdown(report, lang)
             self.assertNotIn("{", text)
             self.assertIn("libc6", text)
-            self.assertIn("0.7 GB", text)
+            self.assertIn("0,7 GB" if lang == "pt" else "0.7 GB", text)
         self.assertIn("## Hermes e sistema", status.markdown(report, "pt"))
 
     def test_the_menu_suggests_and_opens_the_two_new_screens(self):
@@ -606,9 +606,9 @@ class StatusAndMenuTest(Base):
             Menu(self.home, {}, lang="pt", console=Console(read=script.read, write=script.write, width=120, color=False),
                  clock=lambda: NOW).run()
         text = script.text
-        for expected in ("Instalar 2 atualização(ões) de segurança do sistema", "Liberar 700.0 MB",
+        for expected in ("Instalar 2 atualizações de segurança do sistema", "Liberar 700 MB",
                          "12  Saúde do Hermes (sem agente, sem tokens)", "13  Sistema operacional (Ubuntu 26.04.1 LTS)",
-                         "Gateway: sim · versão 0.23.1", "node-22.23.4 (200.0 MB)", "Reinício pendente: sim (libc6)",
+                         "Gateway: rodando · versão 0.23.1", "node-22.23.4 (200 MB)", "Reinício pendente: sim (libc6)",
                          "Pronto para atualizar: sim"):
             self.assertIn(expected, text)
         self.assertEqual(runs, [])

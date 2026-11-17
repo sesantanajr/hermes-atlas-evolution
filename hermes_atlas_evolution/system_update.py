@@ -1,4 +1,4 @@
-"""Keep the operating system up to date without breaking it or Hermes (0.8.4). Linux with apt (Ubuntu, Debian).
+"""Keep the operating system up to date without breaking it or Hermes. Linux with apt (Ubuntu, Debian).
 
 Three steps, each safe on its own:
 - `check` reads, never changes and never takes a lock: the updates waiting (security ones apart), a reboot the
@@ -268,7 +268,8 @@ def _user_units(host: Host) -> list[dict]:
             unit, state = parts[0], parts[1]
             _code, active, _err = host.run(["systemctl", *prefix, "is-active", unit], timeout=10)
             units.append({"unit": unit, "scope": scope, "enabled": state in ("enabled", "enabled-runtime", "static",
-                                                                             "alias"),
+                                                                             "alias", "indirect", "linked",
+                                                                             "linked-runtime"),
                           "state": state, "active": active.strip() == "active"})
     return units
 
@@ -313,8 +314,14 @@ def _linger(host: Host, user: str | None = None) -> bool | None:
 
 
 def _unattended(host: Host) -> dict:
-    text = " ".join(filter(None, (host.read("/etc/apt/apt.conf.d/20auto-upgrades"),
-                                  host.read("/etc/apt/apt.conf.d/10periodic"))))
+    # apt's own reading of every file under apt.conf.d (02periodic, 20auto-upgrades, ...), the files when it is absent
+    code, out, _err = host.run(["apt-config", "dump", "APT::Periodic::Unattended-Upgrade"], timeout=10)
+    if code == 0 and out.strip():
+        text = out
+    else:
+        text = " ".join(filter(None, (host.read("/etc/apt/apt.conf.d/20auto-upgrades"),
+                                      host.read("/etc/apt/apt.conf.d/10periodic"),
+                                      host.read("/etc/apt/apt.conf.d/02periodic"))))
     on = bool(re.search(r'APT::Periodic::Unattended-Upgrade\s+"(?!0)\d+"', text))
     installed = host.path("/usr/bin/unattended-upgrade").exists() or host.path("/usr/bin/unattended-upgrades").exists()
     log = host.path("/var/log/unattended-upgrades/unattended-upgrades.log")
@@ -326,12 +333,24 @@ def _unattended(host: Host) -> dict:
 
 
 def _last_refresh(host: Host) -> float | None:
+    """When the package lists were last refreshed: the newest Release file apt fetched (any `apt-get update`, by hand
+    or by the timer), or the timer's stamp."""
+    times = []
+    try:
+        lists = host.path("/var/lib/apt/lists")
+        for found, entry in enumerate(lists.iterdir()):
+            if found > 2000:
+                break
+            if entry.name.endswith(("_InRelease", "_Release")):
+                times.append(entry.stat().st_mtime)
+    except OSError:
+        pass
     for name in ("/var/lib/apt/periodic/update-success-stamp", "/var/lib/apt/lists/partial"):
         try:
-            return host.path(name).stat().st_mtime
+            times.append(host.path(name).stat().st_mtime)
         except OSError:
             continue
-    return None
+    return max(times) if times else None
 
 
 def native_arch(host: Host) -> str:
@@ -433,7 +452,8 @@ def check(host: Host | None = None, *, now: float | None = None, home: Path | No
         findings.append("unattended_off")
     if report["last_refresh"] is not None and now - report["last_refresh"] > 7 * 86_400:
         findings.append("lists_stale")
-    if any(unit["scope"] == "system" and not unit["enabled"] for unit in report["units"]):
+    # a unit running now that would not come back after a reboot; one the owner left off on purpose is not running
+    if any(unit["scope"] == "system" and not unit["enabled"] and unit["active"] for unit in report["units"]):
         findings.append("unit_not_enabled")
     if any(unit["scope"] == "user" for unit in report["units"]) and report["linger"] is False:
         findings.append("user_units_without_linger")   # the gateway would not come back after a reboot

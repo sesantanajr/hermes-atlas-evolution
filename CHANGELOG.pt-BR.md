@@ -2,6 +2,52 @@
 
 *In English: [CHANGELOG.md](CHANGELOG.md), with every version.*
 
+## 0.9.0
+
+O Atlas Evolution passa a ler o doctor do próprio Hermes para você todo dia, em todos os perfis, e fala o seu idioma em tudo: no painel, no menu, em cada comando e no formulário de configurações. Uma auditoria de todas as ações dele e duas revisões independentes corrigiram o que encontraram.
+
+### Novidades
+
+- **O doctor do Hermes, todo dia** (`doctor.py`). Uma vez por dia, em cada perfil em uso, o perfil que cuida do Hermes inteiro roda as checagens do `hermes doctor` num processo curto do Python do próprio Hermes, com a pasta do perfil e um ambiente limpo, sem `--fix` e sem as cinco checagens que usam a rede, levam minutos ou saem da máquina (sondas dos provedores, npm audit, importação do dashboard, Skills Hub, backend do terminal). Cerca de 7 s e 210 MB por perfil, um de cada vez, e pulado quando a máquina tem menos de 600 MB livres. Nada é mudado: como o `hermes doctor`, ela carrega os plugins do perfil para listar as ferramentas e deixa os mesmos logs e arquivos de trava. Um resultado deixa de valer depois de 3 dias sem outro, e um problema da máquina inteira (alerta de segurança, linger, PATH, supervisão do gateway) aparece uma vez só. O que as checagens encontram entra na tela e na aba Ambiente, o mais importante primeiro:
+  - uma pasta de cache que o Hermes nunca limpa, com mais de 1 GB: um cache de pacotes que se refaz sozinho (uv, pnpm, npm, pip...) vai para a lixeira do plugin com uma tecla, um de cada vez (volta pelo desfazer, apagado depois de 30 dias); qualquer outra pasta (logins do navegador, anexos das conversas, imagens geradas) fica com você, com o que ela guarda e o comando para olhar dentro;
+  - pontos de restauração acima do limite do Hermes: as três saídas do Hermes (menos dias, limpar ou desligar o /rollback), que você roda;
+  - um alerta de segurança ou um servidor MCP suspeito: primeiro da lista, com `hermes doctor --ack <id>` ou `hermes mcp remove <nome>`;
+  - qualquer outro problema que o doctor lista, com título e explicação simples quando o plugin o conhece (ferramentas ligadas sem chave, `.env` faltando, nenhuma chave de provedor, banco de sessões para reparar, gateway que não volta depois de reiniciar, config para migrar, provedor de memória ou plugin desligado, credencial de chat repetida...) e, nos outros casos, as palavras e o comando do próprio Hermes.
+  Peças opcionais que nunca foram configuradas (um pacote opcional, um provedor sem login) são contadas, não propostas. Antes de uma mudança rodar, a checagem que a encontrou roda de novo naquele perfil.
+- **O doctor completo, explicado** (menu → Saúde do Hermes). O código de saída 1 aparece como "o doctor encontrou N problemas", com a própria lista numerada do que fazer; antes do `hermes doctor --fix` o menu diz o que ele pode mudar e o que o `hermes backup --quick` devolve.
+- Quantos problemas e avisos o doctor encontrou em cada perfil, no menu (tela 14), na aba Ambiente do painel e no `status`.
+
+### Mudanças
+
+- **Bilíngue em tudo.** O painel segue o idioma do perfil (com `auto`: o idioma escolhido para o perfil no Hermes, depois o do dashboard); `care`, `environment`, `decisions`, `lessons list`, `proposals list`, `learn`, `skills`, `experiments`, `system`, `health`, `usage`, `history`, `tick` e `schedule-digest` imprimem texto legível no idioma do perfil (scripts que leem o JSON deles acrescentam `--format json`; o JSON é o mesmo); a ajuda também sai em português; o formulário de configurações mostra cada rótulo como "English · Português"; códigos como `busy`, `one_by_one` ou `applied` viram frases; datas no horário local com o fuso; tamanhos e números no formato do idioma.
+- As ferramentas do agente só são registradas com o `agent_tools` ligado, então o `hermes doctor` não avisa mais "hermes-atlas-evolution (system dependency not met)" em todo Hermes. Ligá-las pede `hermes gateway restart`; desligar vale na hora.
+- O painel: "Esperando você" conta cada item uma vez; o comando de uma mudança manual aprovada fica na tela com o botão Copiar e no Histórico; campos numéricos podem ser esvaziados; o Copiar funciona sem a API de área de transferência; a janela de confirmação recebe o foco e fecha com Esc; as abas funcionam com as setas.
+- O menu mostra o Markdown como texto de terminal, fica nas Configurações depois de um erro, avisa quando uma tecla não é opção e mostra a lição no seu idioma ao abri-la.
+- A skill de revisão não pede mais ao agente o texto de lições que ele não pode ver e sabe que aprovar já trava a skill.
+- Uma observação dispensada volta depois de 30 dias só se a situação continuar; uma mudança entre perfis que volta a valer um dia depois de aplicada é dita de novo.
+- A documentação descreve o que o plugin faz hoje, em inglês e em português, sem histórico de versões.
+
+### Correções
+
+- A lixeira apagava na hora uma pasta cuja data era de mais de 30 dias atrás (renomear mantém a data), e o desfazer falhava. Agora os 30 dias contam a partir do dia em que ela entra, e a lixeira é esvaziada a cada rodada de aprendizado (antes, só quando outra coisa entrava nela).
+- O Modo Auto podia reinstalar o plugin num perfil de onde você o removeu (o `hermes plugins remove` apaga também as configurações dele). O banco do plugin que fica lá agora conta como decisão sua.
+- Um plugin instalado como link para uma pasta (um checkout de desenvolvimento) contava como ausente: o ambiente nunca rodava e a instalação era tentada todo dia.
+- Um hook de transformação que devolve o resultado original (`return result`) contava como não mudando nada, mas o Hermes fica com o primeiro texto que qualquer callback devolve: uma sobreposição real passava.
+- A instalação fixava o commit do perfil que cuida do Hermes inteiro mesmo vindo de um fork ou de um commit local, que o Hermes não consegue baixar. Agora só fixa quando o checkout é do repositório publicado.
+- Os nomes de perfil seguem a regra do próprio Hermes, então uma cópia como `profiles/work.bak` não é lida como perfil.
+- Uma mudança que já não valia no disco era reaberta pela olhada em cache na rodada seguinte.
+- O `hermes pm gc` olhava um depósito de ferramentas por perfil (há um só, na raiz) e só rodava do perfil padrão; agora roda uma vez para o Hermes inteiro, do perfil que cuida dele, marcado antes de começar.
+- A rodada em segundo plano não tinha prazo dentro da reserva de 15 minutos.
+- A proteção do Hermes deixava passar `kill $(pgrep -f 'gateway run')`, `pgrep -f gateway | xargs kill` e buscas com awk: uma busca de pid que seleciona o gateway agora conta (`pgrep` contra a linha de comando com `-f` e contra o nome sem ele, `grep`/`awk` só numa lista de processos vinda de um pipe), e comandos comuns como `kill $(cat app.pid)` ou `kill $(pgrep -u root worker)` continuam passando.
+- O `hermes doctor` que termina com 1 porque encontrou problemas aparecia como falha, e a lista do que fazer se perdia.
+- O banco de sessões era aberto por uma URI sem escape (um caminho com `#` abria outro arquivo, com escrita).
+- No Windows, checar o processo do gateway mandava CTRL+C para ele em vez de só consultar.
+- Checagens do apt: atualização automática configurada em outro arquivo do `apt.conf.d`, listas de pacotes atualizadas à mão e uma unidade do systemd deixada desligada de propósito não são mais apontadas para sempre.
+
+### Atualizar
+
+`hermes plugins update hermes-atlas-evolution` em cada perfil que o tem, depois `hermes gateway restart` e `sudo systemctl restart hermes-dashboard` (ou reinicie o Hermes Desktop). A primeira checagem diária do doctor acontece na próxima rodada de aprendizado; `hermes evolution environment scan` a roda na hora.
+
 ## 0.8.5
 
 O Atlas Evolution passa a cuidar de todos os perfis de um Hermes de uma vez, num Modo Auto ligado por padrão, e conhece o ecossistema de plugins do Hermes.

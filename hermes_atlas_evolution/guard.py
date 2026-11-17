@@ -806,7 +806,80 @@ def _as_hermes(verb: str, rest: list[str]) -> tuple[str, list[str]]:
     return verb, rest
 
 
-def _kills_by_lookup(command: str) -> bool:
+_LOOKUP_VALUE_OPTIONS = frozenset({"-u", "-U", "-g", "-G", "-P", "-s", "-t", "-F", "-v", "-e", "-m", "-A", "-B", "-C",
+                                   "--pidfile", "--signal", "--euid", "--uid", "--group", "--parent", "--session",
+                                   "--terminal", "--ns", "--nslist", "--max-count", "--regexp", "--field-separator",
+                                   "--assign"})
+
+
+def _operands(rest: list[str]) -> tuple[list[str], list[str], str | None]:
+    """(the options, the operands, an -e/--regexp pattern) of a lookup command; an option's value is never an operand."""
+    options, operands, pattern = [], [], None
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token == "--":
+            operands += rest[index + 1:]
+            break
+        if token.startswith("-") and token != "-":
+            options.append(token)
+            name = token.split("=", 1)[0]
+            if name in _LOOKUP_VALUE_OPTIONS and "=" not in token:
+                if name in ("-e", "--regexp") and index + 1 < len(rest):
+                    pattern = rest[index + 1]
+                index += 2
+                continue
+            index += 1
+            continue
+        operands.append(token)
+        index += 1
+    return options, operands, pattern
+
+
+def _matches(pattern: str, text: str, *, literal: bool = False) -> bool:
+    if not pattern or _dynamic(pattern):
+        return False
+    try:
+        if literal:
+            return pattern in text
+        if re.fullmatch(pattern, ""):
+            return False   # a pattern that matches anything is not a lookup of the gateway
+        return bool(re.search(pattern, text))
+    except re.error:
+        return pattern in text
+
+
+def _looks_up_gateway(verb: str, rest: list[str], process) -> bool:
+    """Whether a pid lookup selects the gateway itself: `pgrep -f 'gateway run'` (against its command line; without -f
+    against its name), `pidof python3`, or a `grep`/`rg`/`awk '/pattern/{print $2}'` reading a process list from a pipe
+    (one that reads files looks at those files, not at processes)."""
+    if not process:
+        return False
+    name, command_line = process
+    options, operands, pattern = _operands(rest)
+    if verb == "pidof":
+        return any(token == name for token in operands)
+    if verb == "pgrep":
+        full = any(re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", token) or token == "--full" for token in options)
+        exact = any(re.fullmatch(r"-[A-Za-z]*x[A-Za-z]*", token) or token == "--exact" for token in options)
+        target = command_line if full else name
+        return bool(operands) and (operands[0] == target if exact else _matches(operands[0], target))
+    if verb == "awk":
+        if any(token.startswith("-f") or token == "--file" for token in options) or len(operands) != 1:
+            return False   # a program from a file, or input files: not a process list from a pipe
+        return any(_matches(found, command_line) for found in re.findall(r"/((?:[^/\\]|\\.){2,200})/", operands[0]))
+    # grep and friends: the pattern, and no file to read
+    if pattern is None:
+        if len(operands) != 1:
+            return False
+        pattern = operands[0]
+    elif operands:
+        return False
+    literal = verb == "fgrep" or any(token in ("-F", "--fixed-strings") for token in options)
+    return _matches(pattern, command_line, literal=literal)
+
+
+def _kills_by_lookup(command: str, process=None) -> bool:
     """`kill $(pgrep -f hermes)`, `pgrep -f hermes_cli | xargs kill`, ``kill `pidof hermes` ``, `kill $(cat
     ~/.hermes/gateway.pid)`: a kill whose process ids the shell fills in, in a command that looks up Hermes or its
     pid file."""
@@ -824,7 +897,8 @@ def _kills_by_lookup(command: str) -> bool:
         if not tokens:
             continue
         verb, rest = _program(tokens[0]), tokens[1:]
-        if verb in _PID_LOOKUPS and any("hermes" in token.lower() for token in rest):
+        if verb in _PID_LOOKUPS and (any("hermes" in token.lower() for token in rest)
+                                     or _looks_up_gateway(verb, rest, process)):
             looked_up = True
         elif any(name in token.lower() for token in tokens for name in _PID_FILES):
             looked_up = True
@@ -858,7 +932,7 @@ def check(tool_name, args, *, protected, home: Path, profile: Path | None = None
 def _check_command(command: str, *, protected, home: Path, profile: Path | None = None, nested: bool, trees=(), own=(),
                    process=None, cwd: PurePosixPath | None = None) -> dict | None:
     options = {"protected": protected, "home": home, "profile": profile, "trees": trees, "own": own, "process": process}
-    if _kills_by_lookup(command):
+    if _kills_by_lookup(command, process):
         return {"kind": "gateway_stop"}
     if _writes_plugin_config(command, home=home, profile=profile, cwd=cwd) or _calls_panel_decisions(command):
         return {"kind": "plugin_settings"}
