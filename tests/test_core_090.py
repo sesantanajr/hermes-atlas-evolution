@@ -114,7 +114,7 @@ class DoctorReading(unittest.TestCase):
 
         def runner(argv, **kwargs):
             self.assertEqual(argv[1:3], ["-I", "-c"])
-            self.assertEqual(kwargs["env"]["HERMES_HOME"], "/p")
+            self.assertEqual(kwargs["env"]["HERMES_HOME"], str(Path("/p")))
             self.assertNotIn("OPENAI_API_KEY", kwargs["env"])   # a clean environment: never another profile's keys
             return subprocess.CompletedProcess(argv, 0, "noise\n" + doctor.MARKER + json.dumps(payload) + "\n", "")
 

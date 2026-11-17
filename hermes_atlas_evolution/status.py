@@ -369,8 +369,24 @@ def local_time(value, lang: str = "en") -> str:
         moment = moment.astimezone()
     except (TypeError, ValueError, OverflowError, OSError):
         return "?"
-    zone = moment.strftime("%Z") or moment.strftime("%z")
+    zone = short_zone(moment)
     return moment.strftime("%d/%m/%Y %H:%M" if lang == "pt" else "%Y-%m-%d %H:%M") + (f" {zone}" if zone else "")
+
+
+def short_zone(moment) -> str:
+    """The zone of an aware time in one short word on every system: its abbreviation when the system has one (BRT,
+    -03, UTC), else the offset (-03, +05:30). Windows names zones in long words ("E. South America Standard Time")."""
+    name = moment.strftime("%Z")
+    if name and len(name) <= 6 and " " not in name:
+        return name
+    offset = moment.utcoffset()
+    if offset is None:
+        return ""
+    minutes = int(offset.total_seconds() // 60)
+    if minutes == 0:
+        return "UTC"
+    sign, minutes = ("+" if minutes > 0 else "-"), abs(minutes)
+    return f"{sign}{minutes // 60:02d}" + (f":{minutes % 60:02d}" if minutes % 60 else "")
 
 
 def plural(count, one: str, many: str) -> str:
