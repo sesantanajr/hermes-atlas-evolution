@@ -282,7 +282,7 @@ class FindingsTest(Fleet):
         told = explain.describe(found[0], "pt")
         self.assertIn("fica só com a primeira", told["what"])
         self.assertIn("plugin de segurança", told["what"])
-        self.assertEqual(told["does"], "Aplicar roda: hermes -p work plugins disable omh")
+        self.assertEqual(told["does"], "Ao aplicar, o plugin roda `hermes -p work plugins disable omh`.")
         self.assertEqual(told["undo"], "hermes -p work plugins enable omh")
         self.assertFalse(told["bulk"])   # which plugin to keep is decided one by one, never in Apply all
 

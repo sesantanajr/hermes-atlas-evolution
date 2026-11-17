@@ -16,7 +16,7 @@ All commands below are subcommands of `hermes evolution`. Field names, codes and
 6. [Linux remediation](#linux-remediation)
 7. [Configuration keys](#configuration-keys)
 8. [Data and compatibility](#data-and-compatibility)
-9. [Commands kept from earlier versions](#commands-kept-from-earlier-versions)
+9. [Legacy commands](#legacy-commands)
 10. [Removing the plugin](#removing-the-plugin)
 
 ## What the supervisor measures
@@ -32,7 +32,7 @@ All commands below are subcommands of `hermes evolution`. Field names, codes and
 
 The collector stores aggregates. It does not record conversation text, native memory content, search results or raw log lines. An incident keeps the plugin's own hypothesis text.
 
-Version 0.4.0 added these output fields:
+Output fields worth knowing:
 
 | Field | Where | Meaning |
 |---|---|---|
@@ -121,7 +121,7 @@ The provider, the model and the prices above are placeholders.
 
 `ops plan` returns a read-only plan with a suggested budget: search queries, page extracts and parallel lanes for research, parallel lanes and review passes for delegation, and comparable samples for operations. Research plans include source discovery, evidence verification and a record of uncertainties. Delegation plans point to `delegate_task` for answers the current agent must wait for and to Kanban for work that must survive restarts (`--durable`).
 
-Turn on `agent_tools` in the Hermes plugin settings (or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.agent_tools true` from your own terminal) and reload the plugin to expose `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` to the profile. Include `hermes-atlas-evolution` when the profile uses an explicit list of toolsets. The plan tool returns only the plan.
+Turn on `agent_tools` in the Hermes plugin settings (or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.agent_tools true` from your own terminal), then run `hermes gateway restart`: the plugin registers `hermes_atlas_evolution_plan` and `hermes_atlas_evolution_lessons` for the profile when it loads. Turning it off applies at once. Include `hermes-atlas-evolution` when the profile uses an explicit list of toolsets. The plan tool returns only the plan.
 
 Reading shared Kanban boards requires `"inspect_shared_kanban": true`. Creating a card requires your own handoff authorization, independently of that key. The example assigns verifications to the profile `reviewer` on the existing board `ops`.
 
@@ -174,17 +174,17 @@ Save the settings in `<HERMES_HOME>/evolution/settings.json`.
 
 **Verification and rollback.** Each adjustment uses `systemctl --runtime`. The supervisor records the intent before applying, checks the effective value, measures the response and restores the previous setting if the effect is uncertain or the pressure does not fall by at least 20%. The next tick after 15 minutes ends the trial. After any trial no new trial starts for one hour. An ineffective or unverified trial blocks the same unit and resource for 24 hours, and repeated ineffective trials within 14 days defer that resource for 24, 48 and then 96 hours. The command uses only the permissions the process already has. Adjustments observed from outside take precedence.
 
-Schedule `hermes evolution ops tick` **every five minutes** in your existing scheduler, as the user that manages those units. Applying requires the verification ticks to be running as well. To end a trial early, run `hermes evolution ops rollback`. Use `ops history` to confirm that the weight was restored. The adjustment is temporary in systemd and disappears with a host reboot. Cleaning data, disabling plugins, memory changes and code fixes are review recommendations in this version.
+Schedule `hermes evolution ops tick` **every five minutes** in your existing scheduler, as the user that manages those units. Applying requires the verification ticks to be running as well. To end a trial early, run `hermes evolution ops rollback`. Use `ops history` to confirm that the weight was restored. The adjustment is temporary in systemd and disappears with a host reboot. The supervisor recommends, and does not apply, data cleaning, plugin changes, memory changes and code fixes; what the plugin changes in Hermes by itself is in [The mode and automatic actions](evolution-loop.md#the-mode-and-automatic-actions).
 
 Weight changes and rollbacks are tested with a simulated systemd adapter. Validate the controller and the chosen unit in staging before authorizing `apply`.
 
 ## Configuration keys
 
-`<HERMES_HOME>/evolution/settings.json` is an optional JSON object of up to 64 KiB. The plugin reads it when it loads, so restart the gateway after a change; each autopilot pass and each command read it again. The options of the evolution loop are described in [The evolution loop](evolution-loop.md#settings-and-language). Those exposed in the Hermes settings form win over the same keys in this file. The agent's file tools can write this file, so values that would widen trust (`owner_sender_ids`, `owner_platforms`, `agent_advice: true`, `runtime_guard: false`) are ignored here; set them in the Hermes settings form.
+`<HERMES_HOME>/evolution/settings.json` is an optional JSON object of up to 64 KiB. A change applies to the running gateway within a minute, without a restart: the plugin compares its modification time at most every 30 seconds. Each autopilot pass and each command read it again. The options of the evolution loop are described in [The evolution loop](evolution-loop.md#settings-and-language). Those exposed in the Hermes settings form win over the same keys in this file. The agent's file tools can write this file, so values that would widen trust (`owner_sender_ids`, `owner_platforms`, `agent_advice: true`, `runtime_guard: false`, a `mode` other than `manual`, `legacy_memory_commands: true`, `automatic_shared_recall: true`) are ignored here; set them in the Hermes settings form or with `hermes config set`.
 
 | Key | Format | Default | Effect |
 |---|---|---|---|
-| `evolution` | object | see the loop | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `reflector`, `reflector_daily_limit`, `autopilot_minutes`; `owner_sender_ids`, `owner_platforms` and `runtime_guard: false` are ignored here and count only from the Hermes form |
+| `evolution` | object | see the loop | `lessons`, `language`, `tool_hints`, `feedback_signals`, `slow_turn_seconds`, `reflector`, `reflector_daily_limit`, `autopilot_minutes`, `mode` (only `manual` counts here); `owner_sender_ids`, `owner_platforms` and `runtime_guard: false` are ignored here and count only from the Hermes form |
 | `agent_advice` | boolean | `false` | Ignored when `true`: the agent tools are switched on only from the Hermes form (`agent_tools`). |
 | `sensitivity` | `low`, `balanced`, `high` | `balanced` | Threshold of adaptive alerts. |
 | `rates_usd_per_million` | object by provider and model | none | Prices for cost estimates (see [Usage and cost](#usage-and-cost)). |
@@ -193,31 +193,31 @@ Weight changes and rollbacks are tested with a simulated systemd adapter. Valida
 | `kanban_handoff` | object: `enabled`, `board`, `assignee` | disabled | Authorizes `ops handoff`. `board` and `assignee` are lower-case slugs. |
 | `linux_supervisor` | object | absent | Policy for reversible systemd trials (see [Linux remediation](#linux-remediation)). |
 | `semantic_incident_model` | absolute path | none | Local embedding model for `ops similar`. |
-| `legacy_memory_commands` | boolean | `false` | Allows new 0.1 notes and the `/evolution` chat command. Ignored here when `true`: set it with `hermes config set plugins.entries.hermes-atlas-evolution.settings.legacy_memory_commands true`. |
-| `automatic_shared_recall` | boolean | `false` | With `legacy_memory_commands`, injects matching shared 0.1 notes into a turn. Ignored here when `true`, like `legacy_memory_commands`: set it in the Hermes configuration. |
+| `legacy_memory_commands` | boolean | `false` | Allows new legacy notes and the `/evolution` chat command. Ignored here when `true`: set it with `hermes config set plugins.entries.hermes-atlas-evolution.settings.legacy_memory_commands true`. |
+| `automatic_shared_recall` | boolean | `false` | With `legacy_memory_commands`, injects matching shared legacy notes into a turn. Ignored here when `true`, like `legacy_memory_commands`: set it in the Hermes configuration. |
 
 ## Data and compatibility
 
 - The databases live in `<HERMES_HOME>/evolution/`: `evolution.sqlite3` for observer metrics and the evolution loop, and `supervisor.sqlite3` for incidents, baselines, adaptive samples and trials. Observer metrics are kept for 35 days (the delivery IDs that stop one event from being counted twice, 2 days); the loop's aggregates, incidents and closed trials for 90 days. The 35-day retention is applied by the first hook write of each UTC day in each process, so it holds even when no tick is scheduled. Hermes' own backups and logs follow their existing retention.
-- Since 0.5.0 `evolution.sqlite3` is at schema 8, and 0.6.0 keeps it: schemas 0 to 7 are migrated automatically, and a newer schema written by a later version of the plugin also opens, since later versions only add tables and columns (0.6.0 adds one table and stays at schema 8, so 0.5.0 still opens it). Version 0.4.0 or earlier cannot open a migrated database: going back that far requires restoring a backup of the file or deleting it. The rename of the plugin id in 0.6.0 does not move the data: `<HERMES_HOME>/evolution/` keeps its name.
+- `evolution.sqlite3` is at schema 8. Older schemas are migrated automatically, and a newer schema also opens, since the plugin only adds tables and columns. A very old copy of the plugin cannot open a migrated database: going back that far requires restoring a backup of the file or deleting it. The data folder `<HERMES_HOME>/evolution/` kept its name when the plugin was renamed.
 - Hook writes share one connection per process and profile, which stays open while Hermes runs. On Windows this means `evolution.sqlite3` cannot be deleted while Hermes is running.
 - Hermes' own databases (`state.db`, Kanban boards) are opened read-only. For `status` this includes the `state.db` of the other profiles of the same root, where it only counts sessions, and the plugin's database in those profiles, where it reads the last pass and the lesson counts.
-- Note files from version 0.1 are preserved. The commands that record new notes and the legacy chat command require `legacy_memory_commands: true`. The old note injection also requires `automatic_shared_recall: true`. By default, inspection uses the signals of Hermes' native memory.
+- Legacy note files are preserved. The commands that record new notes and the legacy chat command require `legacy_memory_commands: true`. The old note injection also requires `automatic_shared_recall: true`. By default, inspection uses the signals of Hermes' native memory.
 - The integration contract was checked against the official v0.23.1 tree, commit `3b421578588243f920886e6fe79a6faa87ea026e`.
 
-## Commands kept from earlier versions
+## Legacy commands
 
 | Command | What it does |
 |---|---|
 | `health [--upstream-tag TAG]` | Prints the snapshot of Hermes files and host signals that `ops inspect` builds on. |
-| `tick [--upstream-tag TAG] [--days 1..35] [--changes-only]` | Runs the maintenance policy of version 0.2 and records its decisions. `ops tick` already includes it. |
+| `tick [--upstream-tag TAG] [--days 1..35] [--changes-only]` | Runs the original maintenance policy and records its decisions. `ops tick` already includes it. |
 | `feedback CODE helpful\|dismissed\|reset` | Records how a maintenance finding performed. |
 | `history` | Shows maintenance priorities and feedback. |
-| `memory [--shared \| --dm PLATFORM USER CHAT] ...` | Access to the 0.1 note data: `remember`, `recall`, `evaluate`, `audit`, `forget`. |
+| `memory [--shared \| --dm PLATFORM USER CHAT] ...` | Access to the legacy note data: `remember`, `recall`, `evaluate`, `audit`, `forget`. |
 
 ## Removing the plugin
 
-Run `hermes evolution ops rollback` before disabling the plugin with `hermes plugins disable hermes-atlas-evolution`, or removing it with `hermes plugins remove hermes-atlas-evolution`. Disabling makes a running gateway unload the plugin; after a removal, run `hermes gateway restart`. The plugin is installed per profile, so repeat this in each profile that has it (`hermes -p <profile> ...`). Neither command deletes the data in `<HERMES_HOME>/evolution/`; delete that folder yourself if you want it gone.
+Run `hermes evolution ops rollback` before disabling the plugin with `hermes plugins disable hermes-atlas-evolution`, or removing it with `hermes plugins remove hermes-atlas-evolution`. Disabling makes a running gateway unload the plugin; after a removal, run `hermes gateway restart`. The plugin is installed per profile, so repeat this in each profile that has it (`hermes -p <profile> ...`). Neither command deletes the data in `<HERMES_HOME>/evolution/`; delete that folder yourself if you want it gone. In Auto mode, the profile that looks after the whole Hermes remembers where the plugin has been and never reinstalls it there by itself.
 
 ## References
 

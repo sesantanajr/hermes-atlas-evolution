@@ -157,7 +157,10 @@ def decide_proposal(conn: sqlite3.Connection, proposal_id: int, action: str, *, 
                         before=before_lesson, after={**after_lesson, "settled": [row["code"]]})
     else:
         decision = _log(conn, now=now, actor=actor, kind="proposal", target=str(proposal_id), action=action,
-                        before={"status": row["status"]}, after={"status": result["status"]})
+                        before={"status": row["status"]},
+                        after={"status": result["status"], **({"command": result["run_this"]}
+                                                               if isinstance(result.get("run_this"), str)
+                                                               and result["run_this"] else {})})
     return {**result, "decided": True, "decision": decision}
 
 
@@ -212,6 +215,8 @@ def history(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 50) -> l
             from .explain import command_text
 
             item["command"] = command_text(item["after"]["applied"], lang)   # as the owner would type it
+        elif row["kind"] == "proposal" and isinstance(item["after"].get("command"), str):
+            item["command"] = item["after"]["command"][:400]   # the command an approved manual proposal asks you to run
         from .admin import SETTINGS
 
         # what the menu and the panel offer to undo: never Hermes' own maintenance (nothing to undo) nor a setting
@@ -231,7 +236,7 @@ def history(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 50) -> l
 PRIVATE_SETTINGS = ("owner_sender_ids", "owner_platforms")
 
 
-def masked(history: list[dict]) -> list[dict]:
+def masked(history: list[dict], lang: str = "en") -> list[dict]:
     """The history as an agent's terminal or a dashboard without a login may see it: written lesson text is left
     out (only template sentences stay) and the values of the owner's chat accounts become counts."""
     shown = []
@@ -240,14 +245,18 @@ def masked(history: list[dict]) -> list[dict]:
         if item["kind"] == "lesson" and not item.get("templated"):
             item["lesson"], item["text_hidden"] = None, True
         if item["kind"] == "setting" and item["target"] in PRIVATE_SETTINGS:
-            item["before"], item["after"] = ({"value": _count(item[side].get("value"))} for side in ("before", "after"))
+            item["before"], item["after"] = ({"value": _count(item[side].get("value"), lang)} for side in ("before", "after"))
             item["values_hidden"] = True
         shown.append(item)
     return shown
 
 
-def _count(value) -> str:
-    return f"{len(value)} item(s)" if isinstance(value, (list, tuple)) else "…"
+def _count(value, lang: str = "en") -> str:
+    if not isinstance(value, (list, tuple)):
+        return "…"
+    if lang == "pt":
+        return f"{len(value)} {'item' if len(value) == 1 else 'itens'}"
+    return f"{len(value)} {'item' if len(value) == 1 else 'items'}"
 
 
 def mark_undone(conn: sqlite3.Connection, decision_id: int, *, now: float) -> None:

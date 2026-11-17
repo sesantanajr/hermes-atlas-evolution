@@ -216,8 +216,8 @@ class MenuActionsTest(Base):
                 "hermes evolution report --days 7", "low")
         shown = self.menu("a", "s", "0", lang="pt")
         self.assertIn("Sugestões:", shown)
-        self.assertIn("Aplicar 1 mudança(s) recomendada(s): Travar skill reescrita em excesso", shown)
-        self.assertIn("1 aplicada(s).", shown)
+        self.assertIn("Aplicar 1 mudança recomendada: Travar skill reescrita em excesso", shown)
+        self.assertIn("1 aplicada.", shown)
         self.assertEqual(self.hermes.calls[0][-3:], ["curator", "lock", "hermes-admin"])
 
     def test_proposals_are_grouped_explained_and_dismissed(self):
@@ -226,8 +226,9 @@ class MenuActionsTest(Base):
                          "hermes evolution report --days 7", "low")
         shown = self.menu("2", "2", "d", "", "0", lang="pt")
         for text in ("Mudanças que o plugin aplica (reversíveis):", "Observações:",
-                     "[baixo] Ferramenta lenta chamada após chamada · mcp__m365",
-                     "levou em média 37,2 s por chamada", "Dispensada: fica fechada enquanto nada mudar."):
+                     "[risco: baixo] Ferramenta lenta chamada após chamada · mcp__m365 (proposta #2)",
+                     "levou em média 37,2 s por chamada",
+                     "Dispensada: some por 30 dias e só volta se a situação continuar."):
             self.assertIn(text, shown)
         self.assertNotIn("tool_latency", shown)
         with experience(self.home) as conn:
@@ -255,7 +256,7 @@ class MenuActionsTest(Base):
         script = Script("5", "1", "y", "m", "2", "", "0")
         Menu(self.home, {}, lang="en", console=Console(read=script.read, write=script.write, width=110, color=False),
              clock=lambda: NOW, writer=writer).run()
-        self.assertIn("took a repeated entry out of MEMORY.md", script.text)
+        self.assertIn("removed a duplicate entry from MEMORY.md", script.text)
         self.assertIn("Undone.", script.text)
         self.assertEqual(written, [{"mode": "assist"}])
         self.assertEqual(memory_care.parse((self.home / "memories" / "MEMORY.md").read_text(encoding="utf-8")),
@@ -420,7 +421,8 @@ class Review083Test(Base):
         script = Script("0")
         Menu(self.home, {}, lang="en", console=Console(read=script.read, write=script.write, width=110, color=False),
              clock=lambda: NOW).run()
-        self.assertIn("`runtime_guard`", script.text)
+        self.assertIn("apply after hermes gateway restart (in the terminal, at the next session): runtime_guard.",
+                      " ".join(script.text.split()))   # plain text, no backticks (wrapped to the terminal's width)
         self.assertNotIn("{keys}", script.text)
 
 

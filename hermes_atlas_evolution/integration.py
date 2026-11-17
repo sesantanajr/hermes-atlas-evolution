@@ -185,8 +185,11 @@ def autopilot_pass(home: Path, reflect, cancelled=None) -> dict:
     except Exception:   # the pass still runs with the plugin's own settings; who the owner is stays unknown
         runtime = {CONFIG_UNREAD: True}
     current, _problems = safe_settings(home, runtime)
+    from .autopilot import LEASE_SECONDS
+
+    # within the pass's lease, with room to spare: past it another process could start a second pass
     result = cycle(home, now=time.time(), runtime_config=runtime, config=current, reflect=reflect, strict=False,
-                   cancelled=cancelled)
+                   cancelled=cancelled, deadline=time.monotonic() + LEASE_SECONDS - 180)
     reflection = result["reflector"]
     return {"new_lessons": len(result["new_lessons"]), "open_proposals": len(result["open_proposals"]),
             "reflector_status": reflection.get("status", "ran"), "reflector_drafts": len(reflection.get("drafted") or []),
@@ -535,6 +538,8 @@ class _Plugin:
         waiting = sorted(key for key in RELOAD_KEYS if previous.get(key) != evolution.get(key))
         if evolution["lessons"] != "off" and not self.section_registered:
             waiting.append("lessons")   # loaded with lessons off: their prompt section appears at the next load
+        if self.advice and not getattr(self, "tools_registered", True):
+            waiting.append("agent_tools")   # the agent's tools are registered at load only
         try:
             from .experience import record
 
@@ -785,7 +790,7 @@ def register(ctx):
     old = legacy_install(home, runtime_config)
     if old:   # the copy installed under the old id is still enabled: register nothing, never count twice
         getLogger(__name__).warning(
-            "Atlas Evolution is installed twice in this profile, under %s (up to 0.5.0) and hermes-atlas-evolution. "
+            "Atlas Evolution is installed twice in this profile, under its old name %s and hermes-atlas-evolution. "
             "The new copy stays inactive until the old one is removed: hermes plugins remove %s", old, old)
         return
     # Unreadable settings.json: keep measuring with the values from Hermes' form, but show nothing to the
@@ -835,9 +840,14 @@ def register(ctx):
         plugin.clock_allowed = True
         plugin.autopilot.on_tick = plugin.refresh_settings
         plugin.autopilot.start_clock()        # only where it can be stopped: a host with on_unload
-    ctx.register_tool(name=TOOL["name"], toolset="hermes-atlas-evolution", schema=TOOL, handler=plugin.advisory_tool,
-                      check_fn=lambda: plugin.advice)
-    ctx.register_tool(name=LESSONS_TOOL["name"], toolset="hermes-atlas-evolution", schema=LESSONS_TOOL,
-                      handler=plugin.playbook_tool, check_fn=lambda: plugin.advice)
+    plugin.tools_registered = plugin.advice
+    if plugin.advice:
+        # Only when the owner turned the agent's tools on (`agent_tools`): a toolset registered while off reads in
+        # `hermes doctor` as "system dependency not met" on every Hermes. Turning them on later takes effect at the
+        # next load of the plugin (`hermes gateway restart`); turning them off works at once (check_fn).
+        ctx.register_tool(name=TOOL["name"], toolset="hermes-atlas-evolution", schema=TOOL,
+                          handler=plugin.advisory_tool, check_fn=lambda: plugin.advice)
+        ctx.register_tool(name=LESSONS_TOOL["name"], toolset="hermes-atlas-evolution", schema=LESSONS_TOOL,
+                          handler=plugin.playbook_tool, check_fn=lambda: plugin.advice)
     ctx.register_cli_command("evolution", "Review Hermes health, learning and operations", setup,
                              _operator_cli(home, plugin.reflect))

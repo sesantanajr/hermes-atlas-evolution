@@ -1,9 +1,9 @@
-"""The whole Hermes at once (0.8.5): every profile, its plugins and skills, how much it is used, and what to do.
+"""The whole Hermes at once: every profile, its plugins and skills, how much it is used, and what to do.
 
 One profile looks after the whole Hermes (`lead`): the default one when the plugin is on there and has run a pass in
 the last two days, else the first such profile in name order, else the first profile with the plugin on. The work is
-then done once however many profiles load the plugin. `scan` reads, never writes, and never follows a link out of
-the folders it reads: each profile's config.yaml, each plugin's manifest, install record, git checkout and Python
+then done once however many profiles load the plugin. `scan` reads and never writes. It follows a link only where
+Hermes itself does (a plugin folder that is a link to a checkout); anywhere else a link is skipped. It reads each profile's config.yaml, each plugin's manifest, install record, git checkout and Python
 source (parsed with `ast`, never imported or run), each skill's SKILL.md and Hermes' skill usage records. Every file
 is opened as a regular file only (a named pipe, a device or a link is skipped) and read up to a size limit.
 
@@ -52,10 +52,11 @@ FIRST_WINS = ("transform_tool_result", "transform_terminal_output", "transform_l
 KINDS = ("plugin_removed", "plugin_transform_overlap", "plugin_transform_protected", "plugin_transform_unclear",
          "plugin_hints_overlap",
          "plugin_duplicate", "plugin_unused", "plugin_leftover", "plugin_update", "plugin_obsolete", "self_missing",
-         "self_off", "profile_idle", "skills_unused", "skills_duplicate", "skills_similar", "skills_shared")
+         "self_off", "profile_idle", "skills_unused", "skills_duplicate", "skills_similar", "skills_shared",
+         "doctor_cache", "doctor_checkpoints", "doctor_security", "doctor_issue")
 _TOOLISH = {"tool_name", "tool", "name", "function_name", "tool_id"}
 _ARGSISH = {"args", "arguments", "tool_args", "tool_input", "params", "kwargs_args"}
-_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")   # Hermes' own rule for a profile name (hermes_constants)
 _PLUGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
 _LEFTOVER = re.compile(r"\.install-[A-Za-z0-9_-]{1,64}")
 _SHA = re.compile(r"[0-9a-f]{40}")
@@ -96,6 +97,14 @@ def _is_dir(path: Path) -> bool:
     """A real folder (not a link to one)."""
     try:
         return stat.S_ISDIR(os.lstat(path).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+def _is_plugin_dir(path: Path) -> bool:
+    """A plugin's folder as Hermes loads it: a real folder or a link to one (a development checkout)."""
+    try:
+        return stat.S_ISDIR(os.stat(path).st_mode)
     except (OSError, ValueError):
         return False
 
@@ -174,7 +183,7 @@ def _plugin_lists(config) -> tuple[list | None, list]:
 
 def has_plugin(home: Path, config) -> bool:
     enabled, disabled = _plugin_lists(config)
-    return _is_dir(Path(home) / "plugins" / PLUGIN_ID) and enabled is not None \
+    return _is_plugin_dir(Path(home) / "plugins" / PLUGIN_ID) and enabled is not None \
         and PLUGIN_ID in enabled and PLUGIN_ID not in disabled
 
 
@@ -268,6 +277,36 @@ def remember(root: Path, *, seen=(), skip=()) -> None:
     folder = Path(root) / "evolution"
     if folder.is_symlink() or (folder.exists() and not _is_dir(folder)):
         return
+    with _locked(folder):
+        _remember(root, folder, seen, skip)
+
+
+def _locked(folder: Path):
+    """An exclusive lock on the shared state across processes (POSIX); a no-op where there is none."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def held():
+        try:
+            import fcntl
+        except ImportError:
+            yield
+            return
+        try:
+            folder.mkdir(mode=0o700, exist_ok=True)
+            handle = os.open(folder / ".fleet-state.lock", os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except OSError:
+            yield
+            return
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(handle)
+    return held()
+
+
+def _remember(root: Path, folder: Path, seen, skip) -> None:
     current = state(root)
     merged = {"seen": sorted(set(current["seen"]) | {str(item) for item in seen})[:1000],
               "skip": sorted(set(current["skip"]) | {str(item) for item in skip})[:5000]}
@@ -449,13 +488,13 @@ def _compare(node, constants) -> tuple[bool, set[str]] | None:
 
 
 def _exits(body) -> bool:
-    """A branch that ends the callback with nothing changed (`return`, `return None`, `return result`)."""
+    """A branch that ends the callback with nothing changed: `return`, `return None` or `return False`. Returning a
+    name (`return result`) is a change: Hermes keeps the first string any callback returns, even the original one."""
     if not body:
         return False
     last = body[-1]
-    return isinstance(last, ast.Return) and (last.value is None or isinstance(last.value, (ast.Constant, ast.Name))
-                                             and getattr(last.value, "value", None) in (None, "", False) or
-                                             isinstance(last.value, ast.Name))
+    return isinstance(last, ast.Return) and (
+        last.value is None or isinstance(last.value, ast.Constant) and last.value.value in (None, False))
 
 
 def _scope(function, functions, constants, depth: int = 0) -> tuple[str, set[str]]:
@@ -898,7 +937,9 @@ def scan_profile(name: str, home: Path, *, now: float, read_config, bundled: Pat
             "sessions_30d": sessions(home, since=now - IDLE_PROFILE_DAYS * 86_400) or 0,
             "plugins": plugins, "leftovers": leftovers, "skills": _skills_of(home),
             "self": has_plugin(home, config),
-            "self_installed": _is_dir(Path(home) / "plugins" / PLUGIN_ID),
+            "self_installed": _is_plugin_dir(Path(home) / "plugins" / PLUGIN_ID),
+            # the plugin's data folder outlives `hermes plugins remove`: the plugin was there and the owner removed it
+            "self_data": os.path.lexists(Path(home) / "evolution" / "evolution.sqlite3"),
             "self_disabled": PLUGIN_ID in disabled,
             "self_configured": isinstance(entries, dict) and PLUGIN_ID in entries,
             "own_transform": _own_transform(home, config) if has_plugin(home, config) else False}
@@ -1079,7 +1120,8 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
     # This plugin where the profile is used: installed by the Mode auto only where it never was (never found there,
     # not turned off, never configured); anywhere else the owner decided, and it is only said.
     if not row["self"] and row["sessions_7d"] > 0 and row["config_read"]:
-        decided = row["self_disabled"] or row["self_installed"] or row["self_configured"] or profile in fleet["seen"]
+        decided = row["self_disabled"] or row["self_installed"] or row["self_configured"] or row.get("self_data", True) \
+            or profile in fleet["seen"]
         if decided:
             found.append(_finding("self_off", profile, PLUGIN_ID, risk="low",
                                   evidence={"sessions_7d": row["sessions_7d"], "disabled": row["self_disabled"],
@@ -1212,9 +1254,12 @@ def stored(conn) -> dict | None:
 
 
 def self_sha(home: Path) -> str:
-    """The commit the lead's own copy of the plugin runs, so a profile it installs runs the same code."""
-    _repo, sha = git_origin(Path(home) / "plugins" / PLUGIN_ID)
-    return sha
+    """The commit the lead's own copy of the plugin runs, so a profile it installs runs the same code. Only from a
+    checkout of the published repository: a fork's or a local commit is not on GitHub, and installing it would fail."""
+    from .ecosystem import normalize_repo
+
+    repo, sha = git_origin(Path(home) / "plugins" / PLUGIN_ID)
+    return sha if normalize_repo(repo) == normalize_repo(f"https://github.com/{REPOSITORY}") else ""
 
 
 def refresh(home: Path, *, now: float, force: bool = False, read_config=None, deadline: float | None = None) -> dict | None:
@@ -1245,17 +1290,70 @@ def refresh(home: Path, *, now: float, force: bool = False, read_config=None, de
     catalog = load_catalog([Path(row["home"]) for row in reading["profiles"]])
     known = knowledge()
     found = findings(reading, catalog, known, now=now, fleet=state(root), self_sha=self_sha(home))
+    doctor_seen = _doctor(home, reading, found, now=now, deadline=deadline, force=force)
     tiers: dict[str, int] = {}
     for entry in catalog["entries"].values():
         tiers[entry["tier"]] = tiers.get(entry["tier"], 0) + 1
     keep = {"at": now, "lead": leader, "summary": summary(reading), "profiles": [_compact(row) for row in reading["profiles"]],
             "catalog": {"source": catalog["source"], "generated_at": catalog["generated_at"],
                         "plugins": len(catalog["entries"]), "tiers": tiers, "removed": len(catalog["removed"])},
-            "complete": reading.get("complete", True), "findings": found}
+            "complete": reading.get("complete", True), "findings": found, "doctor": doctor_seen}
     with experience(home) as conn:
         sync(conn, catalog, known)
         conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('environment', ?)", (json.dumps(keep),))
     return keep
+
+
+def _doctor(home: Path, reading: dict, found: list, *, now: float, deadline: float | None, force: bool) -> dict:
+    """Hermes' own doctor checks of the profiles in use (doctor.py), once a day each: their problems join `found`,
+    and their counts per profile are returned."""
+    from . import doctor
+
+    rows = [row for row in reading["profiles"] if row["config_read"]]
+    try:
+        runs = doctor.collect(home, rows, now=now, deadline=deadline, force=force)
+    except Exception:   # the doctor is an addition: the look at the plugins and skills stands without it
+        return {}
+    homes = {row["profile"]: Path(row["home"]) for row in rows}
+    seen = {}
+    machine: dict[tuple, dict] = {}   # a problem of the whole machine is said once, with every profile that saw it
+    leader = lead(root_of(home), now=now)
+    for profile, item in sorted(doctor.current(runs, now=now).items(), key=lambda pair: (pair[0] != leader, pair[0])):
+        result = item.get("result") if isinstance(item, dict) else None
+        if not isinstance(result, dict) or profile not in homes:
+            continue
+        for finding in doctor.findings(profile, homes[profile], result):
+            if not finding["evidence"].get("host"):
+                found.append(finding)
+                continue
+            shared = (finding["kind"], finding["subject"].split("/", 1)[1])
+            if shared in machine:
+                machine[shared]["evidence"].setdefault("profiles", [machine[shared]["evidence"]["profile"]]).append(profile)
+            else:
+                machine[shared] = finding
+                found.append(finding)
+        seen[profile] = {"at": item.get("at"), **doctor.summary(result)}
+    order = {"high": 0, "medium": 1, "low": 2}
+    found.sort(key=lambda item: (order.get(item["risk"], 3), item["kind"], item["subject"]))
+    return seen
+
+
+def forget(home: Path, code: str) -> None:
+    """Take a finding out of the stored look (a change found stale on disk), so the next pass does not reopen it
+    from a cached look before the next real one."""
+    from .experience import experience
+
+    parts = str(code).split(":")
+    with experience(home) as conn:
+        if len(parts) >= 3 and parts[1].startswith("doctor_"):
+            from .doctor import forget as forget_run
+
+            forget_run(conn, parts[2])   # the stored checks of that profile are stale too: run again at the next look
+        found = stored(conn)
+        if not found or not isinstance(found.get("findings"), list):
+            return
+        found["findings"] = [item for item in found["findings"] if item.get("code") != code]
+        conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('environment', ?)", (json.dumps(found),))
 
 
 def verify(home: Path, proposal: dict, *, now: float | None = None, read_config=None) -> dict | None:
@@ -1265,6 +1363,10 @@ def verify(home: Path, proposal: dict, *, now: float | None = None, read_config=
     from .ecosystem import knowledge
 
     now = time.time() if now is None else now
+    if str(proposal.get("kind") or "").startswith("doctor_"):
+        from .doctor import verify as doctor_verify
+
+        return doctor_verify(home, proposal)
     subject = str(proposal.get("subject") or "")
     profile = subject.split("/", 1)[0] if "/" in subject else subject
     if not _PROFILE.fullmatch(profile or ""):

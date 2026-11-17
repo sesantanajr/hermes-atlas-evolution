@@ -32,7 +32,10 @@ def _upsert(conn, seen: set, code: str, kind: str, risk: str, subject: str, evid
             VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)""", (code, kind, risk, subject, body, command, now, now))
     elif row["status"] in ("open", "approved"):
         conn.execute("UPDATE proposal SET evidence=?, command=?, risk=? WHERE id=?", (body, command, risk, row["id"]))
-    elif row["status"] in ("expired",) or row["status"] == "rejected" and now - row["updated"] >= REOPEN_AFTER_SECONDS:
+    elif row["status"] in ("expired",) or row["status"] == "rejected" and now - row["updated"] >= REOPEN_AFTER_SECONDS \
+            or row["status"] == "applied" and code.startswith("env:") and now - row["updated"] >= 86_400:
+        # a change across profiles that is true again a day after it was applied (the owner put it back by hand) is
+        # said again; one the owner undid is never applied by itself again (actions.automatic keeps the skip list)
         conn.execute("UPDATE proposal SET evidence=?, command=?, risk=?, status='open', updated=?, note=NULL WHERE id=?",
                      (body, command, risk, now, row["id"]))
 

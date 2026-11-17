@@ -108,7 +108,9 @@ class PluginLoopTest(PluginBase):
         self.assertEqual(sorted(context.hooks), sorted(set(declared["provides_hooks"]) - {"transform_tool_result"}))
         self.settings(evolution={"tool_hints": True})
         self.assertEqual(sorted(self.plugin().hooks), sorted(declared["provides_hooks"]))
-        self.assertEqual(sorted(context.tools), sorted(declared["provides_tools"]))
+        # agent-facing tools are registered only when the owner turned them on: a toolset registered while off reads
+        # "system dependency not met" in `hermes doctor` on every Hermes
+        self.assertEqual(context.tools, {})
         self.assertEqual(list(context.sections), ["hermes-atlas-evolution.playbook"])
         self.assertLessEqual(context.sections["hermes-atlas-evolution.playbook"]["max_chars"], 4000)
         self.assertIn("evolution", context.cli)
@@ -117,9 +119,11 @@ class PluginLoopTest(PluginBase):
         self.assertTrue(skill.startswith("---\nname: evolution-review\ndescription: "))
         self.assertLess(len(skill), 15_000)
         self.assertEqual(context.commands, {})   # the legacy chat command stays opt-in
-        for name, tool in context.tools.items():
-            self.assertFalse(tool["check"](), name)   # agent-facing tools are off until the operator allows them
-            self.assertIn("error", json.loads(tool["handler"]({"action": "search", "kind": "research"})))
+        self.hermes_settings(agent_tools=True)
+        enabled = self.plugin()
+        self.assertEqual(sorted(enabled.tools), sorted(declared["provides_tools"]))
+        for name, tool in enabled.tools.items():
+            self.assertTrue(tool["check"](), name)
 
     def test_a_recurring_failure_becomes_a_lesson_the_agent_sees_when_it_fails_again(self):
         self.settings(evolution={"lessons": "auto", "language": "en", "tool_hints": True})
@@ -424,7 +428,8 @@ class SurfacesTest(PluginBase):
         self.settings(evolution={"lessons": "auto", "owner_sender_ids": ["555"]}, agent_advice=True)
         context = self.plugin()
         self.turn(context, "dm", "t1", platform="telegram", sender_id="555")
-        self.assertEqual(context.tools["hermes_atlas_evolution_lessons"]["check"](), False)
+        tool = context.tools.get("hermes_atlas_evolution_lessons")
+        self.assertTrue(tool is None or tool["check"]() is False)
         self.settings(evolution={"lessons": "auto"})
         self.hermes_settings(owner_sender_ids=["555"], agent_tools=True)
         context = self.plugin()

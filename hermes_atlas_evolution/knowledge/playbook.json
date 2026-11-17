@@ -1,206 +1,246 @@
 {
-  "_about": "Every situation Atlas Evolution recognises across the profiles of a Hermes, and what it does. level: auto = done by itself in Mode auto (always recorded with its undo); safe = also in Mode assist; propose = applied on one key, with its undo; manual = the command is shown, because its undo is not certain; advice = worth knowing, nothing to run.",
-  "playbook": {
-    "_version": "0.8.5",
-    "plugin_removed": {
-      "level": "manual",
-      "risk": "high",
-      "action": "hermes -p <profile> plugins remove <plugin>",
-      "undo": "",
-      "title_en": "A plugin the Hermes catalog removed for safety is still installed",
-      "title_pt": "Plugin que o catálogo do Hermes removeu por segurança continua instalado",
-      "advice_en": "Remove it with the command below. Hermes already refuses to load it, unless it was installed with --allow-removed; the plugin never turns it off or removes it by itself, since that bypass is your decision.",
-      "advice_pt": "Remova com o comando abaixo. O Hermes já se recusa a carregá-lo, a não ser que tenha sido instalado com --allow-removed; o plugin nunca o desliga nem remove sozinho, porque essa exceção é decisão sua."
-    },
-    "plugin_transform_overlap": {
-      "level": "propose",
-      "risk": "medium",
-      "action": "hermes -p <profile> plugins disable <plugin>",
-      "undo": "hermes -p <profile> plugins enable <plugin>",
-      "title_en": "Two plugins change the same tool's result, and Hermes keeps only one",
-      "title_pt": "Dois plugins mudam o resultado da mesma ferramenta, e o Hermes só fica com um",
-      "advice_en": "Keep the plugin whose change you need on those tools and turn the other off in this profile (one key here, never in Apply all). A security plugin is never the one suggested.",
-      "advice_pt": "Fique com o plugin cuja mudança você precisa nessas ferramentas e desligue o outro neste perfil (uma tecla aqui, nunca no Aplicar tudo). Um plugin de segurança nunca é o sugerido para desligar."
-    },
-    "plugin_duplicate": {
-      "level": "propose",
-      "risk": "medium",
-      "action": "hermes -p <profile> plugins disable <plugin>",
-      "undo": "hermes -p <profile> plugins enable <plugin>",
-      "title_en": "Two plugins do the same job in one profile",
-      "title_pt": "Dois plugins fazem o mesmo trabalho no mesmo perfil",
-      "advice_en": "They step on each other. Keep one: the plugin suggests turning off the others (one key here, never in Apply all).",
-      "advice_pt": "Um atropela o outro. Fique com um: o plugin sugere desligar os outros (uma tecla aqui, nunca no Aplicar tudo)."
-    },
-    "plugin_unused": {
-      "level": "manual",
-      "risk": "low",
-      "action": "hermes -p <profile> plugins remove <plugin>",
-      "undo": "hermes -p <profile> plugins install <source>",
-      "title_en": "Plugins installed that this profile never loads",
-      "title_pt": "Plugins instalados que este perfil nunca carrega",
-      "advice_en": "Hermes loads only the plugins listed as enabled. These sit on disk, show up in lists and get updated for nothing. Remove the ones you do not plan to use.",
-      "advice_pt": "O Hermes só carrega os plugins listados como ligados. Estes ocupam disco, aparecem nas listas e são atualizados à toa. Remova os que não pretende usar."
-    },
-    "plugin_leftover": {
-      "level": "auto",
-      "risk": "low",
-      "action": "move the folder to <root>/evolution/trash/",
-      "undo": "move it back",
-      "title_en": "A plugin install that failed left a folder behind",
-      "title_pt": "Uma instalação de plugin que falhou deixou uma pasta para trás",
-      "advice_en": "Hermes' temporary install folder (.install-*) stayed. It is never loaded; the Mode auto moves it to the plugin's trash, where it can be put back.",
-      "advice_pt": "A pasta temporária de instalação do Hermes (.install-*) ficou. Ela nunca é carregada; no Modo auto o plugin a move para a lixeira dele, de onde pode voltar."
-    },
-    "plugin_update": {
-      "level": "manual",
-      "risk": "low",
-      "action": "hermes -p <profile> plugins update <plugin>",
-      "undo": "",
-      "title_en": "A newer reviewed version is in the Hermes catalog",
-      "title_pt": "Há uma versão revisada mais nova no catálogo do Hermes",
-      "advice_en": "Update it in each profile listed (the commands are shown). Read its changelog first if it is a plugin you depend on.",
-      "advice_pt": "Atualize em cada perfil listado (os comandos aparecem acima). Leia as mudanças antes se for um plugin de que você depende."
-    },
-    "self_missing": {
-      "level": "auto",
-      "risk": "low",
-      "action": "hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable --ref <commit of this profile's copy>",
-      "undo": "hermes -p <profile> plugins remove hermes-atlas-evolution",
-      "title_en": "A profile in use without Atlas Evolution",
-      "title_pt": "Perfil em uso sem o Atlas Evolution",
-      "advice_en": "Its errors, skills and memory are not learned from. The Mode auto installs it there by itself, at the same version as this profile (Hermes downloads it), only in a profile that never had it.",
-      "advice_pt": "Os erros, as skills e a memória dele não são aproveitados. No Modo Auto o plugin se instala lá sozinho, na mesma versão deste perfil (o Hermes baixa), só num perfil que nunca o teve."
-    },
-    "profile_idle": {
-      "level": "advice",
-      "risk": "low",
-      "action": "",
-      "undo": "",
-      "title_en": "A profile nobody used in 30 days",
-      "title_pt": "Perfil que ninguém usou em 30 dias",
-      "advice_en": "If it is not coming back, delete it with Hermes (hermes profile delete <name>) after a backup; its plugins and skills stop being maintained for nothing.",
-      "advice_pt": "Se ele não vai voltar, apague com o Hermes (hermes profile delete <nome>) depois de um backup; os plugins e skills dele deixam de ser mantidos à toa."
-    },
-    "skills_unused": {
-      "level": "manual",
-      "risk": "low",
-      "action": "hermes -p <profile> curator archive <skill>",
-      "undo": "hermes -p <profile> curator restore <skill>",
-      "title_en": "Skills unused for 30 days",
-      "title_pt": "Skills sem uso há 30 dias",
-      "advice_en": "Every active skill costs room in the prompt's skill list. Archive the ones you do not need (they leave the list; Hermes keeps them in .archive).",
-      "advice_pt": "Cada skill ativa ocupa espaço na lista de skills do prompt. Arquive as que você não precisa (saem da lista; o Hermes as guarda em .archive)."
-    },
-    "skills_duplicate": {
-      "level": "manual",
-      "risk": "low",
-      "action": "hermes -p <profile> curator archive <skill>",
-      "undo": "hermes -p <profile> curator restore <skill>",
-      "title_en": "The same skill twice under two names",
-      "title_pt": "A mesma skill duas vezes com nomes diferentes",
-      "advice_en": "The text is the same. Keep the one used most (shown) and archive the copy.",
-      "advice_pt": "O texto é o mesmo. Fique com a mais usada (indicada) e arquive a cópia."
-    },
-    "skills_similar": {
-      "level": "advice",
-      "risk": "low",
-      "action": "hermes -p <profile> curator run --consolidate --dry-run",
-      "undo": "",
-      "title_en": "Skills that look like the same job",
-      "title_pt": "Skills que parecem fazer o mesmo trabalho",
-      "advice_en": "Merge them into one. Hermes' curator can propose the merge (the command uses a model, so it spends tokens; --dry-run changes nothing).",
-      "advice_pt": "Junte numa só. O curador do Hermes pode propor a junção (o comando usa um modelo, então gasta tokens; --dry-run não muda nada)."
-    },
-    "skills_shared": {
-      "level": "advice",
-      "risk": "low",
-      "action": "skills.external_dirs",
-      "undo": "",
-      "title_en": "The same skills copied into many profiles",
-      "title_pt": "As mesmas skills copiadas em vários perfis",
-      "advice_en": "Keep one copy in a shared folder and list it in each profile's skills.external_dirs: one place to fix, the same version everywhere.",
-      "advice_pt": "Guarde uma cópia numa pasta compartilhada e liste essa pasta em skills.external_dirs de cada perfil: um lugar para corrigir, a mesma versão em todos."
-    },
-    "tools_reclaim": {
-      "level": "auto",
-      "risk": "low",
-      "action": "hermes pm gc",
-      "undo": "",
-      "title_en": "Old tool versions nothing uses",
-      "title_pt": "Versões antigas de ferramentas que nada usa",
-      "advice_en": "Hermes' own garbage collection removes only what nothing references. The Mode auto runs it at most once a week.",
-      "advice_pt": "A limpeza do próprio Hermes só remove o que nada referencia. No Modo auto o plugin a roda no máximo uma vez por semana."
-    },
-    "memory_identical": {
-      "level": "safe",
-      "risk": "low",
-      "action": "remove the identical copy (a copy of the file is kept)",
-      "undo": "put it back",
-      "title_en": "The same memory entry twice",
-      "title_pt": "A mesma entrada de memória duas vezes",
-      "advice_en": "Hermes' memory goes into every prompt: a repeat costs tokens on every call.",
-      "advice_pt": "A memória do Hermes vai em todo prompt: uma repetição custa tokens em toda chamada."
-    },
-    "skill_lock": {
-      "level": "auto",
-      "risk": "medium",
-      "action": "hermes curator lock <skill>",
-      "undo": "hermes curator unlock <skill>",
-      "title_en": "A skill the curator keeps rewriting",
-      "title_pt": "Skill que o curador reescreve sem parar",
-      "advice_en": "Each rewrite spends a model call. Lock it; your own edits still apply.",
-      "advice_pt": "Cada reescrita gasta uma chamada de modelo. Trave; as suas próprias edições continuam valendo."
-    },
-    "plugin_obsolete": {
-      "level": "manual",
-      "risk": "medium",
-      "action": "hermes -p <profile> plugins remove <plugin>",
-      "undo": "",
-      "title_en": "A plugin that is archived, delisted or no longer maintained",
-      "title_pt": "Plugin arquivado, retirado do catálogo ou sem manutenção",
-      "advice_en": "It will get no fixes, security ones included. Remove it, or move to its replacement when one is named.",
-      "advice_pt": "Ele não vai receber correções, nem de segurança. Remova, ou troque pelo substituto quando houver um indicado."
-    },
-    "plugin_transform_protected": {
-      "level": "advice",
-      "risk": "medium",
-      "action": "",
-      "undo": "",
-      "title_en": "Two protective plugins change the same tool's result",
-      "title_pt": "Dois plugins de proteção mudam o resultado da mesma ferramenta",
-      "advice_en": "Neither is turned off for this. If the later one's warning matters on those tools, ask its maintainer to declare requires_plugins on the other, so Hermes loads it first.",
-      "advice_pt": "Nenhum é desligado por isso. Se o aviso do segundo importa nessas ferramentas, peça ao mantenedor dele para declarar requires_plugins do outro, para o Hermes carregá-lo antes."
-    },
-    "plugin_hints_overlap": {
-      "level": "manual",
-      "risk": "medium",
-      "action": "hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.tool_hints false",
-      "undo": "hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.tool_hints true",
-      "title_en": "This plugin's lesson hints hide another plugin's change",
-      "title_pt": "As dicas de lição deste plugin escondem a mudança de outro plugin",
-      "advice_en": "Turn this plugin's tool_hints off in that profile (the command is below): lessons still reach the agent at the start of each session.",
-      "advice_pt": "Desligue o tool_hints deste plugin nesse perfil (o comando está abaixo): as lições continuam chegando ao agente no começo de cada sessão."
-    },
-    "self_off": {
-      "level": "manual",
-      "risk": "low",
-      "action": "hermes -p <profile> plugins enable hermes-atlas-evolution",
-      "undo": "",
-      "title_en": "A profile in use where you turned Atlas Evolution off",
-      "title_pt": "Perfil em uso onde você desligou o Atlas Evolution",
-      "advice_en": "Your decision is kept: it is never turned on or reinstalled by itself. If you want it back there, run the command below.",
-      "advice_pt": "A sua decisão é mantida: ele nunca é religado nem reinstalado sozinho. Se quiser de volta nesse perfil, rode o comando abaixo."
-    },
-    "plugin_transform_unclear": {
-      "level": "advice",
-      "risk": "low",
-      "action": "",
-      "undo": "",
-      "title_en": "Two plugins may change the same result (their code does not show which tools)",
-      "title_pt": "Dois plugins podem mudar o mesmo resultado (o código não mostra em quais ferramentas)",
-      "advice_en": "Nothing is turned off for this: check the two plugins' documentation. If both change the same tool, keep the one you need there.",
-      "advice_pt": "Nada é desligado por isso: confira a documentação dos dois plugins. Se os dois mudam a mesma ferramenta, fique com o que você precisa ali."
-    }
+ "_about": "Every situation Atlas Evolution recognises across the profiles of a Hermes, and what it does. level: auto = done by itself in Mode auto (always recorded with its undo); safe = also in Mode assist; propose = applied on one key, with its undo; manual = the command is shown, because its undo is not certain; advice = worth knowing, nothing to run.",
+ "playbook": {
+  "_version": "0.9.0",
+  "plugin_removed": {
+   "level": "manual",
+   "risk": "high",
+   "action": "hermes -p <profile> plugins remove <plugin>",
+   "undo": "",
+   "title_en": "A plugin the Hermes catalog removed for safety is still installed",
+   "title_pt": "Plugin que o catálogo do Hermes removeu por segurança continua instalado",
+   "advice_en": "Remove it with the command below. Hermes already refuses to load it, unless it was installed with --allow-removed; the plugin never turns it off or removes it by itself, since that bypass is your decision.",
+   "advice_pt": "Remova com o comando abaixo. O Hermes já se recusa a carregá-lo, a não ser que tenha sido instalado com --allow-removed; o plugin nunca o desliga nem remove sozinho, porque essa exceção é decisão sua."
+  },
+  "plugin_transform_overlap": {
+   "level": "propose",
+   "risk": "medium",
+   "action": "hermes -p <profile> plugins disable <plugin>",
+   "undo": "hermes -p <profile> plugins enable <plugin>",
+   "title_en": "Two plugins change the same tool's result, and Hermes keeps only one",
+   "title_pt": "Dois plugins mudam o resultado da mesma ferramenta, e o Hermes só fica com um",
+   "advice_en": "Keep the plugin whose change you need on those tools and turn the other off in this profile (one key here, never in Apply all). A security plugin is never the one suggested.",
+   "advice_pt": "Fique com o plugin cuja mudança você precisa nessas ferramentas e desligue o outro neste perfil (uma tecla aqui, nunca no Aplicar tudo). Um plugin de segurança nunca é o sugerido para desligar."
+  },
+  "plugin_duplicate": {
+   "level": "propose",
+   "risk": "medium",
+   "action": "hermes -p <profile> plugins disable <plugin>",
+   "undo": "hermes -p <profile> plugins enable <plugin>",
+   "title_en": "Two plugins do the same job in one profile",
+   "title_pt": "Dois plugins fazem o mesmo trabalho no mesmo perfil",
+   "advice_en": "They step on each other. Keep one: the plugin suggests turning off the others (one key here, never in Apply all).",
+   "advice_pt": "Um atropela o outro. Fique com um: o plugin sugere desligar os outros (uma tecla aqui, nunca no Aplicar tudo)."
+  },
+  "plugin_unused": {
+   "level": "manual",
+   "risk": "low",
+   "action": "hermes -p <profile> plugins remove <plugin>",
+   "undo": "hermes -p <profile> plugins install <source>",
+   "title_en": "Plugins installed that this profile never loads",
+   "title_pt": "Plugins instalados que este perfil nunca carrega",
+   "advice_en": "Hermes loads only the plugins listed as enabled. These sit on disk, show up in lists and get updated for nothing. Remove the ones you do not plan to use.",
+   "advice_pt": "O Hermes só carrega os plugins listados como ligados. Estes ocupam disco, aparecem nas listas e são atualizados à toa. Remova os que não pretende usar."
+  },
+  "plugin_leftover": {
+   "level": "auto",
+   "risk": "low",
+   "action": "move the folder to <root>/evolution/trash/",
+   "undo": "move it back",
+   "title_en": "A plugin install that failed left a folder behind",
+   "title_pt": "Uma instalação de plugin que falhou deixou uma pasta para trás",
+   "advice_en": "Hermes' temporary install folder (.install-*) stayed. It is never loaded; Auto mode moves it to the plugin's trash, where it can be put back.",
+   "advice_pt": "A pasta temporária de instalação do Hermes (.install-*) ficou. Ela nunca é carregada; no Modo Auto o plugin a move para a lixeira dele, de onde pode voltar."
+  },
+  "plugin_update": {
+   "level": "manual",
+   "risk": "low",
+   "action": "hermes -p <profile> plugins update <plugin>",
+   "undo": "",
+   "title_en": "A newer reviewed version is in the Hermes catalog",
+   "title_pt": "Há uma versão revisada mais nova no catálogo do Hermes",
+   "advice_en": "Update it in each profile listed (the commands are shown). Read its changelog first if it is a plugin you depend on.",
+   "advice_pt": "Atualize em cada perfil listado (os comandos aparecem acima). Leia as mudanças antes se for um plugin de que você depende."
+  },
+  "self_missing": {
+   "level": "auto",
+   "risk": "low",
+   "action": "hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable --ref <commit of this profile's copy>",
+   "undo": "hermes -p <profile> plugins remove hermes-atlas-evolution",
+   "title_en": "A profile in use without Atlas Evolution",
+   "title_pt": "Perfil em uso sem o Atlas Evolution",
+   "advice_en": "Its errors, skills and memory are not learned from. Auto mode installs it there by itself, at the same version as this profile (Hermes downloads it), only in a profile that never had it.",
+   "advice_pt": "Os erros, as skills e a memória dele não são aproveitados. No Modo Auto o plugin se instala lá sozinho, na mesma versão deste perfil (o Hermes baixa), só num perfil que nunca o teve."
+  },
+  "profile_idle": {
+   "level": "advice",
+   "risk": "low",
+   "action": "",
+   "undo": "",
+   "title_en": "A profile nobody used in 30 days",
+   "title_pt": "Perfil que ninguém usou em 30 dias",
+   "advice_en": "If it is not coming back, delete it with Hermes (hermes profile delete <name>) after a backup; its plugins and skills stop being maintained for nothing.",
+   "advice_pt": "Se ele não vai voltar, apague com o Hermes (hermes profile delete <nome>) depois de um backup; os plugins e skills dele deixam de ser mantidos à toa."
+  },
+  "skills_unused": {
+   "level": "manual",
+   "risk": "low",
+   "action": "hermes -p <profile> curator archive <skill>",
+   "undo": "hermes -p <profile> curator restore <skill>",
+   "title_en": "Skills unused for 30 days",
+   "title_pt": "Skills sem uso há 30 dias",
+   "advice_en": "Every active skill costs room in the prompt's skill list. Archive the ones you do not need (they leave the list; Hermes keeps them in .archive).",
+   "advice_pt": "Cada skill ativa ocupa espaço na lista de skills do prompt. Arquive as que você não precisa (saem da lista; o Hermes as guarda em .archive)."
+  },
+  "skills_duplicate": {
+   "level": "manual",
+   "risk": "low",
+   "action": "hermes -p <profile> curator archive <skill>",
+   "undo": "hermes -p <profile> curator restore <skill>",
+   "title_en": "The same skill twice under two names",
+   "title_pt": "A mesma skill duas vezes com nomes diferentes",
+   "advice_en": "The text is the same. Keep the one used most (shown) and archive the copy.",
+   "advice_pt": "O texto é o mesmo. Fique com a mais usada (indicada) e arquive a cópia."
+  },
+  "skills_similar": {
+   "level": "advice",
+   "risk": "low",
+   "action": "hermes -p <profile> curator run --consolidate --dry-run",
+   "undo": "",
+   "title_en": "Skills that look like the same job",
+   "title_pt": "Skills que parecem fazer o mesmo trabalho",
+   "advice_en": "Merge them into one. Hermes' curator can propose the merge (the command uses a model, so it spends tokens; --dry-run changes nothing).",
+   "advice_pt": "Junte numa só. O curador do Hermes pode propor a junção (o comando usa um modelo, então gasta tokens; --dry-run não muda nada)."
+  },
+  "skills_shared": {
+   "level": "advice",
+   "risk": "low",
+   "action": "skills.external_dirs",
+   "undo": "",
+   "title_en": "The same skills copied into many profiles",
+   "title_pt": "As mesmas skills copiadas em vários perfis",
+   "advice_en": "Keep one copy in a shared folder and list that folder in every profile: `hermes -p <profile> config set skills.external_dirs '[\"/path/to/folder\"]'`. Then archive each profile's copy with `hermes -p <profile> curator archive <skill>`: one place to fix, the same version everywhere.",
+   "advice_pt": "Guarde uma cópia numa pasta compartilhada e liste essa pasta em cada perfil: `hermes -p <perfil> config set skills.external_dirs '[\"/caminho/da/pasta\"]'`. Depois apague as cópias de cada perfil com `hermes -p <perfil> curator archive <skill>`: um lugar para corrigir, a mesma versão em todos."
+  },
+  "tools_reclaim": {
+   "level": "auto",
+   "risk": "low",
+   "action": "hermes pm gc",
+   "undo": "",
+   "title_en": "Old tool versions nothing uses",
+   "title_pt": "Versões antigas de ferramentas que nada usa",
+   "advice_en": "Hermes' own garbage collection removes only what nothing references. Auto mode runs it at most once a week.",
+   "advice_pt": "A limpeza do próprio Hermes só remove o que nada referencia. No Modo Auto o plugin a roda no máximo uma vez por semana."
+  },
+  "memory_identical": {
+   "level": "safe",
+   "risk": "low",
+   "action": "remove the identical copy (a copy of the file is kept)",
+   "undo": "put it back",
+   "title_en": "The same memory entry twice",
+   "title_pt": "A mesma entrada de memória duas vezes",
+   "advice_en": "Hermes' memory goes into every prompt: a repeat costs tokens on every call. Remove the repeat on menu screen 8 (Hermes memory); the plugin keeps a copy of the file first. In Auto mode or Assisted it already happens by itself.",
+   "advice_pt": "A memória do Hermes vai em todo prompt: uma repetição custa tokens em toda chamada. Remova a repetição na tela 8 do menu (Memória do Hermes); o plugin guarda uma cópia do arquivo antes. No Modo Auto ou Assistido isso já acontece sozinho."
+  },
+  "skill_lock": {
+   "level": "auto",
+   "risk": "medium",
+   "action": "hermes curator lock <skill>",
+   "undo": "hermes curator unlock <skill>",
+   "title_en": "A skill the curator keeps rewriting",
+   "title_pt": "Skill que o curador reescreve sem parar",
+   "advice_en": "Each rewrite spends a model call. Lock it; your own edits still apply.",
+   "advice_pt": "Cada reescrita gasta uma chamada de modelo. Trave; as suas próprias edições continuam valendo."
+  },
+  "plugin_obsolete": {
+   "level": "manual",
+   "risk": "medium",
+   "action": "hermes -p <profile> plugins remove <plugin>",
+   "undo": "",
+   "title_en": "A plugin that is archived, delisted or no longer maintained",
+   "title_pt": "Plugin arquivado, retirado do catálogo ou sem manutenção",
+   "advice_en": "It will get no fixes, security ones included. Remove it, or move to its replacement when one is named.",
+   "advice_pt": "Ele não vai receber correções, nem de segurança. Remova, ou troque pelo substituto quando houver um indicado."
+  },
+  "plugin_transform_protected": {
+   "level": "advice",
+   "risk": "medium",
+   "action": "",
+   "undo": "",
+   "title_en": "Two protective plugins change the same tool's result",
+   "title_pt": "Dois plugins de proteção mudam o resultado da mesma ferramenta",
+   "advice_en": "Neither is turned off for this. If the later one's warning matters on those tools, ask its maintainer to declare requires_plugins on the other, so Hermes loads it first.",
+   "advice_pt": "Nenhum é desligado por isso. Se o aviso do segundo importa nessas ferramentas, peça ao mantenedor dele para declarar requires_plugins do outro, para o Hermes carregá-lo antes."
+  },
+  "plugin_hints_overlap": {
+   "level": "manual",
+   "risk": "medium",
+   "action": "hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.tool_hints false",
+   "undo": "hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.tool_hints true",
+   "title_en": "This plugin's lesson hints hide another plugin's change",
+   "title_pt": "As dicas de lição deste plugin escondem a mudança de outro plugin",
+   "advice_en": "Turn this plugin's tool_hints off in that profile (the command is below): lessons still reach the agent at the start of each session.",
+   "advice_pt": "Desligue o tool_hints deste plugin nesse perfil (o comando está abaixo): as lições continuam chegando ao agente no começo de cada sessão."
+  },
+  "self_off": {
+   "level": "manual",
+   "risk": "low",
+   "action": "hermes -p <profile> plugins enable hermes-atlas-evolution",
+   "undo": "",
+   "title_en": "A profile in use where you turned Atlas Evolution off",
+   "title_pt": "Perfil em uso onde você desligou o Atlas Evolution",
+   "advice_en": "Your decision is kept: it is never turned on or reinstalled by itself. If you want it back there, run the command below.",
+   "advice_pt": "A sua decisão é mantida: ele nunca é religado nem reinstalado sozinho. Se quiser de volta nesse perfil, rode o comando abaixo."
+  },
+  "plugin_transform_unclear": {
+   "level": "advice",
+   "risk": "low",
+   "action": "",
+   "undo": "",
+   "title_en": "Two plugins may change the same result (their code does not show which tools)",
+   "title_pt": "Dois plugins podem mudar o mesmo resultado (o código não mostra em quais ferramentas)",
+   "advice_en": "Nothing is turned off for this: check the two plugins' documentation. If both change the same tool, keep the one you need there.",
+   "advice_pt": "Nada é desligado por isso: confira a documentação dos dois plugins. Se os dois mudam a mesma ferramenta, fique com o que você precisa ali."
+  },
+  "doctor_cache": {
+   "level": "assist",
+   "risk": "medium",
+   "action": "move the folder to the plugin's trash (kept 30 days)",
+   "undo": "put it back from the trash",
+   "title_en": "A cache folder Hermes never cleans is large",
+   "title_pt": "Uma pasta de cache que o Hermes nunca limpa está grande",
+   "advice_en": "It is a package cache that rebuilds itself when needed. Move it to the plugin's trash with one key: the space is freed after 30 days, and undo puts it back until then.",
+   "advice_pt": "É um cache de pacotes que se refaz sozinho quando precisa. Mova-o para a lixeira do plugin com uma tecla: o espaço é liberado depois de 30 dias, e o desfazer o traz de volta até lá."
+  },
+  "doctor_checkpoints": {
+   "level": "owner",
+   "risk": "low",
+   "action": "hermes checkpoints prune",
+   "undo": "none: pruned snapshots are gone",
+   "title_en": "Rollback snapshots are above Hermes' size cap",
+   "title_pt": "Os pontos de restauração passaram do limite do Hermes",
+   "advice_en": "Hermes always keeps the latest snapshot of each project, so its cap is a floor. See what takes the space with the command shown, then choose: keep fewer days (`hermes -p <profile> config set checkpoints.retention_days 3`, then `hermes -p <profile> checkpoints prune`) or, if you never use /rollback, turn it off (`hermes -p <profile> config set checkpoints.enabled false`, then `hermes -p <profile> checkpoints clear`). Deleted snapshots cannot be brought back.",
+   "advice_pt": "O Hermes sempre guarda o ponto mais recente de cada projeto, então o limite dele é um piso. Veja o que ocupa espaço com o comando mostrado e escolha: guardar menos dias (`hermes -p <perfil> config set checkpoints.retention_days 3` e depois `hermes -p <perfil> checkpoints prune`) ou, se você nunca usa o /rollback, desligar (`hermes -p <perfil> config set checkpoints.enabled false` e depois `hermes -p <perfil> checkpoints clear`). Pontos apagados não voltam."
+  },
+  "doctor_security": {
+   "level": "owner",
+   "risk": "high",
+   "action": "follow Hermes' doctor",
+   "undo": "",
+   "title_en": "The Hermes doctor found a security problem",
+   "title_pt": "A checagem do Hermes (`hermes doctor`) encontrou um problema de segurança",
+   "advice_en": "Act now, following Hermes' text above: uninstall the package or remove the MCP server it names (the command shown does it for an MCP server) and rotate every credential it may have seen. For a security advisory, the command shown (`--ack`) closes the alert once you have handled it.",
+   "advice_pt": "Aja agora, seguindo o texto do Hermes acima: desinstale o pacote ou remova o servidor MCP citado (para um servidor MCP, o comando mostrado faz isso) e troque todas as credenciais que ele pode ter visto. Para um alerta de segurança, o comando mostrado (`--ack`) fecha o alerta depois que você resolveu."
+  },
+  "doctor_issue": {
+   "level": "owner",
+   "risk": "medium",
+   "action": "the command Hermes names",
+   "undo": "",
+   "title_en": "The Hermes doctor lists a problem",
+   "title_pt": "A checagem do Hermes (`hermes doctor`) aponta um problema",
+   "advice_en": "The plugin checks again once a day and closes this when it is solved.",
+   "advice_pt": "O plugin confere de novo uma vez por dia e fecha este aviso quando estiver resolvido."
   }
+ }
 }

@@ -1,12 +1,13 @@
-"""Actions the plugin takes for the owner (0.8.3): a proposal applied with one click, and automatic actions.
+"""Actions the plugin takes for the owner: a proposal applied with one click, and automatic actions.
 
-`auto_actions` (a setting the agent cannot widen, see cli.TRUSTED_ONLY) says what runs by itself at the end of each
-learning pass:
-- "off": nothing; everything waits for the owner.
-- "safe" (default): copies of a memory entry that are the very same text, character for character, are taken
+The `mode` (a setting the agent cannot widen, see cli.TRUSTED_ONLY; internally auto_actions full/safe/off) says what
+runs by itself at the end of each learning pass:
+- manual ("off"): nothing; everything waits for the owner.
+- assist ("safe"): copies of a memory entry that are the very same text, character for character, are taken
   out of Hermes' memory (a copy of the file is kept); nothing else. An entry the owner put back stays.
-- "full": also the reversible changes to Hermes of explain.AUTOMATIC (today: locking a skill the curator keeps
-  rewriting), at most MAX_CHANGES_PER_PASS per pass, with Hermes' own command; one Hermes refuses waits a day.
+- auto ("full", the default): also the reversible changes of explain.AUTOMATIC (locking a skill the curator keeps
+  rewriting, installing this plugin where a profile in use never had it, moving a failed install's folder to the
+  trash), at most MAX_CHANGES_PER_PASS per pass, with Hermes' own command; one Hermes refuses waits a day.
 
 Every action is recorded in the decision history with "automatic" as the actor and can be undone from the menu,
 the panel or `hermes evolution decisions undo <id>`. An automatic change the owner undoes is never applied
@@ -33,7 +34,8 @@ NEEDED_SECONDS = {"self_missing": COMMAND_SECONDS + 30, "pm_gc": 330}
 
 def _hermes(home: Path, args: list, *, runner=None) -> None:
     """Run a plan's arguments. ["@<profile>", ...] runs in that profile of the same Hermes (`hermes --profile`), and
-    ["@<profile>", "__trash__" | "__restore__", <folder>] moves a failed install's folder to the plugin's trash or back."""
+    ["@<profile>", "__trash__" | "__restore__", <folder>] moves a failed install's folder, or a cache folder Hermes never
+    cleans, to the plugin's trash or back."""
     from .admin import run_hermes
 
     if args and str(args[0]).startswith("@"):
@@ -84,22 +86,40 @@ def _real_folder_chain(base: Path, parts: list[str], *, create: bool) -> Path:
     return current
 
 
+_LEFTOVER = re.compile(r"\.install-[A-Za-z0-9_-]{1,64}")
+_CACHE_FOLDER = re.compile(r"cache/([A-Za-z0-9][A-Za-z0-9._-]{0,95})")
+_TRASHED = re.compile(r"(\.install-[A-Za-z0-9_-]{1,64}|cache\.[A-Za-z0-9][A-Za-z0-9._-]{0,95})")
+_NEVER_CACHE = ("scratch", "terminal")   # Hermes' own cleaner reaps these two
+
+
+def _trash_places(folder: str) -> tuple[list[str], str, str]:
+    """(the folders under the profile that hold it, its name there, its name in the trash) for the two kinds of
+    folders the plugin moves: a failed install (`plugins/.install-*`) and a folder of the profile's cache that Hermes'
+    cleaner never touches (`cache/<name>`)."""
+    if _LEFTOVER.fullmatch(folder):
+        return ["plugins"], folder, folder
+    cache = _CACHE_FOLDER.fullmatch(folder)
+    if cache and cache.group(1) not in _NEVER_CACHE and cache.group(1) not in (".", ".."):
+        return ["cache"], cache.group(1), "cache." + cache.group(1)
+    raise ValueError("Only a failed install's folder or a cache folder is moved")
+
+
 def _trash(home: Path, target: Path, profile: str, folder: str, *, back: bool) -> None:
-    """Move a failed install's folder (`plugins/.install-*` of profile `profile`) to this profile's own
-    `evolution/trash/<profile>/`, or back. Only such folders; never through a link (any part of either path); never
-    over something that is already there. Entries kept longer than 30 days are deleted from the trash."""
+    """Move a folder of profile `profile` (a failed install's `plugins/.install-*`, or a `cache/<name>` Hermes never
+    cleans) to this profile's own `evolution/trash/<profile>/`, or back. Never through a link (any part of either
+    path); never over something that is already there. An entry is deleted from the trash 30 days after it entered
+    (the date it entered is the folder's own date, set when it is moved in)."""
     import os
-    import re as _re
-    import shutil
     import stat
     import time
 
-    if not _re.fullmatch(r"\.install-[A-Za-z0-9_-]{1,64}", folder) or not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", profile):
-        raise ValueError("Only a failed install's folder is moved")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", profile):   # Hermes' rule for a profile name
+        raise ValueError("Only a profile of this Hermes")
+    parents, live_name, kept_name = _trash_places(folder)
     own, target = Path(home).resolve(), Path(target).resolve()
-    plugins = _real_folder_chain(target, ["plugins"], create=False)
+    holder = _real_folder_chain(target, parents, create=False)
     trash = _real_folder_chain(own, ["evolution", "trash", profile], create=not back)
-    live, kept = plugins / folder, trash / folder
+    live, kept = holder / live_name, trash / kept_name
     source, destination = (kept, live) if back else (live, kept)
     try:
         if not stat.S_ISDIR(os.lstat(source).st_mode):
@@ -107,20 +127,54 @@ def _trash(home: Path, target: Path, profile: str, folder: str, *, back: bool) -
     except FileNotFoundError:
         raise ValueError("Nothing to move") from None
     if os.path.lexists(destination):
+        if back:   # Hermes made the folder again meanwhile (a cache rebuilds itself): the copy stays in the trash
+            raise ValueError("The folder exists again; the copy in the trash stays until it is deleted")
         raise ValueError("Something is already there")
     os.rename(source, destination)   # same file system: never a copy that could follow a link
     now = time.time()
+    if not back:
+        try:   # a rename keeps the folder's old date: the 30 days count from today
+            os.utime(destination, (now, now), follow_symlinks=False)
+        except (OSError, NotImplementedError):
+            os.utime(destination, (now, now))
+    _purge(trash, now=now, keep=kept_name)
+
+
+def _purge(trash: Path, *, now: float, keep: str = "") -> int:
+    """Delete what entered one trash folder more than 30 days ago; the number of entries deleted."""
+    import os
+    import shutil
+
     try:
         entries = list(os.scandir(trash))
     except OSError:
-        entries = []
+        return 0
+    gone = 0
     for entry in entries:
         try:
-            if _re.fullmatch(r"\.install-[A-Za-z0-9_-]{1,64}", entry.name) and entry.is_dir(follow_symlinks=False) \
+            if entry.name != keep and _TRASHED.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False) \
                     and now - entry.stat(follow_symlinks=False).st_mtime > TRASH_KEEP_SECONDS:
                 shutil.rmtree(entry.path, ignore_errors=True)
+                gone += 1
         except OSError:
             continue
+    return gone
+
+
+def empty_trash(home: Path, *, now: float) -> int:
+    """Every pass: delete what has been in this profile's trash for more than 30 days (it frees the disk even when
+    nothing else goes to the trash). Never through a link."""
+    import os
+    import stat
+
+    base = Path(home) / "evolution" / "trash"
+    try:
+        if not stat.S_ISDIR(os.lstat(base).st_mode):
+            return 0
+        folders = [entry for entry in os.scandir(base) if entry.is_dir(follow_symlinks=False)]
+    except OSError:
+        return 0
+    return sum(_purge(Path(entry.path), now=now) for entry in folders)
 
 
 def recover(conn) -> None:
@@ -197,6 +251,9 @@ def apply_proposal(home: Path, proposal_id: int, *, now: float, actor: str = "te
             with experience(home) as conn:
                 conn.execute("UPDATE proposal SET status='expired', updated=? WHERE id=? AND status IN ('open', 'approved')",
                              (now, row["id"]))
+            from .environment import forget
+
+            forget(home, row["code"])   # the cached look would reopen it at the next pass
             raise Stale("Not so any more: checked again on disk, the situation changed or is gone; nothing was run")
     with experience(home) as conn:
         claimed = conn.execute("UPDATE proposal SET status='applying', updated=? WHERE id=? AND status IN "
@@ -225,7 +282,8 @@ def apply_proposal(home: Path, proposal_id: int, *, now: float, actor: str = "te
         from .environment import remember, root_of
 
         remember(root_of(home), seen=[str(row["subject"]).split("/", 1)[0]])
-    return {"id": row["id"], "applied": True, "decision": decision, "undo": explain.command_text(found[1])}
+    return {"id": row["id"], "applied": True, "decision": decision, "undo": explain.command_text(found[1]),
+            "undo_args": found[1]}
 
 
 def apply_many(home: Path, ids: list, *, now: float, actor: str = "terminal", runner=None) -> dict:
@@ -314,6 +372,10 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
     from .experience import experience
 
     done: dict = {"mode": mode if mode in MODES else "off", "memory": [], "applied": [], "failed": []}
+    try:   # whatever the mode: the trash keeps what it got for 30 days, and no longer
+        done["trash_emptied"] = empty_trash(home, now=now)
+    except OSError:
+        done["trash_emptied"] = 0
     if done["mode"] == "off":
         return done
     try:
@@ -411,9 +473,15 @@ def reclaim(home: Path, *, now: float, runner=None) -> dict | None:
         care, ran = {}, 0.0
     if "unused_tools" not in (care.get("findings") or ()) or now - ran < RECLAIM_EVERY_SECONDS:
         return None
+    from .admin import profile_name
+    from .environment import lead, root_of
+
+    if lead(root_of(Path(home)), now=now) not in (None, profile_name(home)):
+        return None   # one tool store for the whole Hermes: the profile that looks after all of it frees it
+    with experience(home) as conn:   # marked before it runs: a second process never starts another one meanwhile
+        conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('auto_gc', ?)", (str(now),))
     result = hermes_care.run_action(home, "pm_gc", runner=runner)
     with experience(home) as conn:
-        conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('auto_gc', ?)", (str(now),))
         decision = decisions.record_maintenance(conn, "pm_gc", reclaimable=care.get("reclaimable"),
                                                 ok=bool(result.get("ok")), now=now, actor="automatic")
     return {"action": "pm_gc", "ok": bool(result.get("ok")), "decision": decision}

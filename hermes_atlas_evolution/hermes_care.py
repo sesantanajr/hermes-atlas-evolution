@@ -1,4 +1,4 @@
-"""Care of the Hermes installation itself, without the agent and without tokens (0.8.4).
+"""Care of the Hermes installation itself, without the agent and without tokens.
 
 `check` reads only what Hermes already writes, with no network, no model and no `hermes` command (any `hermes`
 command may start Hermes' own maintenance): the gateway's state and heartbeat (alive, its memory, the machine's
@@ -118,7 +118,8 @@ def gateway(home: Path, *, now: float) -> dict:
     running = state.get("gateway_state") == "running"
     crashed = False
     fresh = updated is not None and now - updated <= HEARTBEAT_STALE_SECONDS
-    if running and not fresh and isinstance(state.get("pid"), int) and state["pid"] > 0:
+    if running and not fresh and os.name == "posix" and isinstance(state.get("pid"), int) and state["pid"] > 0:
+        # (on Windows, os.kill(pid, 0) sends CTRL_C_EVENT instead of probing: no crash is guessed there)
         # A fresh heartbeat means it runs, maybe in another PID namespace (a container on the same folder), where
         # its pid means nothing here. Without one: its process gone, or the pid now someone else's, is a crash.
         try:
@@ -151,7 +152,9 @@ def database(home: Path, *, quick: bool) -> dict:
     except OSError:
         report["wal"] = 0
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+        from urllib.parse import quote
+
+        conn = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=2)
         try:
             report["journal"] = conn.execute("PRAGMA journal_mode").fetchone()[0]
             if quick:   # read-only and bounded: a large database is checked for at most QUICK_CHECK_SECONDS
@@ -178,7 +181,9 @@ _VERSIONED = re.compile(r"^(?P<name>[a-z][a-z0-9-]*?)-(?P<version>\d[\w.+-]*)$")
 def unused_tools(home: Path, *, budget: float = 4.0) -> list[dict]:
     """Versions of Hermes' managed tools that `tools/facts.json` no longer points at (what `hermes pm gc` removes).
     Only names Hermes manages count; anything else in the folder is left out."""
-    store = Path(home) / "tools"
+    from .environment import root_of
+
+    store = root_of(Path(home)) / "tools"   # one store for every profile of a Hermes, at its root
     facts = _read_json(store / "facts.json")
     packages = facts.get("packages") if isinstance(facts, dict) else None
     if not isinstance(packages, dict):
@@ -338,12 +343,29 @@ ACTIONS = {
 
 
 def summarize(output: str) -> dict:
-    """The lines of a `hermes doctor` run that matter: problems, warnings and its summary."""
-    lines = [re.sub(r"\x1b\[[0-9;]*m", "", line).rstrip() for line in output.splitlines()]
+    """The lines of a `hermes doctor` run that matter: problems, warnings, its summary line and the numbered list of
+    what to do that follows it ("actions"), and how many problems it counted ("found")."""
+    lines = [re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", line).rstrip() for line in output.splitlines()]
     problems = [line.strip() for line in lines if line.strip().startswith("✗")]
     warnings = [line.strip() for line in lines if line.strip().startswith("⚠")]
-    tail = [line.strip() for line in lines if re.search(r"(issue|All checks passed|Fixed \d+)", line)]
-    return {"problems": problems[:20], "warnings": warnings[:20], "summary": tail[-3:]}
+    tail = [line.strip() for line in lines if re.search(r"(Found \d+ issue|All checks passed|Fixed \d+ issue|"
+                                                        r"require manual intervention)", line)]
+    actions: list[str] = []
+    found = 0
+    for index, line in enumerate(lines):
+        head = re.search(r"Found (\d+) issue|Fixed \d+ issue\(s\)\.(?: (\d+) issue)?", line)
+        if not head:
+            continue
+        found = int(head.group(1) or head.group(2) or 0)
+        actions = []
+        for following in lines[index + 1:]:
+            item = re.match(r"^\s+\d+\. (.+)$", following)
+            if item:
+                actions.append(item.group(1).strip()[:600])
+            elif following.strip() and actions:
+                break
+    return {"problems": problems[:20], "warnings": warnings[:20], "summary": tail[-3:], "actions": actions[:20],
+            "found": found}
 
 
 def run_action(home: Path, key: str, *, runner=None) -> dict:
@@ -364,4 +386,7 @@ def run_action(home: Path, key: str, *, runner=None) -> dict:
     result = {"ok": code == 0, "steps": steps}
     if key.startswith("doctor"):
         result["doctor"] = summarize(out)
+        # `hermes doctor` ends with 1 when it found problems: that is its answer, not a failure of the run
+        if code == 1 and (result["doctor"]["summary"] or result["doctor"]["actions"]):
+            result["ok"], result["problems_found"] = True, result["doctor"]["found"] or len(result["doctor"]["actions"])
     return result

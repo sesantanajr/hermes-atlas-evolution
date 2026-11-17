@@ -4,6 +4,8 @@
 
 Thank you for considering a contribution. This project is a plugin for Hermes Agent that runs inside other people's agents, so three things matter more than anything else: it must never slow down or break a turn, it must never store what users say, and the operator decides what reaches the agent.
 
+> **Em português:** abra uma issue antes de uma mudança grande; problemas de segurança vão pelo [SECURITY.md](SECURITY.md). Rode `python -m unittest discover -s tests -v` (só biblioteca padrão, Python 3.11 ou mais novo). Toda mudança traz um teste que falha sem ela. A documentação é bilíngue: o que muda em `README.md` ou `docs/` muda igual em `README.pt-BR.md` ou `docs/pt-BR/`, e toda frase que uma pessoa ou o agente lê precisa do par em português no `hermes_atlas_evolution/catalog.py`. A documentação descreve o que o plugin faz hoje; o histórico de versões fica só no CHANGELOG. As regras de privacidade e segurança abaixo valem para qualquer pull request.
+
 ## Before you start
 
 - Open an issue for anything larger than a small fix, so the approach can be agreed first.
@@ -21,7 +23,7 @@ cd hermes-atlas-evolution
 python -m unittest discover -s tests -v
 ```
 
-The same suite runs on GitHub Actions on every push and pull request ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)): on Linux with Python 3.11, 3.12, 3.13 and 3.14, and on macOS and Windows with Python 3.13. A lint job runs `ruff` for undefined names, unused imports and syntax the oldest supported Python refuses (`ruff check --target-version py311 --select F,E9,PLE`), and byte-compiles everything with Python 3.11. Run the same before a pull request if you have ruff; the plugin itself never depends on it. Tests that are POSIX by design (permission bits, the liveness probe, symlinked runtimes) skip themselves on Windows; anything else that fails there is a bug. Compute dates with `experience.utc_datetime` or `utc_day`, never `datetime.fromtimestamp`, which refuses times before 1970 on Windows.
+The same suite runs on GitHub Actions on every push and pull request ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)): on Linux with Python 3.11, 3.12, 3.13 and 3.14, and on macOS and Windows with Python 3.13. A lint job runs `ruff` for undefined names, unused imports and syntax the oldest supported Python refuses (`ruff check --target-version py311 --select F,E9,PLE --ignore PLE2502,PLE2515`; the guard tests carry bidirectional and zero-width characters on purpose), and byte-compiles everything with Python 3.11. Run the same before a pull request if you have ruff; the plugin itself never depends on it. Tests that are POSIX by design (permission bits, the liveness probe, symlinked runtimes) skip themselves on Windows; anything else that fails there is a bug. Compute dates with `experience.utc_datetime` or `utc_day`, never `datetime.fromtimestamp`, which refuses times before 1970 on Windows.
 
 When Hermes Agent is installed, run the suite a second time with the Python interpreter of that installation, the one that can `import agent.redact`. The tests then also exercise Hermes' native redactor and the interpreter your users run:
 
@@ -47,9 +49,9 @@ python -m hermes_atlas_evolution --home /tmp/evolution-test --hermes-version 0.2
 ## Code style
 
 - **Standard library only.** The plugin has no runtime dependency. Optional integrations are imported lazily and must degrade when the package is missing.
-- **Public plugin API only.** Use `ctx` and the modules of the published Hermes plugin API. The one exception is read-only introspection of what Hermes has already loaded (the health radar's plugin list, the guard's view of where Hermes lives, the Hermes version the command reads, the session origin the turn hooks ask for and the plugin isolation mode `status` reads): look the module up in `sys.modules` without importing it, wrap the call, and skip the reading when it is missing or fails. `hermes plugins validate` lists imports of private Hermes modules. Look up optional `ctx` methods with `getattr` so that an older or stricter host still loads the plugin.
+- **Public plugin API only.** Use `ctx` and the modules of the published Hermes plugin API. The one exception is read-only introspection of what Hermes has already loaded (the health radar's plugin list, the guard's view of where Hermes lives, the Hermes version the command reads, the session origin the turn hooks ask for, the plugin isolation mode `status` reads, the administrator's managed configuration files and the `hermes` launcher next to the loaded `hermes_cli`): look the module up in `sys.modules` without importing it, wrap the call, and skip the reading when it is missing or fails. `hermes plugins validate` lists imports of private Hermes modules. Look up optional `ctx` methods with `getattr` so that an older or stricter host still loads the plugin. Hermes' doctor checks are the one place that calls Hermes internals (`hermes_cli.doctor.DOCTOR_CHECKS`): only in a separate short-lived process of Hermes' Python, never in the plugin's process, and a Hermes without them must leave the plugin working and say so.
 - **Tests use `unittest`** and temporary directories. A fix comes with a regression test that fails without it. Close every connection a test opens (`addCleanup`): the suite should print no `ResourceWarning`.
-- **The dashboard panel** (`dashboard/`) is plain JavaScript on the host's plugin SDK, with no build step and no dependency. It renders text with React elements, never `innerHTML`, and its API only reads.
+- **The dashboard panel** (`dashboard/`) is plain JavaScript on the host's plugin SDK, with no build step and no dependency. It renders text with React elements, never `innerHTML`. Its API reads through one `GET` route and decides through one `POST` route, only for a logged-in owner ([the dashboard panel](docs/hermes-integration.md#the-dashboard-panel)).
 - **Thresholds are named constants** at the top of their module. When you change one, update `docs/evolution-loop.md` and `docs/pt-BR/evolution-loop.md` in the same pull request.
 - **Validate at the edge.** Functions that receive settings or hook payloads check types and ranges and raise `ValueError` with a message an operator can act on. Inside the gateway, settings fall back to safe defaults instead.
 - **Bound every read.** Files and databases that belong to Hermes are opened read-only, with a size limit and, where a scan can be slow, a deadline.
@@ -70,7 +72,7 @@ Every change must keep these. A pull request that breaks one will not be merged.
 
 1. **No content is stored or logged.** Conversation text, tool arguments, tool output, memory content and raw log lines may be inspected in memory to classify an event, and are then discarded. The only exception is the reflector's scrubbed excerpt, which exists only while the reflector is on.
 2. **Only safe values reach the database.** A stored value is a counter, a member of a fixed list, or a label that passed `experience.label` or `signals._clean_hint`. Session and turn identifiers are stored only as hashes.
-3. **No network access of the plugin's own and no telemetry.** A model may be called only through Hermes' `ctx.llm`, by a feature the operator can switch off with its own setting, within a per-pass and daily cap, and its output starts in quarantine. The reflector is the only such feature; it is on by default since 0.5.0, and its drafts stay in quarantine in every mode.
+3. **No network access of the plugin's own and no telemetry.** A model may be called only through Hermes' `ctx.llm`, by a feature the operator can switch off with its own setting, within a per-pass and daily cap, and its output starts in quarantine. The reflector is the only such feature; it is on by default, and its drafts stay in quarantine in every mode.
 4. **Hooks fail open and stay cheap.** A hook callback never raises into a turn. Hook writes go through `experience.record` or `operations.record`, which queue the update while the database is busy.
 5. **The plugin changes only its own data.** Anything that would change Hermes (a skill, a setting, a Kanban card outside the explicit handoff) is shown as a command for the operator.
 6. **Only fixed templates reach the agent without approval, and only the operator decides.** Text written by a model, by the agent or by a person reaches the agent only after the operator approves it. Lessons rendered from the fixed templates in the code are active at once in the default `auto` mode, are measured, and are retired when they do not help; `suggest` makes them wait for approval too. New surfaces that show learned text to the agent are off until the operator turns them on. The runtime guard's refusal, on by default, is fixed text in the code, not learned content. A command that activates, approves or retires something calls the operator guard (`cli._operator_only`) and shows the exact text before it takes effect.
@@ -79,7 +81,7 @@ Every change must keep these. A pull request that breaks one will not be merged.
 
 ## Documentation rule
 
-Every command, option, setting key, hook name and number in the documentation must exist in the code. Check commands with `python -m hermes_atlas_evolution --home /tmp/x --hermes-version 0.23.1 <command> --help`, and state plainly what has not been verified. Do not add benchmarks, user counts or results that were not measured.
+Every command, option, setting key, hook name and number in the documentation must exist in the code. Describe what the plugin does now, in short sentences that tell the reader what to do; version history belongs only in `CHANGELOG.md` and `CHANGELOG.pt-BR.md`. `SECURITY.md` and this file are in English with a short Portuguese summary at the top: keep it in step. Check commands with `python -m hermes_atlas_evolution --home /tmp/x --hermes-version 0.23.1 <command> --help`, and state plainly what has not been verified. Do not add benchmarks, user counts or results that were not measured.
 
 Keep the README short. It covers installing, updating, migrating, what the plugin does, the main commands and settings, and a short privacy list; everything else goes to `docs/`, with a link from the README. Development instructions live here, not in the README.
 
@@ -89,7 +91,6 @@ Hermes scans every file of a plugin before it installs or updates it, and a crit
 
 None of these exists yet. Open an issue first, so the approach can be agreed.
 
-- Decisions from the dashboard panel (it only reads today), with the same operator checks as the terminal.
 - A bank of regression evaluations, to test a change against fixed tasks and not only against the following week.
 - Sending the skills that fail most, by outcome, to an optimizer such as GEPA through NousResearch's `hermes-agent-self-evolution`, with the results going through the same proposal queue.
 - Field results: run the loop on a real gateway for a few weeks and compare the lesson verdicts and the skills flagged by outcome with a manual review of the same turns. [Hermes integration](docs/hermes-integration.md#where-the-next-validation-has-the-most-value) lists where validation has the most value.
@@ -97,5 +98,5 @@ None of these exists yet. Open an issue first, so the approach can be agreed.
 ## Pull requests
 
 - Keep one change per pull request and describe how you tested it.
-- Add a line to `CHANGELOG.md` under the next version.
+- Add a line to `CHANGELOG.md` and `CHANGELOG.pt-BR.md` under the next version.
 - By contributing you agree that your work is released under the [MIT license](LICENSE).
