@@ -1,6 +1,6 @@
 # Atlas Evolution and the Hermes interfaces
 
-**English** | [Português (Brasil)](pt-BR/hermes-integration.md)
+**English** | [Português (Brasil)](../pt-BR/hermes-integration.md)
 
 The integration uses the Hermes Agent 0.23.1 tree as its reference (commit `3b421578588243f920886e6fe79a6faa87ea026e`). This document lists what the plugin registers in Hermes, what it reads from a profile, which setting unlocks each capability, what it does not do and where further validation is most useful. [Official release](https://github.com/NousResearch/hermes-agent/releases/tag/v0.23.1) · [Public plugin API](https://github.com/NousResearch/hermes-agent/blob/v0.23.1/website/docs/developer-guide/plugins/public-api.md)
 
@@ -161,7 +161,7 @@ All of it is read-only and bounded in size and time.
 
 ## What the plugin runs
 
-Every command is Hermes' own, run with an argument list (no shell) for one named profile (`hermes --profile <name> ...`). The full list, with time limits, is in [SECURITY.md](../SECURITY.md#what-the-plugin-executes).
+Every command is Hermes' own, run with an argument list (no shell) for one named profile (`hermes --profile <name> ...`). The full list, with time limits, is in [SECURITY.md](../../SECURITY.md#what-the-plugin-executes).
 
 | What | When |
 |---|---|
@@ -241,7 +241,7 @@ Every command is Hermes' own, run with an argument list (no shell) for one named
 
 ### Cover image and the plugin catalog
 
-Hermes shows a plugin's cover only for entries of its curated plugin catalog, the `plugin-catalog/` folder of the hermes-agent repository, which Nous Research reviews ([catalog submission](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/catalog-submission)). An entry's `image` must be an https image on a GitHub host, in a 2:1 proportion, pinned to the commit of the entry. Installed from GitHub, Atlas Evolution shows a generic card until its catalog entry is accepted. Its cover is [banner.jpg](banner.jpg), 1280×640.
+Hermes shows a plugin's cover only for entries of its curated plugin catalog, the `plugin-catalog/` folder of the hermes-agent repository, which Nous Research reviews ([catalog submission](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/catalog-submission)). An entry's `image` must be an https image on a GitHub host, in a 2:1 proportion, pinned to the commit of the entry. Installed from GitHub, Atlas Evolution shows a generic card until its catalog entry is accepted. Its cover is [banner.jpg](https://raw.githubusercontent.com/sesantanajr/hermes-atlas-evolution/assets/banner.jpg), 1280×640.
 
 ## Compatibility and limits
 

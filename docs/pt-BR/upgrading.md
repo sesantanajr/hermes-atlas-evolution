@@ -1,6 +1,6 @@
 # Atualização
 
-[English](../upgrading.md) | **Português (Brasil)**
+[English](../en-US/upgrading.md) | **Português (Brasil)**
 
 ## Atualizar o plugin
 

@@ -1,6 +1,6 @@
 # Manutenção: a saúde do Hermes e o sistema operacional
 
-[English](../maintenance.md) | **Português (Brasil)**
+[English](../en-US/maintenance.md) | **Português (Brasil)**
 
 Onde olhar: as telas 12 (Saúde do Hermes), 13 (Sistema operacional) e 14 (Ambiente) do menu (`hermes evolution`), as abas **Saúde** e **Ambiente** do painel no dashboard, e os comandos `hermes evolution care` e `hermes evolution system`. Nenhum deles usa o agente, e nenhum gasta token.
 

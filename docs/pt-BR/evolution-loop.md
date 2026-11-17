@@ -1,6 +1,6 @@
 # O ciclo de evolução
 
-[English](../evolution-loop.md) | **Português (Brasil)**
+[English](../en-US/evolution-loop.md) | **Português (Brasil)**
 
 Este documento descreve o ciclo que o Atlas Evolution acrescenta ao Hermes Agent: como ele roda sozinho e aprende com o histórico do perfil, o que é registrado, quando uma falha vira lição, como lições, skills e mudanças são medidas, o que faz o refletor, o que o radar de saúde lê, o que vai para a fila de propostas e todos os comandos e opções. Cada limiar citado aqui é uma constante do código, e o módulo onde ela está aparece ao lado. Para instalação e visão geral, veja o [README](../../README.pt-BR.md).
 

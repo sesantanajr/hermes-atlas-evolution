@@ -1,6 +1,6 @@
 # Atlas Evolution e as interfaces do Hermes
 
-[English](../hermes-integration.md) | **Português (Brasil)**
+[English](../en-US/hermes-integration.md) | **Português (Brasil)**
 
 A integração usa como referência a árvore do Hermes Agent 0.23.1 (commit `3b421578588243f920886e6fe79a6faa87ea026e`). Este documento lista o que o plugin registra no Hermes, o que ele lê de um perfil, qual configuração libera cada recurso, o que ele não faz e onde uma validação adicional é mais útil. [Release oficial](https://github.com/NousResearch/hermes-agent/releases/tag/v0.23.1) · [API pública de plugins](https://github.com/NousResearch/hermes-agent/blob/v0.23.1/website/docs/developer-guide/plugins/public-api.md)
 
@@ -241,7 +241,7 @@ Cada comando é do próprio Hermes, rodado com uma lista de argumentos (sem shel
 
 ### Capa e o catálogo de plugins
 
-O Hermes só mostra a capa de um plugin para os itens do catálogo curado de plugins dele, a pasta `plugin-catalog/` do repositório hermes-agent, revisada pela Nous Research ([envio ao catálogo](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/catalog-submission)). A `image` de um item precisa ser uma imagem https num host do GitHub, na proporção 2:1, fixada no commit do item. Instalado pelo GitHub, o Atlas Evolution aparece com um cartão genérico até o item dele no catálogo ser aceito. A capa dele é o [banner.jpg](../banner.jpg), de 1280×640.
+O Hermes só mostra a capa de um plugin para os itens do catálogo curado de plugins dele, a pasta `plugin-catalog/` do repositório hermes-agent, revisada pela Nous Research ([envio ao catálogo](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/catalog-submission)). A `image` de um item precisa ser uma imagem https num host do GitHub, na proporção 2:1, fixada no commit do item. Instalado pelo GitHub, o Atlas Evolution aparece com um cartão genérico até o item dele no catálogo ser aceito. A capa dele é o [banner.jpg](https://raw.githubusercontent.com/sesantanajr/hermes-atlas-evolution/assets/banner.jpg), de 1280×640.
 
 ## Compatibilidade e limites
 

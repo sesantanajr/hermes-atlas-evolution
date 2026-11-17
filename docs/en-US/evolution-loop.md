@@ -1,8 +1,8 @@
 # The evolution loop
 
-**English** | [Português (Brasil)](pt-BR/evolution-loop.md)
+**English** | [Português (Brasil)](../pt-BR/evolution-loop.md)
 
-This document describes the loop that Atlas Evolution adds to Hermes Agent: how it runs by itself and learns from the profile's history, what is recorded, when a failure becomes a lesson, how lessons, skills and changes are measured, what the reflector does, what the health radar reads, what ends up in the proposal queue, and every command and setting. Every threshold below is a constant in the code, and the module that holds it is named next to it. For installation and a summary, see the [README](../README.md).
+This document describes the loop that Atlas Evolution adds to Hermes Agent: how it runs by itself and learns from the profile's history, what is recorded, when a failure becomes a lesson, how lessons, skills and changes are measured, what the reflector does, what the health radar reads, what ends up in the proposal queue, and every command and setting. Every threshold below is a constant in the code, and the module that holds it is named next to it. For installation and a summary, see the [README](../../README.md).
 
 ## Contents
 
@@ -768,7 +768,7 @@ Subcommands of `hermes evolution`. Every command prints readable text in the pro
 | 13 Operating system | The system's check, plan, update, repair and last report (Linux with apt; see [Maintenance](maintenance.md)) |
 | 14 Environment | Every profile of this Hermes (sessions, plugins on and never loaded, skills, and the last check by Hermes' own doctor), Hermes' plugin catalog, and what to fix across them, each with what was seen, what to do, the command and its undo; `v` looks again now (see [The environment](#the-environment)) |
 
-A decision is made with the same code as the dashboard panel (`admin.py`) and recorded in the same history, with `terminal` as the place. The menu opens only in the operator's terminal: never where the commands that decide refuse to run (an agent's shell, see [SECURITY.md](../SECURITY.md)), and never without a terminal on both ends.
+A decision is made with the same code as the dashboard panel (`admin.py`) and recorded in the same history, with `terminal` as the place. The menu opens only in the operator's terminal: never where the commands that decide refuse to run (an agent's shell, see [SECURITY.md](../../SECURITY.md)), and never without a terminal on both ends.
 
 ## The mode and automatic actions
 

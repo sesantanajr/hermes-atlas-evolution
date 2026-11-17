@@ -1,6 +1,6 @@
 # Maintenance: Hermes' health and the operating system
 
-**English** | [Português (Brasil)](pt-BR/maintenance.md)
+**English** | [Português (Brasil)](../pt-BR/maintenance.md)
 
 Where to look: the menu (`hermes evolution`) screens 12 (Hermes health), 13 (Operating system) and 14 (Environment), the **Health** and **Environment** tabs of the dashboard panel, and the commands `hermes evolution care` and `hermes evolution system`. None of them uses the agent, and none spends a token.
 

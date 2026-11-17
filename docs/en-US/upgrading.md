@@ -1,6 +1,6 @@
 # Updating
 
-**English** | [Português (Brasil)](pt-BR/upgrading.md)
+**English** | [Português (Brasil)](../pt-BR/upgrading.md)
 
 ## Updating the plugin
 
@@ -36,4 +36,4 @@ Most settings apply within a minute. Three wait for `hermes gateway restart` (in
 
 If a profile still has the plugin under its old name `hermes-evolution`, run `hermes -p <profile> plugins remove hermes-evolution`, then `hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable`.
 
-Version notes: [CHANGELOG](../CHANGELOG.md).
+Version notes: [CHANGELOG](../../CHANGELOG.md).

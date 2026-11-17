@@ -2,6 +2,18 @@
 
 *In English: [CHANGELOG.md](CHANGELOG.md), with every version.*
 
+## 0.10.1
+
+Um plugin mais enxuto e a documentação refeita em dois idiomas.
+
+### Mudanças
+
+- **Instalação mais leve.** O Hermes instala um plugin com `git clone --depth 1` do ramo padrão em cada perfil, e as imagens do README (cerca de 3 MB) iam junto, sem uso. Agora elas ficam no ramo `assets` do repositório e o README e a documentação as carregam de lá: a cópia de cada perfil caiu de cerca de 5,2 MB para cerca de 2,2 MB.
+- **Documentação em pt-BR e en-US.** As páginas em inglês foram para `docs/en-US/`, lado a lado com `docs/pt-BR/`; cada idioma tem um início da documentação, um novo guia de **Primeiros passos** (instalar, a primeira hora, deixar do seu jeito, toda semana, atualizar e remover) e um novo guia de **Solução de problemas** (o gateway depois de uma atualização do Hermes, perfis fixados, um plugin que não carrega, o Índice de evolução, o custo do próprio plugin, um banco danificado, a Proteção do Hermes, configurações que esperam um reinício, a remoção completa). Cada link foi conferido.
+- **Um README moderno** nos dois idiomas: o que é e por quê, destaques, um diagrama de como funciona, os modos, a compatibilidade e as telas.
+- **CI** com `actions/checkout@v5` e `actions/setup-python@v6`, o ambiente Node 24 atual do GitHub Actions.
+- A página de Operações diz que está obsoleta (sai na 0.11.0).
+
 ## 0.10.0
 
 A evolução do agente como um número, um plugin que mede quanto custa, e o mesmo trabalho feito com menos: uma passada

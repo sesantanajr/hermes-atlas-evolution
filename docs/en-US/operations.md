@@ -1,6 +1,8 @@
 # Operations supervisor
 
-**English** | [Português (Brasil)](pt-BR/operations.md)
+**English** | [Português (Brasil)](../pt-BR/operations.md)
+
+> **Deprecated.** The operations supervisor (`hermes evolution ops`) is deprecated since 0.10.0 and is removed in 0.11.0. Nothing in it runs by default; the learning pass, `status`, `care` and the dashboard cover Hermes' health. This page describes it as it is until then.
 
 Besides the [evolution loop](evolution-loop.md), Atlas Evolution supervises the host and the workload of a Hermes profile. It examines what Hermes records, measures the load of the agent and of Linux, and cross-checks the evidence to suggest tests and to conduct reversible remediation. The supervisor observes by default: a Linux trial needs explicit settings. It uses the public Hermes plugin API and keeps your memory provider, plugins and router as they are. The runtime guard, which stops the agent from restarting the gateway or deleting what Hermes runs on, is described in [Hermes integration](hermes-integration.md#the-runtime-guard).
 

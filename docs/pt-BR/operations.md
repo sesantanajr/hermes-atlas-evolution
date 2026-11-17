@@ -1,6 +1,8 @@
 # Supervisor de operações
 
-[English](../operations.md) | **Português (Brasil)**
+[English](../en-US/operations.md) | **Português (Brasil)**
+
+> **Obsoleto.** O supervisor de operações (`hermes evolution ops`) está obsoleto desde a 0.10.0 e sai na 0.11.0. Nada nele roda por padrão; a rodada de aprendizado, o `status`, o `care` e o dashboard cuidam da saúde do Hermes. Esta página o descreve como ele é até lá.
 
 Além do [ciclo de evolução](evolution-loop.md), o Atlas Evolution supervisiona o host e a carga de um perfil do Hermes. Ele examina o que o Hermes grava, mede a carga do agente e do Linux, e cruza evidências para sugerir testes e conduzir remediações reversíveis. Por padrão, o supervisor só observa: um ensaio no Linux exige configuração explícita. Ele usa a API pública de plugins do Hermes e preserva o seu provedor de memória, os seus plugins e o seu roteador. A Proteção do Hermes, que impede o agente de reiniciar o gateway ou de apagar aquilo de que o Hermes precisa para rodar, está descrita em [Integração com o Hermes](hermes-integration.md#a-proteção-do-hermes).
 

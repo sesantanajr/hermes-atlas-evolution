@@ -2,6 +2,18 @@
 
 *Em português: [CHANGELOG.pt-BR.md](CHANGELOG.pt-BR.md).*
 
+## 0.10.1
+
+A leaner plugin and documentation rebuilt in two languages.
+
+### Changed
+
+- **A lighter install.** Hermes installs a plugin with `git clone --depth 1` of its default branch into every profile, and the README's images (about 3 MB) went with it, unused. They now live on the repository's `assets` branch and the README and the docs load them from there: each profile's copy dropped from about 5.2 MB to about 2.2 MB.
+- **Documentation in en-US and pt-BR.** The English pages moved to `docs/en-US/`, side by side with `docs/pt-BR/`; each language has a documentation home, a new **Getting started** guide (install, the first hour, making it yours, every week, update and remove) and a new **Troubleshooting** guide (the gateway after a Hermes update, pinned profiles, a plugin that does not load, the Evolution index, the plugin's own cost, a damaged database, the runtime guard, settings that wait for a restart, a full removal). Every link was checked.
+- **A modern README** in both languages: what it is and why, highlights, a diagram of how it works, the modes, compatibility, and the screens.
+- **CI** on `actions/checkout@v5` and `actions/setup-python@v6`, the current Node 24 runtime of GitHub Actions.
+- The Operations page says it is deprecated (removed in 0.11.0).
+
 ## 0.10.0
 
 The agent's evolution as a number, a plugin that measures what it costs, and the same work done with less: a
