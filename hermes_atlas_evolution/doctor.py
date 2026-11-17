@@ -180,6 +180,10 @@ def run(home: Path, *, only=(), runner=None, timeout: int = TIMEOUT_SECONDS) -> 
     if only:
         env["ATLAS_EVOLUTION_ONLY"] = json.dumps(list(only))
     started = time.monotonic()
+    if not sys.executable or not Path(sys.executable).is_file():
+        # Hermes replaced its bundled Python under this running process (an update moved tools/python-*): nothing
+        # can be started with it, and a service whose ExecStart names the old path cannot start either.
+        return {"ok": False, "error": "runtime_moved"}
     argv = [sys.executable, "-I", "-c", BOOT]
     try:
         if runner is None:
@@ -189,7 +193,9 @@ def run(home: Path, *, only=(), runner=None, timeout: int = TIMEOUT_SECONDS) -> 
                          encoding="utf-8", errors="replace", timeout=timeout, check=False).stdout or ""
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "timeout", "seconds": round(time.monotonic() - started, 1)}
-    except OSError:
+    except FileNotFoundError:
+        return {"ok": False, "error": "runtime_moved"}   # the interpreter went away between the check and the start
+    except (OSError, TypeError):
         return {"ok": False, "error": "unavailable"}
     seconds = round(time.monotonic() - started, 1)
     out = out[-OUTPUT_MAX:]

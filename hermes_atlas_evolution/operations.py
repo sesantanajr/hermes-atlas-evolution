@@ -131,13 +131,14 @@ def _ensure_additive(connection: sqlite3.Connection, path: Path) -> None:
 
 
 @contextmanager
-def database(home: Path, *, observer: bool = False):
-    """Open the profile database. Hook callers share one connection per process."""
+def database(home: Path, *, observer: bool = False, timeout: float = 2):
+    """Open the profile database. Hook callers share one connection per process. `timeout`: the busy wait of
+    a connection of its own (a reader on a hook path passes a short one)."""
     if observer:
         with _observer(home).session() as connection:
             yield connection
         return
-    connection = _open(_database_path(home), 2)
+    connection = _open(_database_path(home), timeout)
     try:
         with connection:
             yield connection
@@ -160,11 +161,21 @@ def _rollback(connection: sqlite3.Connection) -> None:
         pass
 
 
+class _ObserverClosed(sqlite3.OperationalError):
+    """This observer was closed (evicted, or at exit). A new one serves the profile; a caller sees a busy database."""
+
+    def __init__(self):
+        super().__init__("database is locked")
+
+
 class _Observer:
     """One connection per process and profile for hook callbacks, with a bounded retry queue.
 
     Hermes runs each hook callback on its own thread. A connection per event made the threads of a
     single process compete for the write lock, and an event that outlived the busy wait was lost.
+
+    Hook writes only insert and update counters. Retention runs in the maintenance pass (evolve.cycle and the
+    tick), never here: a hook must stay cheap.
     """
 
     def __init__(self, home: Path):
@@ -175,7 +186,8 @@ class _Observer:
         self.dropped = 0
         self.connection: sqlite3.Connection | None = None
         self.identity = None
-        self.swept = ""
+        self.closed = False   # set once: a closed observer never opens a connection again
+        self._depth = 0       # nested holds of `lock` by its owner thread
 
     def _file(self):
         try:
@@ -190,6 +202,9 @@ class _Observer:
         if self.connection is not None and current is not None and current == self.identity:
             return self.connection
         self._release()
+        if self.closed:
+            # A thread that still holds a reference to an evicted or closed observer must not leak a new handle.
+            raise _ObserverClosed()
         connection = _open(_database_path(self.home), OBSERVER_BUSY_SECONDS, check_same_thread=False)
         try:
             if connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal" and sys.platform != "darwin":
@@ -214,10 +229,24 @@ class _Observer:
         except sqlite3.Error:
             pass
 
+    def _enter(self, timeout: float) -> bool:
+        if not self.lock.acquire(timeout=timeout):
+            return False
+        self._depth += 1
+        return True
+
+    def _exit(self) -> None:
+        try:
+            self._depth -= 1
+            if self.closed and not self._depth:
+                self._release()   # closed while this thread held it: the last holder frees the handle
+        finally:
+            self.lock.release()
+
     @contextmanager
     def session(self):
         """Lend the shared connection. A caller that cannot get it in time sees a busy database."""
-        if not self.lock.acquire(timeout=_OBSERVER_LOCK_SECONDS):
+        if not self._enter(_OBSERVER_LOCK_SECONDS):
             raise sqlite3.OperationalError("database is locked")
         try:
             connection = self._connect()
@@ -231,30 +260,40 @@ class _Observer:
                     self._release()
                 raise
             try:
-                self._write(None, time.time(), sweep=False)  # Events that arrived during the caller's transaction.
+                self._write(None, time.time())  # Events that arrived during the caller's transaction.
             except (OSError, ValueError, sqlite3.Error):
                 pass
         finally:
-            self.lock.release()
+            self._exit()
 
-    def record(self, job, now: float) -> None:
-        """Apply one counter update, or keep it for the next write while the database is busy."""
-        if not self.lock.acquire(timeout=_OBSERVER_LOCK_SECONDS):
-            self._defer(job)
-            return
+    def record(self, job, now: float) -> bool:
+        """Apply one counter update, or keep it for the next write while the database is busy.
+        False when this observer is closed: the caller hands the job to the profile's current observer."""
+        if self.closed:
+            return False
+        if not self._enter(_OBSERVER_LOCK_SECONDS):
+            return self._defer(job)
         try:
+            if self.closed:
+                return False
             self._write(job, now)
+        except _ObserverClosed:
+            return False
         finally:
-            self.lock.release()
+            self._exit()
+        return True
 
-    def _defer(self, job) -> None:
+    def _defer(self, job) -> bool:
         with self.guard:
+            if self.closed:
+                return False
             if len(self.pending) < _OBSERVER_QUEUE:
                 self.pending.append(job)
             else:
                 self.dropped += 1
+            return True
 
-    def _write(self, job, now: float, *, sweep: bool = True) -> None:
+    def _write(self, job, now: float) -> None:
         with self.guard:
             waiting, dropped = list(self.pending), self.dropped
         jobs = waiting + ([job] if job is not None else [])
@@ -266,36 +305,51 @@ class _Observer:
             if connection.in_transaction:  # A caller of session() on this thread is mid-transaction.
                 raise sqlite3.OperationalError("database is locked")
             connection.execute("BEGIN IMMEDIATE")
-            try:
-                if sweep and day > self.swept:
-                    # Before the jobs: the first prune of a database dates its retention from the newest day
-                    # stored, never from a day this write adds under a clock that may be far ahead.
-                    _prune(connection, now)
-                for item in jobs:
-                    item(connection)
-                if dropped:
-                    connection.execute("""INSERT INTO metric VALUES (?, 'observer', '', '', 'dropped', ?, 0, 0, 0, 0, 0, 0, 0)
-                        ON CONFLICT DO UPDATE SET requests=requests+excluded.requests""", (day, dropped))
-                connection.execute("COMMIT")
-            except BaseException:
-                _rollback(connection)
-                raise
-        except (OSError, ValueError):
-            if job is not None:
-                self._defer(job)   # kept (bounded) for when the folder or schema is usable again
+        except _ObserverClosed:
             raise
-        except Exception as error:
+        except (OSError, ValueError):
+            # The folder or the schema is unusable now: the job is kept (bounded) for when it is usable again.
+            if job is not None:
+                self._defer(job)
+            raise
+        except sqlite3.Error as error:
+            if _busy(error):
+                if job is not None:
+                    self._defer(job)
+                return
+            self._release()
+            self._settle(waiting, lost=len(waiting))
+            raise
+        lost = 0
+        try:
+            for item in jobs:
+                connection.execute("SAVEPOINT observer_job")
+                try:
+                    item(connection)
+                except Exception as error:
+                    if isinstance(error, sqlite3.Error) and _busy(error):
+                        raise
+                    # This one update cannot be applied (a value SQLite cannot bind, a broken job): it alone is
+                    # lost, and it never blocks the queue behind it.
+                    connection.execute("ROLLBACK TO observer_job")
+                    lost += 1
+                connection.execute("RELEASE observer_job")
+            if dropped + lost:
+                connection.execute("""INSERT INTO metric VALUES (?, 'observer', '', '', 'dropped', ?, 0, 0, 0, 0, 0, 0, 0)
+                    ON CONFLICT DO UPDATE SET requests=requests+excluded.requests""", (day, dropped + lost))
+            connection.execute("COMMIT")
+        except BaseException as error:
+            _rollback(connection)
             if isinstance(error, sqlite3.Error) and _busy(error):
                 if job is not None:
                     self._defer(job)
                 return
-            # An update that cannot be applied must not fail every later write of the queue.
-            self._release()
-            self._settle(waiting, lost=len(waiting))
+            if isinstance(error, Exception):
+                # A transaction that cannot be applied must not fail every later write of the queue.
+                self._release()
+                self._settle(waiting, lost=len(waiting))
             raise
         self._settle(waiting, lost=-dropped)
-        if sweep:
-            self.swept = max(self.swept, day)
 
     def _settle(self, written: list, *, lost: int) -> None:
         with self.guard:
@@ -304,19 +358,22 @@ class _Observer:
             self.dropped += lost
 
     def close(self, wait: float = 0.5) -> None:
-        """Write what is waiting, with a longer wait than a hook can afford, and release the handle."""
-        if not self.lock.acquire(timeout=wait):
+        """Write what is waiting and release the handle. Waits at most `wait` for the lock (0: not at all); when
+        another thread holds it, that thread releases the handle as it leaves. Never opens a new connection."""
+        with self.guard:
+            self.closed = True
+        if not self._enter(max(0.0, wait)):
             return
         try:
-            try:
-                if self.pending or self.dropped:
-                    self._connect().execute(f"PRAGMA busy_timeout={int(wait * 1000)}")
-                    self._write(None, time.time(), sweep=False)
-            except (OSError, ValueError, sqlite3.Error):
-                pass
-            self._release()
+            if self._depth == 1 and (self.pending or self.dropped) and self.connection is not None:
+                try:
+                    budget = max(wait, OBSERVER_BUSY_SECONDS)
+                    self._connect().execute(f"PRAGMA busy_timeout={int(budget * 1000)}")
+                    self._write(None, time.time())
+                except (OSError, ValueError, sqlite3.Error):
+                    pass
         finally:
-            self.lock.release()
+            self._exit()
 
 
 _OBSERVERS: OrderedDict[str, _Observer] = OrderedDict()
@@ -333,7 +390,7 @@ def _observer(home: Path) -> _Observer:
         _OBSERVERS.move_to_end(key)
         retired = [_OBSERVERS.popitem(last=False)[1] for _ in range(len(_OBSERVERS) - _OBSERVER_LIMIT)]
     for other in retired:
-        other.close()
+        other.close(wait=0)   # never blocks the hook thread; a thread still using it frees the handle
     return observer
 
 
@@ -350,7 +407,10 @@ def record(home: Path, job, *, now: float | None = None) -> None:
     if jobs is not None and _BATCH.home == Path(home):
         jobs.append(job)
         return
-    _observer(home).record(job, time.time() if now is None else now)
+    now = time.time() if now is None else now
+    for _ in range(3):   # an observer closed meanwhile (evicted, or at exit) hands the job to the current one
+        if _observer(home).record(job, now):
+            return
 
 
 @contextmanager

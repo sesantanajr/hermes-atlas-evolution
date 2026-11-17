@@ -274,7 +274,11 @@ CARE_ATTENTION = ("hermes_gateway_crashed", "os_held_by_plugin", "hermes_gateway
                   "hermes_disk_filling", "hermes_storage_growth", "hermes_memory_low", "hermes_swap_full",
                   "hermes_cpu_saturated", "hermes_unused_tools", "hermes_gateway_not_at_boot",
                   "os_dpkg_interrupted", "os_package_manager_stuck", "os_apt_broken", "os_reboot_required", "os_security_updates", "os_unattended_off",
-                  "os_lists_stale", "os_unit_not_enabled")
+                  "os_lists_stale", "os_unit_not_enabled", "hermes_gateway_exec_missing", "hermes_gateway_restart_loop",
+                  "os_unit_exec_missing", "os_unit_restart_loop")
+# The attention codes that come from the gateway's systemd unit: a look now (live_units) overrides what was stored.
+UNIT_CODES = ("hermes_gateway_exec_missing", "hermes_gateway_restart_loop", "hermes_gateway_crashed")
+CARE_REFRESH_SECONDS, SYSTEM_REFRESH_SECONDS = 6 * 3600, 86_400   # hermes_care's and system_update's own pace
 
 
 def _environment(home: Path) -> dict | None:
@@ -414,7 +418,66 @@ def _today_label(now: float, lang: str) -> str:
     return f"Desde 00:00 UTC ({clock} no seu horário)" if lang == "pt" else f"Since 00:00 UTC ({clock} your time)"
 
 
-def build(home: Path, *, now: float | None = None, config=None, runtime_config=None) -> dict:
+def _number(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def _probe_names(care: dict | None, system: dict | None) -> dict:
+    """The Hermes units a look now asks systemd about: the ones the last checks saw, and the gateway's usual one."""
+    names: dict = {"user": ["hermes-gateway.service"], "system": []}
+    for unit in [*((system or {}).get("units") or ()), (care or {}).get("gateway_unit")]:
+        if isinstance(unit, dict) and isinstance(unit.get("unit"), str) and unit.get("scope") in names \
+                and unit["unit"] not in names[unit["scope"]]:
+            names[unit["scope"]].append(unit["unit"])
+    return names
+
+
+def live_units(care: dict | None, system: dict | None, *, host=None) -> dict | None:
+    """One `systemctl show` per scope, 4 s at most, on Linux with systemd (or the `host` given): what Hermes'
+    services do now. None where it cannot be asked."""
+    if host is None and (os.name != "posix" or not Path("/run/systemd/system").is_dir()
+                         or os.environ.get("ATLAS_EVOLUTION_NO_HERMES") == "1"):
+        return None
+    try:
+        from .system_update import probe_units
+
+        return probe_units(_probe_names(care, system), host=host, timeout=4)
+    except Exception:   # a look now is a bonus: status never fails for it
+        return None
+
+
+def _apply_live(attention: list, live: dict) -> list:
+    """The unit-derived attention codes, as systemd says now: a gateway that cannot start is said even when the
+    stored checks are old, and one that runs again is no longer said to be down."""
+    units = [unit for unit in live.get("units") or () if isinstance(unit, dict)]
+    gateway = next((unit for unit in sorted(units, key=lambda unit: unit.get("scope") != "user")
+                    if "gateway" in str(unit.get("unit"))), None)
+    codes = [code for code in attention if code not in UNIT_CODES] if gateway else list(attention)
+    if gateway:
+        running = gateway.get("active_state") == "active" and gateway.get("sub_state") == "running"
+        if not running and (gateway.get("exec_missing") or gateway.get("exec_main_status") == 203):
+            codes.append("hermes_gateway_exec_missing")
+        elif not running and gateway.get("restart_loop"):
+            codes.append("hermes_gateway_restart_loop")
+        elif not running and "hermes_gateway_crashed" in attention:
+            codes.append("hermes_gateway_crashed")
+    others = [unit for unit in units if unit is not gateway]
+    if any(unit.get("exec_missing") for unit in others) and "os_unit_exec_missing" not in codes:
+        codes.append("os_unit_exec_missing")
+    if any(unit.get("restart_loop") for unit in others) and "os_unit_restart_loop" not in codes:
+        codes.append("os_unit_restart_loop")
+    return codes
+
+
+def build(home: Path, *, now: float | None = None, config=None, runtime_config=None, live: bool | None = None,
+          host=None) -> dict:
+    """The status of this profile. `live`: also ask systemd now about Hermes' services (one `systemctl show`, 4 s
+    at most); by default when run from the command line, or when the stored health checks are old or the learning
+    pass stopped (a gateway that died stops the passes that would see it). `host` replaces the machine (tests)."""
     from .evolve import options
     from .signals import guard_summary
 
@@ -533,13 +596,41 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         system = json.loads(rows["system_check"]) if "system_check" in rows else None
     except (OSError, ValueError, sqlite3.Error):
         pass
+    care = care if isinstance(care, dict) else None
+    system = system if isinstance(system, dict) else None
     report["care"], report["system"] = care, system
+    health = []
     for code in (care or {}).get("findings") or ():
         if f"hermes_{code}" in CARE_ATTENTION:
-            attention.append(f"hermes_{code}")
+            health.append(f"hermes_{code}")
     for code in (system or {}).get("findings") or ():
         if f"os_{code}" in CARE_ATTENTION:
-            attention.append(f"os_{code}")
+            health.append(f"os_{code}")
+    # How old the stored health checks are, and whether the learning pass that refreshes them still runs.
+    interval = (opts["autopilot_minutes"] or 0) * 60
+    last_at = _number(last.get("at")) if isinstance(last, dict) else None
+    # the passes ran and stopped (a gateway that died stops them): what they stored is no longer the present
+    loop_stopped = bool(interval and (care or system) and last_at is not None and now - last_at > 2 * interval)
+    ages = [now - at for at in (_number((care or {}).get("at")), _number((system or {}).get("at"))) if at is not None]
+    care_at, system_at = _number((care or {}).get("at")), _number((system or {}).get("at"))
+    old = bool(care_at is not None and now - care_at > 2 * max(interval, CARE_REFRESH_SECONDS)
+               or system_at is not None and now - system_at > 2 * max(interval, SYSTEM_REFRESH_SECONDS))
+    report["health_stale"] = loop_stopped or old
+    report["health_age"] = round(max(ages)) if ages else None
+    if live is None:
+        live = process_kind() == "cli" or report["health_stale"]
+    report["live"] = live_units(care, system, host=host) if live else None
+    if report["live"] is not None:
+        health = _apply_live(health, report["live"])
+    if {"hermes_gateway_exec_missing", "hermes_gateway_restart_loop"} & set(health):
+        # the gateway's own line already says it, with its fix: the system's line only when another unit is concerned
+        problems = [unit for unit in [*((system or {}).get("units") or ()), *((report["live"] or {}).get("units") or ())]
+                    if isinstance(unit, dict) and (unit.get("exec_missing") or unit.get("restart_loop"))]
+        if all("gateway" in str(unit.get("unit")) for unit in problems):
+            health = [code for code in health if code not in ("os_unit_exec_missing", "os_unit_restart_loop")]
+    if report["health_stale"] and (care or system):
+        health.insert(0, "hermes_health_stale")
+    attention += list(dict.fromkeys(health))
     report["attention"] = attention
     return report
 
@@ -581,7 +672,11 @@ _TEXT = {
            "doctor_error": "could not run ({reason}) · {when}",
            "doctor_reasons": {"disabled": "turned off here", "not_a_profile": "not a Hermes profile",
                               "timeout": "took too long", "unavailable": "this Hermes has no `hermes doctor`",
-                              "no_answer": "no answer"},
+                              "no_answer": "no answer",
+                              "runtime_moved": "Hermes' Python was replaced under the running process (an update "
+                                               "moved it): restart Hermes, and check that the gateway service's "
+                                               "ExecStart (`systemctl --user cat hermes-gateway`) points at the new "
+                                               "one"},
            "doctor_more": "Details and what to do: `hermes evolution environment`.",
            "guard_host": "off: plugins run in a plugin host here (`plugins.isolation: host`), where a crashed host would "
                          "block every tool",
@@ -635,6 +730,22 @@ _TEXT = {
            "hermes_unused_tools": "Old versions of Hermes' tools take {size} and nothing uses them: "
                                   "`hermes evolution care gc` removes them (it asks first).",
            "hermes_gateway_not_at_boot": "The gateway runs as a user service without linger: after a reboot it does not start. Fix: `loginctl enable-linger {user}`.",
+           "hermes_gateway_exec_missing": "The gateway's service `{unit}` cannot start: its ExecStart runs `{exec_path}`, "
+                                          "which no longer exists (Hermes replaced its bundled Python{replacement_en}). "
+                                          "systemd keeps failing (status 203/EXEC, {restarts} restarts) and "
+                                          "`hermes gateway restart` only waits. {fix_en} Then run `{restart_cmd}` and "
+                                          "check it with `{journal_cmd}`.",
+           "hermes_gateway_restart_loop": "systemd keeps restarting the gateway's service `{unit}` ({restarts} restarts, "
+                                          "now {sub_state}): it fails right after it starts. See why with "
+                                          "`{journal_cmd}` before starting it again.",
+           "hermes_health_stale": "Hermes' health below was read {stale_en} ago and the learning pass has not run since: "
+                                  "the gateway may be down. `hermes gateway status` and "
+                                  "`journalctl --user -u hermes-gateway -n 30` show what it does now.",
+           "os_unit_exec_missing": "A Hermes service cannot start: `{unit}` runs `{exec_path}`, which no longer exists"
+                                   "{replacement_en}. {fix_en} Then run `{restart_cmd}` and check it with "
+                                   "`{journal_cmd}`.",
+           "os_unit_restart_loop": "systemd keeps restarting Hermes' service(s) {loop_units}: they fail right after "
+                                   "they start. See why with `{journal_cmd}`.",
            "os_package_manager_stuck": "A package manager has been working for {busy} h (an apt left waiting at its "
                                        "question?): while it runs, nothing else can update the system, and a half-way "
                                        "update would not show. See which one with "
@@ -715,7 +826,11 @@ _TEXT = {
            "doctor_error": "não rodou ({reason}) · {when}",
            "doctor_reasons": {"disabled": "desligada aqui", "not_a_profile": "não é um perfil do Hermes",
                               "timeout": "demorou demais", "unavailable": "este Hermes não tem o `hermes doctor`",
-                              "no_answer": "sem resposta"},
+                              "no_answer": "sem resposta",
+                              "runtime_moved": "o Python do Hermes foi trocado com o processo rodando (uma "
+                                               "atualização o moveu): reinicie o Hermes e confira se o ExecStart do "
+                                               "serviço do gateway (`systemctl --user cat hermes-gateway`) aponta "
+                                               "para o novo"},
            "doctor_more": "Detalhes e o que fazer: `hermes evolution environment`.",
            "guard_host": "desligada: aqui os plugins rodam num host de plugins (`plugins.isolation: host`), onde um "
                          "host de plugins que caísse bloquearia todas as ferramentas",
@@ -770,6 +885,22 @@ _TEXT = {
                                   "`hermes evolution care gc` as remove (pergunta antes).",
            "hermes_gateway_not_at_boot": "O gateway roda como serviço do usuário sem o `linger` ligado: depois de um "
                                          "reinício ele não sobe. Correção: `loginctl enable-linger {user}`.",
+           "hermes_gateway_exec_missing": "O serviço do gateway `{unit}` não consegue subir: o ExecStart dele roda "
+                                          "`{exec_path}`, que não existe mais (o Hermes trocou o Python que traz"
+                                          "{replacement_pt}). O systemd segue falhando (status 203/EXEC, {restarts} "
+                                          "reinícios) e o `hermes gateway restart` só fica esperando. {fix_pt} Depois "
+                                          "rode `{restart_cmd}` e confira com `{journal_cmd}`.",
+           "hermes_gateway_restart_loop": "O systemd segue reiniciando o serviço do gateway `{unit}` ({restarts} "
+                                          "reinícios, agora {sub_state}): ele cai logo depois de subir. Veja o motivo com "
+                                          "`{journal_cmd}` antes de subi-lo de novo.",
+           "hermes_health_stale": "A saúde do Hermes abaixo foi lida há {stale_pt} e a rodada de aprendizado não rodou "
+                                  "desde então: o gateway pode estar parado. `hermes gateway status` e "
+                                  "`journalctl --user -u hermes-gateway -n 30` mostram o que ele faz agora.",
+           "os_unit_exec_missing": "Um serviço do Hermes não consegue subir: `{unit}` roda `{exec_path}`, que não existe "
+                                   "mais{replacement_pt}. {fix_pt} Depois rode `{restart_cmd}` e confira com "
+                                   "`{journal_cmd}`.",
+           "os_unit_restart_loop": "O systemd segue reiniciando serviço(s) do Hermes {loop_units}: eles caem logo depois "
+                                   "de subir. Veja o motivo com `{journal_cmd}`.",
            "os_package_manager_stuck": "Um gerenciador de pacotes está trabalhando há {busy_pt} h (um apt esquecido "
                                        "esperando a resposta?): enquanto ele roda, nada mais atualiza o sistema e uma "
                                        "atualização pela metade não apareceria. Veja qual é com "
@@ -882,7 +1013,9 @@ def _care_values(report: dict) -> dict:
     gate, memory = care.get("gateway") or {}, care.get("memory") or {}
     load = care.get("load") or {}
     grown = ", ".join(f"`{item['folder']}` {_gb(item['before'])} → {_gb(item['now'])}" for item in care.get("growth") or ())
-    off = [unit for unit in system.get("units") or () if isinstance(unit, dict) and not unit.get("enabled")]
+    # the units the finding is about (system_update.check): system ones, running now, that a reboot would not start
+    off = [unit for unit in system.get("units") or () if isinstance(unit, dict) and not unit.get("enabled")
+           and unit.get("scope") == "system" and unit.get("active")]
     units = ", ".join(f"`{unit['unit']}`" for unit in off)
     enable = "; ".join(f"`systemctl --user enable --now {unit['unit']}`" if unit.get("scope") == "user"
                        else f"`sudo systemctl enable --now {unit['unit']}`" for unit in off)
@@ -905,7 +1038,55 @@ def _care_values(report: dict) -> dict:
             "security_pt": plural(security, "1 atualização de segurança do sistema espera",
                                   "{n} atualizações de segurança do sistema esperam"),
             "held": ", ".join(system.get("plugin_holds") or ()) or "?",
-            "busy": busy, "busy_pt": _comma(busy)}
+            "busy": busy, "busy_pt": _comma(busy), **_unit_values(report)}
+
+
+def _trouble(report: dict) -> tuple[dict, list[dict]]:
+    """The unit that cannot start (or loops), and every looping unit, from a look now first, then the stored
+    checks: the gateway's own unit before any other."""
+    care, system = report.get("care") or {}, report.get("system") or {}
+    units = [unit for unit in [*((report.get("live") or {}).get("units") or ()), care.get("gateway_unit"),
+                               *(system.get("units") or ())] if isinstance(unit, dict) and unit.get("unit")]
+    units.sort(key=lambda unit: "gateway" not in str(unit.get("unit")))   # stable: the live look stays first
+    missing = [unit for unit in units if unit.get("exec_missing")
+               or unit.get("exec_main_status") == 203 and unit.get("active_state") != "active"]
+    looping = [unit for unit in units if unit.get("restart_loop")]
+    return (missing or looping or [{}])[0], looping
+
+
+def _unit_values(report: dict) -> dict:
+    unit, looping = _trouble(report)
+    name = str(unit.get("unit") or "hermes-gateway.service")
+    user = unit.get("scope", "user") == "user"
+    systemctl = "systemctl --user" if user else "sudo systemctl"
+    source, replacement = unit.get("exec_source"), unit.get("replacement")
+    if source and str(source).endswith(".conf"):
+        fix_en = (f"Edit `{source}` and correct (to the new path) or remove its stale `ExecStart=` line, or re-run "
+                  "Hermes' own service install.")
+        fix_pt = (f"Edite `{source}` e corrija (para o caminho novo) ou apague a linha `ExecStart=` antiga, ou rode de "
+                  "novo a instalação do serviço do próprio Hermes.")
+    elif source:
+        fix_en = f"Correct the `ExecStart=` line of `{source}`, or re-run Hermes' own service install."
+        fix_pt = f"Corrija a linha `ExecStart=` de `{source}`, ou rode de novo a instalação do serviço do próprio Hermes."
+    else:
+        fix_en = (f"Correct the unit's `ExecStart=` line (`{systemctl} cat {name}` shows which file sets it), or re-run "
+                  "Hermes' own service install.")
+        fix_pt = (f"Corrija a linha `ExecStart=` do serviço (`{systemctl} cat {name}` mostra qual arquivo a define), ou "
+                  "rode de novo a instalação do serviço do próprio Hermes.")
+    age = report.get("health_age")
+    hours = round(age / 3600, 1) if isinstance(age, (int, float)) and not isinstance(age, bool) else None
+    return {"unit": name, "exec_path": unit.get("exec_path") or "?",
+            "replacement_en": f"; the current one is `{replacement}`" if replacement else "",
+            "replacement_pt": f"; o atual é `{replacement}`" if replacement else "",
+            "restarts": unit.get("n_restarts") if unit.get("n_restarts") is not None else "?",
+            "sub_state": unit.get("sub_state") or "?", "fix_en": fix_en, "fix_pt": fix_pt,
+            "restart_cmd": f"{systemctl} daemon-reload && {systemctl} reset-failed {name} && {systemctl} start {name}",
+            "journal_cmd": (f"journalctl --user -u {name} -n 30" if user else f"sudo journalctl -u {name} -n 30"),
+            "loop_units": ", ".join(f"`{item['unit']}`" for item in looping) or f"`{name}`",
+            "stale_en": "?" if hours is None else (plural(round(age / 60), "{n} minute", "{n} minutes") if hours < 1
+                                                   else f"{hours} h"),
+            "stale_pt": "?" if hours is None else (plural(round(age / 60), "{n} minuto", "{n} minutos") if hours < 1
+                                                   else f"{_comma(hours)} h")}
 
 
 def _health_lines(report: dict, t: dict, lang: str = "en") -> list[str]:
@@ -1141,6 +1322,12 @@ _ENV_TEXT = {
            "seen": "Seen", "advice": "What to do", "run": "Command", "risk": "{risk} risk",
            "where": "Decide in profile `{lead}`: `hermes{p} evolution proposals list` shows each one's number; then run "
                     "`hermes{p} evolution proposals approve <id>` or `hermes{p} evolution proposals reject <id>`.",
+           "pinned": "Pinned to a commit in {profiles}: `hermes plugins update` refuses it there (\"is pinned to "
+                     "<sha>\"). Installing it again from its repository without `--ref` drops the pin; run the "
+                     "command for each profile, then `hermes gateway restart`.",
+           "self_skew": "{profiles} run(s) another commit of Atlas Evolution than profile `{lead}` (the version "
+                        "number may be the same). Install it again from its repository in each, then "
+                        "`hermes gateway restart`.",
            "yes": "yes", "no": "no"},
     "pt": {"none": "Nenhum perfil tem o Atlas Evolution ligado, então ninguém cuida do Hermes inteiro ainda. Ligue-o "
                    "num perfil: `hermes -p <perfil> plugins enable hermes-atlas-evolution`.",
@@ -1155,6 +1342,12 @@ _ENV_TEXT = {
            "seen": "Visto", "advice": "O que fazer", "run": "Comando", "risk": "risco {risk}",
            "where": "Decida no perfil `{lead}`: `hermes{p} evolution proposals list` mostra o número de cada uma; depois "
                     "rode `hermes{p} evolution proposals approve <id>` ou `hermes{p} evolution proposals reject <id>`.",
+           "pinned": "Fixado num commit em {profiles}: ali o `hermes plugins update` recusa (\"is pinned to <sha>\"). "
+                     "Instalar de novo a partir do repositório, sem `--ref`, tira a fixação; rode o comando de cada "
+                     "perfil e depois `hermes gateway restart`.",
+           "self_skew": "{profiles} roda(m) outro commit do Atlas Evolution que o perfil `{lead}` (o número da versão "
+                        "pode ser o mesmo). Instale de novo a partir do repositório em cada um e depois "
+                        "`hermes gateway restart`.",
            "yes": "sim", "no": "não"},
 }
 
@@ -1205,6 +1398,13 @@ def _environment_markdown(home: Path, lang: str = "en", *, mode: str = "auto") -
         lines.append(f"- **{told['title']}** · {subject_words(item, lang)} · " + t["risk"].format(risk=told["risk"]))
         if told["what"]:
             lines.append(f"  - {t['seen']}: {told['what']}")
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        if item.get("kind") == "plugin_update" and evidence.get("reasons"):
+            for reason in ("pinned", "self_skew"):
+                where = [entry.get("profile") for entry in evidence.get("profiles") or ()
+                         if isinstance(entry, dict) and entry.get("reason") == reason]
+                if where:
+                    lines.append(f"  - {t[reason].format(profiles=', '.join(f'`{who}`' for who in where), lead=name)}")
         if told.get("advice"):
             lines.append(f"  - {t['advice']}: {told['advice']}")
         if item.get("command"):

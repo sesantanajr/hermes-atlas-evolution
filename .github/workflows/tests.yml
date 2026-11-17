@@ -1,4 +1,4 @@
-name: Tests
+name: Checks
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: tests-${{ github.ref }}
+  group: checks-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -23,25 +23,25 @@ jobs:
           python-version: "3.11"
       # Only the checks that find real defects: undefined names, unused imports and syntax the oldest
       # supported Python refuses. The plugin itself stays standard library only; ruff runs in CI alone.
-      # PLE2502/PLE2515: the guard tests carry bidi and zero-width characters on purpose.
       - name: Install ruff
         run: python -m pip install --disable-pip-version-check "ruff==0.17.5"
       - name: Ruff
-        run: ruff check --no-cache --target-version py311 --select F,E9,PLE --ignore PLE2502,PLE2515 --output-format github .
+        run: ruff check --no-cache --target-version py311 --select F,E9,PLE --output-format github .
       - name: Byte-compile with the oldest supported Python
-        run: python -m compileall -q hermes_atlas_evolution tests __init__.py
+        run: python -m compileall -q hermes_atlas_evolution dashboard __init__.py
+      - name: Installer syntax
+        run: sh -n install.sh
 
-  unittest:
+  smoke:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
         include:
-          # Hermes also runs on macOS (a LaunchAgent) and Windows (a service or task, Git Bash as the terminal).
           - os: macos-latest
             python-version: "3.13"
           - os: windows-latest
@@ -51,6 +51,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # The plugin and its tests use the standard library only: there is nothing to install.
-      - name: Run the test suite
-        run: python -m unittest discover -s tests -v
+      # The plugin imports and its standalone runner answers on a throwaway profile (no Hermes needed).
+      - name: Import and run the standalone CLI
+        shell: bash
+        env:
+          ATLAS_EVOLUTION_NO_HERMES: "1"
+        run: |
+          python -c "import hermes_atlas_evolution.integration, hermes_atlas_evolution.fleet_update"
+          mkdir -p "$RUNNER_TEMP/profile"
+          python -m hermes_atlas_evolution --home "$RUNNER_TEMP/profile" --hermes-version 0.23.1 --help > /dev/null
+          python -m hermes_atlas_evolution --home "$RUNNER_TEMP/profile" --hermes-version 0.23.1 update --list --format json

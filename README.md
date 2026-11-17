@@ -83,6 +83,14 @@ hermes evolution                                                                
 
 Installing loads the plugin into a running gateway; no restart is needed. The first look reads up to 14 days of the profile's history, so it does not start from zero. In Auto mode the plugin then installs itself in the other profiles you use. To update it: [Updating](docs/upgrading.md).
 
+### Install or update in every profile at once
+
+```bash
+git clone https://github.com/sesantanajr/hermes-atlas-evolution.git && sh hermes-atlas-evolution/install.sh
+```
+
+It lists your profiles and asks which ones (Enter = all). Without questions: `sh install.sh --all --yes --install-missing --restart`. Once installed, `hermes evolution update` does the same from Hermes (`--all`, `--profiles a,b`, `--list`). If the gateway does not come back after Hermes updated itself: `hermes evolution care fix-gateway`.
+
 ## What's new in 0.9.0
 
 - **Hermes' own check, every day, on every profile.** The plugin runs the `hermes doctor` checks on each profile in use once a day, without network and without changing anything, and turns each problem into plain words, with what to do and the command: tools on without a key, a missing `.env`, a large cache Hermes never cleans, rollback snapshots above the cap, a config to migrate, a memory provider turned off, a security advisory (always first). Optional pieces you never set up are only counted. A problem of the whole machine is listed once.

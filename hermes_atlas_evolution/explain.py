@@ -107,8 +107,10 @@ def plan(proposal: dict) -> tuple[list, list] | None:
         if fleet == "install":
             if name != SELF:
                 return None   # only this plugin installs itself
-            ref = evidence.get("ref")
-            forward = ["plugins", "install", SOURCE, "--enable"] + (["--ref", ref] if isinstance(ref, str) and _SHA.fullmatch(ref) else [])
+            # 0.9.1: never `--ref <sha>`. Hermes pins a profile installed with a ref, so every later
+            # `hermes plugins update` in that profile failed with "is pinned to <sha>". Without a ref the
+            # profile tracks the default branch like the others.
+            forward = ["plugins", "install", SOURCE, "--enable"]
         elif fleet == "trash":
             if proposal.get("kind") == "doctor_cache":
                 from .doctor import REGENERABLE

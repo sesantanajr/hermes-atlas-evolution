@@ -22,7 +22,7 @@ from .operations import RETENTION_DAYS, database, recommendations, run_policy, s
 RESOURCE_FINDINGS = {"low_disk": "disk", "low_memory": "memory", "cgroup_memory_limit": "cgroup_memory"}
 EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report", "owner",
                      "decisions")
-MAINTENANCE_ACTIONS = ("system", "care", "schedule-digest", "environment")
+MAINTENANCE_ACTIONS = ("system", "care", "schedule-digest", "environment", "update")
 CYCLE_INTERVAL_SECONDS = 3600
 
 
@@ -257,7 +257,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     system.add_argument("--skip", nargs="*", default=[], help=_("Packages to leave out of this update"))
     system.add_argument("--yes", action="store_true", help=_("Do not ask before updating or repairing"))
     care = commands.add_parser("care", help=_("Check Hermes' own health without the agent or tokens, and run Hermes' repairs"))
-    care.add_argument("care_action", nargs="?", default="check", choices=("check", "pm-doctor", "doctor", "fix", "gc"),
+    care.add_argument("care_action", nargs="?", default="check", choices=("check", "pm-doctor", "doctor", "fix", "gc", "fix-gateway", "undo-gateway"),
                       help=_b("check (default): read Hermes' health without running anything · pm-doctor: `hermes pm "
                               "doctor` · doctor: `hermes doctor` · fix: `hermes doctor --fix` after a quick backup · gc: "
                               "`hermes pm gc`",
@@ -270,7 +270,20 @@ def setup(parser: argparse.ArgumentParser) -> None:
                      help=_b("show (default): the last check · scan: check every profile now · catalog: the Hermes "
                              "plugin catalog", "show (padrão): a última verificação · scan: verifica todos os perfis "
                              "agora · catalog: o catálogo de plugins do Hermes"))
-    for command in (system, care, env):
+    upgrade = commands.add_parser("update", help=_b(
+        "Update this plugin in every profile, or in the ones you pick (handles pinned profiles)",
+        "Atualiza este plugin em todos os perfis, ou nos que você escolher (resolve perfis fixados)"))
+    upgrade.add_argument("--all", action="store_true", dest="all_profiles",
+                         help=_b("Every profile of this Hermes", "Todos os perfis deste Hermes"))
+    upgrade.add_argument("--profiles", default="", help=_b("Comma-separated profile names, e.g. default,work",
+                                                           "Nomes de perfis separados por vírgula, ex.: default,work"))
+    upgrade.add_argument("--install-missing", action="store_true",
+                         help=_b("Also install it in the chosen profiles that do not have it",
+                                 "Também instala nos perfis escolhidos que ainda não o têm"))
+    upgrade.add_argument("--list", action="store_true", dest="list_only",
+                         help=_b("Only show each profile's version, commit and pin", "Só mostra versão, commit e fixação de cada perfil"))
+    upgrade.add_argument("--yes", action="store_true", help=_("Do not ask before running Hermes' command"))
+    for command in (system, care, env, upgrade):
         output(command)
     digest = commands.add_parser("schedule-digest", help=_b(
         "Schedule the weekly digest as a Hermes scheduled task (cron), no agent",
@@ -392,7 +405,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     history_commands = history.add_subparsers(dest="decisions_action")
     history_commands.add_parser("list", help=_b("List the latest decisions, newest first (the default)",
                                                 "Lista as últimas decisões, das mais novas para as mais antigas (o padrão)")
-                                ).add_argument("--limit", type=int, default=50,
+                                ).add_argument("--limit", type=int, default=50, choices=range(1, 501), metavar="1..500",
                                                help=_b("How many to show (default 50)", "Quantas mostrar (padrão 50)"))
     history_commands.add_parser("undo", help=_("Undo one decision while what it changed is still as it left it")) \
         .add_argument("id", type=int)
@@ -452,7 +465,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     similar.add_argument("query")
     similar.add_argument("--limit", type=int, choices=range(1, 11), default=5, metavar="1..10")
     review = ops_commands.add_parser("review", help=_("Review learned baselines, feedback and outcomes"))
-    review.add_argument("--days", type=int, default=14)
+    review.add_argument("--days", type=int, choices=range(1, RETENTION_DAYS + 1), default=14, metavar="1..35")
     rating = ops_commands.add_parser("feedback", help=_("Rate an adaptive alert"))
     rating.add_argument("code")
     rating.add_argument("result", choices=("helpful", "dismissed", "reset"))
@@ -1039,12 +1052,128 @@ def _decisions(args, home: Path, *, now: float, lang: str, runtime_config=None):
         return result
 
 
+def _pick_profiles(rows: list, lang: str) -> list:
+    """Ask in the operator's terminal which profiles to update: Enter = all, or numbers / names."""
+    import sys
+
+    sys.stderr.write("\n")
+    for number, row in enumerate(rows, 1):
+        state = (_say(lang, "pinned", "fixado") if row["pinned"] else
+                 (row["version"] or "?") if row["installed"] else _say(lang, "not installed", "não instalado"))
+        sys.stderr.write(f"  {number:>2}. {row['profile']}  ({state})\n")
+    sys.stderr.write(_say(lang, "\nProfiles to update (Enter = all, e.g. 1,3 or default,work; q = quit): ",
+                          "\nPerfis para atualizar (Enter = todos, ex.: 1,3 ou default,work; q = sair): "))
+    sys.stderr.flush()
+    answer = sys.stdin.readline().strip()
+    if answer.lower() in ("q", "quit", "sair"):
+        raise ValueError("Cancelled; nothing changed")
+    if not answer or answer.lower() in ("a", "all", "todos", "t"):
+        return ["all"]
+    picked = []
+    for part in answer.replace(" ", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.isdigit() and 1 <= int(part) <= len(rows):
+            picked.append(rows[int(part) - 1]["profile"])
+        else:
+            picked.append(part)
+    return picked
+
+
+def _fleet_update(args, home: Path, lang: str) -> dict:
+    """`hermes evolution update`: this plugin in all or the chosen profiles, with Hermes' own commands."""
+    import sys
+
+    from . import fleet_update
+    from .admin import launch_home
+
+    rows = fleet_update.plan(launch_home(home))
+    if args.list_only:
+        return {"listed": rows}
+    _operator_only()
+    if args.all_profiles:
+        wanted = "all"
+    elif args.profiles.strip():
+        wanted = [name for name in args.profiles.split(",")]
+    elif sys.stdin.isatty() and not args.yes:
+        picked = _pick_profiles(rows, lang)
+        wanted = "all" if picked == ["all"] else picked
+    else:
+        _fail(lang, "Choose the profiles: `hermes evolution update --all` or `--profiles default,work`.",
+              "Escolha os perfis: `hermes evolution update --all` ou `--profiles default,work`.")
+    chosen = fleet_update.select(rows, wanted)
+    if not chosen:
+        _fail(lang, "No profile to update.", "Nenhum perfil para atualizar.")
+    names = ", ".join(row["profile"] for row in chosen)
+    _confirm(_say(lang, f"Update {fleet_update.PLUGIN} in: {names}", f"Atualizar {fleet_update.PLUGIN} em: {names}"),
+             lang, yes=args.yes, apply=True, again="hermes evolution update --all --yes")
+
+    def progress(name):
+        sys.stderr.write(_say(lang, f"  updating {name}...\n", f"  atualizando {name}...\n"))
+        sys.stderr.flush()
+
+    return {"results": fleet_update.run(chosen, install_missing=args.install_missing, progress=progress)}
+
+
+GATEWAY_UNITS = {"user": ["hermes-gateway.service"], "system": ["hermes-gateway.service"]}
+
+
+def _gateway_repair(home: Path, task: str, lang: str, *, yes: bool, now: float) -> dict:
+    """`care fix-gateway`: when Hermes replaced its bundled Python and the gateway's service still starts the old one
+    (systemd: status=203/EXEC, restart loop), point the service at the new Python, reload and start it.
+    `care undo-gateway` puts the service file back from the copy kept by the repair. The operator's only."""
+    import json
+
+    from . import system_update
+
+    host = system_update.Host()
+    record = Path(home) / "evolution" / "gateway-repair.json"
+    if task == "undo-gateway":
+        try:
+            saved = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _fail(lang, "There is no gateway repair to undo.", "Não há reparo do gateway para desfazer.")
+        _confirm(_say(lang, f"Restore {saved.get('file')} from {saved.get('backup')}",
+                      f"Restaurar {saved.get('file')} a partir de {saved.get('backup')}"),
+                 lang, yes=yes, apply=True, again=_hermes_cmd(home, "evolution care undo-gateway --yes"))
+        result = system_update.undo_unit_exec(host, saved)
+        if result.get("ok"):
+            record.unlink(missing_ok=True)
+        return {**result, "task": task}
+    probe = system_update.probe_units(GATEWAY_UNITS, host=host, timeout=10)
+    broken = [unit for unit in probe["units"] if unit.get("exec_exists") is False]
+    if not broken:
+        return {"ok": True, "task": task, "reason": "nothing_to_fix", "units": probe["units"],
+                "unverified": probe.get("unverified")}
+    unit = broken[0]
+    if not unit.get("replacement"):
+        _fail(lang, "The gateway service starts a Python that no longer exists and no newer Hermes Python was found: "
+                    "reinstall Hermes' service.",
+              "O serviço do gateway inicia um Python que não existe mais e nenhum Python mais novo do Hermes foi "
+              "encontrado: reinstale o serviço do Hermes.")
+    _confirm(_say(lang, f"In {unit.get('exec_source')}: {unit['exec_path']} -> {unit['replacement']}, then "
+                        "daemon-reload, reset-failed and start the gateway",
+                  f"Em {unit.get('exec_source')}: {unit['exec_path']} -> {unit['replacement']}, depois "
+                  "daemon-reload, reset-failed e iniciar o gateway"),
+             lang, yes=yes, apply=True, again=_hermes_cmd(home, "evolution care fix-gateway --yes"))
+    result = system_update.fix_unit_exec(host, unit, now=now)
+    try:
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps(result.get("undo") or {}), encoding="utf-8")
+    except OSError:
+        pass
+    return {**result, "task": task}
+
+
 def _maintenance(args, home: Path, *, now: float, runtime_config=None):
     """`system`, `care` and `schedule-digest`: what reads is open to anyone; what changes is the operator's."""
     from . import actions, hermes_care, system_update
     from .experience import experience
 
     lang = getattr(args, "lang", None) or "en"
+    if args.evolution_action == "update":
+        return _fleet_update(args, home, lang)
     if args.evolution_action == "environment":
         from . import environment, explain
 
@@ -1085,6 +1214,8 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
             with experience(home) as conn:
                 return hermes_care.cached(conn, home, now=now, force=True)
         _operator_only()
+        if task in ("fix-gateway", "undo-gateway"):
+            return _gateway_repair(home, task, lang, yes=args.yes, now=now)
         key = {"pm-doctor": "pm_doctor", "doctor": "doctor", "fix": "doctor_fix", "gc": "pm_gc"}[task]
         command = "hermes " + " ".join(hermes_care.ACTIONS[key][0])
         _confirm(command, lang, yes=args.yes, apply=True, what=command,
@@ -1354,7 +1485,7 @@ def _ops(args, home: Path, *, now, running_version, provider, runtime_config, so
 # output (the same structure as before 0.9.0). A caller that builds the arguments itself, without `format`, gets the
 # structure: the menu, the panel and the tests call `execute` that way.
 HUMAN_ACTIONS = ("care", "environment", "decisions", "lessons", "proposals", "learn", "skills", "experiments", "system",
-                 "health", "usage", "history", "tick", "schedule-digest")
+                 "health", "usage", "history", "tick", "schedule-digest", "update")
 
 
 def _wants_text(args) -> bool:
@@ -1822,6 +1953,21 @@ def _care_md(found: dict | None, home: Path, lang: str) -> str:
 
 def _care_action_md(result: dict, task: str, lang: str) -> str:
     t = _H[lang]
+    if task in ("fix-gateway", "undo-gateway"):
+        pt = lang == "pt"
+        if result.get("reason") == "nothing_to_fix":
+            return ("O serviço do gateway já aponta para um programa que existe: nada a reparar.\n" if pt else
+                    "The gateway service already points at a program that exists: nothing to repair.\n")
+        if task == "undo-gateway":
+            return (f"{'Restaurado' if pt else 'Restored'}: {result.get('file')}\n")
+        head = (("Gateway reparado e ativo." if pt else "Gateway repaired and active.") if result.get("ok") else
+                ("Arquivo corrigido, mas o gateway não ficou ativo." if pt else "File fixed, but the gateway is not active."))
+        lines = [head, "", f"- {result.get('file')}: `{result.get('from')}` -> `{result.get('to')}`",
+                 f"- {'Cópia' if pt else 'Backup'}: {result.get('backup')}",
+                 f"- {'Desfazer' if pt else 'Undo'}: `hermes evolution care undo-gateway`"]
+        if not result.get("ok"):
+            lines.append("- `journalctl --user -u hermes-gateway -n 30`")
+        return "\n".join(lines) + "\n"
     steps = result.get("steps") or []
     last = steps[-1] if steps else {}
     if result.get("reason") == "backup_failed":
@@ -2690,11 +2836,22 @@ def _human(args, result, home: Path, lang: str):
         if args.care_action == "check":
             return _care_md(result, home, lang)
         return _care_action_md(result, args.care_action, lang)
+    if action == "update":
+        from .fleet_update import markdown
+
+        return markdown(result, lang)
     if action == "environment":
         task = getattr(args, "environment_action", "show")
         if task == "catalog":
             return _catalog_md(result, lang)
-        text = status.environment_markdown(home, lang)
+        try:   # the same mode the panel shows (0.9.1: the terminal always said "auto")
+            from .evolve import options as _options
+
+            settings_now, problems = safe_settings(home)
+            mode = _options(settings_now, strict=False, problems=problems).get("mode") or "auto"
+        except Exception:
+            mode = "auto"
+        text = status.environment_markdown(home, lang, mode=mode)
         return (_H[lang]["scanned"] + "\n\n" + text) if task == "scan" else text
     if action == "decisions":
         if (getattr(args, "decisions_action", None) or "list") == "list":

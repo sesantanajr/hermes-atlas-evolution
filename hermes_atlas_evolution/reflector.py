@@ -107,11 +107,17 @@ def scrub(text: str) -> str:
         pass
     for pattern, replacement in _SCRUB:
         excerpt = pattern.sub(replacement, excerpt)
-    return " ".join(excerpt.split())[-EXCERPT_LIMIT:]
+    return storable(" ".join(excerpt.split())[-EXCERPT_LIMIT:])
+
+
+def storable(text: str) -> str:
+    """Text SQLite can bind: a lone surrogate (from a decoded byte stream) becomes "?" instead of raising at bind time."""
+    return text.encode("utf-8", "replace").decode("utf-8")
 
 
 def keep_sample(conn: sqlite3.Connection, signature: str, klass: str, excerpt: str, now: float) -> None:
-    if klass in UNTEMPLATED and excerpt:
+    if klass in UNTEMPLATED and isinstance(excerpt, str) and excerpt:
+        excerpt = storable(excerpt)
         conn.execute("""INSERT INTO failure_sample VALUES (?, ?, ?)
             ON CONFLICT(signature) DO UPDATE SET excerpt=excluded.excerpt, updated=excluded.updated""",
                      (signature, excerpt, now))

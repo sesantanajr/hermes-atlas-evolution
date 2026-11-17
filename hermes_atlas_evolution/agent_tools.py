@@ -45,6 +45,13 @@ class LessonsTool:
             self._recent.append(clock)
             return True
 
+    def _return_proposal(self, clock: float) -> None:
+        with self._lock:
+            try:
+                self._recent.remove(clock)
+            except ValueError:
+                pass
+
     def handle(self, args, **_context) -> str:
         try:
             if not isinstance(args, dict) or set(args) - {"action", "tool", "lesson"}:
@@ -58,10 +65,15 @@ class LessonsTool:
                 elif action == "propose":
                     recent = conn.execute("SELECT COUNT(*) FROM lesson WHERE origin='agent' AND created >= ?",
                                           (time.time() - 3600,)).fetchone()[0]   # per profile, every process
-                    if recent >= PROPOSALS_PER_HOUR or not self._allow_proposal(time.monotonic()):
+                    stamp = time.monotonic()
+                    if recent >= PROPOSALS_PER_HOUR or not self._allow_proposal(stamp):
                         raise ValueError("Too many proposals this hour; the operator has not reviewed the earlier ones")
-                    lesson_id = lessons.add_custom(conn, args.get("lesson"), tool=tool or "general", origin="agent",
-                                                   now=time.time())
+                    try:
+                        lesson_id = lessons.add_custom(conn, args.get("lesson"), tool=tool or "general", origin="agent",
+                                                       now=time.time())
+                    except BaseException:
+                        self._return_proposal(stamp)   # a rejected or unsaved draft does not use up the hour's quota
+                        raise
                     result = {"lesson_id": lesson_id, "status": "quarantined",
                               "note": "Stored for operator review. It is not applied until approved."}
                 elif action == "status":

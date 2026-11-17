@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import experiments, lessons, logwatch, proposals, reflector, signals
 from .i18n import resolve
-from .experience import day_offset, experience, prune, utc_day
+from .experience import day_offset, experience, utc_day
 from .skill_health import read_usage, skill_health, skill_outcomes
 
 # Set in a runtime configuration that could not be read (a standalone run without a YAML parser): the settings
@@ -114,7 +114,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     `strict=False` (the autopilot) lets each invalid setting fall back safely instead of failing the pass.
     Until it is done, each pass first replays up to `backfill_budget_s` seconds of Hermes' own history."""
     from . import backfill
-    from .operations import database
+    from .operations import _prune as prune_all, database
 
     opts = options(config or {}, runtime_config, strict=strict)
     if lang in lessons.LANGUAGES:
@@ -131,7 +131,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     with experience(home) as conn:
         # Short transactions: hook writers of a running gateway share this database, so no phase keeps the
         # write lock while it reads files or waits for a model.
-        prune(conn, now=now)
+        prune_all(conn, now)   # the experience tables and the hook counters: hook writes only insert
         conn.commit()
         ingested = 0
         for _ in range(8):   # at most 32 MiB of log per pass

@@ -30,6 +30,8 @@ COMMAND_MIN_SECONDS = 30           # a pass this close to its deadline runs no H
 # Time a pass must still have before it starts each kind of change (Hermes may download a plugin, or collect garbage
 # for minutes): a pass is never cut in the middle of one.
 NEEDED_SECONDS = {"self_missing": COMMAND_SECONDS + 30, "pm_gc": 330}
+PM_GC_SECONDS = 900                # `hermes pm gc` from the menu; a pass gives it only what is left of its own time
+DIGEST_CLAIM_SECONDS = 600         # a claim on scheduling the digest left by a process that died
 
 
 def _hermes(home: Path, args: list, *, runner=None) -> None:
@@ -194,8 +196,10 @@ def _held_by_owner(home: Path, subject: str, usage: dict) -> bool:
     root = Path(home) / "skills"
     try:
         for found, skill_file in enumerate(root.rglob("SKILL.md")):
-            if found >= 2000 or len(skill_file.relative_to(root).parts) > 5:
+            if found >= 2000:
                 break
+            if len(skill_file.relative_to(root).parts) > 5:
+                continue   # too deep for a skill; the ones after it in the walk still count
             try:
                 head = skill_file.read_text(encoding="utf-8", errors="replace")[:4096]
             except OSError:
@@ -430,8 +434,11 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
             done["applied"].append({"proposal": row["id"], "kind": row["kind"], "subject": row["subject"],
                                     "decision": result["decision"]})
     if deadline is None or deadline - time.monotonic() >= NEEDED_SECONDS["pm_gc"]:
+        # never past the pass's own deadline: Hermes' command gets what is left of it (at most PM_GC_SECONDS)
+        limit = None if deadline is None else max(COMMAND_MIN_SECONDS, min(
+            PM_GC_SECONDS, int(deadline - time.monotonic()) - COMMAND_MIN_SECONDS))
         try:
-            done["maintenance"] = reclaim(home, now=now, runner=runner)
+            done["maintenance"] = reclaim(home, now=now, runner=runner, timeout=limit)
         except Exception as error:   # never fails the pass
             done["failed"].append({"what": "pm_gc", "error": str(error)[:120]})
     return done
@@ -456,7 +463,7 @@ def _target_allows(home: Path, subject) -> bool:
 RECLAIM_EVERY_SECONDS = 7 * 86_400
 
 
-def reclaim(home: Path, *, now: float, runner=None) -> dict | None:
+def reclaim(home: Path, *, now: float, runner=None, timeout: int | None = None) -> dict | None:
     """Free old tool versions nothing references with Hermes' own `hermes pm gc`, when the health check found 300 MB
     or more of them, at most once a week. Recorded in the history (nothing to undo: Hermes fetches a version again if
     something asks for it)."""
@@ -480,7 +487,7 @@ def reclaim(home: Path, *, now: float, runner=None) -> dict | None:
         return None   # one tool store for the whole Hermes: the profile that looks after all of it frees it
     with experience(home) as conn:   # marked before it runs: a second process never starts another one meanwhile
         conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('auto_gc', ?)", (str(now),))
-    result = hermes_care.run_action(home, "pm_gc", runner=runner)
+    result = hermes_care.run_action(home, "pm_gc", runner=runner, **({} if timeout is None else {"timeout": timeout}))
     with experience(home) as conn:
         decision = decisions.record_maintenance(conn, "pm_gc", reclaimable=care.get("reclaimable"),
                                                 ok=bool(result.get("ok")), now=now, actor="automatic")
@@ -500,27 +507,54 @@ def schedule_digest(home: Path, *, deliver: str = "local", lang: str = "en", now
     from .experience import experience
     from .status import _digest_scheduled
 
-    if _digest_scheduled(home):
-        return {"scheduled": False, "reason": "already"}
-    spec = digest_schedule_spec(home, weekday=weekday, hour=hour, lang=lang if lang in ("en", "pt") else "en",
-                                deliver=deliver)
-    script = Path(spec["script_path"])
-    script.parent.mkdir(parents=True, exist_ok=True)
-    temporary = script.with_name(script.name + ".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write(spec["script_content"])
-    os.replace(temporary, script)
-    args = spec["create_args"]
-    args = args[args.index("cron"):]   # run_hermes names the profile itself
-    code, out = hermes_output(home, args, runner=runner, timeout=180)
-    found = re.search(r"Created job:?\s*([A-Za-z0-9_-]{1,64})", out)
-    if code != 0 or not found:
-        raise ValueError(" ".join(out.split())[-200:] or "Hermes refused the command")
+    import secrets
+    import time
+
+    # Claimed first (one row, taken atomically): two clicks, or the panel and a terminal at once, never create two
+    # jobs; a claim left by a process that died expires after DIGEST_CLAIM_SECONDS.
+    real = time.time()
     with experience(home) as conn:
-        decision = decisions.record_cron(conn, found.group(1), name="hermes-atlas-evolution-digest",
-                                         schedule=args[2], deliver=deliver, now=now, actor=actor)
-    return {"scheduled": True, "job": found.group(1), "schedule": args[2], "deliver": deliver, "decision": decision}
+        conn.execute("DELETE FROM cursor WHERE key='digest_schedule_claim' AND CAST(value AS REAL) < ?",
+                     (real - DIGEST_CLAIM_SECONDS,))
+        claimed = conn.execute("INSERT OR IGNORE INTO cursor(key, value) VALUES ('digest_schedule_claim', ?)",
+                               (str(real),)).rowcount
+    if not claimed:
+        return {"scheduled": False, "reason": "busy"}
+    temporary = None
+    try:
+        if _digest_scheduled(home):
+            return {"scheduled": False, "reason": "already"}
+        spec = digest_schedule_spec(home, weekday=weekday, hour=hour, lang=lang if lang in ("en", "pt") else "en",
+                                    deliver=deliver)
+        script = Path(spec["script_path"])
+        script.parent.mkdir(parents=True, exist_ok=True)
+        temporary = script.with_name(f".{script.name}.{secrets.token_hex(4)}.tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(spec["script_content"])
+        os.replace(temporary, script)
+        temporary = None
+        args = spec["create_args"]
+        args = args[args.index("cron"):]   # run_hermes names the profile itself
+        code, out = hermes_output(home, args, runner=runner, timeout=180)
+        found = re.search(r"Created job:?\s*([A-Za-z0-9_-]{1,64})", out)
+        if code != 0 or not found:
+            raise ValueError(" ".join(out.split())[-200:] or "Hermes refused the command")
+        with experience(home) as conn:
+            decision = decisions.record_cron(conn, found.group(1), name="hermes-atlas-evolution-digest",
+                                             schedule=args[2], deliver=deliver, now=now, actor=actor)
+        return {"scheduled": True, "job": found.group(1), "schedule": args[2], "deliver": deliver, "decision": decision}
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+        try:
+            with experience(home) as conn:
+                conn.execute("DELETE FROM cursor WHERE key='digest_schedule_claim' AND value=?", (str(real),))
+        except Exception:   # the claim expires by itself
+            pass
 
 
 def recent(conn, *, now: float, days: int = 7) -> list[dict]:

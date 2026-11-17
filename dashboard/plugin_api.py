@@ -384,6 +384,9 @@ def _router():
         except ValueError as error:
             told = i18n.normalize(lang) or "en"
             return JSONResponse({"error": "invalid", "message": i18n.text(str(error), told)}, status_code=400)
+        except OSError:
+            told = i18n.normalize(lang) or "en"
+            return JSONResponse({"error": "busy", "message": message("busy", told)}, status_code=503)
         allowed, why = _policy(request)
         if allowed and not _ticket_allows(request, home):
             allowed, why = False, "other_profile"
@@ -393,6 +396,9 @@ def _router():
         except (OSError, sqlite3.Error):
             told = profile_language(home, config, lang)
             return JSONResponse({"error": "busy", "message": message("busy", told)}, status_code=503)
+        except Exception:   # 0.9.1: odd stored data never becomes a bare HTTP 500 in the panel
+            told = profile_language(home, config, lang)
+            return JSONResponse({"error": "invalid", "message": message("busy", told)}, status_code=500)
 
     @router.post("/decide")
     def post_decide(request: Request, body: dict = Body(...), lang: str = Query("", max_length=8)):

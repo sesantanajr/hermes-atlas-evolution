@@ -1,5 +1,5 @@
 name: hermes-atlas-evolution
-version: "0.9.0"
+version: "0.9.1"
 requires_hermes: ">=0.23.1"
 description: >-
   Looks after your whole Hermes Agent, every profile at once. Every day it runs Hermes' own doctor checks

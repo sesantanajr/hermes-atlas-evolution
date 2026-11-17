@@ -31,6 +31,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import tarfile
@@ -52,12 +53,21 @@ ATTENTION = (
 )
 # A run of these is a package manager at work (packagekitd idles for minutes after each `apt-get update` and holds
 # nothing: only the locks it takes count, and /proc/locks shows them).
-BUSY_PROCESSES = ("apt", "apt-get", "aptitude", "dpkg")
+BUSY_PROCESSES = ("apt", "apt-get", "aptitude", "dpkg", "unattended-upgr")
 LOCK_FILES = ("/var/lib/dpkg/lock-frontend", "/var/lib/dpkg/lock", "/var/lib/apt/lists/lock",
               "/var/cache/apt/archives/lock")
 MIN_FREE = {"/": 1_500_000_000, "/boot": 150_000_000, "/var": 1_000_000_000}
 PACKAGE_NAME = re.compile(r"[a-z0-9][a-z0-9.+-]{0,99}(?::[a-z0-9][a-z0-9-]{0,31})?")
 _ENV = {"LC_ALL": "C", "LANG": "C", "DEBIAN_FRONTEND": "noninteractive"}
+
+
+def _shutdown_helper(entry: Path) -> bool:
+    """Whether /proc/<pid> is unattended-upgrades' `unattended-upgrade-shutdown --wait-for-signal` helper."""
+    try:
+        line = (entry / "cmdline").read_bytes()[:4096].replace(b"\0", b" ")
+    except OSError:
+        return False
+    return b"unattended-upgrade-shutdown" in line or b"--wait-for-signal" in line
 
 
 class Host:
@@ -66,20 +76,47 @@ class Host:
     def __init__(self, root: Path = Path("/"), runner=None):
         self.root = Path(root)
         self.runner = runner
+        self.deadline: float | None = None   # time.monotonic(): past it, no command is launched
+        self.skipped = 0                     # commands left out because the time budget was spent
+        self.unverified: set[str] = set()    # systemd scopes whose bus could not be reached ("system", "user")
 
     def run(self, argv: list, *, timeout: int = 60) -> tuple[int, str, str]:
+        if self.deadline is not None:   # a check with a time budget launches nothing once it is spent
+            left = self.deadline - time.monotonic()
+            if left <= 0:
+                self.skipped += 1
+                return 124, "", f"{argv[0]}: time budget spent"
+            timeout = max(1, min(timeout, int(left) + 1))
         if self.runner is not None:
             return self.runner(list(argv), timeout)
+        env = {**os.environ, **_ENV}
+        if argv and os.path.basename(str(argv[0])) in ("systemctl", "journalctl") and "--user" in argv                 and not env.get("XDG_RUNTIME_DIR") and hasattr(os, "geteuid"):
+            # a service, cron or `sudo -i` has no session: the user's own bus is found by its runtime folder
+            env["XDG_RUNTIME_DIR"] = f"/run/user/{os.geteuid()}"
+        posix = os.name == "posix"
         try:
-            done = subprocess.run(argv, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
-                                  check=False, stdin=subprocess.DEVNULL, env={**os.environ, **_ENV})
+            process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       encoding="utf-8", errors="replace", env=env, start_new_session=posix)
         except FileNotFoundError:
             return 127, "", f"{argv[0]}: not found"
-        except subprocess.TimeoutExpired:
-            return 124, "", f"{argv[0]}: timed out"
         except OSError as error:
             return 126, "", f"{argv[0]}: {type(error).__name__}"
-        return done.returncode, done.stdout or "", done.stderr or ""
+        try:
+            out, err = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:   # the whole group: a child it started never keeps the pipes open past the timeout
+                if posix:
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except OSError:
+                pass
+            try:
+                process.communicate(timeout=5)
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                pass
+            return 124, "", f"{argv[0]}: timed out"
+        return process.returncode, out or "", err or ""
 
     def path(self, name: str) -> Path:
         return self.root / name.lstrip("/")
@@ -140,12 +177,10 @@ class Host:
                     if stat.rsplit(")", 1)[1].split()[0] in ("Z", "X"):
                         continue   # a dead process nobody reaped yet runs nothing
                     name = (entry / "comm").read_text(encoding="utf-8", errors="replace").strip()
-                    if name == "unattended-upgr":
+                    if name == "unattended-upgr" and _shutdown_helper(entry):
                         # unattended-upgrades keeps `unattended-upgrade-shutdown --wait-for-signal` running for good: it
                         # waits for a shutdown and holds no lock. Only the upgrade run itself is busy.
-                        line = (entry / "cmdline").read_bytes()[:4096].replace(b"\0", b" ")
-                        if b"unattended-upgrade-shutdown" in line:
-                            continue
+                        continue
                     names.append(name)
                 except (OSError, IndexError):
                     continue
@@ -191,8 +226,12 @@ class Host:
             entries = []
         for entry in entries:
             try:
-                if (entry / "comm").read_text(encoding="utf-8", errors="replace").strip() in BUSY_PROCESSES:
-                    pids.add(int(entry.name))
+                name = (entry / "comm").read_text(encoding="utf-8", errors="replace").strip()
+                if name not in BUSY_PROCESSES:
+                    continue
+                if name == "unattended-upgr" and _shutdown_helper(entry):
+                    continue   # waits for a shutdown, holds nothing (as in processes())
+                pids.add(int(entry.name))
             except OSError:
                 continue
         wanted = set()
@@ -252,26 +291,201 @@ def attention_of(name: str) -> list[str]:
     return [code for code, prefixes in ATTENTION if any(name == p or name.startswith(p) for p in prefixes)]
 
 
-def _user_units(host: Host) -> list[dict]:
-    """Hermes' systemd units, system and user ones, and whether each comes back after a reboot."""
+SHOW_PROPERTIES = ("Id", "LoadState", "ActiveState", "SubState", "Result", "NRestarts", "ExecMainCode", "ExecMainStatus",
+                   "ExecStart", "FragmentPath", "DropInPaths", "NeedDaemonReload")
+RESTART_LOOP = 3          # NRestarts from this many on, with the unit restarting or failed, is a loop
+EXEC_FAILED = 203         # systemd's status=203/EXEC: the program to start could not be run
+UNIT_CACHE_SECONDS = 60   # hermes_care and system_update read the units in the same pass: once is enough
+_UNIT_CACHE: dict = {}
+_BUS_ERRORS = ("Failed to connect to bus", "Failed to get D-Bus connection", "No medium found")
+_TOOL_PYTHON = re.compile(r"python-\d[\w.+-]*")
+
+
+def bus_failed(code: int, err: str) -> bool:
+    """systemctl could not reach the manager (no user session bus): nothing is known, which is not "no unit"."""
+    return code != 0 and any(marker in (err or "") for marker in _BUS_ERRORS)
+
+
+def _int(value) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _executable(host: Host, path: str) -> bool:
+    target = host.path(path)
+    try:
+        return target.is_file() and os.access(target, os.X_OK)
+    except OSError:
+        return False
+
+
+def show_units(host: Host, scope: str, names: list[str], *, timeout: int = 10) -> dict | None:
+    """One `systemctl [--user] show <units> -p ...` for every unit: {unit: {property: value}}. None when the manager
+    could not be reached (unverified, not empty)."""
+    if not names:
+        return {}
+    prefix = ["--user"] if scope == "user" else []
+    code, out, err = host.run(["systemctl", *prefix, "show", *names, "-p", ",".join(SHOW_PROPERTIES)], timeout=timeout)
+    if bus_failed(code, err):
+        host.unverified.add(scope)
+        return None
+    if code != 0 and not out.strip():
+        return {}
+    blocks, current = [], {}
+    for line in out.splitlines():
+        if not line.strip():
+            if current:
+                blocks.append(current)
+            current = {}
+            continue
+        key, sep, value = line.partition("=")
+        if sep:
+            current[key.strip()] = value.strip()
+    if current:
+        blocks.append(current)
+    found = {}
+    for index, block in enumerate(blocks):
+        name = block.get("Id") or (names[index] if index < len(names) else None)
+        if name:
+            found[name] = block
+    return found
+
+
+def _exec_source(host: Host, exec_path: str | None, drop_ins: list[str], fragment: str | None) -> str | None:
+    """The file whose `ExecStart=` line sets the program: the last drop-in (systemd applies them in order) that
+    names it, else the unit file. None when no file can be read or names it."""
+    files = [*reversed(drop_ins), *([fragment] if fragment else [])]
+    fallback = None
+    for name in files:
+        text = host.read(name, 262_144)
+        if text is None:
+            continue
+        lines = [line.strip() for line in text.splitlines() if line.strip().startswith("ExecStart=")]
+        values = [line.split("=", 1)[1].strip() for line in lines if line.split("=", 1)[1].strip()]
+        if exec_path and any(exec_path in value for value in values):
+            return name
+        if values and fallback is None:
+            fallback = name
+    return fallback
+
+
+def replacement_python(host: Host, exec_path: str | None) -> str | None:
+    """For a program under a Hermes tools folder (`.../tools/python-<version>/bin/python3`), the same program in the
+    newest python-* folder next to it that exists and can be run. None when there is none."""
+    if not exec_path:
+        return None
+    parts = exec_path.replace("\\", "/").split("/")
+    index = next((i for i, part in enumerate(parts) if i > 0 and parts[i - 1] == "tools" and _TOOL_PYTHON.fullmatch(part)),
+                 None)
+    if index is None:
+        return None
+    tools, rest = "/".join(parts[:index]) or "/", "/".join(parts[index + 1:])
+    try:
+        names = [entry.name for entry in host.path(tools).iterdir() if _TOOL_PYTHON.fullmatch(entry.name)]
+    except OSError:
+        return None
+
+    def key(name: str):
+        version = name[len("python-"):].split("+", 1)[0]
+        return tuple(int(number) for number in re.findall(r"\d+", version)), name
+
+    for name in sorted(names, key=key, reverse=True):
+        candidate = f"{tools.rstrip('/')}/{name}/{rest}" if rest else f"{tools.rstrip('/')}/{name}"
+        if candidate != exec_path and _executable(host, candidate):
+            return candidate
+    return None
+
+
+def unit_detail(host: Host, unit: str, scope: str, raw: dict) -> dict:
+    """What `systemctl show` says of a unit, and what that means: the program it starts, whether that program
+    still exists, how often systemd restarted it."""
+    paths = re.findall(r"\bpath=([^\s;]+)", raw.get("ExecStart") or "")
+    exec_path = paths[0] if paths else None
+    exec_exists = None if exec_path is None else _executable(host, exec_path)
+    drop_ins = [item for item in (raw.get("DropInPaths") or "").split() if item]
+    fragment = raw.get("FragmentPath") or None
+    detail = {"load_state": raw.get("LoadState"), "active_state": raw.get("ActiveState"), "sub_state": raw.get("SubState"),
+              "result": raw.get("Result"), "n_restarts": _int(raw.get("NRestarts")),
+              "exec_main_code": _int(raw.get("ExecMainCode")), "exec_main_status": _int(raw.get("ExecMainStatus")),
+              "exec_path": exec_path, "exec_exists": exec_exists, "drop_ins": drop_ins[:20], "fragment": fragment,
+              "need_reload": raw.get("NeedDaemonReload") == "yes", "exec_source": None, "replacement": None}
+    if exec_exists is False:
+        detail["exec_source"] = _exec_source(host, exec_path, drop_ins, fragment)
+        detail["replacement"] = replacement_python(host, exec_path)
+    detail["exec_missing"] = exec_exists is False
+    detail["restart_loop"] = bool(
+        (detail["n_restarts"] or 0) >= RESTART_LOOP and detail["sub_state"] in ("auto-restart", "failed")
+        or detail["exec_main_status"] == EXEC_FAILED and detail["active_state"] != "active")
+    return detail
+
+
+def _user_units(host: Host, *, fresh: bool = False) -> list[dict]:
+    """Hermes' systemd units, system and user ones: whether each comes back after a reboot, runs now, and what
+    `systemctl show` says of it (unit_detail). A scope whose manager cannot be reached is left out and named in
+    host.unverified."""
+    key = str(host.root) if host.runner is None else None
+    cached = _UNIT_CACHE.get(key) if key is not None and not fresh else None
+    if cached and time.monotonic() - cached[0] < UNIT_CACHE_SECONDS:
+        host.unverified |= cached[2]
+        return [dict(unit) for unit in cached[1]]
     units = []
     for scope, prefix in (("system", []), ("user", ["--user"])):
-        code, out, _err = host.run(["systemctl", *prefix, "list-unit-files", "--no-legend", "--plain", "hermes*"],
-                                   timeout=20)
+        code, out, err = host.run(["systemctl", *prefix, "list-unit-files", "--no-legend", "--plain", "hermes*"],
+                                  timeout=20)
+        if bus_failed(code, err):
+            host.unverified.add(scope)
+            continue
         if code not in (0, 1):
             continue
+        listed = []
         for line in out.splitlines():
             parts = line.split()
             if len(parts) < 2 or not parts[0].endswith(".service") or "@" in parts[0] \
                     or parts[0].startswith("hermes-evolution-os-") or parts[1] in ("transient", "generated"):
                 continue   # this plugin's own runs and units systemd made up are not Hermes' services
-            unit, state = parts[0], parts[1]
-            _code, active, _err = host.run(["systemctl", *prefix, "is-active", unit], timeout=10)
+            listed.append((parts[0], parts[1]))
+        shown = show_units(host, scope, [unit for unit, _state in listed]) if listed else {}
+        for unit, state in listed:
+            raw = (shown or {}).get(unit)
+            if raw and raw.get("ActiveState"):
+                detail = unit_detail(host, unit, scope, raw)
+                active = raw.get("ActiveState") == "active"
+            else:   # an older systemd, or a show that said nothing of it: the plain question
+                _code, answer, _err = host.run(["systemctl", *prefix, "is-active", unit], timeout=10)
+                detail, active = {}, answer.strip() == "active"
             units.append({"unit": unit, "scope": scope, "enabled": state in ("enabled", "enabled-runtime", "static",
                                                                              "alias", "indirect", "linked",
                                                                              "linked-runtime"),
-                          "state": state, "active": active.strip() == "active"})
+                          "state": state, "active": active, **detail})
+    if key is not None:
+        _UNIT_CACHE.clear()
+        _UNIT_CACHE[key] = (time.monotonic(), [dict(unit) for unit in units], set(host.unverified))
     return units
+
+
+def probe_units(names: dict, *, host: Host | None = None, timeout: int = 4) -> dict:
+    """A cheap look now, for `status` when the stored checks are old: one `systemctl show` per scope for the units
+    named ({"user": [...], "system": [...]}), each bounded by `timeout`. {"units": [...], "unverified": [...]}"""
+    host = host or Host()
+    units = []
+    for scope in ("system", "user"):
+        wanted = [name for name in names.get(scope) or () if isinstance(name, str) and name.endswith(".service")][:20]
+        shown = show_units(host, scope, wanted, timeout=timeout) if wanted else {}
+        for name in wanted:
+            raw = (shown or {}).get(name)
+            if raw and raw.get("ActiveState") and raw.get("LoadState") != "not-found":
+                units.append({"unit": name, "scope": scope, "active": raw.get("ActiveState") == "active",
+                              **unit_detail(host, name, scope, raw)})
+    return {"units": units, "unverified": sorted(host.unverified)}
+
+
+def unit_problems(units) -> dict:
+    """{"exec_missing": [...], "restart_loop": [...]}: the units that cannot start or that systemd keeps restarting."""
+    units = [unit for unit in units or () if isinstance(unit, dict)]
+    return {"exec_missing": [unit for unit in units if unit.get("exec_missing")],
+            "restart_loop": [unit for unit in units if unit.get("restart_loop")]}
 
 
 def running_services(host: Host) -> list[str]:
@@ -286,9 +500,20 @@ def running_services(host: Host) -> list[str]:
 
 
 def failed_services(host: Host) -> list[str]:
-    code, out, _err = host.run(["systemctl", "list-units", "--type=service", "--state=failed", "--no-legend", "--plain"],
-                               timeout=20)
-    return sorted({line.split()[0] for line in out.splitlines() if line.split()}) if code == 0 else []
+    """Every failed service, system and the user's (as running_services names them: "user:<unit>")."""
+    found = set()
+    for scope, prefix in (("system", []), ("user", ["--user"])):
+        code, out, err = host.run(["systemctl", *prefix, "list-units", "--type=service", "--state=failed",
+                                   "--no-legend", "--plain"], timeout=20)
+        if bus_failed(code, err):
+            host.unverified.add(scope)
+            continue
+        if code == 0:
+            for line in out.splitlines():
+                parts = [part for part in line.split() if part not in ("●", "*")]   # the mark of a failed unit
+                if parts:
+                    found.add(("user:" if prefix else "") + parts[0])
+    return sorted(found)
 
 
 def owner_of(home: Path) -> str | None:
@@ -386,17 +611,44 @@ def _names(holds: Path) -> list[str]:
         return []
 
 
-def check(host: Host | None = None, *, now: float | None = None, home: Path | None = None) -> dict:
-    """What stands between this machine and a safe upgrade, and what is waiting. Reads only; takes no lock."""
+def _left_out(code: int, err: str) -> bool:
+    """A command the time budget never launched: unknown, never a failure."""
+    return code == 124 and "time budget spent" in (err or "")
+
+
+def check(host: Host | None = None, *, now: float | None = None, home: Path | None = None,
+          deadline: float | None = None, budget: float | None = None) -> dict:
+    """What stands between this machine and a safe upgrade, and what is waiting. Reads only; takes no lock.
+    `deadline` (time.monotonic) or `budget` (seconds from now): once spent, no further command is launched and the
+    report says `incomplete`."""
     host = host or Host()
+    if budget is not None:
+        limit = time.monotonic() + budget
+        deadline = limit if deadline is None else min(deadline, limit)
+    previous = host.deadline
+    if deadline is not None:
+        host.deadline = deadline if previous is None else min(previous, deadline)
+    try:
+        return _check(host, now=now, home=home)
+    finally:
+        host.deadline = previous
+
+
+def _check(host: Host, *, now: float | None, home: Path | None) -> dict:
     now = time.time() if now is None else now
+    skipped = host.skipped
     report: dict = {"at": now, "supported": supported(host), "os": os_release(host)}
     code, kernel, _err = host.run(["uname", "-r"], timeout=10)
     report["kernel"] = kernel.strip() if code == 0 else None
     if not report["supported"]:
         report["findings"] = ["unsupported"]
         report["ready"] = False
+        report["incomplete"] = host.skipped > skipped
         return report
+    # Hermes' services first: what a spent time budget must never leave out (a gateway that cannot start)
+    report["units"] = _user_units(host)
+    report["running"] = running_services(host)
+    report["failed"] = failed_services(host)
     pending = upgradable(host)
     report["upgradable"] = pending
     report["security"] = sum(item["security"] for item in pending)
@@ -406,13 +658,13 @@ def check(host: Host | None = None, *, now: float | None = None, home: Path | No
     locks = host.held_locks()
     busy = sorted({name for name in host.processes() if name in BUSY_PROCESSES} | {f"lock:{name}" for name in locks})
     report["busy"] = busy
-    code, audit, _err = host.run(["dpkg", "--audit"], timeout=60)
+    code, audit, err = host.run(["dpkg", "--audit"], timeout=60)
     report["dpkg_audit"] = audit.strip().splitlines()[:20]
-    report["dpkg_ok"] = code == 0 and not audit.strip()
+    report["dpkg_ok"] = None if _left_out(code, err) else code == 0 and not audit.strip()
     report["root"] = host.root_user()
     # Without apt's lock (Debug::NoLocking): a check never makes unattended-upgrades or the owner's apt wait.
     code, out, err = host.run(["apt-get", "-o", "Debug::NoLocking=1", "check"], timeout=120)
-    report["apt_ok"] = code == 0
+    report["apt_ok"] = None if _left_out(code, err) else code == 0
     report["apt_error"] = None if code == 0 else " ".join((err or out).split())[:200]
     code, held, _err = host.run(["apt-mark", "showhold"], timeout=30)
     report["held"] = held.split() if code == 0 else []
@@ -422,9 +674,6 @@ def check(host: Host | None = None, *, now: float | None = None, home: Path | No
     report["disk"] = {mount: host.free(mount) for mount in MIN_FREE}
     report["unattended"] = _unattended(host)
     report["last_refresh"] = _last_refresh(host)
-    report["units"] = _user_units(host)
-    report["running"] = running_services(host)
-    report["failed"] = failed_services(host)
     report["owner"] = owner_of(home) if home is not None else None
     report["linger"] = _linger(host, report["owner"])
     findings = []
@@ -434,7 +683,7 @@ def check(host: Host | None = None, *, now: float | None = None, home: Path | No
         if (report["busy_seconds"] or 0) > BUSY_STUCK_SECONDS:
             findings.append("package_manager_stuck")   # an apt left at its question hides everything else
     else:
-        if not report["dpkg_ok"]:
+        if report["dpkg_ok"] is False:
             findings.append("dpkg_interrupted")
         if report["apt_ok"] is False:
             findings.append("apt_broken")
@@ -457,6 +706,13 @@ def check(host: Host | None = None, *, now: float | None = None, home: Path | No
         findings.append("unit_not_enabled")
     if any(unit["scope"] == "user" for unit in report["units"]) and report["linger"] is False:
         findings.append("user_units_without_linger")   # the gateway would not come back after a reboot
+    problems = unit_problems(report["units"])
+    if problems["exec_missing"]:
+        findings.append("unit_exec_missing")   # its ExecStart names a program that is gone (a moved interpreter)
+    if problems["restart_loop"]:
+        findings.append("unit_restart_loop")
+    report["units_unverified"] = sorted(host.unverified)
+    report["incomplete"] = host.skipped > skipped
     report["findings"] = findings
     report["ready"] = not ({"dpkg_interrupted", "apt_broken", "package_manager_busy", "disk_low"} & set(findings))
     return report
@@ -516,6 +772,21 @@ def _write(path: Path, text: str, mode: int = 0o600) -> None:
         stream.write(text)
 
 
+def _write_atomic(path: Path, text: str, mode: int = 0o600) -> None:
+    """Written whole or not at all: a new file next to it (never through a link), then renamed over it. A reader
+    never sees half a report, and a crash leaves the previous one."""
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        _write(temporary, text, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
 def _state_dir(host: Host) -> Path:
     """The runs' root-only folder, made (0700) where missing and refused when anyone else could write it."""
     base = host.path(STATE_DIR)
@@ -550,9 +821,9 @@ def _guard(host: Host, home: Path, *, repair: bool = False) -> None:
                              "system with apt yourself (the plan shows what would change)")
 
 
-def _snapshot(host: Host, folder: Path, name: str) -> int:
+def _snapshot(host: Host, folder: Path, name: str, *, atomic: bool = False) -> int:
     code, out, _err = host.run(["dpkg-query", "-W", "-f=${Package}\\t${Version}\\t${db:Status-Abbrev}\\n"], timeout=120)
-    _write(folder / name, out if code == 0 else "")
+    (_write_atomic if atomic else _write)(folder / name, out if code == 0 else "")
     return len(out.splitlines()) if code == 0 else 0
 
 
@@ -733,7 +1004,7 @@ def after(host: Host, folder: Path, before: dict, *, now: float | None = None) -
     after_from = "run"
     if not (folder / "packages-after.tsv").exists():   # the run was killed before it listed them: taken now
         after_from = "later"
-        _snapshot(host, folder, "packages-after.tsv")
+        _snapshot(host, folder, "packages-after.tsv", atomic=True)
 
     def table(path: Path) -> dict:
         rows = {}
@@ -774,10 +1045,7 @@ def after(host: Host, folder: Path, before: dict, *, now: float | None = None) -
               "go_back": [f"apt-get install {item['name']}={item['from']}" for item in changed if item["from"] and item["to"]][:200]}
     result["ok"] = bool(result["exit"] == 0 and result["dpkg_ok"] and result["apt_ok"] is not False
                         and result["hermes_ok"] is not False and not result["stopped_units"])
-    path = folder / "report.json"
-    if path.exists() and not path.is_symlink():
-        path.unlink()
-    _write(path, json.dumps(result, ensure_ascii=False, indent=2))
+    _write_atomic(folder / "report.json", json.dumps(result, ensure_ascii=False, indent=2))
     return result
 
 
@@ -861,8 +1129,91 @@ def repair(home: Path, host: Host | None = None, *, now: float | None = None, wa
             "folder": str(folder)}
 
 
-def cached(conn, home: Path, *, now: float, host: Host | None = None, force: bool = False) -> dict | None:
-    """The day's check, read from the plugin's store or taken now (the learning pass calls this)."""
+# ── a unit whose program moved: the owner's repair, with its undo ───────────────────────────────────────────────
+_UNIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,100}\.service")
+
+
+def _systemctl(host: Host, scope: str, *args: str, timeout: int = 30) -> dict:
+    prefix = ["--user"] if scope == "user" else []
+    code, out, err = host.run(["systemctl", *prefix, *args], timeout=timeout)
+    return {"command": " ".join(["systemctl", *prefix, *args]), "exit": code,
+            "tail": " ".join((err or out).split())[-200:]}
+
+
+def fix_unit_exec(host: Host, unit: dict, *, now: float | None = None) -> dict:
+    """Point a Hermes unit whose ExecStart names a program that is gone (Hermes replaced its bundled Python) at the
+    same program in the newest tools folder that has it, then daemon-reload, reset-failed and start.
+
+    Only the file that sets ExecStart (a drop-in, or the unit file), only the interpreter's path on its ExecStart
+    lines; a copy of the file is kept next to it (`<file>.atlas-<time>.bak`, a name systemd never loads) and
+    undo_unit_exec puts it back. The owner's: called from their terminal, never by the learning pass. ValueError
+    says why nothing was changed."""
+    now = time.time() if now is None else now
+    name, scope = str(unit.get("unit") or ""), unit.get("scope")
+    old, source = unit.get("exec_path"), unit.get("exec_source")
+    if not _UNIT_NAME.fullmatch(name) or scope not in ("user", "system") or not old or not source:
+        raise ValueError("Not a unit whose program is missing, or the file that sets it is unknown: nothing was changed")
+    if not name.startswith("hermes"):
+        raise ValueError("Only Hermes' own services are repaired here")
+    if _executable(host, old):
+        raise ValueError("The program the unit starts exists again: nothing to repair")
+    new = replacement_python(host, old)
+    if not new:
+        raise ValueError("No newer Hermes Python was found to point the unit at: reinstall Hermes' service instead")
+    path = host.path(source)
+    try:
+        info = os.lstat(path)
+    except OSError:
+        raise ValueError("The unit's file cannot be read: nothing was changed") from None
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("The unit's file is a link or not a regular file: nothing was changed")
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    changed = 0
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith("ExecStart=") and old in line:
+            lines[index] = line.replace(old, new)
+            changed += 1
+    if not changed:
+        raise ValueError("The unit's file does not name that program on an ExecStart line: nothing was changed")
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+    backup = path.with_name(f"{path.name}.atlas-{stamp}-{secrets.token_hex(3)}.bak")
+    _write(backup, text, stat.S_IMODE(info.st_mode))
+    _write_atomic(path, "".join(lines), stat.S_IMODE(info.st_mode))
+    steps = [_systemctl(host, scope, "daemon-reload"), _systemctl(host, scope, "reset-failed", name),
+             _systemctl(host, scope, "start", name, timeout=90)]
+    _code, state, _err = host.run(["systemctl", *(["--user"] if scope == "user" else []), "is-active", name], timeout=10)
+    return {"ok": all(step["exit"] == 0 for step in steps) and state.strip() == "active", "unit": name, "scope": scope,
+            "file": source, "backup": str(backup), "from": old, "to": new, "lines": changed, "steps": steps,
+            "state": state.strip() or None,
+            "undo": {"unit": name, "scope": scope, "file": source, "backup": str(backup)}}
+
+
+def undo_unit_exec(host: Host, record: dict) -> dict:
+    """Put back the file fix_unit_exec changed, from its copy, and reload systemd (the unit is left as it is)."""
+    name, scope = str(record.get("unit") or ""), record.get("scope")
+    source, backup = record.get("file"), Path(str(record.get("backup") or ""))
+    if not _UNIT_NAME.fullmatch(name) or scope not in ("user", "system") or not source:
+        raise ValueError("Not a repair of this plugin")
+    path = host.path(source)
+    if backup.parent != path.parent or not backup.name.startswith(path.name + ".atlas-") or backup.is_symlink() \
+            or not backup.is_file():
+        raise ValueError("The copy of the unit's file is gone: nothing was changed")
+    _write_atomic(path, backup.read_text(encoding="utf-8"), stat.S_IMODE(os.lstat(backup).st_mode))
+    step = _systemctl(host, scope, "daemon-reload")
+    return {"ok": step["exit"] == 0, "unit": name, "file": source, "restored_from": str(backup), "steps": [step]}
+
+
+UNIT_KEEP = ("unit", "scope", "enabled", "active", "state", "active_state", "sub_state", "result", "n_restarts",
+             "exec_main_status", "exec_path", "exec_exists", "exec_source", "replacement", "drop_ins", "need_reload",
+             "exec_missing", "restart_loop")
+CHECK_BUDGET_SECONDS = 240
+
+
+def cached(conn, home: Path, *, now: float, host: Host | None = None, force: bool = False,
+           deadline: float | None = None) -> dict | None:
+    """The day's check, read from the plugin's store or taken now (the learning pass calls this). Taken within
+    `deadline` (time.monotonic), and never for longer than CHECK_BUDGET_SECONDS."""
     row = conn.execute("SELECT value FROM cursor WHERE key='system_check'").fetchone()
     try:
         last = json.loads(row[0]) if row else None
@@ -872,12 +1223,12 @@ def cached(conn, home: Path, *, now: float, host: Host | None = None, force: boo
         return last
     if os.name != "posix" or not Path("/etc/os-release").exists() and host is None:
         return None
-    found = check(host, now=now, home=home)
+    found = check(host, now=now, home=home, deadline=deadline, budget=CHECK_BUDGET_SECONDS)
     keep = {key: found.get(key) for key in ("at", "supported", "os", "kernel", "security", "reboot_required",
                                              "reboot_packages", "dpkg_ok", "apt_ok", "busy", "busy_seconds", "held", "plugin_holds",
                                              "disk_low", "unattended", "last_refresh", "linger", "owner", "findings",
-                                             "ready")}
+                                             "ready", "units_unverified", "incomplete")}
     keep["upgradable"] = len(found.get("upgradable") or [])
-    keep["units"] = [{key: unit[key] for key in ("unit", "scope", "enabled", "active")} for unit in found.get("units") or ()]
+    keep["units"] = [{key: unit[key] for key in UNIT_KEEP if key in unit} for unit in found.get("units") or ()]
     conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('system_check', ?)", (json.dumps(keep),))
     return keep

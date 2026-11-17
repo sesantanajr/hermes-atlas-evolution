@@ -5,6 +5,16 @@
 ## Atualizar o plugin
 
 ```sh
+hermes evolution update --all          # todos os perfis; perfis fixados perdem a fixação
+hermes evolution update                # escolha os perfis numa lista
+hermes evolution update --list         # versão, commit e fixação de cada perfil
+sh install.sh --all --yes --restart    # o mesmo sem o plugin carregado
+hermes gateway restart
+```
+
+Manualmente, um perfil por vez:
+
+```sh
 hermes plugins update hermes-atlas-evolution                 # o perfil padrão
 hermes -p <perfil> plugins update hermes-atlas-evolution     # um perfil com nome
 

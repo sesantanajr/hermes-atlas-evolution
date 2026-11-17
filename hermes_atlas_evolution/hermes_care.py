@@ -124,7 +124,10 @@ def gateway(home: Path, *, now: float) -> dict:
         # its pid means nothing here. Without one: its process gone, or the pid now someone else's, is a crash.
         try:
             os.kill(state["pid"], 0)
-            gone = _started(state["pid"]) not in (None, state.get("start_time"))
+            # the pid now someone else's only when both start times are known and differ: a missing or odd
+            # start_time in the state file proves nothing, and a live gateway is never called crashed for it
+            expected, started = state.get("start_time"), _started(state["pid"])
+            gone = type(expected) is int and type(started) is int and started != expected
         except ProcessLookupError:
             gone = True
         except OSError:
@@ -178,12 +181,42 @@ def database(home: Path, *, quick: bool) -> dict:
 _VERSIONED = re.compile(r"^(?P<name>[a-z][a-z0-9-]*?)-(?P<version>\d[\w.+-]*)$")
 
 
-def unused_tools(home: Path, *, budget: float = 4.0) -> list[dict]:
+def _in_use(store: Path, paths) -> set[str]:
+    """The folders of the tool store that a running program or a service's ExecStart points into: never unused,
+    whatever facts.json says (removing one would delete the interpreter a service starts)."""
+    names = set()
+    try:
+        base = os.path.normcase(os.path.realpath(store)).replace("\\", "/").rstrip("/") + "/"
+    except (OSError, ValueError):
+        return names
+    for raw in paths:
+        if not raw:
+            continue
+        try:
+            candidates = {str(raw), os.path.realpath(str(raw))}
+        except (OSError, ValueError):
+            candidates = {str(raw)}
+        for candidate in candidates:
+            folded = os.path.normcase(candidate).replace("\\", "/")
+            if folded.startswith(base):
+                names.add(folded[len(base):].split("/", 1)[0])
+            parts = str(candidate).replace("\\", "/").split("/")
+            for index in range(1, len(parts)):   # any .../tools/<folder>/... (a unit names the root's own store)
+                if parts[index - 1] == "tools" and parts[index]:
+                    names.add(parts[index])
+    return names
+
+
+def unused_tools(home: Path, *, budget: float = 4.0, in_use=()) -> list[dict]:
     """Versions of Hermes' managed tools that `tools/facts.json` no longer points at (what `hermes pm gc` removes).
-    Only names Hermes manages count; anything else in the folder is left out."""
+    Only names Hermes manages count; anything else in the folder is left out, and so is any folder a Hermes service
+    starts a program from (`in_use`: the ExecStart paths of the hermes* units) or this process runs from."""
+    import sys
+
     from .environment import root_of
 
     store = root_of(Path(home)) / "tools"   # one store for every profile of a Hermes, at its root
+    protected = _in_use(store, [*in_use, sys.executable])
     facts = _read_json(store / "facts.json")
     packages = facts.get("packages") if isinstance(facts, dict) else None
     if not isinstance(packages, dict):
@@ -196,7 +229,7 @@ def unused_tools(home: Path, *, budget: float = 4.0) -> list[dict]:
     except OSError:
         return []
     for child in children:
-        if not child.is_dir() or child.is_symlink() or child.name in used:
+        if not child.is_dir() or child.is_symlink() or child.name in used or child.name in protected:
             continue
         match = _VERSIONED.match(child.name)
         name = match["name"] if match else None
@@ -211,7 +244,9 @@ def _growth(history: list[dict], current: dict) -> list[dict]:
     """Folders that grew by at least GROWTH_BYTES and GROWTH_RATIO since about a week ago (or the oldest record)."""
     if not history:
         return []
-    old = history[0]["sizes"]
+    old = history[0].get("sizes") if isinstance(history[0], dict) else None
+    if not isinstance(old, dict):
+        return []
     grown = []
     for name, value in current.items():
         before = old.get(name)
@@ -221,14 +256,42 @@ def _growth(history: list[dict], current: dict) -> list[dict]:
     return grown
 
 
+def _when(item) -> float | None:
+    """A history record's time, None when the record is damaged."""
+    try:
+        value = float(item.get("at"))
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        return None
+    return value if value == value and abs(value) != float("inf") else None
+
+
+def _gateway_unit(units: list[dict]) -> dict | None:
+    """The unit that runs the gateway: a user one first (Hermes installs it there), then a system one."""
+    found = [unit for unit in units if isinstance(unit, dict) and "gateway" in str(unit.get("unit") or "")]
+    found.sort(key=lambda unit: (unit.get("scope") != "user", str(unit.get("unit"))))
+    return found[0] if found else None
+
+
+GATEWAY_UNIT_KEYS = ("unit", "scope", "active", "active_state", "sub_state", "n_restarts", "exec_main_status",
+                     "exec_path", "exec_exists", "exec_source", "replacement", "need_reload", "exec_missing",
+                     "restart_loop")
+
+
 def check(home: Path, *, now: float | None = None, history: list[dict] | None = None, quick: bool = False,
-          root: Path = Path("/")) -> dict:
-    """Read-only. `history`: earlier records [{"at", "sizes", "free", "rss"}], oldest first."""
+          root: Path = Path("/"), host=None) -> dict:
+    """Read-only. `history`: earlier records [{"at", "sizes", "free", "rss"}], oldest first. `host`: the machine
+    (system_update.Host) whose systemd units are read; by default this one, on Linux with systemd only."""
     from .system_update import Host, _linger, _user_units
 
     now = time.time() if now is None else now
     home = Path(home)
     report: dict = {"at": now, "gateway": gateway(home, now=now), "database": database(home, quick=quick)}
+    units, unit_host = [], None
+    if host is not None or (os.name == "posix" and Path("/run/systemd/system").is_dir()):
+        unit_host = host or Host(root=root)
+        units = _user_units(unit_host)
+    unit = _gateway_unit(units)
+    report["gateway_unit"] = {key: unit.get(key) for key in GATEWAY_UNIT_KEYS} if unit else None
     try:
         stat = os.statvfs(home)
         report["free"] = stat.f_bavail * stat.f_frsize
@@ -245,14 +308,15 @@ def check(home: Path, *, now: float | None = None, history: list[dict] | None = 
     except (OSError, AttributeError):
         report["load"] = None
     report["sizes"] = sizes(home)
-    report["unused_tools"] = unused_tools(home)
+    report["unused_tools"] = unused_tools(home, in_use=[item.get("exec_path") for item in units])
     report["reclaimable"] = sum(item["bytes"] or 0 for item in report["unused_tools"])
-    past = [item for item in history or () if isinstance(item, dict) and now - float(item.get("at") or 0) <= 8 * 86_400]
+    past = [item for item in history or () if isinstance(item, dict) and _when(item) is not None
+            and now - _when(item) <= 8 * 86_400]
     for item in past:
-        item["days_ago"] = round((now - float(item["at"])) / 86_400, 1)
+        item["days_ago"] = round((now - _when(item)) / 86_400, 1)
     report["growth"] = _growth(past, report["sizes"])
     if past and report["free"] is not None and isinstance(past[0].get("free"), int):
-        days = max(0.5, (now - float(past[0]["at"])) / 86_400)
+        days = max(0.5, (now - _when(past[0])) / 86_400)
         per_day = (past[0]["free"] - report["free"]) / days
         report["disk_per_day"] = round(per_day)
         report["days_to_full"] = round(report["free"] / per_day, 1) if per_day > 0 else None
@@ -261,7 +325,14 @@ def check(home: Path, *, now: float | None = None, history: list[dict] | None = 
     gate = report["gateway"]
     if gate["stale"]:
         findings.append("gateway_heartbeat_stale")
-    if gate.get("crashed"):
+    service = report["gateway_unit"] or {}
+    if not gate.get("running") and (service.get("exec_missing") or service.get("exec_main_status") == 203
+                                    and service.get("active_state") != "active"):
+        # systemd cannot start it (its program is gone, status=203/EXEC): a restart only waits; the unit needs fixing
+        findings.append("gateway_exec_missing")
+    elif not gate.get("running") and service.get("restart_loop"):
+        findings.append("gateway_restart_loop")
+    elif gate.get("crashed"):
         findings.append("gateway_crashed")
     if gate["rss"] and rss_old and gate["rss"] > 2 * sorted(rss_old)[len(rss_old) // 2] and gate["rss"] > 512 * 2**20:
         findings.append("gateway_memory_growth")
@@ -293,11 +364,9 @@ def check(home: Path, *, now: float | None = None, history: list[dict] | None = 
     from .system_update import owner_of
 
     report["owner"] = owner_of(home)
-    if os.name == "posix" and Path("/run/systemd/system").is_dir():
-        host = Host(root=root)
-        units = _user_units(host)
+    if unit_host is not None:
         if any(unit["scope"] == "user" and "gateway" in unit["unit"] for unit in units) \
-                and _linger(host, report["owner"]) is False:
+                and _linger(unit_host, report["owner"]) is False:
             findings.append("gateway_not_at_boot")
     report["findings"] = findings
     return report
@@ -310,22 +379,26 @@ def cached(conn, home: Path, *, now: float, force: bool = False) -> dict | None:
         last = json.loads(row[0]) if row else None
     except ValueError:
         last = None
-    if not force and isinstance(last, dict) and now - float(last.get("at") or 0) < CHECK_EVERY_SECONDS:
+    if not force and isinstance(last, dict) and now - (_when(last) or 0) < CHECK_EVERY_SECONDS:
         return last
     row = conn.execute("SELECT value FROM cursor WHERE key='care_history'").fetchone()
     try:
         history = json.loads(row[0]) if row else []
     except ValueError:
         history = []
-    history = [item for item in history if isinstance(item, dict)]
+    history = [item for item in history if isinstance(item, dict) and _when(item) is not None] \
+        if isinstance(history, list) else []
     quick_row = conn.execute("SELECT value FROM cursor WHERE key='care_quick_check'").fetchone()
-    quick = quick_row is None or now - float(quick_row[0] or 0) >= QUICK_CHECK_EVERY_SECONDS   # weekly, even when asked
+    try:
+        quick = quick_row is None or now - float(quick_row[0] or 0) >= QUICK_CHECK_EVERY_SECONDS   # weekly, even when asked
+    except (TypeError, ValueError):
+        quick = True
     found = check(home, now=now, history=history, quick=quick)
     if quick:
         conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('care_quick_check', ?)", (str(now),))
     record = {"at": now, "sizes": found["sizes"], "free": found["free"], "rss": found["gateway"]["rss"]}
-    keep = [item for item in history if now - float(item.get("at") or 0) <= HISTORY_DAYS * 86_400]
-    if not keep or now - float(keep[-1].get("at") or 0) >= 20 * 3600:   # about one record a day
+    keep = [item for item in history if now - _when(item) <= HISTORY_DAYS * 86_400]
+    if not keep or now - _when(keep[-1]) >= 20 * 3600:   # about one record a day
         keep.append(record)
     conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('care_history', ?)", (json.dumps(keep[-HISTORY_DAYS:]),))
     conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('care_check', ?)", (json.dumps(found),))
@@ -368,8 +441,9 @@ def summarize(output: str) -> dict:
             "found": found}
 
 
-def run_action(home: Path, key: str, *, runner=None) -> dict:
-    """Run one of ACTIONS for this profile and keep what it printed (a backup first where it says so)."""
+def run_action(home: Path, key: str, *, runner=None, timeout: int = 900) -> dict:
+    """Run one of ACTIONS for this profile and keep what it printed (a backup first where it says so). `timeout`
+    bounds each Hermes command (a learning pass passes what is left of its own time)."""
     from .admin import hermes_output
 
     if key not in ACTIONS:
@@ -377,11 +451,11 @@ def run_action(home: Path, key: str, *, runner=None) -> dict:
     args, backup_first = ACTIONS[key]
     steps = []
     if backup_first:
-        code, out = hermes_output(home, ACTIONS["backup"][0], runner=runner, timeout=900)
+        code, out = hermes_output(home, ACTIONS["backup"][0], runner=runner, timeout=timeout)
         steps.append({"command": "hermes " + " ".join(ACTIONS["backup"][0]), "exit": code, "tail": out.strip().splitlines()[-3:]})
         if code != 0:
             return {"ok": False, "steps": steps, "reason": "backup_failed"}
-    code, out = hermes_output(home, args, runner=runner, timeout=900)
+    code, out = hermes_output(home, args, runner=runner, timeout=timeout)
     steps.append({"command": "hermes " + " ".join(args), "exit": code, "tail": out.strip().splitlines()[-6:]})
     result = {"ok": code == 0, "steps": steps}
     if key.startswith("doctor"):

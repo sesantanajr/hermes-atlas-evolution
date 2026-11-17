@@ -104,6 +104,7 @@ def shared_context(home, payload: dict, config: dict):
 
 SETTINGS_CHECK_SECONDS = 30   # how often a hook or the clock may look for a change of the settings
 RELOAD_KEYS = ("runtime_guard", "tool_hints")   # these decide which hooks are registered: next load of the plugin
+PLAYBOOK_BUSY_SECONDS = 0.25   # the lessons section reads on the prompt path: a busy database leaves it empty
 
 
 def _managed_files() -> list:
@@ -422,12 +423,19 @@ class _Plugin:
                                             parent_owner=surface == "subagent" and self.served_owner(parent)), origin)
         except Exception:
             pass
+        sensor = self.sensor   # apply_settings may set it to None on another thread meanwhile
         try:
-            if self.sensor is not None and {"correction", "reask"} & set(self.sensor.observe(payload)):
+            if sensor is not None and {"correction", "reask"} & set(sensor.observe(payload)):
                 # The owner is correcting the previous turn: count it against the skills that turn loaded.
                 record_skill_correction(self.home, self.turns.recent_skills(payload.get("session_id")))
-            self.research.start(payload)
-            self.turns.start(payload)
+        except Exception:
+            pass   # a feedback counter that cannot be written never costs the turn its measurement
+        for tracker in (self.research, self.turns):
+            try:
+                tracker.start(payload)
+            except Exception:
+                pass
+        try:
             # The 0.1 shared notes are the owner's: never recalled into a turn that serves someone else.
             return shared_context(self.home, payload, self.config) \
                 if self.legacy and self.served_owner(payload.get("session_id")) else None
@@ -584,7 +592,8 @@ class _Plugin:
         (a `learn` run, another process) must never leave a new session without its lessons. A session counts
         once, however often Hermes renders its prompt again (compaction, a fork, an inspection)."""
         from . import lessons as playbook
-        from .experience import experience, record
+        from .experience import record
+        from .operations import database
         from .signals import session_source, surface_of
 
         try:
@@ -603,7 +612,9 @@ class _Plugin:
             else:
                 others = surface == "gateway" and not self.served_owner(info.get("session_id")) \
                     and not (isinstance(origin, str) and origin.lower() in self.owner_platforms)
-            with experience(self.home) as conn:   # its own connection: WAL readers never wait for a writer
+            # Its own connection: WAL readers never wait for a writer. The short busy wait bounds the rare one-time
+            # schema step, so a prompt is never held up by this section; a busy database leaves it empty.
+            with database(self.home, timeout=PLAYBOOK_BUSY_SECONDS) as conn:
                 text = playbook.playbook(conn, lang=self.lang, chosen=shown, templates_only=others)
             session = info.get("session_id")
             if isinstance(session, str) and session:

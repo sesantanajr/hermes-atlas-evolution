@@ -32,6 +32,17 @@ _JOB_NAME = "hermes-atlas-evolution-watchdog"
 _SCRIPT_NAME = _JOB_NAME + ".py"
 
 
+def _launcher() -> str | None:
+    """The `hermes` launcher as an absolute path: the one admin finds for this Hermes (a service's PATH may lack
+    it), else the PATH's. Never a .bat or .cmd shim."""
+    from .admin import hermes_executable
+
+    found = hermes_executable() or shutil.which("hermes")
+    if not found or Path(found).suffix.lower() in (".bat", ".cmd"):
+        return None
+    return str(Path(found).resolve())
+
+
 def _profile_args(profile: Path) -> list[str]:
     # A root HERMES_HOME alone can still follow Hermes's sticky active_profile.
     name = profile.name if profile.parent.name == "profiles" else "default"
@@ -43,7 +54,7 @@ def _profile_args(profile: Path) -> list[str]:
 def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: float | None = None,
                    runner=None, lang: str = "en") -> dict:
     """Request one bounded, blocked card using a fixed verification playbook."""
-    policy = config.get("kanban_handoff")
+    policy = config.get("kanban_handoff") if isinstance(config, dict) else None
     if policy is None or isinstance(policy, dict) and policy.get("enabled") is not True:
         return {"status": "disabled", "reason": "kanban_handoff_not_enabled"}
     if not isinstance(policy, dict):
@@ -60,8 +71,8 @@ def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: fl
     profile = Path(home).expanduser().resolve()
     if not profile.is_dir():
         return {"status": "unavailable", "reason": "profile_not_found"}
-    executable = shutil.which("hermes")
-    if not executable or Path(executable).suffix.lower() in (".bat", ".cmd"):
+    executable = _launcher()
+    if not executable:
         return {"status": "unavailable", "reason": "hermes_launcher_not_found"}
     from .experience import utc_datetime
 
@@ -77,7 +88,7 @@ def create_handoff(home: Path, config: dict, *, kind: str, subject: str, now: fl
         + text(HANDOFF_RULES, lang)
     )
     command = [
-        str(Path(executable).resolve()), *_profile_args(profile), "kanban", "--board", board, "create", title,
+        executable, *_profile_args(profile), "kanban", "--board", board, "create", title,
         "--body", body, "--assignee", assignee, "--initial-status", "blocked",
         "--max-retries", "1", "--max-runtime", "5m", "--created-by", "hermes-atlas-evolution",
         "--idempotency-key", key, "--json",
@@ -124,12 +135,15 @@ def schedule_spec(home: Path, *, every_minutes: int = 5, upstream_tag: str | Non
     arguments = [*profile_args, "evolution", "ops", "tick", "--notify-only"]
     if upstream_tag:
         arguments += ["--upstream-tag", upstream_tag]
+    resolved = _launcher()   # the scheduler's PATH may lack it: the absolute path found now, the PATH's as a fallback
     script = f'''"""Run the configured Atlas Evolution policy without an agent turn."""
 import os
 import shutil
 import subprocess
 
-launcher = shutil.which("hermes")
+launcher = {resolved!r}
+if not launcher or not os.path.isfile(launcher):
+    launcher = shutil.which("hermes")
 if not launcher:
     raise SystemExit({text("Hermes CLI is not on the scheduler PATH.", lang)!r})
 try:

@@ -47,6 +47,7 @@ IDLE_PLUGIN_DAYS = 1     # installed and not loaded for longer than this (a plug
 LEFTOVER_DAYS = 1
 IDLE_PROFILE_DAYS = 30
 LEAD_PASS_SECONDS = 2 * 86_400
+LOCK_WAIT_SECONDS = 10   # the shared state's lock is waited for this long at most
 SIMILAR = 0.6
 FIRST_WINS = ("transform_tool_result", "transform_terminal_output", "transform_llm_output")
 KINDS = ("plugin_removed", "plugin_transform_overlap", "plugin_transform_protected", "plugin_transform_unclear",
@@ -299,17 +300,51 @@ def _locked(folder: Path):
             yield
             return
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+            # never wait for good: a process stuck while it held the lock must not hang every pass and every menu
+            give_up = time.monotonic() + LOCK_WAIT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= give_up:
+                        raise TimeoutError(f"The shared state of this Hermes ({folder / '.fleet-state.lock'}) stayed "
+                                           f"locked by another process for {LOCK_WAIT_SECONDS} s; nothing was "
+                                           "written. Try again; if it lasts, look for a stuck `hermes` process.") from None
+                    time.sleep(0.1)
             yield
         finally:
             os.close(handle)
     return held()
 
 
+def _ordered(values, limit: int) -> list[str]:
+    """The strings of `values` once each, in their order (oldest first), keeping the newest `limit`."""
+    seen: dict[str, None] = {}
+    for item in values or ():
+        if isinstance(item, str):
+            seen.pop(item, None)
+            seen[item] = None
+    return list(seen)[-limit:]
+
+
+def _raw_state(root: Path) -> dict:
+    """The shared state as written, oldest entry first (state() sorts it for its readers)."""
+    text = read_text(_state_path(root), 1_000_000)
+    try:
+        data = json.loads(text) if text else {}
+    except ValueError:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    return {"seen": _ordered(data.get("seen"), 1000), "skip": _ordered(data.get("skip"), 5000)}
+
+
 def _remember(root: Path, folder: Path, seen, skip) -> None:
-    current = state(root)
-    merged = {"seen": sorted(set(current["seen"]) | {str(item) for item in seen})[:1000],
-              "skip": sorted(set(current["skip"]) | {str(item) for item in skip})[:5000]}
+    current = _raw_state(root)
+    # added at the end, and past the limit the oldest go first: a new entry is never the one dropped (a sorted list
+    # cut at its limit dropped whatever sorted last, often what was just added)
+    merged = {"seen": _ordered([*current["seen"], *[str(item) for item in seen]], 1000),
+              "skip": _ordered([*current["skip"], *[str(item) for item in skip]], 5000)}
     if merged == current:
         return
     try:
@@ -393,16 +428,38 @@ def git_origin(folder: Path) -> tuple[str, str]:
 
 
 def install_record(home: Path, name: str, folder: str) -> dict:
-    """Hermes' install record of a plugin (`plugins/.install-metadata.json`), {} when none."""
+    """Hermes' install record of a plugin (`plugins/.install-metadata.json`, or the plugin folder's own), {} when
+    none. `pinned`: the commit Hermes pinned the install to (an install made with `--ref`), "" when not pinned; a
+    pinned plugin refuses `hermes plugins update` ("is pinned to <sha>")."""
+    record: dict = {}
     text = read_text(Path(home) / "plugins" / ".install-metadata.json", 1_000_000)
     try:
         data = json.loads(text) if text else {}
-    except ValueError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    record = data.get(name) or data.get(folder)
-    return record if isinstance(record, dict) else {}
+    except (ValueError, RecursionError):
+        data = {}
+    if isinstance(data, dict):
+        found = data.get(name) or data.get(folder)
+        record = dict(found) if isinstance(found, dict) else {}
+    own = read_text(Path(home) / "plugins" / folder / ".install-metadata.json", 65_536) if _PLUGIN.fullmatch(folder) else None
+    try:
+        local = json.loads(own) if own else {}
+    except (ValueError, RecursionError):
+        local = {}
+    if isinstance(local, dict):
+        record = {**local, **record}
+    record["pinned"] = _pin_of(record) or _pin_of(local if isinstance(local, dict) else {})
+    return record
+
+
+def _pin_of(record: dict) -> str:
+    """The commit an install record pins to, whatever Hermes names the key; "" when it pins nothing."""
+    if not isinstance(record, dict) or record.get("pinned") is False:
+        return ""
+    for key in ("pinned", "pin", "pinned_ref", "pinned_sha", "ref", "commit"):
+        value = record.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{7,40}", value.strip().lower()):
+            return value.strip().lower()
+    return "pinned" if record.get("pinned") is True else ""
 
 
 def _size(folder: Path, limit: int = 4000) -> tuple[int, float]:
@@ -809,6 +866,7 @@ def _plugins_of(home: Path, enabled, disabled, bundled: Path | None, *, now: flo
                           "requires": meta["requires_plugins"], "origin": origin, "state": state, "repo": repo,
                           "sha": sha, "bytes": size, "changed": newest, "linked": linked,
                           "source": str(record.get("source") or "")[:300], "allow_removed": record.get("allow_removed") is True,
+                          "pinned": str(record.get("pinned") or "")[:40],
                           "hooks": code_hooks(path, budget) if state == "enabled" else {}})
             if len(found) >= PLUGIN_MAX:
                 break
@@ -1129,10 +1187,10 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
                                   command=_cmd(profile, f"plugins enable {PLUGIN_ID}" if row["self_installed"]
                                                else f"plugins install {REPOSITORY} --enable")))
         else:
+            # never `--ref`: Hermes pins an install made with one, and every later `plugins update` there fails
             found.append(_finding("self_missing", profile, PLUGIN_ID, risk="low",
-                                  evidence={"sessions_7d": row["sessions_7d"], "ref": self_sha},
-                                  command=_cmd(profile, f"plugins install {REPOSITORY} --enable"
-                                               + (f" --ref {self_sha}" if self_sha else ""))))
+                                  evidence={"sessions_7d": row["sessions_7d"]},
+                                  command=_cmd(profile, f"plugins install {REPOSITORY} --enable")))
     if row["sessions_30d"] == 0 and profile != "default" and row["config_read"]:
         found.append(_finding("profile_idle", profile, "", risk="low",
                               evidence={"days": IDLE_PROFILE_DAYS, "plugins": len(on), "skills": len(row["skills"])},
@@ -1177,6 +1235,47 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
     return found
 
 
+SELF_URL = f"https://github.com/{REPOSITORY}.git"
+
+
+def _reinstall(profile: str) -> str:
+    """This plugin installed again from its repository, over the profile's copy: drops a pin (no --ref), so the
+    profile follows the default branch and the next `plugins update` works again."""
+    return _cmd(profile, f"plugins install {SELF_URL} --force")
+
+
+def _update_command(name: str, item: dict) -> str:
+    if name == PLUGIN_ID and item.get("pinned"):
+        return _reinstall(item["profile"])   # `plugins update` refuses a pinned install ("is pinned to <sha>")
+    return _cmd(item["profile"], f"plugins update {name}")
+
+
+def _self_drift(reading: dict, self_sha: str, *, already=()) -> list[dict]:
+    """Profiles whose copy of this plugin is pinned to a commit, or runs another commit than the lead's (the same
+    version string can hide different code): one finding, with the reinstall command for each."""
+    rows, lead_version = [], ""
+    for row in reading.get("profiles") or ():
+        for item in row.get("plugins") or ():
+            if item.get("origin") != "profile" or item.get("linked") or PLUGIN_ID not in (item.get("name"), item.get("folder")):
+                continue
+            if self_sha and item.get("sha") == self_sha:
+                lead_version = lead_version or str(item.get("version") or "")
+            reason = "pinned" if item.get("pinned") else (
+                "self_skew" if self_sha and item.get("sha") and item["sha"] != self_sha else "")
+            if reason and row["profile"] not in already:
+                rows.append({"profile": row["profile"], "installed": item.get("version") or "?", "reason": reason,
+                             "pinned": item.get("pinned") or "", "sha": (item.get("sha") or "")[:12]})
+    if not rows:
+        return []
+    reasons = sorted({item["reason"] for item in rows})
+    commands = [_reinstall(item["profile"]) for item in rows]
+    return [_finding("plugin_update", "all", PLUGIN_ID, risk="medium" if "pinned" in reasons else "low", key="drift",
+                     evidence={"catalog": lead_version or "?", "tier": "lead", "reason": reasons[0] if len(reasons) == 1
+                               else "pinned", "reasons": reasons, "lead_sha": self_sha[:12], "profiles": rows[:20],
+                               "count": len(rows), "commands": commands[:20]},
+                     command=commands[0])]
+
+
 def findings(reading: dict, catalog: dict, known: dict, *, now: float | None = None, fleet: dict | None = None,
              self_sha: str = "") -> list[dict]:
     """The situations of the playbook found in a scan, most important first."""
@@ -1198,13 +1297,15 @@ def findings(reading: dict, catalog: dict, known: dict, *, now: float | None = N
             if entry and entry["version"] and item["version"] and entry["version"] != item["version"] \
                     and _newer(entry["version"], item["version"]):
                 group = updates.setdefault(item["name"], {"catalog": entry["version"], "tier": entry["tier"], "profiles": []})
-                group["profiles"].append({"profile": row["profile"], "installed": item["version"]})
+                group["profiles"].append({"profile": row["profile"], "installed": item["version"],
+                                          **({"pinned": item["pinned"]} if item.get("pinned") else {})})
     for name, group in sorted(updates.items()):
         names = [item["profile"] for item in group["profiles"]]
+        commands = [_update_command(name, item) for item in group["profiles"]]
         found.append(_finding("plugin_update", "all", name, risk="low",
-                              evidence={**group, "count": len(names),
-                                        "commands": [_cmd(profile, f"plugins update {name}") for profile in names][:20]},
-                              command=_cmd(names[0], f"plugins update {name}")))
+                              evidence={**group, "count": len(names), "commands": commands[:20]},
+                              command=commands[0]))
+    found += _self_drift(reading, self_sha, already={item["profile"] for item in (updates.get(PLUGIN_ID) or {}).get("profiles") or ()})
     shared = sum(1 for where in copies.values() if len(where) >= 3)
     if shared:
         found.append(_finding("skills_shared", "all", "", risk="low",

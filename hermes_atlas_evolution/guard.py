@@ -40,6 +40,10 @@ _SERVICE_CMDLETS = frozenset({"stop-service", "restart-service", "suspend-servic
 _STOP_ACTIONS = frozenset({"restart", "stop", "kill", "try-restart", "reload-or-restart", "try-reload-or-restart",
                            "condrestart", "condstop", "force-reload", "freeze"})
 _STOP_WITH_NOW = frozenset({"disable", "mask"})   # with --now they stop the unit as well
+# Taking the machine (or the owner's user manager) down takes the gateway with it.
+_POWER = frozenset({"reboot", "shutdown", "poweroff", "halt", "restart-computer", "stop-computer"})
+_SYSTEMCTL_POWER = frozenset({"reboot", "poweroff", "halt", "kexec", "soft-reboot", "exit"})
+_MAX_DEPTH = 3   # commands inside commands (bash -c "bash -c '...'", $(...), find -exec) looked into this deep
 # systemctl options that take their value as the next word: that word is not the action or a unit.
 _SYSTEMCTL_VALUES = frozenset({"-s", "--signal", "-t", "--type", "-p", "--property", "-M", "--machine", "-H", "--host",
                                "--job-mode", "--kill-whom", "--kill-value", "--state", "-o", "--output", "-n", "--lines",
@@ -240,24 +244,69 @@ def protected_trees() -> tuple[Path, ...]:
     return tuple(sorted(path for path in found if path.is_absolute() and len(path.parts) > 2))
 
 
-_HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_]\w*)\2")
+# `<<EOF`, `<<-'EOF'`; never the here-string `<<<word`, which feeds one word and has no body.
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_]\w*)\2")
 
 
-def _strip_heredocs(command: str) -> str:
-    """Drop here-document bodies: they are data written somewhere (a script, a note), not commands run now."""
-    lines, kept, index = command.split("\n"), [], 0
+def _heredocs(command: str) -> tuple[str, list[str]]:
+    """(the command without its here-document bodies, the bodies of the unquoted ones): a body is data written
+    somewhere (a script, a note), not a command run now, but the shell still expands $(...) in an unquoted one."""
+    lines, kept, expanded, index = command.split("\n"), [], [], 0
     while index < len(lines):
         line = lines[index]
         kept.append(line)
         index += 1
         for match in _HEREDOC.finditer(line):
-            tabs, delimiter = match.group(1) == "-", match.group(3)
+            tabs, quoted, delimiter = match.group(1) == "-", bool(match.group(2)), match.group(3)
             while index < len(lines):
                 body = lines[index].lstrip("\t") if tabs else lines[index]
                 index += 1
                 if body == delimiter:
                     break
-    return "\n".join(kept)
+                if not quoted:
+                    expanded.append(lines[index - 1])
+    return "\n".join(kept), expanded
+
+
+def _strip_heredocs(command: str) -> str:
+    """Drop here-document bodies: they are data written somewhere (a script, a note), not commands run now."""
+    return _heredocs(command)[0]
+
+
+def _without_single_quotes(command: str) -> str:
+    """The command with its single-quoted spans ('...' and $'...') left out: the shell runs nothing inside them.
+    Inside double quotes a single quote is an ordinary character."""
+    out, index, double = [], 0, False
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and index + 1 < len(command):
+            out.append(command[index:index + 2])
+            index += 2
+            continue
+        if char == '"':
+            double = not double
+        elif char == "'" and not double:
+            end = command.find("'", index + 1)
+            if end < 0:
+                return "".join(out) + command[index:]   # unbalanced: keep the rest, let the lexer decide
+            if out and out[-1] == "$":
+                out.pop()   # $'...': ANSI-C quoting, single-quoted as well
+            index = end + 1
+            out.append(" ")
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _substitutions(command: str) -> list[str]:
+    """The commands inside $(...) and `...` that run when the command runs: also inside double quotes and in the
+    body of an unquoted here-document, never inside single quotes or a quoted here-document."""
+    stripped, expanded = _heredocs(command)
+    found = [a or b for a, b in _SUBSTITUTION.findall(_without_single_quotes(stripped))]
+    for body in expanded:
+        found += [a or b for a, b in _SUBSTITUTION.findall(body)]
+    return found
 
 
 def _segments(command: str) -> list[list[str]] | None:
@@ -430,6 +479,13 @@ def _expand(token: str, home: Path, profile: Path | None = None, cwd: PurePosixP
     return found
 
 
+def _glob_match(path: PurePosixPath, pattern: PurePosixPath) -> bool:
+    """Whether the shell's glob `pattern` names `path`: one component at a time, since `*` never matches a `/`."""
+    if len(path.parts) != len(pattern.parts):
+        return False
+    return all(fnmatch.fnmatchcase(part, glob) for part, glob in zip(path.parts, pattern.parts))
+
+
 def _hits(pattern: PurePosixPath, protected, *, tree: bool = False) -> bool:
     """True when removing `pattern` would remove `protected`: the same path, an ancestor, or a glob of either.
     With `tree`, anything inside `protected` counts too (`rm -rf venv/lib`, `rm -rf venv/*`)."""
@@ -438,7 +494,7 @@ def _hits(pattern: PurePosixPath, protected, *, tree: bool = False) -> bool:
         return False
     chain = [target, *target.parents]
     globbed = any(char in str(pattern) for char in "*?[")
-    if globbed and any(fnmatch.fnmatchcase(str(item), str(pattern)) for item in chain):
+    if globbed and any(_glob_match(item, pattern) for item in chain):
         return True
     if not globbed and pattern in chain:
         return True
@@ -478,25 +534,69 @@ def own_process() -> tuple[str, str]:
     return name, " ".join(getattr(sys, "orig_argv", None) or sys.argv)
 
 
+# Options of pkill/pgrep and killall that take a value: `pkill -u root -f node` selects by `node`, never by `root`.
+_PKILL_VALUES = frozenset({"-u", "-U", "-g", "-G", "-P", "-s", "-t", "-F", "--euid", "--uid", "--group", "--pgroup",
+                           "--parent", "--session", "--terminal", "--pidfile", "--signal", "--ns", "--nslist",
+                           "--older", "--newer", "--env", "--cgroup"})
+_KILLALL_VALUES = frozenset({"-u", "--user", "-s", "--signal", "-n", "--ns", "-o", "--older-than", "-y",
+                             "--younger-than", "-Z", "--context"})
+# Program names Hermes runs under: the launcher script, executed through its shebang, is a process of that name.
+_HERMES_PROGRAMS = frozenset({"hermes", "hermes-agent"})
+
+
+def _kill_patterns(verb: str, rest: list[str]) -> tuple[list[str], list[str]]:
+    """(the options, the patterns or names) of `pkill`/`killall`: a signal (-9, -TERM) and the values of options
+    that take one are never a pattern."""
+    takes_value = _PKILL_VALUES if verb == "pkill" else _KILLALL_VALUES
+    options, operands, index = [], [], 0
+    while index < len(rest):
+        token = rest[index]
+        if token == "--":
+            operands += rest[index + 1:]
+            break
+        if token.startswith("-") and token != "-":
+            options.append(token)
+            index += 2 if token in takes_value else 1
+            continue
+        operands.append(token)
+        index += 1
+    return options, operands
+
+
+def _process_names(process) -> set[str]:
+    """The names the gateway's process may go by (/proc/<pid>/comm, 15 characters): the interpreter's, a script
+    run through its shebang (`/venv/bin/hermes gateway run`), and the names of Hermes' own launchers."""
+    name, command_line = process
+    names = {name, *_HERMES_PROGRAMS}
+    words = command_line.split()
+    for word in words[:2]:
+        if not word.startswith("-"):
+            names.add(_program(word)[:15])
+    return {item for item in names if item}
+
+
 def _own_process_match(verb: str, rest: list[str], words: list[str], process) -> bool:
     """Whether `pkill`/`killall` would select the gateway itself: its pattern matched against this process's name
-    (`pkill python3`, `killall python3`) or, with -f, its whole command line (`pkill -f 'gateway run'`)."""
+    (`pkill python3`, `killall python3`) or, with -f, its whole command line (`pkill -f 'gateway run'`). Without
+    the process to look at, a pattern naming Hermes counts."""
     if not process:
-        return False
-    name, command_line = process
+        return any("hermes" in word.lower() for word in words)
+    _name, command_line = process
+    names = _process_names(process)
     full = any(re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", token) or token == "--full" for token in rest)
+    exact = any(re.fullmatch(r"-[A-Za-z]*x[A-Za-z]*", token) or token == "--exact" for token in rest) if verb == "pkill" \
+        else any(token in ("-e", "--exact") for token in rest)
     regex = verb == "pkill" or any(token in ("-r", "--regexp") for token in rest)
+    targets = [command_line] if full and verb == "pkill" else sorted(names)
     for word in words:
         if not word or _dynamic(word):
             continue
-        try:
-            if verb == "pkill" or regex:
-                if re.search(word, command_line if full else name):
-                    return True
-            elif word == name:
+        if not regex:   # killall <name>: the process's name, or its path
+            if word in names or (word.startswith("/") and word in command_line.split()[:2]):
                 return True
-        except re.error:
             continue
+        if any(_search(word, target, whole=exact) for target in targets):
+            return True
     return False
 
 
@@ -520,6 +620,14 @@ def _stops_gateway(verb: str, rest: list[str], words: list[str], *, mentions: bo
         return any(token.lower() == "/end" for token in rest) and any(_WINDOWS_NAME.match(token) for token in rest)
     if verb in ("taskkill", "stop-process"):
         return any("hermes" in token.lower() for token in rest)
+    if verb in _POWER:   # the machine goes down and the gateway with it; `shutdown -c` cancels, `-k` only warns
+        return not any(token.lower() in ("-c", "/a", "-a", "-k", "--help") for token in rest)
+    if verb in ("init", "telinit"):
+        return bool(words) and words[0] in ("0", "6")
+    if verb == "loginctl":   # ending the owner's session or user ends the user services, the gateway among them
+        return bool(words) and words[0] in ("terminate-user", "kill-user", "terminate-session", "kill-session")
+    if verb == "systemctl" and any(word in _SYSTEMCTL_POWER for word in _without_values(rest, _SYSTEMCTL_VALUES)[:1]):
+        return True   # systemctl reboot|poweroff|halt|kexec, and `systemctl --user exit`, which stops every user unit
     if verb == "systemctl":
         words = _without_values(rest, _SYSTEMCTL_VALUES)
         action = words[0] if words else ""
@@ -528,8 +636,8 @@ def _stops_gateway(verb: str, rest: list[str], words: list[str], *, mentions: bo
         return stops and any(_gateway_unit(word) or (mentions and _dynamic(word)) for word in words[1:])
     if verb == "service":
         return len(words) >= 2 and _gateway_unit(words[0]) and words[1] in ("restart", "stop")
-    if verb in ("pkill", "killall"):
-        return any("hermes" in word.lower() for word in words) or _own_process_match(verb, rest, words, process)
+    if verb in ("pkill", "killall"):   # its patterns, never an option's value (`pkill -u root -f node`)
+        return _own_process_match(verb, rest, _kill_patterns(verb, rest)[1], process)
     if verb == "hermes":   # stop leaves Hermes down; restart is the owner's call
         words, options = _hermes_words(rest), {token.split("=", 1)[0] for token in rest if token.startswith("-")}
         for word, following in zip(words, words[1:]):
@@ -680,16 +788,66 @@ def _removed_paths(verb: str, rest: list[str], words: list[str]) -> list[str]:
             target = False
         words = [item for word in words for item in _braces(word)]
         return words[:-1] if verb in _MOVERS and not target and len(words) > 1 else words
-    if verb != "find":
-        return []
-    if "-delete" not in rest and not ("-exec" in rest and any(os.path.basename(token) == "rm" for token in rest)):
-        return []
+    found = _find_deletes(rest) if verb == "find" else None
+    return found[0] if found is not None and found[1] is None else []
+
+
+# find tests that select only some of what is under a starting point: with one, the starting point itself is not
+# what goes (`find ~/.hermes -name '*.log' -delete`).
+_FIND_FILTERS = frozenset({"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex",
+                           "-lname", "-ilname", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-newer",
+                           "-anewer", "-cnewer", "-newermt", "-type", "-xtype", "-size", "-empty", "-user", "-group",
+                           "-uid", "-gid", "-perm", "-links", "-inum", "-samefile", "-used", "-nouser", "-nogroup",
+                           "-mindepth"})
+_FIND_PATH_TESTS = frozenset({"-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex", "-lname", "-ilname",
+                              "-inum", "-samefile"})
+
+
+def _find_deletes(rest: list[str]) -> tuple[list[str], list[tuple[str, bool]] | None] | None:
+    """For `find ... -delete` or `-exec rm`: (its starting points, None when it deletes them whole, else the -name /
+    -iname globs that select what goes under them, as (glob, ignore case), empty when any name may go). None when
+    the find deletes nothing."""
+    if "-delete" not in rest and not (any(token in ("-exec", "-execdir") for token in rest)
+                                      and any(os.path.basename(token) == "rm" for token in rest)):
+        return None
     starts = []
     for token in rest:   # find's starting points come before the first expression token
         if token.startswith(("-", "(", "!")):
             break
         starts.append(token)
-    return starts
+    if not any(token in _FIND_FILTERS for token in rest):
+        return starts, None
+    globs = []
+    for index, token in enumerate(rest[:-1]):
+        if token in ("-name", "-iname"):
+            globs.append((rest[index + 1], token == "-iname"))
+        elif token in _FIND_PATH_TESTS:
+            return starts, []   # -path, -regex, ...: which names go is not read here, so any may
+    return starts, globs
+
+
+def _find_hit(starts: list[str], globs: list[tuple[str, bool]], *, protected, trees=(), home: Path,
+              profile: Path | None = None, cwd: PurePosixPath | None = None) -> str | None:
+    """A protected path strictly under a filtered find's starting point that the find may delete: one whose name, or
+    the name of a folder between it and the starting point, matches a -name glob (any, without one)."""
+    for token in starts:
+        start = _expand(token, home, profile, cwd)
+        if start is None:
+            continue
+        globbed = any(char in str(start) for char in "*?[")
+        for item in (*protected, *trees):
+            target = _canonical(str(item))
+            if target is None:
+                continue
+            below = [parent for parent in target.parents
+                     if (_glob_match(parent, start) if globbed else parent == start)]
+            if not below:
+                continue
+            names = target.parts[len(below[0].parts):]
+            if not globs or any(fnmatch.fnmatchcase(name.lower() if fold else name, glob.lower() if fold else glob)
+                                for name in names for glob, fold in globs):
+                return str(item)
+    return None
 
 
 def _hit(paths: list[str], *, protected, home: Path, profile: Path | None = None, trees=(),
@@ -836,17 +994,73 @@ def _operands(rest: list[str]) -> tuple[list[str], list[str], str | None]:
     return options, operands, pattern
 
 
+_PATTERN_LIMIT = 200   # longer agent-written patterns are not run as regular expressions
+
+
+def _risky_pattern(pattern: str) -> bool:
+    """A pattern Python's backtracking engine may take exponential time on: too long, or a group that holds a
+    quantifier or an alternation and is itself repeated (`(a+)+`, `(\\w*)*`, `(a|aa)+`)."""
+    if len(pattern) > _PATTERN_LIMIT:
+        return True
+    stack, index = [], 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            if stack:
+                stack[-1] = stack[-1] or (index < len(pattern) and pattern[index] in "*+?{")
+            continue
+        if char == "[":   # a character class: its insides are not quantifiers
+            end = index + 1
+            if end < len(pattern) and pattern[end] == "^":
+                end += 1
+            if end < len(pattern) and pattern[end] == "]":
+                end += 1
+            end = pattern.find("]", end)
+            index = len(pattern) if end < 0 else end + 1
+            continue
+        if char == "(":
+            stack.append(False)
+        elif char == ")" and stack:
+            inner = stack.pop()
+            repeated = index + 1 < len(pattern) and pattern[index + 1] in "*+{"
+            if inner and repeated:
+                return True
+            if stack:
+                stack[-1] = stack[-1] or inner or repeated
+        elif char in "*+{|" or (char == "?" and index > 0 and pattern[index - 1] not in "(*+?}"):
+            if stack:
+                stack[-1] = True
+        index += 1
+    return False
+
+
+def _search(pattern: str, text: str, *, whole: bool = False) -> bool:
+    """`re.search` (or fullmatch) of an agent-written pattern, bounded: a risky or invalid pattern is matched as the
+    literal text it names, its metacharacters left out."""
+    if not _risky_pattern(pattern):
+        try:
+            return bool((re.fullmatch if whole else re.search)(pattern, text))
+        except re.error:
+            pass
+    literal = re.sub(r"[\\^$.|?*+()\[\]{}]", "", pattern)
+    return bool(literal) and (literal == text if whole else literal in text)
+
+
+def _lookup_patterns(rest: list[str]) -> list[str]:
+    """What a lookup command searches for: its operands and its -e pattern, never another option's value."""
+    _options, operands, pattern = _operands(rest)
+    return [*operands, pattern] if pattern is not None else operands
+
+
 def _matches(pattern: str, text: str, *, literal: bool = False) -> bool:
     if not pattern or _dynamic(pattern):
         return False
-    try:
-        if literal:
-            return pattern in text
-        if re.fullmatch(pattern, ""):
-            return False   # a pattern that matches anything is not a lookup of the gateway
-        return bool(re.search(pattern, text))
-    except re.error:
+    if literal:
         return pattern in text
+    if _search(pattern, ""):
+        return False   # a pattern that matches anything is not a lookup of the gateway
+    return _search(pattern, text)
 
 
 def _looks_up_gateway(verb: str, rest: list[str], process) -> bool:
@@ -858,12 +1072,13 @@ def _looks_up_gateway(verb: str, rest: list[str], process) -> bool:
     name, command_line = process
     options, operands, pattern = _operands(rest)
     if verb == "pidof":
-        return any(token == name for token in operands)
+        return any(token in _process_names(process) for token in operands)
     if verb == "pgrep":
         full = any(re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", token) or token == "--full" for token in options)
         exact = any(re.fullmatch(r"-[A-Za-z]*x[A-Za-z]*", token) or token == "--exact" for token in options)
-        target = command_line if full else name
-        return bool(operands) and (operands[0] == target if exact else _matches(operands[0], target))
+        targets = [command_line] if full else sorted(_process_names(process))
+        return bool(operands) and any(operands[0] == target if exact else _matches(operands[0], target)
+                                      for target in targets)
     if verb == "awk":
         if any(token.startswith("-f") or token == "--file" for token in options) or len(operands) != 1:
             return False   # a program from a file, or input files: not a process list from a pipe
@@ -897,9 +1112,9 @@ def _kills_by_lookup(command: str, process=None) -> bool:
         if not tokens:
             continue
         verb, rest = _program(tokens[0]), tokens[1:]
-        if verb in _PID_LOOKUPS and (any("hermes" in token.lower() for token in rest)
-                                     or _looks_up_gateway(verb, rest, process)):
-            looked_up = True
+        if verb in _PID_LOOKUPS and (_looks_up_gateway(verb, rest, process) if process
+                                     else any("hermes" in token.lower() for token in _lookup_patterns(rest))):
+            looked_up = True   # matched against the gateway's own command line; without it, a pattern naming Hermes
         elif any(name in token.lower() for token in tokens for name in _PID_FILES):
             looked_up = True
         elif verb == "systemctl" and "show" in rest and any(_gateway_unit(token) for token in rest):
@@ -925,11 +1140,11 @@ def check(tool_name, args, *, protected, home: Path, profile: Path | None = None
         return None
     workdir = args.get("workdir") if tool_name in TERMINAL_TOOLS else None
     cwd = _expand(workdir, home, profile) if isinstance(workdir, str) and workdir.strip() else None
-    return _check_command(command, protected=protected, home=home, profile=profile, nested=False, trees=trees, own=own,
+    return _check_command(command, protected=protected, home=home, profile=profile, depth=0, trees=trees, own=own,
                           process=process, cwd=cwd)
 
 
-def _check_command(command: str, *, protected, home: Path, profile: Path | None = None, nested: bool, trees=(), own=(),
+def _check_command(command: str, *, protected, home: Path, profile: Path | None = None, depth: int = 0, trees=(), own=(),
                    process=None, cwd: PurePosixPath | None = None) -> dict | None:
     options = {"protected": protected, "home": home, "profile": profile, "trees": trees, "own": own, "process": process}
     if _kills_by_lookup(command, process):
@@ -939,9 +1154,10 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
     mentions = "hermes" in command.lower()
     segments = _segments(command) or []
     fed = [token for segment in segments for token in segment]   # what xargs may be given: every word of the command
-    if not nested:   # $(...) and `...` run too, also inside double quotes
-        for groups in _SUBSTITUTION.findall(command):
-            found = _check_command(groups[0] or groups[1], nested=True, cwd=cwd, **options)
+    deeper = depth < _MAX_DEPTH   # bash -c "bash -c '...'": commands inside commands, a few levels deep
+    if deeper:   # $(...) and `...` run too, also inside double quotes; never inside single quotes
+        for inner_command in _substitutions(command):
+            found = _check_command(inner_command, depth=depth + 1, cwd=cwd, **options)
             if found:
                 return found
     for segment in segments:
@@ -949,10 +1165,10 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
         if not tokens:
             continue
         verb, rest = _as_hermes(_program(tokens[0]), tokens[1:])
-        nested_command = _nested_command(verb, rest) if not nested else None
+        nested_command = _nested_command(verb, rest) if deeper else None
         if nested_command is not None:   # find -exec ..., ssh localhost ..., the strings of python -c / perl -e
             for item in nested_command:
-                found = _check_command(item, nested=True, cwd=cwd, **options)
+                found = _check_command(item, depth=depth + 1, cwd=cwd, **options)
                 if found:
                     return found
         if verb in ("cd", "pushd", "chdir", "set-location", "sl"):   # later relative paths start there
@@ -960,8 +1176,8 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
             cwd = _expand(target[0], home, profile, cwd) if target else _canonical(str(home)) if not rest else None
             continue
         inner = _command_string(verb, rest)
-        if inner is not None:   # one level: bash -lc '<command>', su -c '<command>', pwsh -c '<command>', cmd /c ...
-            found = None if nested else _check_command(inner, nested=True, cwd=cwd, **options)
+        if inner is not None:   # bash -lc '<command>', su -c '<command>', pwsh -c '<command>', cmd /c ...
+            found = _check_command(inner, depth=depth + 1, cwd=cwd, **options) if deeper else None
             if found:
                 return found
             continue
@@ -981,6 +1197,14 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
             return {"kind": "runtime_removal", "path": path}
         if own and _hit(removed, protected=(), home=home, profile=profile, trees=own, cwd=cwd):
             return {"kind": "plugin_settings"}
+        filtered = _find_deletes(rest) if verb == "find" else None
+        if filtered is not None and filtered[1] is not None:   # find <dir> -name X -delete: only what X selects goes
+            where = {"home": home, "profile": profile, "cwd": cwd}
+            path = _find_hit(filtered[0], filtered[1], protected=protected, trees=trees, **where)
+            if path:
+                return {"kind": "runtime_removal", "path": path}
+            if own and _find_hit(filtered[0], filtered[1], protected=own, **where):
+                return {"kind": "plugin_settings"}
     return None
 
 

@@ -1,36 +1,30 @@
 # Contributing to Atlas Evolution
 
-[![Tests](https://github.com/sesantanajr/hermes-atlas-evolution/actions/workflows/tests.yml/badge.svg)](https://github.com/sesantanajr/hermes-atlas-evolution/actions/workflows/tests.yml)
+[![Checks](https://github.com/sesantanajr/hermes-atlas-evolution/actions/workflows/tests.yml/badge.svg)](https://github.com/sesantanajr/hermes-atlas-evolution/actions/workflows/tests.yml)
 
 Thank you for considering a contribution. This project is a plugin for Hermes Agent that runs inside other people's agents, so three things matter more than anything else: it must never slow down or break a turn, it must never store what users say, and the operator decides what reaches the agent.
 
-> **Em português:** abra uma issue antes de uma mudança grande; problemas de segurança vão pelo [SECURITY.md](SECURITY.md). Rode `python -m unittest discover -s tests -v` (só biblioteca padrão, Python 3.11 ou mais novo). Toda mudança traz um teste que falha sem ela. A documentação é bilíngue: o que muda em `README.md` ou `docs/` muda igual em `README.pt-BR.md` ou `docs/pt-BR/`, e toda frase que uma pessoa ou o agente lê precisa do par em português no `hermes_atlas_evolution/catalog.py`. A documentação descreve o que o plugin faz hoje; o histórico de versões fica só no CHANGELOG. As regras de privacidade e segurança abaixo valem para qualquer pull request.
+> **Em português:** abra uma issue antes de uma mudança grande; problemas de segurança vão pelo [SECURITY.md](SECURITY.md). A suíte de testes é mantida fora deste repositório; o CI daqui roda lint, compilação e um teste de fumaça (só biblioteca padrão, Python 3.11 ou mais novo). A documentação é bilíngue: o que muda em `README.md` ou `docs/` muda igual em `README.pt-BR.md` ou `docs/pt-BR/`, e toda frase que uma pessoa ou o agente lê precisa do par em português no `hermes_atlas_evolution/catalog.py`. A documentação descreve o que o plugin faz hoje; o histórico de versões fica só no CHANGELOG. As regras de privacidade e segurança abaixo valem para qualquer pull request.
 
 ## Before you start
 
 - Open an issue for anything larger than a small fix, so the approach can be agreed first.
 - Security problems go through [SECURITY.md](SECURITY.md), not public issues.
 - Documentation is bilingual. A change to `README.md` or `docs/` needs the same change in `README.pt-BR.md` or `docs/pt-BR/`. If you do not write Portuguese, say so in the pull request and a maintainer will translate.
-- So is everything a person or the agent reads. A new message needs its pt-BR pair in `hermes_atlas_evolution/catalog.py` (a pattern when it carries values); `tests/test_i18n.py` walks every `raise ValueError(...)` and `raise SystemExit(...)` of the package and fails when one has no Portuguese form.
+- So is everything a person or the agent reads. A new message needs its pt-BR pair in `hermes_atlas_evolution/catalog.py` (a pattern when it carries values); the i18n test of the external suite walks every `raise ValueError(...)` and `raise SystemExit(...)` of the package and fails when one has no Portuguese form.
 
-## Development setup and tests
+## Development setup and checks
 
-You need Python 3.11 or later. There is nothing to install: the plugin and its tests use the standard library only.
+You need Python 3.11 or later. There is nothing to install: the plugin uses the standard library only.
 
 ```sh
 git clone https://github.com/sesantanajr/hermes-atlas-evolution
 cd hermes-atlas-evolution
-python -m unittest discover -s tests -v
+python -m compileall -q hermes_atlas_evolution dashboard __init__.py
+python -m hermes_atlas_evolution --home /tmp/evolution-test --hermes-version 0.23.1 update --list
 ```
 
-The same suite runs on GitHub Actions on every push and pull request ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)): on Linux with Python 3.11, 3.12, 3.13 and 3.14, and on macOS and Windows with Python 3.13. A lint job runs `ruff` for undefined names, unused imports and syntax the oldest supported Python refuses (`ruff check --target-version py311 --select F,E9,PLE --ignore PLE2502,PLE2515`; the guard tests carry bidirectional and zero-width characters on purpose), and byte-compiles everything with Python 3.11. Run the same before a pull request if you have ruff; the plugin itself never depends on it. Tests that are POSIX by design (permission bits, the liveness probe, symlinked runtimes) skip themselves on Windows; anything else that fails there is a bug. Compute dates with `experience.utc_datetime` or `utc_day`, never `datetime.fromtimestamp`, which refuses times before 1970 on Windows.
-
-When Hermes Agent is installed, run the suite a second time with the Python interpreter of that installation, the one that can `import agent.redact`. The tests then also exercise Hermes' native redactor and the interpreter your users run:
-
-```sh
-/path/to/hermes/python -c "import agent.redact"          # check that it is Hermes' interpreter
-/path/to/hermes/python -m unittest discover -s tests -v
-```
+The unit test suite is maintained outside this repository, so the published plugin carries only what Hermes loads. GitHub Actions ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs `ruff` for undefined names, unused imports and syntax the oldest supported Python refuses, byte-compiles everything with Python 3.11, checks `install.sh` and runs a smoke test of the standalone CLI on Linux (Python 3.11 to 3.14), macOS and Windows. Compute dates with `experience.utc_datetime` or `utc_day`, never `datetime.fromtimestamp`, which refuses times before 1970 on Windows.
 
 With a Hermes Agent 0.23.1 installation, also run the admission checks. `validate` must report the security scan as `safe`:
 
@@ -61,7 +55,7 @@ python -m hermes_atlas_evolution --home /tmp/evolution-test --hermes-version 0.2
 
 Everything a person or the agent reads exists in English and Brazilian Portuguese, and the catalog must stay complete.
 
-- A new sentence in a diagnostic, plan, recommendation, Kanban card, agent tool reply, error message or command help needs its pair in `hermes_atlas_evolution/catalog.py`: an exact `(English, Portuguese)` entry in `PAIRS`, or a pattern in `PATTERNS` when it carries values. `tests/test_i18n.py` extracts the diagnostic sentences, the command help, the Kanban card texts and the plans from the code and fails when one lacks its pair. For any other new text, add the pair and a test that the output comes out translated.
+- A new sentence in a diagnostic, plan, recommendation, Kanban card, agent tool reply, error message or command help needs its pair in `hermes_atlas_evolution/catalog.py`: an exact `(English, Portuguese)` entry in `PAIRS`, or a pattern in `PATTERNS` when it carries values. The i18n test of the external suite extracts the diagnostic sentences, the command help, the Kanban card texts and the plans from the code and fails when one lacks its pair. For any other new text, add the pair and a test that the output comes out translated.
 - A new lesson template in `lessons.TEMPLATES`, a digest label in `report._TEXT`, a `status` label in `status._TEXT` and a reflector instruction in `reflector.INSTRUCTIONS` are written in both languages next to each other.
 - Codes, field names, identifiers and numbers are never translated.
 - Write Portuguese as spoken in Brazil, with the same meaning as the English, not a word-for-word copy.

@@ -411,6 +411,9 @@ def _host(home: Path) -> dict:
     return result
 
 
+TRANSITION_STUCK_SECONDS = 300   # starting, restarting or stopping for longer than this, with no process: stuck
+
+
 def _findings(report: dict) -> list[dict]:
     findings = []
     disk = report["host"]["disk"] or {}
@@ -439,6 +442,10 @@ def _findings(report: dict) -> list[dict]:
          "gateway_startup_failure", "warning", "Confira o serviço e os erros recentes antes de repetir a inicialização."),
         (gateway["reported_state"] in ("running", "degraded") and gateway["process_liveness"] in ("missing_locally", "pid_reused_locally"),
          "gateway_liveness_unconfirmed", "warning", "Compare o registro com o supervisor e o namespace do gateway."),
+        (gateway["reported_state"] in ("starting", "restarting", "stopping")
+         and (gateway["reported_age_seconds"] or 0) > TRANSITION_STUCK_SECONDS and gateway["process_liveness"] != "confirmed",
+         "gateway_transition_stuck", "warning",
+         "O gateway está preso numa transição sem processo confirmado. Confira o serviço com journalctl --user -u hermes-gateway -n 30 antes de reiniciar."),
         (gateway["reported_state"] == "degraded" and gateway["process_liveness"] == "confirmed",
          "gateway_degraded", "warning", "Correlacione a degradação com as conexões e os registros do gateway."),
         (gateway["marker_consistent"] and gateway["heartbeat"] == "stale" and gateway["process_liveness"] == "confirmed",

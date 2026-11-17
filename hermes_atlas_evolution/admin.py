@@ -84,8 +84,19 @@ def hermes_executable() -> str | None:
     candidates += ["/usr/local/bin/hermes", str(Path.home() / ".local" / "bin" / "hermes")]
     for candidate in candidates:
         if candidate and Path(candidate).is_file() and Path(candidate).suffix.lower() not in (".bat", ".cmd"):
-            return candidate
+            return os.path.abspath(candidate)   # absolute: a script or a job run from another folder finds it too
     return None
+
+
+def _decision_id(body: dict) -> int:
+    """The id a decision names; ValueError (never KeyError or TypeError) for one that is missing or not a number."""
+    value = body.get("id")
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError("Invalid decision")
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError("Invalid decision") from None
 
 
 def profile_name(home: Path) -> str:
@@ -219,7 +230,7 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
     if kind == "apply":
         from . import actions
 
-        return actions.apply_proposal(home, int(body["id"]), now=now, actor=actor, runner=runner)
+        return actions.apply_proposal(home, _decision_id(body), now=now, actor=actor, runner=runner)
     if kind == "schedule_digest":
         from . import actions
 
@@ -239,7 +250,7 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
                                   runtime_config=runtime_config)
     with experience(home) as conn:
         if kind == "lesson":
-            return decisions.decide_lesson(conn, int(body["id"]), str(body.get("action")), now=now, actor=actor,
+            return decisions.decide_lesson(conn, _decision_id(body), str(body.get("action")), now=now, actor=actor,
                                            lang=lang, shown=body.get("shown") if isinstance(body.get("shown"), str) else None)
         if kind == "all":
             items = body.get("items")
@@ -247,10 +258,10 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
                 raise ValueError("Invalid decision")
             return decisions.approve_all(conn, items, now=now, actor=actor, lang=lang)
         if kind == "proposal":
-            return decisions.decide_proposal(conn, int(body["id"]), str(body.get("action")), now=now, actor=actor,
+            return decisions.decide_proposal(conn, _decision_id(body), str(body.get("action")), now=now, actor=actor,
                                              lang=lang)
         if kind == "undo":
-            decision_id = int(body["id"])
+            decision_id = _decision_id(body)
             row = conn.execute("SELECT kind, target FROM decision_log WHERE id=?", (decision_id,)).fetchone()
             current = current_settings(home, runtime_config).get(row["target"]) \
                 if row is not None and row["kind"] == "setting" else ...

@@ -184,6 +184,15 @@ class Autopilot:
     def stop(self) -> None:
         """Stop the clock and refuse new passes. A pass already running stops at its next safe point."""
         self._stop.set()
+        if not self._running:
+            self._unhook_exit()   # a running pass unhooks as it ends: until then an exit still frees its lease
+
+    def _unhook_exit(self) -> None:
+        # atexit keeps a reference to this Autopilot (and its plugin) until the process ends: one per reload.
+        with self._lock:
+            hooked, self._exit_hooked = self._exit_hooked, False
+        if hooked:
+            atexit.unregister(self._at_exit)
 
     @property
     def stopped(self) -> bool:
@@ -235,8 +244,10 @@ class Autopilot:
             return
         ok, summary, error = False, None, ""
         self._running = True
-        if not self._exit_hooked:   # a short-lived process (hermes -z) may exit in the middle of the pass
-            self._exit_hooked = True
+        with self._lock:
+            hook = not self._exit_hooked and not self._stop.is_set()
+            self._exit_hooked = self._exit_hooked or hook
+        if hook:   # a short-lived process (hermes -z) may exit in the middle of the pass
             atexit.register(self._at_exit)
         try:
             with pinned_profile(self.home):
@@ -250,6 +261,8 @@ class Autopilot:
                                error, RETRY_SECONDS // 60)
         finally:
             self._running = False
+            if self._stop.is_set():   # unloaded during the pass: nothing is left for an exit to free
+                self._unhook_exit()
             try:
                 finish(self.home, now=self.wall(), owner=self._owner, ok=ok, interval_s=self.interval_s,
                        started=started, summary=summary, error=error)

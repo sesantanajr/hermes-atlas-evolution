@@ -171,6 +171,16 @@ def _output_hint(value, *, module: bool = False) -> str:
     return value if (_MODULE_HINT if module else _OUTPUT_HINT).fullmatch(value) else ""
 
 
+# A tool name as Hermes registers them: the name inside the `tool_call` wrapper is written by the agent, so
+# anything else (dotted, namespaced, very long) stays "tool_call".
+_WRAPPED_TOOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
+
+
+def _wrapped_name(value, fallback: str) -> str:
+    name = label(value, fallback=fallback)
+    return name if name != "tool_call" and _WRAPPED_TOOL.fullmatch(name) else fallback
+
+
 def effective_tool(tool_name, args=None) -> str:
     """Name the tool that actually ran. `tool_call` is Hermes' wrapper for deferred tools."""
     tool = label(tool_name)
@@ -184,8 +194,19 @@ def effective_tool(tool_name, args=None) -> str:
         if calls is None and args.get("name"):
             calls = [args]
         if isinstance(calls, list) and len(calls) == 1 and isinstance(calls[0], dict):
-            return label(calls[0].get("name"), fallback=tool)
+            return _wrapped_name(calls[0].get("name"), tool)
     return tool
+
+
+def _hermes_named(failure: dict, error_message, result) -> bool:
+    """Whether Hermes' own error text names the tool of a wrapped call: it resolved the name, so the tool exists."""
+    if failure["klass"] == "not_found" or failure["tool"] == "tool_call":
+        return False
+    target = _TARGET_TOOL.search(_error_parts(error_message, result)[0])
+    if not target:
+        return False
+    name = target.group("tool")
+    return (_clean_hint(name) if len(name) <= 32 else label(name)) == failure["tool"]
 
 
 def classify(tool_name, status, error_message=None, result=None, args=None) -> dict | None:
@@ -205,7 +226,7 @@ def classify(tool_name, status, error_message=None, result=None, args=None) -> d
         target = _TARGET_TOOL.search(errors)
         if target and len(target.group("tool")) <= 96:
             named = _clean_hint(target.group("tool")) if len(target.group("tool")) <= 32 else label(target.group("tool"))
-            tool = named or tool
+            tool = _wrapped_name(named, tool) if named else tool
     klass, hint = "", ""
     if _PLUGIN_FAULT.search(errors):   # Hermes' own fail-closed veto after another plugin's guard hung or raised
         signature = hashlib.sha256("\0".join((tool, "plugin_fault", "")).encode()).hexdigest()[:20]
@@ -277,6 +298,12 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
     seen = ((failure["signature"], failure["tool"], failure["klass"], failure["hint"], now, now,
              _session_tag(payload.get("session_id"))) if failure else None)
     origin_name = label(origin, fallback="unknown") if isinstance(origin, str) else "unknown"
+    # The tool of a deferred call is named by the agent inside the `tool_call` wrapper, and the plugin has no
+    # registry of tool names to check it against. Only Hermes' own error ("tool_call to 'name' ...", which it writes
+    # after resolving the tool) confirms the name; any other such failure is counted but is never the owner's
+    # evidence that lets a lesson activate by itself: its lesson waits for the owner's approval.
+    evidence = owner and (not failure or label(payload.get("tool_name")) != "tool_call"
+                          or _hermes_named(failure, payload.get("error_message"), payload.get("result")))
     setting = ""
     if failure and failure["klass"] == "approval_refused":
         setting = approval_setting(_error_text(payload.get("error_message"), payload.get("result"))[0], origin_name)
@@ -301,7 +328,7 @@ def record_tool(home: Path, payload: dict, *, now: float | None = None, failure:
                   sessions=sessions + (last_session != excluded.last_session), last_session=excluded.last_session""", seen)
             conn.execute("""INSERT INTO failure_daily VALUES (?, ?, 1)
                 ON CONFLICT DO UPDATE SET count=count+1""", (today, seen[0]))
-            if owner:
+            if evidence:
                 conn.execute("""INSERT INTO failure_owner_daily VALUES (?, ?, 1)
                     ON CONFLICT DO UPDATE SET count=count+1""", (today, seen[0]))
             if seen[2] == "approval_refused":
@@ -453,6 +480,7 @@ def owner_turn(surface: str, sender_id, owners, *, origin: str | None = None, ow
 
 
 MAX_SKILLS_PER_TURN = 16
+MAX_SEEN_CALLS = 256   # tool call ids remembered per turn against a repeated delivery
 CORRECTION_WINDOW_SECONDS = 1800
 
 
@@ -463,7 +491,7 @@ class _Turn:
     owners: tuple = ()
     calls: int = 0
     errors: int = 0
-    seen: set[bytes] = field(default_factory=set)
+    seen: set[bytes] = field(default_factory=set)   # 8-byte digests of tool call ids, at most MAX_SEEN_CALLS
     skills: set[str] = field(default_factory=set)
 
 
@@ -538,12 +566,14 @@ class TurnTracker:
         if payload.get("status") not in ("ok", "error", "blocked", "timeout"):
             return
         key = _key(payload.get("turn_id"))
-        call = _key(payload.get("tool_call_id"))
+        identifier = payload.get("tool_call_id")
+        call = hashlib.blake2b(identifier.encode("utf-8", "replace"), digest_size=8).digest() \
+            if isinstance(identifier, str) and 0 < len(identifier) <= 400 else None
         with self._lock:
             turn = self._turns.get(key) if key else None
             if turn is None or turn.calls >= 4096 or call and call in turn.seen:
                 return
-            if call:
+            if call and len(turn.seen) < MAX_SEEN_CALLS:   # past the cap, calls are still counted, not deduplicated
                 turn.seen.add(call)
             turn.calls += 1
             turn.errors += int(payload.get("status") in ("error", "timeout"))
@@ -623,6 +653,8 @@ class FeedbackSensor:
 
     def observe(self, payload: dict, *, clock: float | None = None, now: float | None = None) -> list[str]:
         message = payload.get("user_message")
+        if isinstance(message, str):
+            message = message[:4000]   # a pasted log or file: only its start can read as feedback
         session = _key(payload.get("session_id"))
         if not isinstance(message, str) or not message.strip() or session is None or not self._from_owner(payload):
             return []

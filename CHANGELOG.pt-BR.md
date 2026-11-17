@@ -2,6 +2,28 @@
 
 *In English: [CHANGELOG.md](CHANGELOG.md), with every version.*
 
+## 0.9.1
+
+Versão de estabilidade: uma revisão completa do plugin corrigiu o que podia travar, vazar memória, perder dados ou dar orientação errada. O plugin agora se atualiza em todos os perfis e repara o problema do gateway que antes passava despercebido.
+
+### Novidades
+
+- **`hermes evolution update`**: atualiza o plugin em todos os perfis (`--all`), nos que você nomear (`--profiles default,trabalho`) ou nos que escolher numa lista. Um perfil fixado num commit é reinstalado sem a fixação; uma atualização recusada cai para uma reinstalação forçada; um perfil com erro nunca impede os outros. `--list` mostra versão, commit e fixação de cada perfil; `--install-missing` também instala onde falta.
+- **`install.sh`**: o mesmo, sem depender do plugin carregado (primeira instalação ou cópia quebrada). `sh install.sh` pergunta os perfis; `sh install.sh --all --yes --restart` faz tudo e confere o serviço do gateway antes de reiniciá-lo.
+- **O gateway que não sobe.** Quando o Hermes troca o Python embutido e o serviço do gateway continua chamando o antigo (systemd `status=203/EXEC`, reinício em loop, `hermes gateway restart` esperando minutos), o `status`, o `care` e o painel agora avisam, com o arquivo que tem o caminho antigo e os comandos que resolvem. `hermes evolution care fix-gateway` faz o reparo (guarda cópia do arquivo; `care undo-gateway` desfaz). Reinício em loop, gateway preso em starting/restarting e dados de saúde desatualizados também são apontados. A sugestão de `hermes pm gc` nunca oferece um runtime que um serviço ainda usa.
+
+### Correções
+
+- O Modo Auto instalava o plugin em outros perfis com `--ref <commit>`, o que os fixava, e o `hermes plugins update` falhava ali com "is pinned to". Agora instala sem ref; cópias fixadas ou defasadas aparecem com o comando que remove a fixação.
+- Ganchos: um registro ruim (um caractere quebrado num erro de ferramenta) não para mais toda a gravação até reiniciar; a limpeza diária não roda mais dentro de uma chamada de ferramenta; o acompanhamento do turno não para quando a gravação de feedback falha; conexões fechadas não são reabertas; mensagens longas e caches por turno têm limite; recarregar o plugin não mantém o antigo na memória.
+- Proteção do Hermes: não barra mais encerrar seus próprios processos só porque o caminho tem "hermes" ou por `-u root`; `find ... -name X -delete` dentro da pasta do Hermes é permitido; here-strings, aninhamento mais profundo, `$(...)` entre aspas e padrões patológicos são lidos corretamente; `reboot`, `shutdown`, `systemctl reboot` e `loginctl terminate-user` contam como derrubar o gateway.
+- Checagens do Linux: unidades de usuário são lidas com o barramento certo como root, comandos que estouram o tempo não deixam processos filhos, a checagem de atualização respeita seu tempo, relatórios são gravados de forma atômica, `unattended-upgrades` conta como ocupado, um gateway vivo não é dado como caído quando o Hermes não gravou a hora de início, o `hermes pm gc` não passa do tempo da manutenção.
+- Correções menores: travas de skills em pastas profundas, o watchdog acha o `hermes` fora do PATH, requisições malformadas no painel respondem com mensagem em vez de um 500 cru, jobs de resumo duplicados, limites de `decisions list --limit` e `ops review --days`, a tela Ambiente do terminal mostra o mesmo modo do painel.
+
+### Removido
+
+- A suíte de testes não é mais distribuída com o plugin.
+
 ## 0.9.0
 
 O Atlas Evolution passa a ler o doctor do próprio Hermes para você todo dia, em todos os perfis, e fala o seu idioma em tudo: no painel, no menu, em cada comando e no formulário de configurações. Uma auditoria de todas as ações dele e duas revisões independentes corrigiram o que encontraram.

@@ -57,19 +57,24 @@ class HintIndex:
         self._lock = threading.Lock()
 
     def _refresh(self, clock: float) -> None:
-        if clock - self._loaded < REFRESH_SECONDS:
-            return
-        self._loaded = clock
-        with experience(self.home) as conn:   # once a minute at most; WAL readers never wait for a writer
-            self._index = lessons.hint_index(conn, lang=self.lang)
+        """Reload the index at most once a minute. The read runs outside the lock, so other hook threads keep
+        using the current index meanwhile; one thread reloads, the new index is swapped in under the lock."""
+        with self._lock:
+            if clock - self._loaded < REFRESH_SECONDS:
+                return
+            self._loaded = clock   # claimed: no other thread reloads during this read
+        with experience(self.home) as conn:   # WAL readers never wait for a writer
+            index = lessons.hint_index(conn, lang=self.lang)
+        with self._lock:
+            self._index = index
 
     def lookup(self, signature: str, session: str, *, clock: float | None = None,
                templates_only: bool = False) -> tuple[int, str] | None:
         """The lesson for this failure, once per session and at most MAX_HINTS_PER_SESSION per session.
         `templates_only`: a chat where someone else may read along gets template lessons only."""
         clock = time.monotonic() if clock is None else clock
+        self._refresh(clock)
         with self._lock:
-            self._refresh(clock)
             entry = self._index.get(signature)
             if entry is None or templates_only and not entry[2]:
                 return None

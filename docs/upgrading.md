@@ -5,6 +5,16 @@
 ## Updating the plugin
 
 ```sh
+hermes evolution update --all          # every profile; pinned profiles are unpinned
+hermes evolution update                # pick the profiles from a list
+hermes evolution update --list         # version, commit and pin of each profile
+sh install.sh --all --yes --restart    # the same without the plugin loaded
+hermes gateway restart
+```
+
+Manually, one profile at a time:
+
+```sh
 hermes plugins update hermes-atlas-evolution                # the default profile
 hermes -p <profile> plugins update hermes-atlas-evolution   # a named profile
 
