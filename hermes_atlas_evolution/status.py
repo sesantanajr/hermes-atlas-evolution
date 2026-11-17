@@ -211,6 +211,21 @@ def legacy_notes_command(home: Path) -> str:
     return f'python3 -c "{code}" {shlex.quote(str(database))}'
 
 
+def legacy_notes_forget_command(home: Path) -> str:
+    """A command that saves the notes of version 0.1 to evolution/notes-0.1.json, next to the database, and then
+    removes them from it (the table evolution_memories, which nothing reads since 0.11.0). Run by the owner only."""
+    import shlex
+
+    database = Path(home).resolve() / "evolution" / "evolution.sqlite3"
+    code = ("import json,pathlib,sqlite3,sys; p=pathlib.Path(sys.argv[1]); db=sqlite3.connect(p); "
+            "keys=('id','category','scope','created_at','content'); "
+            "rows=[dict(zip(keys,row)) for row in db.execute('SELECT id,category,scope,created_at,content FROM "
+            "evolution_memories ORDER BY id')]; out=p.with_name('notes-0.1.json'); "
+            "out.write_text(json.dumps(rows,ensure_ascii=False,indent=1),encoding='utf-8'); "
+            "db.execute('DROP TABLE evolution_memories'); db.commit(); print(len(rows),'->',out)")
+    return f'python3 -c "{code}" {shlex.quote(str(database))}'
+
+
 def _legacy_notes(home: Path) -> dict | None:
     """The notes of version 0.1 (table evolution_memories) left in the plugin's database: nothing reads or writes
     them since 0.11.0, and they are not deleted, so the owner can keep what they need. None when there are none."""
@@ -221,7 +236,8 @@ def _legacy_notes(home: Path) -> dict | None:
             count = conn.execute("SELECT COUNT(*) FROM evolution_memories").fetchone()[0]
     except (OSError, ValueError, sqlite3.Error):
         return None
-    return {"count": count, "command": legacy_notes_command(home)} if count else None
+    return {"count": count, "command": legacy_notes_command(home), "forget": legacy_notes_forget_command(home)} \
+        if count else None
 
 
 def _digest_scheduled(home: Path, *, paused_too: bool = True) -> bool:
@@ -232,6 +248,27 @@ def _digest_scheduled(home: Path, *, paused_too: bool = True) -> bool:
     return any(isinstance(job, dict) and (paused_too or job.get("enabled") is not False)
                and job.get("name") in ("hermes-atlas-evolution-digest", "hermes-evolution-digest")
                for job in jobs or ())
+
+
+_OLD_TICK = re.compile(r"\bevolution\s+(?:ops\s+)?tick\b")
+_OLD_TICK_NAMES = ("hermes-atlas-evolution-watchdog", "hermes-evolution-watchdog")   # `ops schedule-spec` up to 0.10
+
+
+def stale_tick_jobs(home: Path) -> list[dict]:
+    """Jobs of Hermes' scheduler that still run `evolution ops tick` or `evolution tick`, removed in 0.11.0: each
+    fails at every run now. Found by the name the old recipe gave them or by the command in the job."""
+    status, data = _load_json(Path(home) / "cron" / "jobs.json", 4 * 1024 * 1024)
+    jobs = data.get("jobs") if status == "ok" and isinstance(data, dict) else None
+    found = []
+    for job in jobs or ():
+        if not isinstance(job, dict):
+            continue
+        name, ident = str(job.get("name") or ""), str(job.get("id") or "")
+        said = " ".join(str(job.get(key) or "") for key in ("prompt", "script", "command", "args"))
+        if (ident or name) and (name in _OLD_TICK_NAMES or _OLD_TICK.search(said)
+                                or "atlas-evolution-watchdog" in str(job.get("script") or "")):
+            found.append({"id": ident or name, "name": name or ident})
+    return found[:5]
 
 
 LEGACY_DIRS = ("hermes-evolution",)   # the plugin id used up to 0.5.0 (the same as cli.LEGACY_PLUGIN_IDS)
@@ -636,6 +673,7 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
     report["chats"] = [{key: value for key, value in channel.items() if key != "senders"} | {"senders": len(channel["senders"])}
                        for channel in channels]   # counts only: the ids stay in `hermes evolution owner`
     report["digest_scheduled"] = _digest_scheduled(home)
+    report["stale_tick_jobs"] = stale_tick_jobs(home)
     report["environment"] = _environment(home)
     report["doctor"] = _doctor(home, report["environment"])
     mine =next((row for row in report["profiles"] if row["current"]), None)
@@ -666,6 +704,8 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         attention.append("owner_unknown")
     if (report["lessons"]["awaiting_approval"] or report["proposals_open"]) and not report["digest_scheduled"]:
         attention.append("digest_unscheduled")
+    if report["stale_tick_jobs"]:
+        attention.append("stale_tick_job")
     from .cli import ignored_settings, settings as stored_settings
 
     from .cli import TRUSTED_ONLY
@@ -701,6 +741,18 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
             report["self_cost"] = selfcost.summary(conn, now=now)
     except (OSError, ValueError, sqlite3.Error):
         report["evolution_index"] = report["self_cost"] = None
+    try:   # why the index moved, a failure far above its usual day, and what to do first (insights)
+        from . import insights
+
+        with experience(home) as conn:
+            report["insights"] = insights.read(conn, now=now, view=report["evolution_index"])
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as error:
+        from logging import getLogger
+
+        getLogger(__name__).info("Atlas Evolution could not read the insights: %s", type(error).__name__)
+        report["insights"] = None
+    if (report.get("insights") or {}).get("spikes"):
+        attention.append("failure_spike")
     if (report.get("self_cost") or {}).get("slow"):
         attention.append("self_slow")
     # Hermes' own health and the operating system's, as the last learning pass read them (hermes_care, system_update)
@@ -878,12 +930,12 @@ _TEXT = {
                                   "`hermes evolution system repair`.",
            "os_apt_broken": "The system's package manager reports broken dependencies: `hermes evolution system repair` "
                             "fixes them.",
-           "os_reboot_required": "The system waits for a reboot ({packages}). Reboot when you can (`sudo reboot`); "
+           "os_reboot_required": "The system waits for a reboot ({packages}). Reboot when you can (`sudo systemctl reboot`); "
                                  "Hermes' services come back by themselves when they are enabled.",
            "os_security_updates": "{security_en}: run `hermes evolution system upgrade` (it shows what changes and asks "
                                   "first).",
            "os_unattended_off": "Automatic security updates of the system are off (unattended-upgrades). Turn them on "
-                                "with `sudo dpkg-reconfigure -plow unattended-upgrades`.",
+                                "as root with `dpkg-reconfigure -plow unattended-upgrades`.",
            "os_lists_stale": "The system's package lists were not refreshed for more than 7 days: "
                              "`hermes evolution system plan` refreshes them.",
            "os_unit_not_enabled": "A Hermes service is not enabled: after a reboot it does not start ({units}). Enable "
@@ -892,6 +944,8 @@ _TEXT = {
            "health_disk": "Disk", "health_memory": "Memory", "health_os": "System",
            "updates": ("1 update waiting", "{n} updates waiting"), "security": "{n} security",
            "reboot": "reboot waiting",
+           "stale_tick_job": "A scheduled job still runs the `tick` that 0.11.0 removed, so it fails at every run. "
+                             "Nothing replaces it: the learning pass runs by itself. Remove it:",
            "digest_unscheduled": "Decisions wait for you and nothing reminds you of them (Hermes 0.23.1 drops "
                                  "end-of-session notices). Schedule the weekly digest to your chat with "
                                  "`hermes evolution schedule-digest --deliver <channel>`: it becomes a Hermes scheduled "
@@ -909,10 +963,12 @@ _TEXT = {
                            "was not affected.",
            "legacy_notes": ("{n} note of version 0.1 is still in the plugin's database. Since 0.11.0 nothing reads it "
                             "and the agent no longer gets it; it was kept so you can copy what you need. To print it "
-                            "(read-only): `{command}`",
+                            "(read-only): `{command}`. To save it to `evolution/notes-0.1.json` and remove it from the "
+                            "database, which closes this item: `{forget}`",
                             "{n} notes of version 0.1 are still in the plugin's database. Since 0.11.0 nothing reads "
                             "them and the agent no longer gets them; they were kept so you can copy what you need. To "
-                            "print them (read-only): `{command}`"),
+                            "print them (read-only): `{command}`. To save them to `evolution/notes-0.1.json` and remove "
+                            "them from the database, which closes this item: `{forget}`"),
            "settings_reload": "These settings changed and apply after `hermes gateway restart` (in the terminal, at the "
                               "next session): {keys}.",
            "settings_ignored": "These values in `settings.json` are ignored: {keys}. They would widen whom the plugin trusts or turn a protection off, and the agent's own file tools can write that file. Set the ones you want in the Hermes settings form, with `hermes evolution owner` (sender ids and platforms), or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> <value>` in your own terminal.",
@@ -1059,12 +1115,12 @@ _TEXT = {
                                   "`hermes evolution system repair`.",
            "os_apt_broken": "O gerenciador de pacotes do sistema relata dependências quebradas: "
                             "`hermes evolution system repair` as conserta.",
-           "os_reboot_required": "O sistema espera um reinício ({packages}). Reinicie quando puder (`sudo reboot`); os "
+           "os_reboot_required": "O sistema espera um reinício ({packages}). Reinicie quando puder (`sudo systemctl reboot`); os "
                                  "serviços do Hermes voltam sozinhos quando estão habilitados.",
            "os_security_updates": "{security_pt}: rode `hermes evolution system upgrade` (ele mostra o que muda e "
                                   "pergunta antes).",
            "os_unattended_off": "As atualizações automáticas de segurança do sistema estão desligadas "
-                                "(unattended-upgrades). Ligue-as com `sudo dpkg-reconfigure -plow unattended-upgrades`.",
+                                "(unattended-upgrades). Ligue-as, como root, com `dpkg-reconfigure -plow unattended-upgrades`.",
            "os_lists_stale": "As listas de pacotes do sistema não são atualizadas há mais de 7 dias: "
                              "`hermes evolution system plan` as atualiza.",
            "os_unit_not_enabled": "Um serviço do Hermes não está habilitado: depois de um reinício ele não sobe "
@@ -1073,6 +1129,8 @@ _TEXT = {
            "health_disk": "Disco", "health_memory": "Memória", "health_os": "Sistema",
            "updates": ("1 atualização esperando", "{n} atualizações esperando"), "security": "{n} de segurança",
            "reboot": "reinício pendente",
+           "stale_tick_job": "Uma tarefa agendada ainda roda o `tick` que a 0.11.0 removeu, então falha em toda "
+                             "execução. Nada a substitui: a rodada de aprendizado roda sozinha. Remova-a:",
            "digest_unscheduled": "Há decisões esperando por você e nada as lembra (o Hermes 0.23.1 descarta os avisos de "
                                  "fim de sessão). Agende o resumo semanal no seu chat com "
                                  "`hermes evolution schedule-digest --deliver <canal>`: ele vira uma tarefa agendada do "
@@ -1091,10 +1149,12 @@ _TEXT = {
                            "afetado.",
            "legacy_notes": ("{n} nota da versão 0.1 continua no banco do plugin. Desde a 0.11.0 nada a lê e o agente "
                             "não a recebe mais; ela foi mantida para você copiar o que precisar. Para mostrá-la (só "
-                            "leitura): `{command}`",
+                            "leitura): `{command}`. Para salvá-la em `evolution/notes-0.1.json` e tirá-la do banco, o "
+                            "que encerra este item: `{forget}`",
                             "{n} notas da versão 0.1 continuam no banco do plugin. Desde a 0.11.0 nada as lê e o "
                             "agente não as recebe mais; elas foram mantidas para você copiar o que precisar. Para "
-                            "mostrá-las (só leitura): `{command}`"),
+                            "mostrá-las (só leitura): `{command}`. Para salvá-las em `evolution/notes-0.1.json` e "
+                            "tirá-las do banco, o que encerra este item: `{forget}`"),
            "settings_reload": "Estas configurações mudaram e valem depois de `hermes gateway restart` (no terminal, na "
                               "próxima sessão): {keys}.",
            "settings_ignored": "Estes valores do `settings.json` são ignorados: {keys}. Eles ampliariam em quem o plugin confia ou desligariam uma proteção, e as ferramentas de arquivo do próprio agente conseguem gravar esse arquivo. Defina os que você quer no formulário de configurações do Hermes, com o `hermes evolution owner` (ids de remetente e plataformas) ou com `hermes config set plugins.entries.hermes-atlas-evolution.settings.<chave> <valor>` no seu próprio terminal.",
@@ -1263,7 +1323,7 @@ def _unit_values(report: dict) -> dict:
             "restarts": unit.get("n_restarts") if unit.get("n_restarts") is not None else "?",
             "sub_state": unit.get("sub_state") or "?", "fix_en": fix_en, "fix_pt": fix_pt,
             "restart_cmd": f"{systemctl} daemon-reload && {systemctl} reset-failed {name} && {systemctl} start {name}",
-            "journal_cmd": (f"journalctl --user -u {name} -n 30" if user else f"sudo journalctl -u {name} -n 30"),
+            "journal_cmd": (f"journalctl --user -u {name} -n 30" if user else f"sudo systemctl status {name} -n 30 --no-pager"),
             "loop_units": ", ".join(f"`{item['unit']}`" for item in looping) or f"`{name}`",
             "stale_en": "?" if hours is None else (plural(round(age / 60), "{n} minute", "{n} minutes") if hours < 1
                                                    else f"{hours} h"),
@@ -1375,6 +1435,11 @@ def markdown(report: dict, lang: str = "en") -> str:
         line = sparkline(index.get("series") or [])
         lines.append(f"- **{t['index']}:** {index['score']}/100{moved}" + (f" `{line}`" if len(line) > 1 else "")
                      + (f" · {named}" if named else ""))
+        from .insights import moved_words
+
+        story = moved_words((report.get("insights") or {}).get("moved"), lang)
+        if story:
+            lines.append(f"  - {story}")
     elif index:
         lines.append(f"- **{t['index']}:** {t['index_wait']}")
     cost = (report.get("self_cost") or {}).get("hooks") or {}
@@ -1425,9 +1490,20 @@ def markdown(report: dict, lang: str = "en") -> str:
         if code == "legacy_notes":
             notes = report["legacy_notes"]
             one, many = t[code]
-            lines.append("- " + (one if notes["count"] == 1 else many).format(n=notes["count"], command=notes["command"]))
+            lines.append("- " + (one if notes["count"] == 1 else many).format(
+                n=notes["count"], command=notes["command"], forget=notes.get("forget", "")))
+            continue
+        if code == "failure_spike":
+            from .insights import spike_lines
+
+            lines += spike_lines(report["insights"]["spikes"], lang)
             continue
         lines.append(f"- {t[code]}")
+        if code == "stale_tick_job":
+            import shlex
+
+            for job in report["stale_tick_jobs"]:
+                lines.append(f"  - `{job['name']}`: `{_command(report['profile'], 'cron remove ' + shlex.quote(job['id']))}`")
         if code == "legacy_install":
             for item in report["legacy_installs"]:
                 lines.append(f"  - `{item['profile']}`: `{item['migrate']}`")
@@ -1444,6 +1520,11 @@ def markdown(report: dict, lang: str = "en") -> str:
                                                                 senders=_p(t["chat_senders"], item["senders"])))
     if not report["attention"]:
         lines.append(t["none"])
+    from .insights import _TEXT as insight_text, action_lines
+
+    steps = action_lines((report.get("insights") or {}).get("next_actions") or [], lang)
+    if steps:
+        lines += ["", f"## {insight_text.get(lang, insight_text['en'])['do_first']}", "", *steps]
     lines += _health_lines(report, t, lang)
     rows = report.get("profiles", [])
     env = report.get("environment") or {}
@@ -1485,6 +1566,8 @@ _NOTICE = {
 
 def _guard_state(enabled: bool) -> str:
     """on, off, or host: Hermes runs this profile's plugins in a plugin host, where the guard stays off."""
+    if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":   # read inside the host: isolation_mode() says in_process
+        return "host"
     module = sys.modules.get("hermes_cli.plugin_isolation")
     mode = getattr(module, "isolation_mode", None)
     try:

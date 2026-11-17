@@ -67,6 +67,13 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
             report["evolution_index"] = evolution_now(conn, now=now)
     except (sqlite3.Error, ValueError):
         report["evolution_index"] = None
+    try:   # why the index moved, today's failure spikes and what to do first (insights)
+        from . import insights
+
+        with experience(home) as conn:
+            report["insights"] = insights.read(conn, now=now, view=report["evolution_index"])
+    except (sqlite3.Error, ValueError, TypeError, KeyError):
+        report["insights"] = None
     report["comparison"] = {"current": current, "previous": before, "verdict": experiments.compare(before, current)}
     if usage is not None:
         main = [row for row in usage["groups"] if row["lane"] == "main" and row["outcome"] == "ok"]
@@ -518,6 +525,11 @@ def markdown(report: dict, lang: str = "en") -> str:
         trend = index.get("trend_7d")
         lines.append(f"- **{t['index']}:** {index['score']}/100"
                      + ("" if trend is None else f" ({'+' if trend > 0 else ''}{trend} {t['index_week']})"))
+        from .insights import moved_words
+
+        story = moved_words((report.get("insights") or {}).get("moved"), lang)
+        if story:
+            lines.append(f"  - {story}")
     cost = report.get("native_cost", {}).get("estimated_cost_usd")
     if cost is not None:
         earlier = report.get("native_cost", {}).get("sessions_started_before") or 0
@@ -533,6 +545,13 @@ def markdown(report: dict, lang: str = "en") -> str:
             lines.append(f"- {_METRIC[lang].get(name, f'`{name}`')}: {_number(values['before'], lang, 1)} → "
                          f"{_number(values['after'], lang, 1)} {mark}")
     lines.append(f"- **{t['verdict']}:** {verdicts[comparison['verdict']['verdict']]}")
+    from .insights import _TEXT as insight_text, action_lines, spike_lines
+
+    found = report.get("insights") or {}
+    spiking, steps = spike_lines(found.get("spikes") or [], lang), action_lines(found.get("next_actions") or [], lang)
+    if spiking or steps:
+        lines += ["", "## " + insight_text.get(lang, insight_text["en"])["do_first"], ""] + spiking \
+            + ([""] if spiking and steps else []) + steps
 
     lines += ["", "## " + t["failures"], ""]
     if report["recurring_failures"]:

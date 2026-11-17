@@ -116,7 +116,14 @@ def pinned_profile(home: Path):
     except ImportError:   # outside Hermes: nothing to pin
         yield
         return
-    home_token = set_hermes_home_override(str(home))
+    refused = object()
+    try:
+        home_token = set_hermes_home_override(str(home))
+    except Exception:   # a hosted (pooled) scope refuses a switch (ScopeSwitchRefused): it is already pinned
+        home_token = refused
+    if home_token is refused:
+        yield
+        return
     secret_token = reset_scope = None
     try:
         from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope

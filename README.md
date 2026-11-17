@@ -140,7 +140,7 @@ Every action goes to the history with its undo, and an action you undo is never 
 | `schedule-digest [--deliver <channel>]` | The weekly digest as a Hermes cron job with no agent and no tokens. |
 | `owner` | Which chat senders and channels count as you. |
 
-Full reference: [Commands](docs/en-US/evolution-loop.md#commands). The commands `health`, `history`, `tick`, `feedback`, `memory`, `ops` and the `/evolution` chat command are deprecated and go away in 0.11.0 (each says what replaces it).
+Full reference: [Commands](docs/en-US/evolution-loop.md#commands). The commands `health`, `history`, `tick`, `feedback`, `memory`, `ops` and the `/evolution` chat command were removed in 0.11.0: use `care check` instead of `health` and `decisions` instead of `history`; the learning pass runs by itself, and `learn` runs one now. When the plugin's database still holds notes of version 0.1, `status` says so, with a read-only command that prints them. Details: [Updating to 0.11.0](docs/en-US/upgrading.md#updating-to-0110).
 
 ## Settings
 
@@ -182,11 +182,12 @@ Details: [SECURITY.md](SECURITY.md).
 
 📚 **[Documentation home](docs/en-US/README.md)**: [Getting started](docs/en-US/getting-started.md) · [The evolution loop](docs/en-US/evolution-loop.md) · [Maintenance](docs/en-US/maintenance.md) · [Hermes integration](docs/en-US/hermes-integration.md) · [Updating](docs/en-US/upgrading.md) · [Troubleshooting](docs/en-US/troubleshooting.md) · [CHANGELOG](CHANGELOG.md)
 
-## What's new in 0.10.1
+## What's new in 0.11.0
 
-- A lighter install: the images moved off the plugin's branch, so Hermes no longer copies about 3 MB of screenshots into every profile.
-- Documentation reorganized in **en-US** and **pt-BR**, with a getting-started guide and a troubleshooting guide in both languages.
-- CI on the current GitHub Actions runtime.
+- **The index explains itself.** `status`, the digest and the panel say what moved the Evolution index, flag a failure that jumped today, and list what to **do first**, ranked by the points each step could add.
+- **Safe for Hermes' install scan.** Hermes' own plugin scan now says `safe`, so the plugin installs and updates itself in every profile without waiting for a confirmation.
+- **More self-repair.** A `lessons: false` written by `hermes config set` is fixed on load; an old `tick` job in Hermes' scheduler is found, with the command that removes it; a plugin host and a hosted scope no longer trip the plugin.
+- **Leaner.** The commands deprecated in 0.10.0 (`ops`, `health`, `tick`, `feedback`, `history`, `memory`, `/evolution`) are gone, about 5,300 lines: see [Updating to 0.11.0](docs/en-US/upgrading.md#updating-to-0110).
 
 Every change: [CHANGELOG](CHANGELOG.md).
 

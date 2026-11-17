@@ -287,6 +287,7 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
                      "reload_keys": ["runtime_guard", "tool_hints"], "problems": sorted(set(settings_problems))},
         "owner": {"channels": channels, "suggestions": suggestions},
         "status_md": status.markdown(state, lang), "report_md": report.markdown(digest, lang), "health_md": health_md,
+        "insights_md": _module("insights").panel_markdown(state.get("insights"), lang),
         "environment_md": status.environment_markdown(home, lang, mode=opts["mode"]),
         "environment": environment_extra(home),
         "commands": {"menu": f"{hermes} evolution", "review": f"{hermes} evolution lessons review",

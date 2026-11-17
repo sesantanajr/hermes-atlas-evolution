@@ -22,7 +22,7 @@ You need Python 3.11 or later. There is nothing to install: the plugin uses the 
 git clone https://github.com/sesantanajr/hermes-atlas-evolution
 cd hermes-atlas-evolution
 python -m compileall -q hermes_atlas_evolution dashboard __init__.py
-python -m hermes_atlas_evolution --home /tmp/evolution-test --hermes-version 0.23.1 update --list
+python -m hermes_atlas_evolution --home /tmp/evolution-test update --list
 ```
 
 The unit test suite is maintained outside this repository, so the published plugin carries only what Hermes loads. GitHub Actions ([`.github/workflows/checks.yml`](.github/workflows/checks.yml)) runs `ruff` for undefined names, unused imports and syntax the oldest supported Python refuses, byte-compiles everything with Python 3.11, checks `install.sh` and runs a smoke test of the standalone CLI on Linux (Python 3.11 to 3.14), macOS and Windows. Compute dates with `experience.utc_datetime` or `utc_day`, never `datetime.fromtimestamp`, which refuses times before 1970 on Windows.
@@ -38,7 +38,7 @@ To try a command, point the standalone runner at a throwaway profile directory. 
 
 ```sh
 mkdir /tmp/evolution-test
-python -m hermes_atlas_evolution --home /tmp/evolution-test --hermes-version 0.23.1 report
+python -m hermes_atlas_evolution --home /tmp/evolution-test report
 ```
 
 ## Code style
@@ -56,7 +56,7 @@ python -m hermes_atlas_evolution --home /tmp/evolution-test --hermes-version 0.2
 
 Everything a person or the agent reads exists in English and Brazilian Portuguese, and the catalog must stay complete.
 
-- A new sentence in a diagnostic, plan, recommendation, Kanban card, agent tool reply, error message or command help needs its pair in `hermes_atlas_evolution/catalog.py`: an exact `(English, Portuguese)` entry in `PAIRS`, or a pattern in `PATTERNS` when it carries values. The i18n test of the external suite extracts the diagnostic sentences, the command help, the Kanban card texts and the plans from the code and fails when one lacks its pair. For any other new text, add the pair and a test that the output comes out translated.
+- A new sentence in an agent tool reply, a refusal, an error message or the command help needs its pair in `hermes_atlas_evolution/catalog.py`: an exact `(English, Portuguese)` entry in `PAIRS`, or a pattern in `PATTERNS` when it carries values. The i18n test of the external suite extracts the command help and the error messages from the code and fails when one lacks its pair. For any other new text, add the pair and a test that the output comes out translated.
 - A new lesson template in `lessons.TEMPLATES`, a digest label in `report._TEXT`, a `status` label in `status._TEXT` and a reflector instruction in `reflector.INSTRUCTIONS` are written in both languages next to each other.
 - Codes, field names, identifiers and numbers are never translated.
 - Write Portuguese as spoken in Brazil, with the same meaning as the English, not a word-for-word copy.
@@ -69,14 +69,14 @@ Every change must keep these. A pull request that breaks one will not be merged.
 2. **Only safe values reach the database.** A stored value is a counter, a member of a fixed list, or a label that passed `experience.label` or `signals._clean_hint`. Session and turn identifiers are stored only as hashes.
 3. **No network access of the plugin's own and no telemetry.** A model may be called only through Hermes' `ctx.llm`, by a feature the operator can switch off with its own setting, within a per-pass and daily cap, and its output starts in quarantine. The reflector is the only such feature; it is on by default, and its drafts stay in quarantine in every mode.
 4. **Hooks fail open and stay cheap.** A hook callback never raises into a turn. Hook writes go through `experience.record` or `operations.record`, which queue the update while the database is busy.
-5. **The plugin changes only its own data.** Anything that would change Hermes (a skill, a setting, a Kanban card outside the explicit handoff) is shown as a command for the operator.
+5. **The plugin changes only its own data.** Anything that would change Hermes (a skill, a setting) is shown as a command for the operator.
 6. **Only fixed templates reach the agent without approval, and only the operator decides.** Text written by a model, by the agent or by a person reaches the agent only after the operator approves it. Lessons rendered from the fixed templates in the code are active at once in the default `auto` mode, are measured, and are retired when they do not help; `suggest` makes them wait for approval too. New surfaces that show learned text to the agent are off until the operator turns them on. The runtime guard's refusal, on by default, is fixed text in the code, not learned content. A command that activates, approves or retires something calls the operator guard (`cli._operator_only`) and shows the exact text before it takes effect.
 7. **Refused approvals are never advice.** No signal, template or draft may teach the agent to reach an outcome the user's approval refused.
 8. **Prove it in a test.** When you add a signal, add a test that feeds it sensitive-looking input and asserts that the text is absent from the stored rows and from the command output.
 
 ## Documentation rule
 
-Every command, option, setting key, hook name and number in the documentation must exist in the code. Describe what the plugin does now, in short sentences that tell the reader what to do; version history belongs only in `CHANGELOG.md` and `CHANGELOG.pt-BR.md`. `SECURITY.md` and this file are in English with a short Portuguese summary at the top: keep it in step. Check commands with `python -m hermes_atlas_evolution --home /tmp/x --hermes-version 0.23.1 <command> --help`, and state plainly what has not been verified. Do not add benchmarks, user counts or results that were not measured.
+Every command, option, setting key, hook name and number in the documentation must exist in the code. Describe what the plugin does now, in short sentences that tell the reader what to do; version history belongs only in `CHANGELOG.md` and `CHANGELOG.pt-BR.md`. `SECURITY.md` and this file are in English with a short Portuguese summary at the top: keep it in step. Check commands with `python -m hermes_atlas_evolution --home /tmp/x <command> --help`, and state plainly what has not been verified. Do not add benchmarks, user counts or results that were not measured.
 
 Keep the README short. It covers installing, updating, migrating, what the plugin does, the main commands and settings, and a short privacy list; everything else goes to `docs/en-US/` and `docs/pt-BR/`, with a link from the README. Development instructions live here, not in the README.
 

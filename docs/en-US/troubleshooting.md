@@ -93,4 +93,6 @@ hermes -p <profile> plugins remove hermes-atlas-evolution    # each profile
 
 Then delete `<profile home>/evolution/` in each profile to remove its data (lessons, history, counters).
 
+To stop it without removing it, `hermes -p <profile> plugins disable hermes-atlas-evolution` makes a running gateway unload it; after a removal, run `hermes gateway restart`. Neither command deletes the data folder. In Auto mode, the profile that looks after the whole Hermes remembers where the plugin has been and never installs it there again by itself.
+
 **Still stuck?** Open an issue with the output of `hermes evolution status --format json` (it holds no conversation text): [issues](https://github.com/sesantanajr/hermes-atlas-evolution/issues).

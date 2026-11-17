@@ -140,7 +140,7 @@ Cada ação vai para o histórico com o seu desfazer, e uma ação que você des
 | `schedule-digest [--deliver <canal>]` | O resumo semanal como tarefa agendada do Hermes, sem agente e sem tokens. |
 | `owner` | Quais remetentes e canais de chat contam como você. |
 
-Referência completa: [Comandos](docs/pt-BR/evolution-loop.md#comandos). Os comandos `health`, `history`, `tick`, `feedback`, `memory`, `ops` e o comando de chat `/evolution` estão obsoletos e saem na 0.11.0 (cada um diz o que o substitui).
+Referência completa: [Comandos](docs/pt-BR/evolution-loop.md#comandos). Os comandos `health`, `history`, `tick`, `feedback`, `memory`, `ops` e o comando de chat `/evolution` foram removidos na 0.11.0: use `care check` no lugar de `health` e `decisions` no lugar de `history`; a rodada de aprendizado roda sozinha, e o `learn` roda uma agora. Quando o banco do plugin ainda guarda notas da versão 0.1, o `status` avisa, com um comando só de leitura que as mostra. Detalhes: [Atualizar para a 0.11.0](docs/pt-BR/upgrading.md#atualizar-para-a-0110).
 
 ## Configurações
 
@@ -182,11 +182,12 @@ Detalhes: [SECURITY.md](SECURITY.md).
 
 📚 **[Início da documentação](docs/pt-BR/README.md)**: [Primeiros passos](docs/pt-BR/getting-started.md) · [O ciclo de evolução](docs/pt-BR/evolution-loop.md) · [Manutenção](docs/pt-BR/maintenance.md) · [Integração com o Hermes](docs/pt-BR/hermes-integration.md) · [Atualização](docs/pt-BR/upgrading.md) · [Solução de problemas](docs/pt-BR/troubleshooting.md) · [Mudanças](CHANGELOG.pt-BR.md)
 
-## Novidades da 0.10.1
+## Novidades da 0.11.0
 
-- Instalação mais leve: as imagens saíram do ramo do plugin, então o Hermes não copia mais cerca de 3 MB de capturas de tela para cada perfil.
-- Documentação reorganizada em **pt-BR** e **en-US**, com um guia de primeiros passos e um de solução de problemas nos dois idiomas.
-- CI no ambiente atual do GitHub Actions.
+- **O índice se explica.** O `status`, o resumo e o painel dizem o que moveu o Índice de evolução, apontam uma falha que disparou hoje e listam o que **fazer primeiro**, em ordem dos pontos que cada passo pode somar.
+- **Seguro para a varredura de instalação do Hermes.** A varredura de plugins do próprio Hermes agora diz `safe`, então o plugin se instala e se atualiza em cada perfil sem esperar uma confirmação.
+- **Mais autorreparo.** Um `lessons: false` gravado pelo `hermes config set` é corrigido no carregamento; uma tarefa antiga do `tick` no agendador do Hermes é encontrada, com o comando que a remove; um host de plugins e um escopo hospedado não atrapalham mais o plugin.
+- **Mais enxuto.** Os comandos obsoletos desde a 0.10.0 (`ops`, `health`, `tick`, `feedback`, `history`, `memory`, `/evolution`) saíram, cerca de 5.300 linhas: veja [Atualizar para a 0.11.0](docs/pt-BR/upgrading.md#atualizar-para-a-0110).
 
 Cada mudança: [Mudanças](CHANGELOG.pt-BR.md).
 

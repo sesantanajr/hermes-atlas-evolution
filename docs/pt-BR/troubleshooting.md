@@ -93,4 +93,6 @@ hermes -p <perfil> plugins remove hermes-atlas-evolution    # em cada perfil
 
 Depois apague `<pasta do perfil>/evolution/` em cada perfil para remover os dados (lições, histórico, contadores).
 
+Para pará-lo sem remover, o `hermes -p <perfil> plugins disable hermes-atlas-evolution` faz um gateway em execução descarregar o plugin; depois de uma remoção, rode `hermes gateway restart`. Nenhum dos dois comandos apaga a pasta de dados. No Modo Auto, o perfil que cuida do Hermes inteiro lembra onde o plugin já esteve e nunca o instala lá de novo sozinho.
+
 **Ainda com problema?** Abra uma issue com a saída de `hermes evolution status --format json` (ela não tem texto de conversa): [issues](https://github.com/sesantanajr/hermes-atlas-evolution/issues).

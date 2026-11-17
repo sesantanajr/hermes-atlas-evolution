@@ -16,10 +16,9 @@ O Atlas Evolution é um plugin do Hermes Agent que aprende com os erros do agent
 
 | Página | O que cobre |
 |---|---|
-| [O ciclo de evolução](evolution-loop.md) | Como uma falha vira lição e como a lição é medida, o refletor, as propostas, as ações automáticas, o Índice de evolução, o resumo, o menu do terminal, cada comando e cada configuração. |
+| [O ciclo de evolução](evolution-loop.md) | Como uma falha vira lição e como a lição é medida, o refletor, as propostas, as ações automáticas, o Índice de evolução, o resumo, uso e custo, o menu do terminal, cada comando e cada configuração. |
 | [Manutenção](maintenance.md) | As checagens de saúde do próprio Hermes, o doctor diário, o reparo do gateway e a atualização do sistema operacional, passo a passo. |
 | [Integração com o Hermes](hermes-integration.md) | Os ganchos que ele registra, o painel do dashboard, a Proteção do Hermes, o que ele lê e grava, e o que foi verificado. |
-| [Operações](operations.md) | O supervisor de Linux da 0.3 (`hermes evolution ops`), obsoleto e removido na 0.11.0. |
 
 ## Projeto
 

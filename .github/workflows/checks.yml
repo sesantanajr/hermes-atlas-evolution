@@ -57,5 +57,5 @@ jobs:
         run: |
           python -c "import hermes_atlas_evolution.integration, hermes_atlas_evolution.fleet_update"
           mkdir -p "$RUNNER_TEMP/profile"
-          python -m hermes_atlas_evolution --home "$RUNNER_TEMP/profile" --hermes-version 0.23.1 --help > /dev/null
-          python -m hermes_atlas_evolution --home "$RUNNER_TEMP/profile" --hermes-version 0.23.1 update --list --format json
+          python -m hermes_atlas_evolution --home "$RUNNER_TEMP/profile" --help > /dev/null
+          python -m hermes_atlas_evolution --home "$RUNNER_TEMP/profile" update --list --format json

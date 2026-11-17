@@ -2,6 +2,42 @@
 
 *Em português: [CHANGELOG.pt-BR.md](CHANGELOG.pt-BR.md).*
 
+## 0.11.0
+
+An index that explains itself, an install Hermes' own scan calls safe, and the deprecated stack removed.
+
+### Added
+
+- **Why the Evolution index moved.** When a part moved 5 points or more against a week ago, `status` and the digest say which part and what drove it: the tools whose errors grew or fell the most, failed and slow turns, your corrections, the lessons that did not help, the health problems found now (`What moved it: tools 92 → 62 · terminal +147 errors`).
+- **A failure that jumped today.** A failure that already happened at least 5 times in the UTC day and 4 times its daily average of the 14 days before is listed under what needs attention, with its tool and both counts: a dependency, a key, a service or a quota that just changed, said the same day. A quiet scheduled run (`learn --notify-only`) tells each one once per day.
+- **Do first.** Up to 3 steps ranked by the index points each could add, estimated with the index's own formula: a lesson waiting for you, a recurring failure without a lesson, a health problem. Each has its command. In `status`, in the digest and in the panel's Overview ("What the numbers say"). No model call: a few indexed queries over 7 to 14 days.
+- **Self-repair of `lessons: false`.** `hermes config set ... settings.lessons off` stores the boolean false, which Hermes reported at every load and its settings form showed as no choice. The plugin now writes the text `off` back once, with Hermes' own writer for its settings (`ctx.set_config`).
+- **An old tick job is found.** A job of Hermes' scheduler that still runs `evolution ops tick` or `evolution tick` fails at every run in 0.11.0: `status` lists it with the exact `cron remove` command.
+- **The notes of 0.1 can be closed.** Next to the read-only command that prints them, `status` gives one that saves them to `evolution/notes-0.1.json` and removes them from the database; the item then goes away.
+
+### Fixed
+
+- **Hermes' install scan says `safe`.** 0.10.x got `caution` from Hermes' plugin scan (`plugin-guard-v15`), because of advice strings that showed `sudo loginctl`, `sudo reboot`, `sudo dpkg-reconfigure` and `sudo journalctl`, and two CHANGELOG examples of a pipe into `sh`. A caution install waits for a yes from a terminal, so the plugin's own install into another profile (Mode auto, `update --all`) was refused there. The advice now reads `loginctl enable-linger $USER` (it asks for a password when it needs one), `sudo systemctl reboot`, `dpkg-reconfigure -plow unattended-upgrades` as root and `sudo systemctl status <unit> -n 30 --no-pager`. The plugin never runs any of them itself; a new test keeps such strings out.
+- **Plugin host** (`plugins.isolation: host`): the `evolution` CLI command is no longer registered there (Hermes skips it with a warning at every load), and `status` says the runtime guard is off there even when it is read inside the host.
+- **A hosted scope that refuses a profile switch** (`ScopeSwitchRefused`) no longer fails the learning pass: the pass runs in the scope it is in.
+- **The panel's tab** comes after Skills: Analytics is hidden by default, so `after:analytics` put it last.
+
+### Removed
+
+What 0.10.0 marked as deprecated, about 5,300 lines and 14 modules (`supervisor`, `linux_actions`, `learning`, `reasoning`, `inventory`, `linux_host`, `workloads`, `ops_metrics`, `semantic_ops`, `advisory`, `native_actions`, `diagnostics`, `memory`, `native_signals`):
+
+- the commands `ops ...` (the Linux operations supervisor of 0.3), `health` (use `care check`), `tick` (the pass runs by itself; `learn` runs one now), `feedback`, `history` (use `decisions`), `memory remember|recall|audit|forget`, the `/evolution` chat command and the automatic recall of the 0.1 notes into turns;
+- the hooks `subagent_stop`, `post_curator_run` and `on_kanban_worker_exited` (14 hooks remain);
+- the settings `sensitivity`, `inspect_shared_kanban`, `kanban_handoff`, `linux_supervisor`, `semantic_incident_model`, `daily_estimated_budget_usd`, `legacy_memory_commands` and `automatic_shared_recall`, now ignored without an error;
+- `supervisor.sqlite3`, no longer written; the standalone runner ignores `--hermes-version`;
+- the Operations pages of the docs: `usage` and `rates_usd_per_million` moved to [Usage and cost](docs/en-US/evolution-loop.md#usage-and-cost).
+
+### Documentation
+
+- [Updating to 0.11.0](docs/en-US/upgrading.md#updating-to-0110): what replaces each removed command, the old cron job, the 0.1 notes.
+- The reflector's route, as Hermes resolves it: the compression task's provider and model reach it only with `plugins.entries.hermes-atlas-evolution.llm.allow_task_override: true`; otherwise set `auxiliary.evolution_reflector`.
+- The hook tables list the 14 hooks of `plugin.yaml`; every link and anchor was checked in both languages.
+
 ## 0.10.1
 
 A leaner plugin and documentation rebuilt in two languages.
@@ -65,7 +101,7 @@ Self-repair and every profile kept current by itself. A second full review (six 
 - **Linux checks:** a `dpkg --audit` or `apt-get check` cut by the time budget is "not checked", never "broken"; systemd 254's bus error and unexpected exit codes leave the scope unverified instead of empty; a program this user cannot look at is never called missing; the gateway unit of this profile is picked, never another profile's; a named profile served by the root gateway reads the root's state; a system upgrade run is bounded (`RuntimeMaxSec`).
 - **A proposal you rejected was applied by itself 30 days later** in Mode auto (it reopens for you to see; the automatic pass did not know you had said no). A rejection now keeps it from ever being applied by itself, in every profile; undoing the rejection lifts that.
 - **Operator-only commands:** an agent could pass the check after clearing the environment markers when a Hermes ancestor's arguments contained the word "evolution" (a profile named evolution, a one-shot prompt mentioning it). Only this command's own launcher is skipped now, read from the shape of its arguments.
-- **Runtime guard:** commands that restart or kill the gateway, delete Hermes or change this plugin still passed when written as: a line continuation (`\` at the end of a line); a `#` inside a word (a URL, `$#`) read as a comment; a `<<EOF` inside quotes or a comment; a shell that reads its commands from a heredoc, `<<<` or a pipe (`bash <<'EOF'`, `echo ... | sh`); `kill -- -$PPID` or `pkill -u $USER`; `cmd /c` and `powershell -Command` with Windows paths, `taskkill /IM python.exe`; `find ... ! -name X -delete` or `-o`; `grep -F hermes | xargs kill`; a write into the plugin's own files (`sed -i`, `: >`, `tee`). All are vetoed now. It no longer blocks `find ~/.hermes -name '*.log' | xargs rm`, `cd ~/.hermes && ls logs/*.log | xargs rm` or reading `config.yaml`, and a command with many `{a,b}` groups no longer takes minutes to check (a stalled check blocks the tool).
+- **Runtime guard:** commands that restart or kill the gateway, delete Hermes or change this plugin still passed when written as: a line continuation (`\` at the end of a line); a `#` inside a word (a URL, `$#`) read as a comment; a `<<EOF` inside quotes or a comment; a shell that reads its commands from a heredoc, `<<<` or a pipe (`bash <<'EOF'`, the output of `echo` piped into `sh`); `kill -- -$PPID` or `pkill -u $USER`; `cmd /c` and `powershell -Command` with Windows paths, `taskkill /IM python.exe`; `find ... ! -name X -delete` or `-o`; `grep -F hermes | xargs kill`; a write into the plugin's own files (`sed -i`, `: >`, `tee`). All are vetoed now. It no longer blocks `find ~/.hermes -name '*.log' | xargs rm`, `cd ~/.hermes && ls logs/*.log | xargs rm` or reading `config.yaml`, and a command with many `{a,b}` groups no longer takes minutes to check (a stalled check blocks the tool).
 - **Text hidden from agent shells:** `report` and `learn` printed lesson texts, drafts and proposals' lessons that `lessons list` hides from an agent's terminal; they hide them too now.
 - **Memory:** the automatic duplicate removal could take out the only copy the agent sees (the same entry in `MEMORY.md` and in a `USER.md` Hermes does not load); a removal whose record could not be written failed the whole pass.
 - **Learning:** a failure the reflector declined was asked about again on every pass, so the same few failures took the whole daily budget; one damaged session in Hermes' history stopped the replay for ever (and with it the lessons' baselines); a manual pass had no deadline and could outlive its lease; the Curator ledger was read under a write lock.
@@ -73,7 +109,7 @@ Self-repair and every profile kept current by itself. A second full review (six 
 - **Command line:** every printed command names its profile (`hermes -p default ...`), because Hermes may follow a sticky profile; a command that failed (`update`, `care`) exits 1, so `hermes evolution update --all --yes && hermes gateway restart` no longer restarts after a failed update; Ctrl-C prints a sentence, not a traceback; the no-terminal hint repeats your own request; `owner add/remove` refuses where the current owners cannot be read instead of printing a list that would drop them; cron and maintenance decisions are described correctly; an empty `HERMES_HOME` is no profile.
 - **Windows:** `NUL` is no longer taken for a terminal, and the language follows the Windows locale.
 - **Profiles:** a profile folder that is a link to another place is no longer taken for the default profile (which made it a second lead).
-- **`install.sh`:** every profile runs with its own `HERMES_HOME` and `--profile` (a sticky or exported profile no longer updates the wrong one); a profile name Hermes would refuse, a name given twice, a `profiles` folder higher up the path, an unset `HOME` and a missing terminal (`curl ... | sh` without `-t`) are handled; the gateway restart never reads the rest of a piped script and its failure shows in the exit code.
+- **`install.sh`:** every profile runs with its own `HERMES_HOME` and `--profile` (a sticky or exported profile no longer updates the wrong one); a profile name Hermes would refuse, a name given twice, a `profiles` folder higher up the path, an unset `HOME` and a missing terminal (a script piped from `curl` into `sh`, without `-t`) are handled; the gateway restart never reads the rest of a piped script and its failure shows in the exit code.
 
 ### Removed
 

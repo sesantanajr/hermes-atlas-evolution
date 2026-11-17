@@ -659,6 +659,28 @@ def _runtime_config() -> dict:
         return {}
 
 
+def _repair_settings(ctx, runtime_config) -> None:
+    """`hermes config set ... settings.lessons off`, and a bare `off` in config.yaml, store the boolean false, which
+    Hermes then reports on every load ("lessons should be str") and its settings form shows as no choice. The plugin
+    reads it as "off" already; here it writes the string back once, with Hermes' own writer for this plugin's
+    settings (ctx.set_config), so the form and the schema check see a declared choice. Never fails the load."""
+    from .cli import PLUGIN_ID
+
+    setter = getattr(ctx, "set_config", None)
+    plugins = runtime_config.get("plugins") if isinstance(runtime_config, dict) else None
+    entries = plugins.get("entries") if isinstance(plugins, dict) else None
+    entry = entries.get(PLUGIN_ID) if isinstance(entries, dict) else None
+    values = entry.get("settings") if isinstance(entry, dict) else None
+    if not callable(setter) or not isinstance(values, dict) or values.get("lessons") is not False:
+        return
+    try:
+        setter("lessons", "off")
+    except Exception as error:   # a managed install, a locked config: the plugin keeps reading false as "off"
+        from logging import getLogger
+
+        getLogger(__name__).info("Atlas Evolution could not store lessons=off as text: %s", type(error).__name__)
+
+
 def _reflector(ctx, evolution: dict):
     """The model access of the reflector through Hermes, or None (reflector off, or an older host)."""
     if not evolution["reflector"] or not callable(getattr(ctx, "register_auxiliary_task", None)):
@@ -795,6 +817,7 @@ def register(ctx):
             "Atlas Evolution is installed twice in this profile, under its old name %s and hermes-atlas-evolution. "
             "The new copy stays inactive until the old one is removed: hermes plugins remove %s", old, old)
         return
+    _repair_settings(ctx, runtime_config)
     # Unreadable settings.json: keep measuring with the values from Hermes' form, but show nothing to the
     # agent until the file is fixed.
     config, problems = safe_settings(home, runtime_config)
@@ -855,5 +878,10 @@ def register(ctx):
         # next load of the plugin (`hermes gateway restart`); turning them off works at once (check_fn).
         ctx.register_tool(name=LESSONS_TOOL["name"], toolset="hermes-atlas-evolution", schema=LESSONS_TOOL,
                           handler=plugin.playbook_tool, check_fn=lambda: plugin.advice)
-    ctx.register_cli_command("evolution", "Review Hermes health, learning and operations", setup,
-                             _operator_cli(home, plugin.reflect))
+    import os
+
+    # A plugin host (plugins.isolation: host) skips CLI commands and warns on every load: the `evolution` command is
+    # registered where the terminal runs Hermes in process, and the standalone runner (python -m) serves the rest.
+    if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") != "1":
+        ctx.register_cli_command("evolution", "Review Hermes health, learning and operations", setup,
+                                 _operator_cli(home, plugin.reflect))

@@ -37,3 +37,22 @@ A maior parte das configurações vale em até um minuto. Três esperam o `herme
 Se um perfil ainda tem o plugin com o nome antigo `hermes-evolution`, rode `hermes -p <perfil> plugins remove hermes-evolution` e depois `hermes -p <perfil> plugins install sesantanajr/hermes-atlas-evolution --enable`.
 
 O que mudou em cada versão: [Mudanças](../../CHANGELOG.pt-BR.md).
+
+## Atualizar para a 0.11.0
+
+A 0.11.0 remove o que a 0.10.0 marcou como obsoleto. Atualize como acima; depois confira os dois pontos abaixo que podem afetar você: uma tarefa agendada antiga e as notas da versão 0.1.
+
+| Removido | Use no lugar |
+|---|---|
+| `hermes evolution ops ...`, o supervisor de operações de Linux da 0.3 (`inspect`, `tick`, `history`, `rollback`, `similar`, `review`, `feedback`, `plan`, `handoff`, `schedule-spec`, os ensaios de pesos de cgroup no Linux, o encaminhamento ao Kanban) | `status`, `care` e a aba **Saúde** do dashboard para a saúde do Hermes ([Manutenção](maintenance.md)); `usage` para as chamadas ao modelo e o custo delas ([Uso e custo](evolution-loop.md#uso-e-custo)) |
+| `health` | `care check` |
+| `tick` | Nada para rodar: a rodada de aprendizado roda sozinha, e o `learn` roda uma agora |
+| `feedback` | Nada: ele avaliava os achados do antigo `tick` |
+| `history` | `decisions` |
+| `memory remember`, `recall`, `audit` e `forget`, o comando de chat `/evolution` e a recuperação automática das notas compartilhadas nos turnos (as notas da 0.1) | A memória do próprio Hermes; as notas que ainda estão no banco estão abaixo |
+
+- **Configurações antigas são ignoradas.** `sensitivity`, `inspect_shared_kanban`, `kanban_handoff`, `linux_supervisor`, `semantic_incident_model`, `daily_estimated_budget_usd`, `legacy_memory_commands` e `automatic_shared_recall` não são mais lidas, nem no `settings.json` nem na configuração do Hermes. Um valor que ficou lá é ignorado, sem erro nem aviso; apague quando quiser. O `rates_usd_per_million` continua: o `usage` precifica as chamadas com ele.
+- **As notas da 0.1 ficam no banco.** Nada mais as lê nem grava, e o agente não as recebe mais, mas elas não são apagadas. Enquanto houver alguma, o `status` mostra no que precisa de atenção "N notas da versão 0.1 continuam no banco do plugin", com um comando só de leitura que as mostra, para você copiar o que precisar (para a memória do Hermes, por exemplo). Para salvá-las em `evolution/notes-0.1.json`, ao lado do banco, e tirá-las dele, o `status` dá um segundo comando; depois de rodá-lo, o item some.
+- **Uma tarefa agendada que rodava o tick antigo precisa sair.** Uma tarefa que roda `hermes evolution ops tick` ou `hermes evolution tick` agora falha em toda execução. A receita do `ops schedule-spec` a chamava de `hermes-atlas-evolution-watchdog`. O `status` encontra essa tarefa no agendador do Hermes e a mostra no que precisa de atenção, com o comando `cron remove` exato. Encontre-a com `hermes cron list` e remova-a com `hermes cron remove <tarefa>`, em cada perfil em que você a criou (`hermes -p <perfil> cron list`). Se você a agendou em outro agendador (um crontab, um timer do systemd), remova-a lá. A tarefa do resumo semanal (`hermes-atlas-evolution-digest`) continua.
+- **O banco do supervisor.** O `evolution/supervisor.sqlite3` não é mais gravado nem lido. Apague-o se quiser o espaço de volta.
+- **O executor independente** ainda aceita `--hermes-version` e o ignora, então um script que o passa continua rodando; você pode tirá-lo.

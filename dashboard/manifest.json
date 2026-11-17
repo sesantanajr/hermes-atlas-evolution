@@ -3,8 +3,8 @@
   "label": "Evolution",
   "description": "What this profile learned, what waits for you, what the plugin did by itself, and the health of Hermes and of the system, in plain words. With a dashboard login you decide here, for every profile. Without one, the same in the terminal: hermes evolution.",
   "icon": "Sparkles",
-  "version": "0.10.1",
-  "tab": { "path": "/evolution", "position": "after:analytics" },
+  "version": "0.11.0",
+  "tab": { "path": "/evolution", "position": "after:skills" },
   "entry": "dist/index.js",
   "css": "dist/style.css",
   "api": "plugin_api.py"

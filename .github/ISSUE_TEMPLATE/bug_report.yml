@@ -48,7 +48,7 @@ body:
         - Evolution loop (signals, lessons, skills by outcome, measurement, proposals, digest)
         - Reflector
         - Language (English or Portuguese text)
-        - Operations supervisor (Linux, Cron, Kanban, usage)
+        - Maintenance and usage (Hermes health, the environment, the operating system, usage and cost)
         - Installation or Hermes integration
         - Documentation
     validations:
@@ -78,7 +78,7 @@ body:
     id: settings
     attributes:
       label: Relevant settings
-      description: The parts of `<HERMES_HOME>/evolution/settings.json` and of `plugins.entries.hermes-atlas-evolution.settings` that matter, without identifiers such as sender IDs or unit names you prefer to keep private.
+      description: The parts of `<HERMES_HOME>/evolution/settings.json` and of `plugins.entries.hermes-atlas-evolution.settings` that matter, without identifiers such as sender IDs you prefer to keep private.
       render: json
   - type: checkboxes
     id: checks

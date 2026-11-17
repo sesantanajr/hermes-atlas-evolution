@@ -555,6 +555,15 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
         result = run_exclusive(home, lambda: cycle(home, now=now, runtime_config=runtime_config, config=config,
                                                    lang=lang, reflect=reflect, backfill_budget_s=120.0,
                                                    deadline=time.monotonic() + LEASE_SECONDS - 180))
+        if args.notify_only:   # a failure far above its usual day, told once per day to whoever reads this run
+            from . import insights
+
+            try:
+                with experience(home) as conn:
+                    result["failure_spikes"] = insights.untold_spikes(conn, now=now)
+                    conn.commit()
+            except (sqlite3.Error, ValueError, OSError):
+                result["failure_spikes"] = []
         view = notify_view(result) if args.notify_only else result
         return _masked_pass(view) if _agent_shell() else view
     if action == "skills":
@@ -2115,7 +2124,11 @@ def _learn_md(result: dict | None, home: Path, lang: str, *, quiet: bool) -> str
         if reflector:
             lines.append(f"- **{t['reflector']}:** {t['reflector_states'].get(reflector, reflector)}")
         lines.append("")
+    from .insights import _TEXT as insight_text, spike_items
+
     sections = [
+        (insight_text.get(lang, insight_text["en"])["spike_title"],
+         [[f"- {line}"] for line in spike_items(result.get("failure_spikes") or [], lang)]),
         (t["new_lessons"], [_lesson_line(item, lang) for item in result.get("new_lessons") or ()]),
         (t["drafts"], [[f"- #{item.get('lesson_id')} `{item.get('tool')}`: {item.get('lesson') or t['hidden']}"]
                        for item in result.get("reflector_drafts") or (result.get("reflector") or {}).get("drafted") or ()

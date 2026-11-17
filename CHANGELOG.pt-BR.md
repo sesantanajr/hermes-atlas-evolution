@@ -2,6 +2,42 @@
 
 *In English: [CHANGELOG.md](CHANGELOG.md), with every version.*
 
+## 0.11.0
+
+Um índice que se explica, uma instalação que a própria varredura do Hermes considera segura e a pilha obsoleta removida.
+
+### Novidades
+
+- **Por que o Índice de evolução mudou.** Quando uma parte mudou 5 pontos ou mais em relação a uma semana atrás, o `status` e o resumo dizem qual parte e o que a moveu: as ferramentas cujos erros mais cresceram ou caíram, turnos com falha e lentos, as suas correções, as lições que não ajudaram, os problemas de saúde encontrados agora (`O que o moveu: ferramentas 92 → 62 · terminal +147 erros`).
+- **Uma falha que disparou hoje.** Uma falha que já aconteceu pelo menos 5 vezes no dia UTC e 4 vezes a sua média diária dos 14 dias anteriores aparece no que precisa de atenção, com a ferramenta e as duas contagens: uma dependência, uma chave, um serviço ou uma cota que acabou de mudar, dito no mesmo dia. Uma rodada agendada silenciosa (`learn --notify-only`) avisa cada uma uma vez por dia.
+- **Faça primeiro.** Até 3 passos em ordem dos pontos do índice que cada um pode somar, estimados com a própria fórmula do índice: uma lição que espera por você, uma falha recorrente sem lição, um problema de saúde. Cada um com o seu comando. No `status`, no resumo e na Visão geral do painel ("O que os números dizem"). Sem chamar modelo: poucas consultas indexadas sobre 7 a 14 dias.
+- **Autorreparo do `lessons: false`.** O `hermes config set ... settings.lessons off` grava o booleano falso, que o Hermes apontava em todo carregamento e o formulário de configurações mostrava como nenhuma opção. Agora o plugin grava de volta o texto `off` uma vez, com o gravador do próprio Hermes para as suas configurações (`ctx.set_config`).
+- **Uma tarefa antiga do tick é encontrada.** Uma tarefa do agendador do Hermes que ainda roda `evolution ops tick` ou `evolution tick` falha em toda execução na 0.11.0: o `status` a mostra com o comando `cron remove` exato.
+- **As notas da 0.1 podem ser encerradas.** Ao lado do comando só de leitura que as mostra, o `status` dá um que as salva em `evolution/notes-0.1.json` e as tira do banco; o item então some.
+
+### Correções
+
+- **A varredura de instalação do Hermes diz `safe`.** A 0.10.x recebia `caution` da varredura de plugins do Hermes (`plugin-guard-v15`), por causa de textos de orientação que mostravam `sudo loginctl`, `sudo reboot`, `sudo dpkg-reconfigure` e `sudo journalctl`, e de dois exemplos do CHANGELOG de um pipe para o `sh`. Uma instalação `caution` espera um sim de um terminal, então a instalação do próprio plugin em outro perfil (Modo auto, `update --all`) era recusada ali. A orientação agora diz `loginctl enable-linger $USER` (ele pede a senha quando precisa), `sudo systemctl reboot`, `dpkg-reconfigure -plow unattended-upgrades` como root e `sudo systemctl status <serviço> -n 30 --no-pager`. O plugin nunca roda nenhum deles por conta própria; um teste novo mantém esses textos fora.
+- **Host de plugins** (`plugins.isolation: host`): o comando de terminal `evolution` não é mais registrado ali (o Hermes o pula com um aviso em todo carregamento), e o `status` diz que a Proteção do Hermes está desligada ali mesmo quando é lido dentro do host.
+- **Um escopo hospedado que recusa a troca de perfil** (`ScopeSwitchRefused`) não derruba mais a rodada de aprendizado: a rodada roda no escopo em que está.
+- **A aba do painel** vem depois de Skills: Analytics fica oculta por padrão, então `after:analytics` a colocava no fim.
+
+### Removido
+
+O que a 0.10.0 marcou como obsoleto, cerca de 5.300 linhas e 14 módulos (`supervisor`, `linux_actions`, `learning`, `reasoning`, `inventory`, `linux_host`, `workloads`, `ops_metrics`, `semantic_ops`, `advisory`, `native_actions`, `diagnostics`, `memory`, `native_signals`):
+
+- os comandos `ops ...` (o supervisor de operações Linux da 0.3), `health` (use `care check`), `tick` (a rodada roda sozinha; `learn` roda uma agora), `feedback`, `history` (use `decisions`), `memory remember|recall|audit|forget`, o comando de chat `/evolution` e a lembrança automática das notas da 0.1 nos turnos;
+- os hooks `subagent_stop`, `post_curator_run` e `on_kanban_worker_exited` (ficam 14 hooks);
+- as configurações `sensitivity`, `inspect_shared_kanban`, `kanban_handoff`, `linux_supervisor`, `semantic_incident_model`, `daily_estimated_budget_usd`, `legacy_memory_commands` e `automatic_shared_recall`, agora ignoradas sem erro;
+- o `supervisor.sqlite3`, que não é mais gravado; o executor avulso ignora `--hermes-version`;
+- as páginas de Operações da documentação: `usage` e `rates_usd_per_million` foram para [Uso e custo](docs/pt-BR/evolution-loop.md#uso-e-custo).
+
+### Documentação
+
+- [Atualizar para a 0.11.0](docs/pt-BR/upgrading.md#atualizar-para-a-0110): o que substitui cada comando removido, a tarefa agendada antiga, as notas da 0.1.
+- A rota do refletor, como o Hermes a resolve: o provedor e o modelo da tarefa de compressão só chegam a ele com `plugins.entries.hermes-atlas-evolution.llm.allow_task_override: true`; caso contrário, configure `auxiliary.evolution_reflector`.
+- As tabelas de hooks listam os 14 hooks do `plugin.yaml`; cada link e âncora foi conferido nos dois idiomas.
+
 ## 0.10.1
 
 Um plugin mais enxuto e a documentação refeita em dois idiomas.
@@ -65,7 +101,7 @@ Autoreparo e todos os perfis atualizados sozinhos. Uma segunda revisão completa
 - **Checagens do Linux:** um `dpkg --audit` ou `apt-get check` cortado pelo tempo é "não verificado", nunca "quebrado"; o erro de barramento do systemd 254 e códigos de saída inesperados deixam o escopo não verificado em vez de vazio; um programa que este usuário não consegue ver nunca é dado como ausente; a unidade do gateway deste perfil é escolhida, nunca a de outro perfil; um perfil com nome atendido pelo gateway da raiz lê o estado da raiz; uma atualização do sistema tem limite de tempo (`RuntimeMaxSec`).
 - **Uma proposta que você recusou era aplicada sozinha 30 dias depois** no Modo Auto (ela reabre para você ver; a rodada automática não sabia que você tinha dito não). Agora uma recusa impede que ela seja aplicada sozinha, em qualquer perfil; desfazer a recusa libera.
 - **Comandos só do operador:** um agente passava pela checagem depois de limpar os marcadores do ambiente quando os argumentos de um processo do Hermes acima dele tinham a palavra "evolution" (um perfil chamado evolution, uma pergunta avulsa que a cita). Agora só o lançador do próprio comando é pulado, reconhecido pela forma dos argumentos.
-- **Proteção do Hermes:** comandos que reiniciam ou matam o gateway, apagam o Hermes ou mudam este plugin ainda passavam quando escritos como: continuação de linha (`\` no fim da linha); um `#` dentro de uma palavra (uma URL, `$#`) lido como comentário; um `<<EOF` dentro de aspas ou de um comentário; um shell que lê os comandos de um heredoc, de `<<<` ou de um pipe (`bash <<'EOF'`, `echo ... | sh`); `kill -- -$PPID` ou `pkill -u $USER`; `cmd /c` e `powershell -Command` com caminhos do Windows, `taskkill /IM python.exe`; `find ... ! -name X -delete` ou `-o`; `grep -F hermes | xargs kill`; uma gravação nos arquivos do próprio plugin (`sed -i`, `: >`, `tee`). Agora todos são barrados. Ela não barra mais `find ~/.hermes -name '*.log' | xargs rm`, `cd ~/.hermes && ls logs/*.log | xargs rm` nem a leitura do `config.yaml`, e um comando com muitos grupos `{a,b}` não leva mais minutos para ser checado (uma checagem travada bloqueia a ferramenta).
+- **Proteção do Hermes:** comandos que reiniciam ou matam o gateway, apagam o Hermes ou mudam este plugin ainda passavam quando escritos como: continuação de linha (`\` no fim da linha); um `#` dentro de uma palavra (uma URL, `$#`) lido como comentário; um `<<EOF` dentro de aspas ou de um comentário; um shell que lê os comandos de um heredoc, de `<<<` ou de um pipe (`bash <<'EOF'`, a saída de um `echo` ligada ao `sh` por pipe); `kill -- -$PPID` ou `pkill -u $USER`; `cmd /c` e `powershell -Command` com caminhos do Windows, `taskkill /IM python.exe`; `find ... ! -name X -delete` ou `-o`; `grep -F hermes | xargs kill`; uma gravação nos arquivos do próprio plugin (`sed -i`, `: >`, `tee`). Agora todos são barrados. Ela não barra mais `find ~/.hermes -name '*.log' | xargs rm`, `cd ~/.hermes && ls logs/*.log | xargs rm` nem a leitura do `config.yaml`, e um comando com muitos grupos `{a,b}` não leva mais minutos para ser checado (uma checagem travada bloqueia a ferramenta).
 - **Texto escondido dos terminais do agente:** o `report` e o `learn` mostravam textos de lições, rascunhos e lições de propostas que o `lessons list` esconde do terminal de um agente; agora escondem também.
 - **Memória:** a remoção automática de repetidas podia tirar a única cópia que o agente vê (a mesma entrada no `MEMORY.md` e num `USER.md` que o Hermes não carrega); uma remoção cujo registro não podia ser gravado derrubava a rodada inteira.
 - **Aprendizado:** uma falha que o refletor recusou era perguntada de novo a cada rodada, então as mesmas poucas falhas gastavam a cota do dia; uma sessão danificada no histórico do Hermes parava o replay para sempre (e com ele as bases das lições); uma rodada manual não tinha prazo e podia passar da reserva; o registro do Curator era lido segurando a trava de escrita.
@@ -73,7 +109,7 @@ Autoreparo e todos os perfis atualizados sozinhos. Uma segunda revisão completa
 - **Linha de comando:** todo comando impresso nomeia o perfil (`hermes -p default ...`), porque o Hermes pode seguir um perfil fixo; um comando que falhou (`update`, `care`) sai com código 1, então `hermes evolution update --all --yes && hermes gateway restart` não reinicia mais depois de uma atualização que falhou; Ctrl-C mostra uma frase, não um traceback; a dica sem terminal repete o seu próprio pedido; `owner add/remove` recusa onde os donos atuais não podem ser lidos, em vez de imprimir uma lista que os apagaria; decisões de cron e de manutenção aparecem descritas corretamente; um `HERMES_HOME` vazio não é um perfil.
 - **Windows:** o `NUL` não é mais tomado por um terminal, e o idioma segue a localidade do Windows.
 - **Perfis:** uma pasta de perfil que é um link para outro lugar não é mais tomada pelo perfil padrão (o que a tornava um segundo líder).
-- **`install.sh`:** cada perfil roda com o próprio `HERMES_HOME` e `--profile` (um perfil fixo ou exportado não faz mais atualizar o perfil errado); um nome de perfil que o Hermes recusaria, um nome repetido, uma pasta `profiles` mais acima no caminho, um `HOME` ausente e a falta de terminal (`curl ... | sh` sem `-t`) são tratados; o reinício do gateway nunca lê o resto de um script recebido por pipe, e uma falha nele aparece no código de saída.
+- **`install.sh`:** cada perfil roda com o próprio `HERMES_HOME` e `--profile` (um perfil fixo ou exportado não faz mais atualizar o perfil errado); um nome de perfil que o Hermes recusaria, um nome repetido, uma pasta `profiles` mais acima no caminho, um `HOME` ausente e a falta de terminal (um script do `curl` ligado ao `sh` por pipe, sem `-t`) são tratados; o reinício do gateway nunca lê o resto de um script recebido por pipe, e uma falha nele aparece no código de saída.
 
 ### Removido
 

@@ -280,10 +280,13 @@ def notify_view(result: dict) -> dict | None:
     synced = automatic.get("plugin_sync") or {}
     acted = automatic.get("applied") or automatic.get("memory") or automatic.get("failed") or synced.get("synced") \
         or synced.get("failed") or automatic.get("gateway_repair")
-    if not (result["new_lessons"] or regressions or retired or urgent or drafts or acted):
+    spiking = result.get("failure_spikes") or []   # set by the caller (insights.untold_spikes): each told once a day
+    if not (result["new_lessons"] or regressions or retired or urgent or drafts or acted or spiking):
         return None
     view = {"new_lessons": result["new_lessons"], "reflector_drafts": drafts, "regressions": regressions,
             "lessons_retired": retired, "high_risk_proposals": urgent}
+    if spiking:
+        view["failure_spikes"] = spiking
     if acted:
         view["automatic_actions"] = automatic
     return view
