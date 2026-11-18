@@ -1,18 +1,22 @@
 name: hermes-atlas-evolution
-version: "0.12.0"
+version: "0.13.0"
 requires_hermes: ">=0.23.1"
 description: >-
   Looks after your whole Hermes Agent, every profile at once. Every day it runs Hermes' own doctor checks
   offline and explains each problem with the command that fixes it; turns tool errors that keep coming back
   into short lessons the agent reads, and drops the ones that do not help; removes duplicate memory entries;
   points out plugins that conflict, duplicate or never load and skills that are unused or repeated; watches the
-  gateway, the disk and the server's updates; and stops the agent from taking Hermes down. Safe changes happen
-  by themselves with undo; the rest waits for one key in `hermes evolution` or the dashboard's Evolution tab.
+  gateway, the disk and the server's updates; and stops the agent from taking Hermes down. By default (Assist)
+  it only removes repeated memory entries by itself; in Auto mode, which you turn on, it also does what is safe
+  and can be undone. The rest waits for one key in `hermes evolution` or the dashboard's Evolution tab. No
+  network access of its own, no telemetry, and it never updates itself: updates come from Hermes.
   Português: cuida do seu Hermes inteiro, de todos os perfis. Todo dia roda as checagens do próprio
   `hermes doctor` sem rede e explica cada problema com o comando que resolve; transforma erros repetidos em
   lições curtas; remove entradas repetidas da memória; aponta plugins em conflito, duplicados ou que nunca
-  carregam e skills sem uso; cuida do gateway, do disco e das atualizações do servidor. O que é seguro ele faz
-  sozinho, com desfazer; o resto espera uma tecla.
+  carregam e skills sem uso; cuida do gateway, do disco e das atualizações do servidor. No padrão (Assistido),
+  sozinho só remove entradas repetidas da memória; no Modo Auto, que você liga, também faz o que é seguro e tem
+  desfazer. O resto espera uma tecla. Sem rede própria, sem telemetria, e nunca se atualiza sozinho: as
+  atualizações vêm do Hermes.
 license: MIT
 homepage: https://github.com/sesantanajr/hermes-atlas-evolution
 author: "Sérgio Sant'Ana Júnior"
@@ -151,30 +155,34 @@ config_schema:
   mode:
     type: str
     choices: [auto, assist, manual]
-    default: auto
+    default: assist
     label: "Mode · Modo"
     description: >-
-      auto = Auto mode (default): looks after every profile of this Hermes and does by itself what is safe and can be
-      undone: it removes duplicate memory entries (keeps a copy of the file first), locks skills the curator keeps
-      rewriting, installs itself in profiles in use and keeps every profile's copy on the same code, cleans failed
-      installs, repairs the gateway's service when Hermes removed the Python it started, and frees old tool versions;
-      the rest waits for you. assist = Assisted: on its own it only removes duplicate memory entries; everything else waits for you.
-      manual = Manual: only measures and proposes. Every action is in the history with its undo.
-      — auto = Modo Auto (padrão): cuida de todos os perfis deste Hermes e faz sozinho o que é seguro e tem desfazer:
-      remove entradas repetidas da memória (guarda uma cópia do arquivo antes), trava skills que o curador reescreve
-      sem parar, instala-se nos perfis em uso e mantém a cópia de cada perfil no mesmo código, limpa instalações que
-      falharam, repara o serviço do gateway quando o Hermes removeu o Python que ele iniciava e libera versões antigas
-      de ferramentas; o resto espera você. assist = Assistido: sozinho, só remove entradas repetidas da memória; o resto espera você.
-      manual = Manual: só mede e propõe. Cada ação fica no histórico com o seu desfazer.
+      assist = Assisted (default): on its own it only removes an entry repeated word for word between MEMORY.md and
+      USER.md (keeps a copy of the file first); everything else waits for you. auto = Auto mode (you turn it on):
+      looks after every profile of this Hermes and does by itself what is safe and can be undone: locks skills the
+      curator keeps rewriting, installs itself from the Hermes plugin catalog (by name, when this profile came from
+      it) in profiles in use that never had it,
+      cleans failed installs, repairs the gateway's service when Hermes removed the Python it started, and frees old
+      tool versions; the rest waits for you. manual = Manual: only measures and proposes. Every action is in the
+      history with its undo. Updates of the plugin itself come only from Hermes (`hermes plugins update`).
+      — assist = Assistido (padrão): sozinho, só remove uma entrada repetida palavra por palavra entre MEMORY.md e
+      USER.md (guarda uma cópia do arquivo antes); o resto espera você. auto = Modo Auto (você liga): cuida de todos
+      os perfis deste Hermes e faz sozinho o que é seguro e tem desfazer: trava skills que o curador reescreve sem
+      parar, instala-se pelo catálogo de plugins do Hermes (pelo nome, quando este perfil veio dele) nos perfis em
+      uso que nunca o tiveram, limpa instalações
+      que falharam, repara o serviço do gateway quando o Hermes removeu o Python que ele iniciava e libera versões
+      antigas de ferramentas; o resto espera você. manual = Manual: só mede e propõe. Cada ação fica no histórico
+      com o seu desfazer. As atualizações do próprio plugin vêm só do Hermes (`hermes plugins update`).
   fleet_managed:
     type: bool
     default: true
     label: "Let the lead profile act here · Deixar o perfil que cuida de todos agir aqui"
     description: >-
-      Off = the lead profile, which looks after every profile of this Hermes, never installs, updates or moves
+      Off = the lead profile, which looks after every profile of this Hermes, never installs anything or moves
       anything to the trash in this profile by itself; it still shows what it finds. settings.json can only turn it
       off.
-      — Desligado = o perfil que cuida de todos os perfis deste Hermes nunca instala, atualiza nem move nada para a
+      — Desligado = o perfil que cuida de todos os perfis deste Hermes nunca instala nada nem move nada para a
       lixeira neste perfil sozinho; continua mostrando o que encontra. O settings.json só pode desligar.
   runtime_guard:
     type: bool
@@ -182,8 +190,9 @@ config_schema:
     label: "Runtime guard · Proteção do Hermes"
     description: >-
       Keeps the agent from taking down the Hermes it runs in: vetoes terminal commands that restart or kill the
-      gateway, delete the running Python, Hermes' code or this profile, or change or switch off this plugin. Off where
-      plugins run in a plugin host. Applies after hermes gateway restart (in the terminal, at the next session).
+      gateway, delete or overwrite the running Python, Hermes' code or this profile, or change or switch off this
+      plugin. Off where plugins run in a plugin host. Applies after hermes gateway restart (in the terminal, at the next
+      session).
       — Impede o agente de derrubar o Hermes em que roda: barra comandos de terminal que reiniciam ou matam o gateway,
-      apagam o Python em uso, o código do Hermes ou este perfil, ou mudam ou desligam este plugin. Desligada onde os
+      apagam ou sobrescrevem o Python em uso, o código do Hermes ou este perfil, ou mudam ou desligam este plugin. Desligada onde os
       plugins rodam num host de plugins. Vale depois de hermes gateway restart (no terminal, na próxima sessão).

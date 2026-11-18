@@ -40,9 +40,9 @@ def _fleet_undo(forward: list) -> list | None:
     if len(forward) == 3 and forward[:2] == ["plugins", "disable"] and _PLUGIN.fullmatch(forward[2]) \
             and forward[2] != SELF:
         return ["plugins", "enable", forward[2]]
-    if forward[:4] == ["plugins", "install", SOURCE, "--enable"] and (
-            len(forward) == 4 or len(forward) == 6 and forward[4] == "--ref" and _SHA.fullmatch(forward[5])):
-        return ["plugins", "remove", SELF]
+    if forward == ["plugins", "install", SELF, "--enable"] or forward[:4] == ["plugins", "install", SOURCE, "--enable"] \
+            and (len(forward) == 4 or len(forward) == 6 and forward[4] == "--ref" and _SHA.fullmatch(forward[5])):
+        return ["plugins", "remove", SELF]   # by its catalog name, or this repository (at a commit)
     if len(forward) == 2 and forward[0] == "__trash__" and (_LEFTOVER.fullmatch(forward[1]) or (
             _CACHE.fullmatch(forward[1]) and _CACHE.fullmatch(forward[1]).group(1) not in ("scratch", "terminal"))):
         return ["__restore__", forward[1]]
@@ -87,8 +87,10 @@ def undo_for(applied) -> list | None:
     return None
 
 
-def plan(proposal: dict) -> tuple[list, list] | None:
-    """(apply, undo) Hermes arguments for a proposal the plugin can apply, or None."""
+def plan(proposal: dict, *, home=None) -> tuple[list, list] | None:
+    """(apply, undo) Hermes arguments for a proposal the plugin can apply, or None. `home` is the profile that applies
+    it: installing this plugin elsewhere gives the code that profile runs (fleet_update.source), so without it there
+    is nothing to install."""
     fleet = FLEET.get(proposal.get("kind"))
     if fleet is not None:
         target = _target(proposal.get("subject"))
@@ -107,10 +109,18 @@ def plan(proposal: dict) -> tuple[list, list] | None:
         if fleet == "install":
             if name != SELF:
                 return None   # only this plugin installs itself
-            # 0.9.1: never `--ref <sha>`. Hermes pins a profile installed with a ref, so every later
-            # `hermes plugins update` in that profile failed with "is pinned to <sha>". Without a ref the
-            # profile tracks the default branch like the others.
-            forward = ["plugins", "install", SOURCE, "--enable"]
+            # 0.13.0: the code the applying profile runs, never a commit the plugin picks: its catalog name (Hermes
+            # installs the reviewed pin) or this repository at that profile's own commit. A copy pinned that way is
+            # moved later by `hermes evolution update`, to the code of the profile that runs it (fleet_update).
+            from .fleet_update import source
+
+            found = source(home) if home is not None else None
+            if found == [SELF]:
+                forward = ["plugins", "install", SELF, "--enable"]
+            elif found and len(found) == 3 and found[:2] == [SOURCE, "--ref"] and _SHA.fullmatch(found[2]):
+                forward = ["plugins", "install", SOURCE, "--enable", "--ref", found[2]]
+            else:
+                return None
         elif fleet == "trash":
             if proposal.get("kind") == "doctor_cache":
                 from .doctor import REGENERABLE
@@ -570,7 +580,7 @@ def agree(text: str) -> str:
     return _COUNTED.sub(one_count, text) if isinstance(text, str) else text
 
 
-def describe(proposal: dict, lang: str = "en") -> dict:
+def describe(proposal: dict, lang: str = "en", *, home=None) -> dict:
     """The proposal as the menu and the panel show it: title, what was seen, what to do about it (advice), what
     applying does, and its undo."""
     lang = lang if lang in ("en", "pt") else "en"
@@ -583,7 +593,7 @@ def describe(proposal: dict, lang: str = "en") -> dict:
             evidence = json.loads(evidence)
         except ValueError:
             evidence = {}
-    found = plan(proposal)
+    found = plan(proposal, home=home)   # `home`: the profile that applies it (installing this plugin needs it)
     undo = command_text(found[1], lang) if found is not None else None
     entry = playbook().get(kind) if kind.startswith(("plugin_", "skills_", "self_", "profile_", "doctor_")) \
         or kind in FLEET else None

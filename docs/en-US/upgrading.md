@@ -4,17 +4,27 @@
 
 ## Updating the plugin
 
-Every command names the profile it runs in: `default` for the root profile, or the profile's name.
+The plugin never updates itself and never reads the network: new code comes only from Hermes. Every command names the profile it runs in: `default` for the root profile, or the profile's name.
 
 ```sh
-hermes -p <profile> evolution update --all          # every profile; a pinned one moves to the latest commit
+hermes -p <profile> evolution update --all          # Hermes' own `plugins update` in every profile, this one first
 hermes -p <profile> evolution update                # pick the profiles from a list
 hermes -p <profile> evolution update --list         # version, commit and pin of each profile
-sh install.sh --all --yes --restart                 # the same without the plugin loaded
+sh install.sh --all --yes --restart                 # Hermes' own commands, without the plugin loaded
 hermes gateway restart
 ```
 
-`update` installs only where the plugin already is; add `--install-missing` to install it in the profiles you chose that do not have it, and `--yes` to skip the question.
+`evolution update` is a convenience: it runs Hermes' own command in each profile you pick, the profile you run it in first, and never picks a commit.
+
+| The copy in a profile | What `evolution update` runs there |
+|---|---|
+| Installed from the Hermes plugin catalog | `plugins update hermes-atlas-evolution`: Hermes moves it to the catalog's reviewed pin. |
+| Installed from GitHub | `plugins update hermes-atlas-evolution`: Hermes pulls the source it was installed from. |
+| Pinned by Hermes with `--ref` | Moved only to the commit the profile you run the command in runs (`plugins install <url> --force --ref <that commit>`), and only when both copies come from this repository. Otherwise it is left as it is, with the command that moves it. |
+| Missing, with `--install-missing` | The code the profile you run the command in runs: its catalog name, or this repository at that profile's commit. |
+| A development link, or a fork's pinned or half-installed copy | Never touched. |
+
+`update` installs only where the plugin already is; add `--install-missing` to install it in the profiles you chose that do not have it, and `--yes` to skip the question. `install.sh` does the same with Hermes' own commands only: `plugins update hermes-atlas-evolution` where the plugin is, `plugins install` where it is missing (with `--install-missing`; from GitHub, or by catalog name with `--catalog`), and a pinned copy left as it is, with the command that moves it.
 
 Manually, one profile at a time:
 
@@ -30,17 +40,34 @@ systemctl restart hermes-dashboard   # as root, or however you run the dashboard
 hermes -p <profile> evolution status
 ```
 
+**Unattended updates are Hermes' own.** `hermes -p <profile> config set plugins.auto_apply true` lets the gateway's scheduled check apply catalog re-pins and pulls of git installs in that profile, and Hermes Desktop and the dashboard have an "Update all" button. What an unattended update does not accept (new capabilities, a widened catalog pin) waits for you to run the update yourself.
+
 The command-line `plugins update` only replaces the files: it does not reload a gateway that is already running, so restart the gateway once at the end. The dashboard shows the **Evolution** tab once it rescans its plugins; if it does not appear, restart the dashboard. (Hermes does reload a running gateway on install, enable and disable, and when the update is applied from Hermes Desktop, the dashboard or `/plugins update` in a chat.) If something is still running (a turn, a cron job, a delegated task), the restart lists it and asks `Interrupt them and restart the gateway? [y/N]`: answer N and run it again in a few minutes, or y to interrupt them. `status` points out a gateway that still runs older code.
 
-**Every profile at once, by itself.** In Auto mode, the profile that looks after the whole Hermes keeps the plugin's copy in every other profile on its own code: a copy that is pinned to another commit, older, on other code with the same version, or left half-installed by an interrupted update is brought to the lead's commit with Hermes' own command (at most two profiles per pass, once per situation, retried a day later if Hermes refuses). A profile where the plugin is off, or set to Assisted or Manual, is left as it is, and so are a development link and a profile with `fleet_managed` off. Nothing new is downloaded by itself: a copy that is not pinned is updated only while the repository's latest commit is the one the lead runs (read with `git ls-remote`), so update the lead (`hermes -p <profile> evolution update`) and the rest follow. Each sync is in the history (`hermes -p <profile> evolution decisions`); restart the gateway once to load the new code.
-
-Hermes keeps a pin when a plugin is installed again without `--ref` (it reinstalls the pinned commit), and its `plugins update` refuses a pinned copy. `hermes evolution update`, `install.sh` and the Auto mode therefore move a pin with `hermes -p <profile> plugins install <url> --force --ref <commit>`, Hermes' own way; the profile stays pinned, now to current code.
+Hermes keeps a pin when a plugin is installed again without `--ref` (it reinstalls the pinned commit), and its `plugins update` refuses a pinned copy. `hermes evolution update` therefore moves a pin with `hermes -p <profile> plugins install <url> --force --ref <commit>`, Hermes' own way, to the commit the profile you run it in already runs; the profile stays pinned, now to that code.
 
 Most settings apply within a minute. A few wait for `hermes gateway restart` (in the terminal: the next session): `runtime_guard`, `tool_hints`, and `agent_tools` or `reflector` when you turn it on (turning either off works without a restart).
 
-If a profile still has the plugin under its old name `hermes-evolution`, run `hermes -p <profile> plugins remove hermes-evolution`, then `hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable`.
+If a profile still has the plugin under its old name `hermes-evolution`, run `hermes -p <profile> plugins remove hermes-evolution`, then `hermes -p <profile> plugins install hermes-atlas-evolution` and `hermes -p <profile> plugins enable hermes-atlas-evolution` (or, from GitHub, `hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable`).
 
 Version notes: [CHANGELOG](../../CHANGELOG.md).
+
+## Updating to 0.13.0
+
+Update as above and restart the gateway once. There is nothing to migrate by hand; check the first point if you relied on Auto mode.
+
+- **Assist is now the default mode.** A profile with no `mode` set switches from Auto to Assist: by itself it then only takes out a memory entry repeated word for word between `MEMORY.md` and `USER.md`, and everything else becomes a proposal that waits for you. A profile where you set `mode` keeps it. To keep Auto mode in a profile, from your own terminal:
+
+  ```sh
+  hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.mode auto
+  ```
+
+- **Auto mode no longer syncs copies across profiles.** It never moves the plugin's copy in another profile to a commit. It still installs the plugin where a profile in use never had it, but by itself only by its catalog name, when the lead profile is a catalog install (Hermes installs the reviewed pin); an install from the repository waits for your key (the proposal, or `evolution update --install-missing`).
+- **`evolution update` runs Hermes' command, and nothing else.** In each profile you pick it runs `plugins update hermes-atlas-evolution` (no `--force`), moves a copy pinned with `--ref` only to the commit of the profile you run it in, and installs a missing one (with `--install-missing`) with the code that profile runs. It no longer looks up the repository's latest commit.
+- **`install.sh --catalog`.** With `--install-missing`, it installs by catalog name instead of from GitHub. The installer runs only Hermes' own commands and leaves a pinned copy as it is, printing the command that moves it.
+- **No network of its own.** The plugin no longer contacts GitHub or anything else; downloads happen only inside Hermes' own `plugins install` and `plugins update`.
+- **Hermes' approvals in every child.** The commands the plugin starts no longer inherit `HERMES_YOLO_MODE`, `HERMES_YOLO` or `HERMES_ACP_AUTO_APPROVE`.
+- **Stability fixes.** The runtime guard, the database, the output of the commands it runs and the learning pass's deadline: see the [CHANGELOG](../../CHANGELOG.md).
 
 ## Updating to 0.12.0
 

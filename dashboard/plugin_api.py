@@ -33,7 +33,6 @@ shares state with a copy of the plugin the dashboard process may have loaded for
 # routes import Request inside _router(), where a string annotation could not be resolved.
 import importlib
 import importlib.util
-import re
 import sys
 import threading
 import time
@@ -69,10 +68,6 @@ def _prefix(profile: str) -> str:
     return f"hermes -p {profile}"   # explicit even for default: `hermes profile use` makes another one sticky
 
 
-# Hermes names the login cookie by the request's shape (hermes_cli/dashboard_auth/cookies.py): bare over HTTP,
-# `__Host-` on HTTPS (a public_url behind a proxy, as most logins are), `__Secure-` under a path prefix, with
-# `_<gateway>` on the gateway's Webapp. Read only where Hermes publishes no verified session (older hosts).
-_LOGIN_COOKIE = re.compile(r"(?:^|;)\s*(?:__Host-|__Secure-)?hermes_session_at(?:_[\w-]+)?=[^;\s]")
 _SHARED_TOKEN_PROVIDER = "session-token"   # Hermes' deployment session token, as a session provider
 
 
@@ -110,8 +105,8 @@ def decision_policy(headers, query, *, state=None, app_state=None) -> tuple[bool
         return True, "login"
     if headers.get("x-hermes-gateway-ticket"):
         return True, "desktop"   # Hermes verified the grant before forwarding (a forged one is refused there)
-    if _LOGIN_COOKIE.search(headers.get("cookie") or ""):
-        return True, "login"
+    # No verdict from Hermes' login gate (every Hermes the plugin supports, 0.23.1 on, sets auth_required): a login
+    # cookie's name alone proves nothing (any program on the machine can send one), so nothing is decided here.
     return False, "open_dashboard"
 
 
@@ -279,7 +274,7 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
         if not can_decide:   # before describe: what a lesson proposal "saw" is its text
             queue = cli._hidden_from_agent(queue, "evidence")
         queue = [{**item, "command": commands_of(item.get("command")),
-                  "explain": {key: commands_of(value) for key, value in explain.describe(item, lang).items()}}
+                  "explain": {key: commands_of(value) for key, value in explain.describe(item, lang, home=home).items()}}
                  for item in queue]
         recent = _module("actions").recent(conn, now=now)
         pending = decisions.waiting(conn, lang=lang)

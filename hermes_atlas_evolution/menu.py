@@ -174,13 +174,14 @@ TEXT = {
         "auto_names": {"auto": "Auto", "assist": "Assisted", "manual": "Manual"},
         "auto_title": "Mode", "auto_q": "Switch to the mode “{mode}”?",
         "auto_now": "Now: {mode}.",
-        "auto_modes": ["Auto (default): Atlas Evolution thinks and acts for you, in every profile of this Hermes. By itself"
+        "auto_modes": ["Auto (you turn it on): Atlas Evolution thinks and acts for you, in every profile of this Hermes. By itself"
                        " it removes duplicate memory entries (keeps a copy of the file first), locks skills the curator"
-                       " keeps rewriting, installs itself"
-                       " (same version) in profiles in use that never had it, moves folders of failed installs to its"
+                       " keeps rewriting, installs itself from the Hermes plugin catalog"
+                       " in profiles in use that never had it, moves folders of failed installs to its"
                        " trash and frees old tool versions once a week. What could break something waits for you, with"
                        " its reason and the key or command to apply.",
-                       "Assisted: on its own it only removes duplicate memory entries; everything else waits for you.",
+                       "Assisted (default): on its own it only removes duplicate memory entries; everything else waits"
+                       " for you.",
                        "Manual: it measures and proposes; nothing changes by itself."],
         "auto_rules": "Each action goes to the history and can be undone; an automatic change you undo is never repeated.",
         "auto_recent": "Automatic actions of the last 7 days:", "auto_none": "No automatic action in the last 7 days.",
@@ -432,13 +433,13 @@ TEXT = {
         "auto_names": {"auto": "Auto", "assist": "Assistido", "manual": "Manual"},
         "auto_title": "Modo", "auto_q": "Passar para o modo “{mode}”?",
         "auto_now": "Agora: {mode}.",
-        "auto_modes": ["Auto (padrão): o Atlas Evolution pensa e age por você, em todos os perfis deste Hermes. Sozinho ele"
+        "auto_modes": ["Auto (você liga): o Atlas Evolution pensa e age por você, em todos os perfis deste Hermes. Sozinho ele"
                        " remove entradas repetidas da memória (guarda uma cópia do arquivo antes), trava skills que o"
-                       " curador reescreve sem parar, se instala"
-                       " (na mesma versão) nos perfis em uso que nunca o tiveram, move para a lixeira pastas de"
+                       " curador reescreve sem parar, se instala pelo catálogo de plugins do Hermes"
+                       " nos perfis em uso que nunca o tiveram, move para a lixeira pastas de"
                        " instalações que falharam e libera versões antigas de ferramentas uma vez por semana. O que"
                        " poderia quebrar algo espera você, com o motivo e a tecla ou o comando para aplicar.",
-                       "Assistido: sozinho, só remove entradas repetidas da memória; o resto espera você.",
+                       "Assistido (padrão): sozinho, só remove entradas repetidas da memória; o resto espera você.",
                        "Manual: mede e propõe; nada muda sozinho."],
         "auto_rules": "Cada ação vai para o histórico e pode ser desfeita; uma mudança automática que você desfaz nunca se repete.",
         "auto_recent": "Ações automáticas dos últimos 7 dias:", "auto_none": "Nenhuma ação automática nos últimos 7 dias.",
@@ -1023,7 +1024,8 @@ class Menu:
         owner = profile_name(Path(home or self.home))   # the profile that wrote them: the lead's keep the lead's `-p`
         found = []
         for item in items:
-            told = {key: profile_commands(value, owner) for key, value in explain.describe(item, self.lang).items()}
+            told = {key: profile_commands(value, owner)
+                    for key, value in explain.describe(item, self.lang, home=Path(home or self.home)).items()}
             if told.get("category") == "change" and told.get("can_apply") is False:
                 told = {**told, "category": "manual"}   # nothing the plugin can apply here: it is the owner's to run
             found.append({**item, "command": profile_commands(item.get("command"), owner), "explain": told})
@@ -1400,7 +1402,7 @@ class Menu:
 
         args = result.get("undo_args")
         if not isinstance(args, (list, tuple)) or not args:
-            found = explain.plan(item)
+            found = explain.plan(item, home=self.home)
             args = found[1] if found is not None else None
         return explain.command_text(args, self.lang) if args else str(result.get("undo") or "")
 

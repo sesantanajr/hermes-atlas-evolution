@@ -75,10 +75,34 @@ CACHE_ROLES = {
     "web": ("pages the agent read", "páginas que o agente leu"),
 }
 
+# The checks never outlive the process that asked for them: a daemon thread watches the parent (on POSIX an orphan
+# gets another one, init or a subreaper) and the run's own limit (ATLAS_EVOLUTION_LIMIT seconds; the only bound on
+# Windows, where nothing shows a parent's death), then ends the process group this process leads (start_new_session),
+# with whatever a check started in it.
+WATCHDOG = r"""
+import os as _os, threading as _threading, time as _time
+def _atlas_watchdog():
+    parent = _os.getppid()
+    try:
+        limit = _time.monotonic() + float(_os.environ.get("ATLAS_EVOLUTION_LIMIT") or "inf")
+    except ValueError:
+        limit = float("inf")
+    while _os.getppid() == parent and _time.monotonic() < limit:
+        _time.sleep(0.5)
+    try:
+        if _os.name == "posix" and _os.getpgid(0) == _os.getpid():
+            import signal as _signal
+            _os.killpg(0, _signal.SIGKILL)
+    except OSError:
+        pass
+    _os._exit(70)
+_threading.Thread(target=_atlas_watchdog, name="atlas-evolution-watchdog", daemon=True).start()
+"""
+
 # Run in Hermes' own interpreter: sys.path comes from the process that runs the plugin (Hermes' launcher sets it),
 # the profile from HERMES_HOME. Each check is called as `hermes doctor` calls it without --fix. Hermes raises
 # SystemExit subclasses for some config problems: caught too, so one check never hides the others.
-BOOT = r"""
+BOOT = WATCHDOG + r"""
 import contextlib, io, json, os, sys
 # Read, never popped: importing Hermes 0.23.2 can relaunch this very process (same argv, same environment), and the
 # second run must still find them.
@@ -164,29 +188,26 @@ def rows(text: str) -> list[dict]:
     return found
 
 
+def _kill_group(process) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except OSError:
+        pass
+
+
 def _spawn(argv: list, *, env: dict, cwd: str, timeout: int) -> str:
     """Run the checks in a process group of their own: on a timeout the whole group is stopped, so a process a check
-    started (ssh, docker) can never hold the pipes open past it. Raises subprocess.TimeoutExpired."""
-    posix = os.name == "posix"
+    started (ssh, docker) can never hold the pipes open past it. Only the last OUTPUT_MAX characters it printed are
+    kept, read as they come (admin.collect): its answer is its last line. Raises subprocess.TimeoutExpired."""
+    from .admin import collect
+
     process = subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace",
-                               start_new_session=posix)
-    try:
-        out, _err = process.communicate(timeout=timeout)
-        return out or ""
-    except subprocess.TimeoutExpired:
-        try:
-            if posix:
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        except OSError:
-            pass
-        try:
-            process.communicate(timeout=5)
-        except (subprocess.TimeoutExpired, OSError, ValueError):
-            pass
-        raise
+                               stderr=subprocess.DEVNULL, start_new_session=os.name == "posix")
+    out, _err = collect(process, timeout=timeout, kill=_kill_group, head=0, tail=OUTPUT_MAX)
+    return out
 
 
 def run(home: Path, *, only=(), runner=None, timeout: int = TIMEOUT_SECONDS) -> dict:
@@ -195,6 +216,7 @@ def run(home: Path, *, only=(), runner=None, timeout: int = TIMEOUT_SECONDS) -> 
     if runner is None and not (home / "config.yaml").is_file():
         return {"ok": False, "error": "not_a_profile"}
     env = _environment(home)
+    env["ATLAS_EVOLUTION_LIMIT"] = str(timeout + 15)   # the checks' own end, should this process die (WATCHDOG)
     if only:
         env["ATLAS_EVOLUTION_ONLY"] = json.dumps(list(only))
     started = time.monotonic()

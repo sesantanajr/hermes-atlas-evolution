@@ -11,8 +11,10 @@ nothing the hooks counted is counted twice. Hermes' in-place compaction archives
 re-inserts copies of them (same `message_uid`, sometimes a later timestamp or a shortened body) plus a
 summary row: each logical message is replayed once and summaries are skipped. Each slice is written
 synchronously in one transaction together with its cursor, after checking that no other pass moved the
-cursor, so a pass that is killed half way leaves nothing half counted. One session that cannot be replayed
-is skipped and counted, never the whole backfill. Text is classified in memory and discarded, exactly as
+cursor, so a pass that is killed half way leaves nothing half counted. A long session is written in parts of
+about PAUSE_MESSAGES messages, each cut where one turn ended and the next has not begun, with a cursor inside
+the session: the time budget is checked there and memory holds one part, never the whole session. One session
+that cannot be replayed is skipped (from where it failed) and counted, never the whole backfill. Text is classified in memory and discarded, exactly as
 in the hooks; the history itself is never modified.
 """
 
@@ -35,6 +37,14 @@ from .telemetry import ResearchTracker
 
 BACKFILL_DAYS = 14
 SLICE_SESSIONS = 25
+# Messages read between two pauses of the replay: at a pause what was counted is written with a cursor (inside a
+# long session too) and the time budget is checked. A pause waits for a clean point (one turn over, the next not
+# begun); a single turn longer than _FORCE_PAUSE messages is cut where it is.
+PAUSE_MESSAGES = 2_000
+_FORCE_PAUSE = 4 * PAUSE_MESSAGES
+# A cursor inside a session: "<session start>|<session id>|@<message timestamp>|<message id as JSON>". A copy older
+# than this version reads "<session id>|@…" as the id, so it goes on after that session and never counts it twice.
+_INSIDE = re.compile(r"(.*)\|@([^|]+)\|([^|]+)", re.S)
 # 2: compaction copies counted once. 3: the owner's failures per day and refused approvals per origin.
 # A backfill done by an earlier version is redone once (see _redo). The revision is kept under its own key:
 # backfill_version keeps saying "2", so a 0.6.0 copy still running beside this one (a gateway not restarted
@@ -206,12 +216,23 @@ def _state(home: Path) -> dict:
         started = float(position[0]) if position[0] else None
     except ValueError:
         since, started = None, None
+    session, inside = position[2], None
+    match = _INSIDE.fullmatch(session) if started is not None else None
+    if match:
+        try:
+            message = json.loads(match.group(3))
+            if type(message) in (int, str):
+                inside = ((started, match.group(1)), (float(match.group(2)), message))
+                session = match.group(1)
+        except (ValueError, RecursionError):
+            pass   # unreadable: the id as written, so that session is not replayed again
     try:
         until = float(values["backfill_until"]) if "backfill_until" in values else since
     except ValueError:
         until = since
     done = values.get("backfill_done")
-    return {"since": since, "until": until, "cursor": (started, position[2]), "position": values.get("backfill_cursor"),
+    return {"since": since, "until": until, "cursor": (started, session), "inside": inside,
+            "position": values.get("backfill_cursor"),
             "done": None if done == _RUNNING else done, "version": values.get("backfill_revision"),
             "owner": values.get("backfill_owner") or _NO_OWNER, "floor": values.get("backfill_floor"),
             "totals": {key: _count(totals.get(key)) for key in _TOTALS}}
@@ -272,6 +293,7 @@ class _Replay:
         self.sensor = FeedbackSensor(home, owner_sender_ids=owner_sender_ids, owner_platforms=owner_platforms)
         self.research = ResearchTracker(home)   # web research turns: timing, calls and errors
         self.counts = dict.fromkeys(_TOTALS, 0)
+        self.read = 0   # messages read since the last pause
         self.uids = "message_uid" in columns
         self.select = ("SELECT id, role, content, tool_call_id, tool_calls, tool_name, timestamp, "
                        f"{'finish_reason' if 'finish_reason' in columns else 'NULL'} AS finish_reason, "
@@ -303,10 +325,17 @@ class _Replay:
             self.parents[session] = served
         return self.parents[session]
 
-    def _messages(self, source: sqlite3.Connection, sid, low: float, high: float | None = None, *, limit: int = 0):
-        sql = self.select + (" AND timestamp < ?" if high is not None else "") + " ORDER BY timestamp, id"
-        return source.execute(sql + (f" LIMIT {int(limit)}" if limit else ""),
-                              (sid, low) if high is None else (sid, low, high))
+    def _messages(self, source: sqlite3.Connection, sid, low: float, high: float | None = None, *, limit: int = 0,
+                  after: tuple | None = None, at: tuple | None = None):
+        if at is not None:   # (timestamp, id): the rows of that timestamp up to that id
+            return source.execute(self.select + " AND timestamp = ? AND id <= ? ORDER BY timestamp, id",
+                                  (sid, low, at[0], at[1]))
+        sql = self.select + (" AND timestamp < ?" if high is not None else "")
+        values = [sid, low] if high is None else [sid, low, high]
+        if after is not None:   # (timestamp, id) of the last message an earlier part read
+            sql += " AND (timestamp > ? OR (timestamp = ? AND id > ?))"
+            values += [after[0], after[0], after[1]]
+        return source.execute(sql + " ORDER BY timestamp, id" + (f" LIMIT {int(limit)}" if limit else ""), values)
 
     @staticmethod
     def _copy(message, seen: set, *, remember: bool = True) -> bool:
@@ -314,7 +343,7 @@ class _Replay:
         message under its `message_uid`, sometimes with a later timestamp or a shortened body."""
         uid = message["message_uid"]
         if uid:
-            keys: tuple = (("uid", uid),)
+            keys: tuple = (uid,)   # the bare id (a str), not a tuple: a long session holds one per message
         else:   # a history without message ids: compaction cloned the row byte for byte, same timestamp
             body = repr((message["role"], message["content"], message["tool_call_id"], message["tool_calls"],
                          message["timestamp"])).encode("utf-8", "backslashreplace")
@@ -336,7 +365,12 @@ class _Replay:
                 return message["role"]
         return None if not rows else ""
 
-    def session(self, source: sqlite3.Connection, row: dict, *, start: float, until: float) -> None:
+    def session(self, source: sqlite3.Connection, row: dict, *, start: float, until: float, resume: tuple | None = None):
+        """Replay one session. A generator: it pauses, yielding (timestamp, id) of the last message it read, once
+        PAUSE_MESSAGES were read since the last pause, at a clean point (a turn over and the next not begun, before a
+        message with a later timestamp, so no copy of a message read is left after it), or anywhere in a turn
+        longer than _FORCE_PAUSE. `resume`: such a position, where an earlier pass stopped; the session goes on
+        after it, without the windows of the trackers (a correction right there is not charged to a skill)."""
         # The session's own source decides, as in the hooks: kanban and cron are automations, "subagent" is a
         # delegated child, and a child of /new, /branch or a compression stays where its source puts it.
         sid, surface = row["id"], surface_of(row.get("source") or "gateway")
@@ -344,26 +378,50 @@ class _Replay:
         owner = owner_turn(surface, row.get("user_id"), self.sensor.owners, origin=origin,
                            owner_platforms=self.sensor.platforms,
                            parent_owner=surface == "subagent" and self._served_owner(source, row.get("parent_session_id")))
-        first = float(row.get("started_at") or 0) >= start   # its first message is in the window
+        # its first message is in the window (a session resumed is past its first turn)
+        first = float(row.get("started_at") or 0) >= start and resume is None
         open_turn, final, last, answered = None, False, None, False
         calls: dict = {}
         asked: dict = {}   # call id -> when the assistant asked for it
         started = None
         seen: set = set()
-        self.counts["sessions"] += 1
-        if self.uids and float(row.get("started_at") or 0) < start:   # copies of messages older than the window
-            seen.update(("uid", uid) for (uid,) in source.execute(
+        if resume is None:
+            self.counts["sessions"] += 1
+        if self.uids and resume is not None:   # copies of messages an earlier part read, or older than the window
+            seen.update(uid for (uid,) in source.execute(
+                "SELECT message_uid FROM messages WHERE session_id=? AND (timestamp < ? OR (timestamp = ? AND id <= ?))"
+                " AND message_uid IS NOT NULL", (sid, resume[0], resume[0], resume[1])))
+        elif self.uids and float(row.get("started_at") or 0) < start:   # copies of messages older than the window
+            seen.update(uid for (uid,) in source.execute(
                 "SELECT message_uid FROM messages WHERE session_id=? AND timestamp < ? AND message_uid IS NOT NULL",
                 (sid, start)))
-        for message in self._messages(source, sid, start, until):
+        if resume is not None:
+            # A copy without an id has its original's timestamp, so only the rows of the pause's own timestamp can
+            # have a copy still ahead: read them again as the earlier part did (a pause between a row and its copy)
+            for message in self._messages(source, sid, resume[0], at=resume):
+                if not message["summary"]:
+                    self._copy(message, seen)
+        read = resume   # (timestamp, id) of the last message read
+        for message in self._messages(source, sid, start, until, after=resume):
+            self.read += 1
+            previous, read = read, (float(message["timestamp"]), message["id"])
+            # one turn longer than any pause: cut here, though never before the first turn or while a turn waits for
+            # its first answer (a user message there joins that turn; after the cut it would open one of its own)
+            if self.read >= _FORCE_PAUSE and previous is not None and not first and (open_turn is None or answered):
+                self.read = 1
+                yield previous
             if message["summary"] or self._copy(message, seen):
                 continue   # a compaction summary, or a copy of a message already replayed
-            role, stamp = message["role"], float(message["timestamp"])
+            role, stamp = message["role"], read[0]
             if role == "user":
                 if open_turn and not answered:
                     continue   # sent before the agent answered: Hermes handles it in the same turn
                 if open_turn:
                     self._finish(open_turn, final=final, ended=last, interrupted=True)
+                    open_turn = None
+                    if self.read > PAUSE_MESSAGES and previous is not None and stamp > previous[0]:
+                        self.read = 1   # a clean point: the turn before is written, this one not begun
+                        yield previous
                 content = message["content"]
                 payload = {"session_id": sid, "surface": surface, "user_message": content if isinstance(content, str) else "",
                            "sender_id": row.get("user_id"), "is_first_turn": first, "origin": origin}
@@ -488,55 +546,96 @@ def step(home: Path, *, now: float, budget_s: float = 20.0, slice_sessions: int 
                          columns=present["messages"], owner_platforms=owner_platforms, session_columns=present["sessions"])
         deadline = time.monotonic() + budget_s
         expected = state["position"]
-        while time.monotonic() < deadline and not (cancelled and cancelled()):
-            try:
-                rows = source.execute(f"""SELECT id, source, started_at, {optional} FROM sessions
-                    WHERE started_at < ? AND COALESCE(ended_at, ?) >= ?
-                      AND (? IS NULL OR started_at > ? OR (started_at = ? AND id > ?))
-                    ORDER BY started_at, id LIMIT ?""", (until, now, start, cursor_start, cursor_start, cursor_start,
-                                                           cursor_id, slice_sessions)).fetchall()
-            except sqlite3.DatabaseError as error:
-                if _damaged(error):
-                    return _settle(home, "damaged_history", totals, fingerprint, floor)
-                return {"status": "unreadable", **totals}
-            if not rows:
-                return _settle(home, "done", totals, fingerprint, floor)
-            before = dict(replay.counts)
-            position = f"{float(rows[-1]['started_at'])!r}|{rows[-1]['id']}"
-            try:
-                # Written synchronously in one transaction that first checks the cursor is still where this
-                # slice started: never through the hooks' queue, never half.
-                with batched(home, check=lambda conn, expected=expected: _unmoved(conn, expected)) as jobs:
-                    for row in rows:
-                        mark, counts = len(jobs), dict(replay.counts)
-                        try:
-                            replay.session(source, dict(row), start=start, until=until)
-                        except sqlite3.Error as error:
-                            if _busy(error):
-                                raise _Unreadable from error   # Hermes is writing: the slice is read again next pass
-                            # a damaged page in one session's messages: that session is skipped, never the backfill
-                            del jobs[mark:]
-                            replay.counts = {**counts, "skipped": counts["skipped"] + 1}
-                        except Exception:   # one session that cannot be replayed is skipped, not the backfill
-                            del jobs[mark:]
-                            replay.counts = {**counts, "skipped": counts["skipped"] + 1}
-                    counted = {key: totals[key] + replay.counts[key] - before[key] for key in totals}
-                    summary = json.dumps(counted)
-                    record(home, lambda conn, p=position, s=summary: conn.executemany(
-                        "INSERT OR REPLACE INTO cursor VALUES (?, ?)",
-                        (("backfill_cursor", p), ("backfill_totals", s), ("backfill_done", _RUNNING),
-                         *_revision_keys(fingerprint, floor))))
-            except _CursorMoved:
-                return {"status": "running", **state["totals"]}
-            except _Unreadable:
-                return {"status": "unreadable", **totals}
-            except sqlite3.Error:   # the Evolution database stayed busy: this slice is read again next pass
-                return {"status": "running", **totals}
-            totals, expected = counted, position
-            cursor_start, cursor_id = float(rows[-1]["started_at"]), str(rows[-1]["id"])
+        inside = state["inside"]   # ((start, id), (timestamp, id)): a session an earlier pass replayed in part
+        running = None             # [row, steps]: a session paused in this pass, replayed on in the next part
+        try:
+            while time.monotonic() < deadline and not (cancelled and cancelled()):
+                try:
+                    rows = source.execute(f"""SELECT id, source, started_at, {optional} FROM sessions
+                        WHERE started_at < ? AND COALESCE(ended_at, ?) >= ?
+                          AND (? IS NULL OR started_at > ? OR (started_at = ? AND id {'>=' if inside else '>'} ?))
+                        ORDER BY started_at, id LIMIT ?""", (until, now, start, cursor_start, cursor_start, cursor_start,
+                                                               cursor_id, slice_sessions)).fetchall()
+                except sqlite3.DatabaseError as error:
+                    if _damaged(error):
+                        return _settle(home, "damaged_history", totals, fingerprint, floor)
+                    return {"status": "unreadable", **totals}
+                if not rows:
+                    return _settle(home, "done", totals, fingerprint, floor)
+                queue = [dict(row) for row in rows]
+                while queue or running is not None:
+                    before = dict(replay.counts)
+                    try:
+                        # Written synchronously in one transaction that first checks the cursor is still where this
+                        # part started: never through the hooks' queue, never half. A part ends with the slice, or
+                        # at a pause of the replay (every PAUSE_MESSAGES messages, inside a session too).
+                        with batched(home, check=lambda conn, expected=expected: _unmoved(conn, expected)) as jobs:
+                            position, running, inside = _part(replay, source, queue, running, inside, jobs,
+                                                              start=start, until=until)
+                            counted = {key: totals[key] + replay.counts[key] - before[key] for key in totals}
+                            summary = json.dumps(counted)
+                            record(home, lambda conn, p=position, s=summary: conn.executemany(
+                                "INSERT OR REPLACE INTO cursor VALUES (?, ?)",
+                                (("backfill_cursor", p), ("backfill_totals", s), ("backfill_done", _RUNNING),
+                                 *_revision_keys(fingerprint, floor))))
+                    except _CursorMoved:
+                        return {"status": "running", **state["totals"]}
+                    except _Unreadable:
+                        return {"status": "unreadable", **totals}
+                    except sqlite3.Error:   # the Evolution database stayed busy: this part is read again next pass
+                        return {"status": "running", **totals}
+                    totals, expected = counted, position
+                    if (queue or running is not None) and (time.monotonic() >= deadline or (cancelled and cancelled())):
+                        return {"status": "running", **totals}   # the next pass goes on from the cursor just written
+                cursor_start, cursor_id = float(rows[-1]["started_at"]), str(rows[-1]["id"])
+        finally:
+            if running is not None:
+                running[1].close()
         return {"status": "running", **totals}
     finally:
         source.close()
+
+
+def _cursor(row: dict, inside: tuple | None = None) -> str:
+    """The cursor after a session, or inside it after the message `inside` ((timestamp, id))."""
+    position = f"{float(row['started_at'])!r}|{row['id']}"
+    return position if inside is None else f"{position}|@{float(inside[0])!r}|{json.dumps(inside[1])}"
+
+
+def _part(replay: _Replay, source: sqlite3.Connection, queue: list, running, inside, jobs: list, *, start: float,
+          until: float):
+    """Replay sessions from `queue` (the paused one, `running`, first) into `jobs` up to the next pause: the end of
+    the slice, PAUSE_MESSAGES messages read, or a pause inside a session. (cursor, running, inside) for the caller."""
+    position = None
+    while queue or running is not None:
+        if running is None:
+            row = queue.pop(0)
+            key = (float(row["started_at"]), str(row["id"]))
+            resume = inside[1] if inside is not None and inside[0] == key else None
+            inside = None   # only the first session of the pass can be the one left in part
+            running = [row, replay.session(source, row, start=start, until=until, resume=resume)]
+        row, steps = running
+        mark, counts = len(jobs), dict(replay.counts)
+        try:
+            paused = next(steps, None)
+        except sqlite3.Error as error:
+            if _busy(error):
+                raise _Unreadable from error   # Hermes is writing: this part is read again next pass
+            # a damaged page in one session's messages: the rest of that session is skipped, never the backfill
+            del jobs[mark:]
+            replay.counts = {**counts, "skipped": counts["skipped"] + 1}
+            paused = None
+        except Exception:   # one session that cannot be replayed is skipped, not the backfill
+            del jobs[mark:]
+            replay.counts = {**counts, "skipped": counts["skipped"] + 1}
+            paused = None
+        if paused is not None:
+            return _cursor(row, paused), running, inside
+        running, position = None, _cursor(row)
+        if replay.read >= PAUSE_MESSAGES and queue:
+            replay.read = 0
+            return position, None, inside
+    return position, None, inside
 
 
 def _history_readable(home: Path) -> bool:

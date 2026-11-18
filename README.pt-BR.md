@@ -1,13 +1,13 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/sesantanajr/hermes-atlas-evolution/assets/banner.jpg" alt="Atlas carregando uma esfera celeste sobre uma grade técnica preta. Atlas Evolution." width="100%">
-</p>
+# Atlas Evolution
 
-<h1 align="center">Atlas Evolution</h1>
+**A camada de automelhoria e cuidado do Hermes Agent.**
 
-<p align="center">
-  <b>A camada de automelhoria e cuidado do Hermes Agent.</b>
-</p>
+O README é bilíngue, numa página só: o texto completo em português fica no [README.md](README.md#português-brasil), logo depois do texto em inglês.
 
-O README agora é bilíngue, em uma página só: **[leia em português](README.md#pt-br)** · [read in English](README.md#en-us).
+- A documentação completa em português: [docs/pt-BR](docs/pt-BR/README.md).
+- Cada mudança, versão por versão: [Mudanças](CHANGELOG.pt-BR.md).
+- Problemas de segurança: [SECURITY.md](SECURITY.md).
 
-A documentação completa em português fica em **[docs/pt-BR](docs/pt-BR/README.md)**, e cada mudança, em **[Mudanças](CHANGELOG.pt-BR.md)**.
+---
+
+The README is bilingual, on one page: the English text is at the top of [README.md](README.md), and the Portuguese text follows it.

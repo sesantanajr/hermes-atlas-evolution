@@ -2,6 +2,57 @@
 
 *Em português: [CHANGELOG.pt-BR.md](CHANGELOG.pt-BR.md).*
 
+## 0.13.0
+
+Ready for the Hermes plugin catalog: the plugin no longer updates itself or reads the network, Assist is the default mode, and three audits (catalog rules, the hooks inside Hermes, the background work) found the bugs fixed below.
+
+### Changed: ready for the catalog
+
+- **No self-update and no network access of its own (catalog rule 3).** `git ls-remote`, the Mode auto's sync of the plugin's copies across profiles and every "move to the latest commit" are gone, from the plugin and from `install.sh`. Only Hermes decides what code a profile gets: `hermes -p <profile> plugins update hermes-atlas-evolution` moves a catalog install to the catalog's reviewed pin and pulls a git install from the source it came from. `hermes -p <profile> evolution update` runs that command in each chosen profile (the one running it first); a copy Hermes pinned with `--ref` is moved only to the commit the profile running the command runs; a failed update is reported, never followed by a reinstall; `--force` is no longer passed to an update (it only skipped Hermes' scan prompt). For unattended updates, use Hermes' own `plugins.auto_apply`.
+- **Assist is the default mode (catalog rule 12).** On its own the plugin now only removes an entry repeated word for word between `MEMORY.md` and `USER.md`. Auto is your explicit choice: `hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.mode auto`. A profile with no `mode` set switches to Assist when it updates.
+- **The Mode auto installs the plugin by itself only from the catalog.** In a profile in use that never had it, by its catalog name (the reviewed pin), when the lead profile is a catalog install. From the repository, at the lead's own commit, only with your key.
+- **A catalog install is never "pinned" for the plugin:** `plugins update` moves it, so status, the update and the suggestions treat it that way.
+- **`install.sh` runs only Hermes' own commands:** `plugins update` where the plugin is, `plugins install` where it is missing (from GitHub, or from the catalog with the new `--catalog`), and a pinned copy is left as it is with the command that moves it. The example that piped a download straight into a shell is gone from the script.
+- **Commands the plugin starts never inherit an approval bypass:** `HERMES_YOLO_MODE`, `HERMES_YOLO`, `HERMES_ACP_AUTO_APPROVE`, `HERMES_ACCEPT_HOOKS`, `HERMES_TUI_NO_CONFIRM` and `CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS` are dropped from every child's environment, the weekly digest's script included (a digest scheduled before keeps its old script until you schedule it again).
+- **Credential files are never touched (catalog rule 11).** `.env` and `auth.json` are no longer profile markers, and no scan, size or settings watch looks at a `.env`, `*.env` or `auth.json` file, not even to check that it exists (`install.sh` too). A folder holding only such files is no longer a profile.
+- **The panel decides only on Hermes' verdict.** Without Hermes' own login verdict, a cookie with a login's name no longer grants decisions: the panel answers read-only.
+- **README in English first, then Portuguese, in plain Markdown,** with a Disclosure section (what it reads, writes and runs, and what the agent sees) and images pinned to a commit, so the catalog's plugin page shows it whole.
+
+### Fixed
+
+**Runtime guard**
+
+- **A pattern could freeze the whole gateway.** `pkill -f '.*.*.*.*X'` made the guard's search of the gateway's own command line take 75 seconds and more, holding Python's lock: every session stopped, then Hermes blocked every tool. Costly patterns are now simplified or matched in one linear pass, only patterns of up to 64 characters reach the regex engine, and 3,000 random patterns take at most 0.15 s.
+- **Padding no longer hides a command.** Here-document bodies and comments are taken out in one linear pass over the whole text (up to 500,000 characters), and a command longer than 20,000 characters is read at its beginning and its end.
+
+**Stability**
+
+- **Two learning passes never run at once.** The pass now renews its lease while it works and stops if another process took it; before, a long pass outlived its lease and a second one started beside it, and the first one's result was lost.
+- **No more "database is locked" in the learning pass.** Under load (the gateway writing while the pass rebuilt the proposals) 34 of 60 passes failed and were postponed 10 minutes; now none.
+- **The daily health checks keep to the pass's time.** They need 5 minutes left, receive the pass's deadline, and the Hermes check stops at 2 minutes; before, they could end minutes past it. The database quick check keeps to its 5 seconds (it took 9.9 s on a 441 MB `state.db`).
+- **A command's output is bounded.** Its beginning and end are kept, with a "…" line between (400 MB of output took 1.2 GB of memory; now 16 MB).
+- **A command that starts a helper is not "did not answer".** A Hermes command that ended well but left a background helper holding its output was reported as a timeout and the helper was killed; now it ends when the command does and the helper is left alone.
+- **The doctor's checks end with the plugin.** The child running Hermes' doctor checks stops when the plugin's process dies, or at its timeout plus 15 seconds.
+- **`hermes pm gc` waits when it cannot see what runs.** Without `/proc` (macOS, Windows) or when the scan of running programs ran out of time, the Mode auto, `care gc` and the menu hold gc back and say why ("which programs run could not be read").
+- **Long sessions are read back in parts.** The first pass's backfill keeps to its time budget inside one long session (150,000 calls: 47 s and +223 MB before, 20 s and +20 MB now) and goes on from there at the next pass.
+- **Under `plugins.isolation: host`** the learning pass and the cleanup run in the plugin host, and `status` sees the host's version.
+
+**Efficiency**
+
+- **Lighter writes on every tool call.** The de-duplication table `seen` is replaced by a small memory in the process: about 7 times less database growth, 2 instead of 5.6 journal frames per call. Journal checkpoints moved off the hooks to the 10-minute clock, and the journal shrinks back to 1 MiB.
+- **One process serving many profiles** (9 or more) no longer reopens the database on every write: 1.3 ms → 0.09 ms.
+- **A much faster scan of a large Hermes.** 20 profiles with 60,000 skills: 12 s → 2.6 s on a warm scan; 5,850 skills: 1.6 s → 0.4 s. Each plugin's code is parsed once per process.
+
+**Learning**
+
+- **New lessons reach the prompt.** The playbook now puts first the lessons whose failure happened in the last 30 days; before, old lessons kept the 8 lines, so new ones were never shown, measured or retired.
+- **An automatic lesson nobody saw expires.** A lesson the Mode activated by itself, never shown to the agent, whose failure has not come back for 30 days, is withdrawn; it returns if the failure does. Lessons you wrote, approved, kept or imported never expire.
+- **The decision history stays bounded.** The newest 1,000 entries always stay (the history shows 200); beyond that, entries older than 90 days are removed.
+
+### Upgrading
+
+See [Updating to 0.13.0](docs/en-US/upgrading.md#updating-to-0130). The test suite has 783 tests, on the `tests` branch.
+
 ## 0.12.0
 
 A full audit of 0.11.0 and its fixes: safer automatic actions, a stronger runtime guard, lessons judged on what the agent really read, and the test suite back in CI.

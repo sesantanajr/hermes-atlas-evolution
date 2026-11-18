@@ -87,16 +87,23 @@ def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None,
     """Rebuild open proposals from current evidence. Proposals whose evidence is gone expire.
 
     A lesson proposal carries the exact sentence the agent would read. Regressions come from the stored
-    verdicts of the last 30 days, so a high-risk proposal stays open while its evidence stands."""
+    verdicts of the last 30 days, so a high-risk proposal stays open while its evidence stands.
+
+    The rebuild is one write transaction, taken first (BEGIN IMMEDIATE waits for the hooks' writes like any write).
+    Started by a read instead, an insert made while hooks commit failed at once with SQLITE_BUSY_SNAPSHOT (the read
+    saw an older database), with no busy wait: 2 to 45% of the passes of a busy gateway failed there."""
     seen: set[str] = set()
     command = _command_for(conn, home)
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     for row in conn.execute("SELECT l.*, COALESCE(f.total,0) AS total, COALESCE(f.sessions,0) AS sessions FROM lesson l "
-                            "LEFT JOIN failure f ON f.signature=l.signature WHERE l.status IN ('candidate','quarantined')"):
+                            "LEFT JOIN failure f ON f.signature=l.signature WHERE l.status IN ('candidate','quarantined')"
+                            ).fetchall():
         _upsert(conn, seen, f"lesson:{row['id']}", "lesson", LESSON_RISK.get(row["origin"], "high"), row["tool"],
                 {"lesson_id": row["id"], "origin": row["origin"], "class": row["klass"], "failures_seen": row["total"],
                  "sessions": row["sessions"], "lesson": playbook.render(row, lang)},
                 command(f"evolution lessons approve {row['id']}"), now)
-    for row in conn.execute("SELECT * FROM lesson WHERE status='active' AND verdict='ineffective'"):
+    for row in conn.execute("SELECT * FROM lesson WHERE status='active' AND verdict='ineffective'").fetchall():
         _upsert(conn, seen, f"lesson_retire:{row['id']}", "lesson_retire", "low", row["tool"],
                 {"lesson_id": row["id"], "rate_before": row["rate_before"], "rate_after": row["rate_after"],
                  "basis": playbook.basis_of(conn, row["id"])},   # per call or per day: explain words the rates by it
@@ -152,7 +159,8 @@ def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None,
         elif row["kind"] == "config":
             _upsert(conn, seen, f"config_review:{row['id']}", "config_review", "high", row["subject"], evidence,
                     f"hermes config get {row['subject']}", now)
-    stale = [row["id"] for row in conn.execute("SELECT id, code FROM proposal WHERE status='open'") if row["code"] not in seen]
+    stale = [row["id"] for row in conn.execute("SELECT id, code FROM proposal WHERE status='open'").fetchall()
+             if row["code"] not in seen]
     conn.executemany("UPDATE proposal SET status='expired', updated=? WHERE id=?", [(now, item) for item in stale])
     return listing(conn, status="open")
 

@@ -26,7 +26,8 @@ from pathlib import Path
 CHECK_SECONDS = 60          # how often a hook may start a check
 CLOCK_FIRST_SECONDS = 120   # the clock's first nudge after the plugin loads
 CLOCK_PERIOD_SECONDS = 600  # then every 10 minutes, so an idle profile still gets its passes
-LEASE_SECONDS = 15 * 60     # a pass that has not finished by then is presumed dead
+LEASE_SECONDS = 15 * 60     # a pass that has not renewed its lease by then is presumed dead
+PASS_RENEW_LIMIT = 3        # renewals of a running pass's lease on a timer: past ~2 leases a stuck pass lets another run
 RETRY_SECONDS = 10 * 60     # a failed pass is tried again after this, not after a full interval
 SKEW_SECONDS = 5 * 60       # a last pass up to this far "in the future" finished after the caller read its clock
 
@@ -55,12 +56,18 @@ def runs_passes(argv=None, *, terminal: bool | None = None) -> bool:
     """Whether this process may claim the learning pass: one that stays up (a gateway, the dashboard, the backend of
     the TUI or the Desktop, an editor's ACP server, an interactive CLI in a terminal). A run that ends in seconds
     (`hermes -z`, a scripted or piped `hermes chat -q`, a kanban worker, any other subcommand) would claim the pass,
-    exit in its middle and push the next attempt RETRY_SECONDS away, again and again: it only reads the settings."""
+    exit in its middle and push the next attempt RETRY_SECONDS away, again and again: it only reads the settings.
+
+    A plugin host (`plugins.isolation: host`: `python -m hermes_cli.plugin_host_child`, HERMES_PLUGIN_HOST_PROCESS=1)
+    lives as long as the Hermes that started it and is where the plugin runs then: without it no pass, and no
+    retention, ever ran in such a profile."""
     from .status import process_kind
 
     if process_kind() != "cli":
         return True
     argv = [str(item) for item in (sys.argv if argv is None else argv)[:64]]
+    if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1" or argv and "plugin_host_child" in argv[0]:
+        return True
     if argv and "tui_gateway" in argv[0].replace("\\", "/"):
         return True   # python -m tui_gateway.entry: the TUI's and the Desktop's backend, up while they are open
     subcommand, value, previous = None, False, ""
@@ -115,6 +122,62 @@ def claim(home: Path, *, now: float, interval_s: float, owner: str) -> bool:
         return True
 
 
+def renew(home: Path, *, now: float, owner: str) -> bool:
+    """Extend the lease of the pass `owner` runs to LEASE_SECONDS from `now`. False when it is not its own any more
+    (it expired and another process took the pass)."""
+    from .experience import experience
+
+    with experience(home) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        holder, _ = _lease(conn)
+        if holder != owner:
+            return False
+        conn.execute("INSERT OR REPLACE INTO cursor VALUES ('loop_lease', ?)", (f"{owner}|{now + LEASE_SECONDS!r}",))
+        return True
+
+
+class _Lease:
+    """Keeps the lease of a running pass: renewed every LEASE_SECONDS / 3 on a thread of its own, at most
+    PASS_RENEW_LIMIT times, so a pass that outlives one lease (a slow systemd, a big quick_check) is not run a second
+    time by another process, and one stuck for good still lets another process take over. `lost` turns True when
+    another process holds the pass after all; the pass's `cancelled` check then stops it."""
+
+    def __init__(self, home: Path, owner: str, *, wall=time.time):
+        self.home, self.owner, self.wall = home, owner, wall
+        self.lost = False
+        self.renewed = wall()   # the claim wrote the first lease
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def renew(self) -> bool:
+        try:
+            held = renew(self.home, now=self.wall(), owner=self.owner)
+        except (sqlite3.Error, OSError, ValueError):
+            return not self.lost   # busy now: the lease still has two thirds of its time
+        if held:
+            self.renewed = self.wall()
+        else:
+            self.lost = True
+        return held
+
+    def __enter__(self):
+        def keep():
+            for _ in range(PASS_RENEW_LIMIT):
+                if self._done.wait(LEASE_SECONDS / 3) or not self.renew():
+                    return
+
+        self._thread = threading.Thread(target=keep, name="hermes-atlas-evolution-lease", daemon=True)
+        try:
+            self._thread.start()
+        except RuntimeError:   # the interpreter is shutting down
+            self._thread = None
+        return self
+
+    def __exit__(self, *_exc):
+        self._done.set()
+        return False
+
+
 def finish(home: Path, *, now: float, owner: str, ok: bool, interval_s: float, started: float | None = None,
            summary=None, error: str = "") -> None:
     """Record the end of a pass. A failure moves the next attempt to RETRY_SECONDS from now."""
@@ -147,7 +210,8 @@ def run_exclusive(home: Path, run, *, wait_s: float = 30.0, now=time.time):
         time.sleep(0.5)
     started = now()
     try:
-        result = run()
+        with _Lease(home, owner, wall=now):
+            result = run()
     except BaseException as problem:
         finish(home, now=now(), owner=owner, ok=False, interval_s=0, started=started, error=type(problem).__name__)
         raise
@@ -210,6 +274,7 @@ class Autopilot:
         self._exit_hooked = False
         self.on_tick = None   # called by the clock before each nudge (the plugin's settings refresh)
         self.claims = True    # False in a short-lived process (runs_passes): it never claims the pass
+        self._lease: _Lease | None = None   # the lease of the pass running now
 
     def start_clock(self, *, first: float = CLOCK_FIRST_SECONDS, period: float = CLOCK_PERIOD_SECONDS) -> bool:
         """A daemon timer that nudges the pass while the process is idle.
@@ -258,6 +323,19 @@ class Autopilot:
     @property
     def stopped(self) -> bool:
         return self._stop.is_set()
+
+    def cancelled(self) -> bool:
+        """The running pass's check at each safe point (`cancelled` of evolve.cycle): stop when the plugin was unloaded,
+        or when another process holds the pass now (its lease ran out). A pass that reaches a safe point is making
+        progress, so its lease is renewed there too, without the timer's limit, once a third of it is gone."""
+        if self._stop.is_set():
+            return True
+        lease = self._lease
+        if lease is None:
+            return False
+        if not lease.lost and self.wall() - lease.renewed >= LEASE_SECONDS / 3:
+            lease.renew()
+        return lease.lost
 
     def _at_exit(self) -> None:
         """At interpreter exit, free the lease of a pass this process cannot finish, so another retries soon."""
@@ -311,17 +389,18 @@ class Autopilot:
         if hook:   # a process may still end in the middle of the pass (its user quits): the lease is freed at exit
             atexit.register(self._at_exit)
         try:
-            with pinned_profile(self.home):
+            with pinned_profile(self.home), _Lease(self.home, self._owner, wall=self.wall) as lease:
+                self._lease = lease
                 summary = self.run()
             ok = True
         except Exception as problem:   # never let a pass escape into the host process
             error = type(problem).__name__
-            if not self._warned:
+            if not self._warned and error != "Cancelled":   # told to stop (evolve.Cancelled) is not a failure
                 self._warned = True
                 logger.warning("Atlas Evolution autopilot pass failed (%s); it will try again in %d minutes",
                                error, RETRY_SECONDS // 60)
         finally:
-            self._running = False
+            self._running, self._lease = False, None
             if self._stop.is_set():   # unloaded during the pass: nothing is left for an exit to free
                 self._unhook_exit()
             try:

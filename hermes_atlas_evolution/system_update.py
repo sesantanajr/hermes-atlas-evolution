@@ -59,6 +59,7 @@ LOCK_FILES = ("/var/lib/dpkg/lock-frontend", "/var/lib/dpkg/lock", "/var/lib/apt
 MIN_FREE = {"/": 1_500_000_000, "/boot": 150_000_000, "/var": 1_000_000_000}
 PACKAGE_NAME = re.compile(r"[a-z0-9][a-z0-9.+-]{0,99}(?::[a-z0-9][a-z0-9-]{0,31})?")
 _ENV = {"LC_ALL": "C", "LANG": "C", "DEBIAN_FRONTEND": "noninteractive"}
+OUTPUT_HEAD, OUTPUT_TAIL = 8 * 2**20, 256 * 1024   # what a command's output keeps (characters), its start and end
 
 
 def _shutdown_helper(entry: Path) -> bool:
@@ -81,42 +82,44 @@ class Host:
         self.unverified: set[str] = set()    # systemd scopes whose bus could not be reached ("system", "user")
 
     def run(self, argv: list, *, timeout: int = 60) -> tuple[int, str, str]:
-        if self.deadline is not None:   # a check with a time budget launches nothing once it is spent
+        if self.deadline is not None:   # a check with a time budget launches nothing it cannot finish within it
             left = self.deadline - time.monotonic()
-            if left <= 0:
+            if left < 1:
                 self.skipped += 1
                 return 124, "", f"{argv[0]}: time budget spent"
-            timeout = max(1, min(timeout, int(left) + 1))
+            timeout = max(1, min(timeout, int(left)))
         if self.runner is not None:
             return self.runner(list(argv), timeout)
-        env = {**os.environ, **_ENV}
-        if argv and os.path.basename(str(argv[0])) in ("systemctl", "journalctl") and "--user" in argv                 and not env.get("XDG_RUNTIME_DIR") and hasattr(os, "geteuid"):
+        from .admin import child_environment, collect
+
+        env = child_environment(None, **_ENV)   # never an approval bypass (admin.UNSAFE_ENV)
+        if argv and os.path.basename(str(argv[0])) in ("systemctl", "journalctl") and "--user" in argv \
+                and not env.get("XDG_RUNTIME_DIR") and hasattr(os, "geteuid"):
             # a service, cron or `sudo -i` has no session: the user's own bus is found by its runtime folder
             env["XDG_RUNTIME_DIR"] = f"/run/user/{os.geteuid()}"
         posix = os.name == "posix"
         try:
             process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       encoding="utf-8", errors="replace", env=env, start_new_session=posix)
+                                       env=env, start_new_session=posix)
         except FileNotFoundError:
             return 127, "", f"{argv[0]}: not found"
         except OSError as error:
             return 126, "", f"{argv[0]}: {type(error).__name__}"
-        try:
-            out, err = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            try:   # the whole group: a child it started never keeps the pipes open past the timeout
+
+        def kill(process):   # the whole group: a child it started never keeps the pipes open past the timeout
+            try:
                 if posix:
                     os.killpg(process.pid, signal.SIGKILL)
                 else:
                     process.kill()
             except OSError:
                 pass
-            try:
-                process.communicate(timeout=5)
-            except (subprocess.TimeoutExpired, OSError, ValueError):
-                pass
+
+        try:   # read as it comes, its start and end kept (an apt simulation or a package list stays whole)
+            out, err = collect(process, timeout=timeout, kill=kill, head=OUTPUT_HEAD, tail=OUTPUT_TAIL)
+        except subprocess.TimeoutExpired:
             return 124, "", f"{argv[0]}: timed out"
-        return process.returncode, out or "", err or ""
+        return process.returncode, out, err
 
     def path(self, name: str) -> Path:
         return self.root / name.lstrip("/")
@@ -1255,8 +1258,10 @@ def start(host: Host, folder: Path, *, full: bool = False, skip: list[str] = (),
     if host.runner is not None:
         code, _out, _err = host.run(["/bin/sh", str(folder / "run.sh")], timeout=7200)
         return {"mode": "direct", "code": code}
+    from .admin import child_environment
+
     process = subprocess.Popen(["/bin/sh", str(folder / "run.sh")], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, start_new_session=True, env={**os.environ, **_ENV})
+                               stderr=subprocess.DEVNULL, start_new_session=True, env=child_environment(None, **_ENV))
     _write(folder / "pid", str(process.pid))
     return {"mode": "process", "pid": process.pid}
 

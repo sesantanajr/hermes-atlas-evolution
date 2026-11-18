@@ -248,16 +248,6 @@ def record_maintenance(conn: sqlite3.Connection, action: str, *, reclaimable, ok
                 before={"reclaimable": reclaimable if isinstance(reclaimable, int) else None}, after={"ok": ok})
 
 
-def record_sync(conn: sqlite3.Connection, profile: str, *, reason: str, before: str, after: str, version, ok: bool,
-                now: float, actor: str = "automatic") -> int:
-    """Log the Mode auto bringing this plugin's copy in another profile to the lead's commit (fleet_update.auto_sync).
-    Nothing to undo: the operator moves a copy with `hermes evolution update` when they want another commit."""
-    return _log(conn, now=now, actor=actor, kind="maintenance", target="plugin_sync", action="run",
-                before={"profile": str(profile), "reason": str(reason), "sha": str(before or "")[:12]},
-                after={"ok": bool(ok), "sha": str(after or "")[:12],
-                       "version": str(version)[:32] if version else None})
-
-
 def record_gateway_repair(conn: sqlite3.Connection, unit: str, *, before: str, after: str, ok: bool, undo: bool,
                           now: float, actor: str = "automatic") -> int:
     """Log the Mode auto pointing the gateway's unit at the Python Hermes uses now (actions.repair_gateway). It is
