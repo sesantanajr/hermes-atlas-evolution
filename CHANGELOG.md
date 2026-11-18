@@ -10,7 +10,7 @@ A full audit of 0.11.0 and its fixes: safer automatic actions, a stronger runtim
 
 **Hermes 0.23.2**
 
-- **Your own commands work again under Hermes 0.23.2.** Its launcher runs `python3 -I -c '<launcher script>' evolution …`, which the plugin did not recognise as this command's own launcher: every command only the owner may run (`owner`, `care doctor`, `care pm-doctor`, approving or retiring lessons) was refused in the owner's own terminal, and `lessons list` hid the owner's lesson text. The launcher is now recognised; a command from an agent's shell under a gateway is still refused.
+- **Your own commands work again under Hermes 0.23.2.** Its launcher runs `python3 -I -c '<launcher script>' evolution …`, which the plugin did not recognise as this command's own launcher: every command only the owner may run (`owner`, `care doctor`, `care pm-doctor`, `update`, approving or retiring lessons) was refused in the owner's own terminal, and `lessons list` hid the owner's lesson text. The launcher is now recognised; a command from an agent's shell under a gateway is still refused.
 
 **Automatic actions (Mode auto)**
 

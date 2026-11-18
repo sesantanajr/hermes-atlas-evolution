@@ -10,7 +10,7 @@ Uma auditoria completa da 0.11.0 e as correções que ela pediu: ações automá
 
 **Hermes 0.23.2**
 
-- **Os seus próprios comandos voltam a funcionar no Hermes 0.23.2.** O lançador dele roda `python3 -I -c '<script do lançador>' evolution …`, que o plugin não reconhecia como o lançador deste comando: todo comando que só o dono pode rodar (`owner`, `care doctor`, `care pm-doctor`, aprovar ou aposentar lições) era recusado no terminal do próprio dono, e o `lessons list` escondia o texto das lições do dono. Agora o lançador é reconhecido; um comando do shell de um agente sob um gateway continua recusado.
+- **Os seus próprios comandos voltam a funcionar no Hermes 0.23.2.** O lançador dele roda `python3 -I -c '<script do lançador>' evolution …`, que o plugin não reconhecia como o lançador deste comando: todo comando que só o dono pode rodar (`owner`, `care doctor`, `care pm-doctor`, `update`, aprovar ou aposentar lições) era recusado no terminal do próprio dono, e o `lessons list` escondia o texto das lições do dono. Agora o lançador é reconhecido; um comando do shell de um agente sob um gateway continua recusado.
 
 **Ações automáticas (Modo Auto)**
 
