@@ -1046,10 +1046,13 @@ class DoctorRelaunchTest(unittest.TestCase):
             fake = Path(folder) / "hermes_cli"
             fake.mkdir()
             (fake / "__init__.py").write_text(
-                "import os, sys\n"
+                "import os, subprocess, sys\n"
                 "if not os.environ.get('FAKE_RELAUNCHED'):\n"
                 "    os.environ['FAKE_RELAUNCHED'] = '1'\n"
-                "    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])\n")
+                "    argv = [sys.executable, *sys.orig_argv[1:]]\n"
+                "    if os.name == 'nt':   # os.execv does not quote its arguments there\n"
+                "        os._exit(subprocess.call(argv))\n"
+                "    os.execv(sys.executable, argv)\n")
             (fake / "doctor.py").write_text("DOCTOR_CHECKS = []\n")
             (fake / "left_core_migration.py").write_text(
                 "import contextlib\n@contextlib.contextmanager\ndef installs_held():\n    yield\n")

@@ -345,7 +345,8 @@ class MemoryCareTest(Base):
         while size < memory_care.MAX_BYTES - 2_000:
             entries.append(f"another remembered fact {len(entries)} with several words in it")
             size += len(entries[-1]) + 4
-        path = write_memory(self.home, "MEMORY.md", entries)
+        path = write_memory(self.home, "MEMORY.md", [])
+        path.write_bytes(memory_care.DELIMITER.join(entries).encode("utf-8"))   # "\n" everywhere: \r\n passes the cap
         self.assertLessEqual(path.stat().st_size, memory_care.MAX_BYTES)
         start = time.monotonic()
         found = memory_care.review(self.home, {"memory": {"memory_char_limit": 10**7}})

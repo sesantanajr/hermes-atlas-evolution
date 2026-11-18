@@ -173,7 +173,11 @@ class ImportTest(PackBase):
         with self.assertRaises(SystemExit) as refused:
             self.import_from(self.target, yes=False)
         self.assertIn("--yes", str(refused.exception))
-        with patch("sys.stdin.isatty", return_value=True), patch("sys.stdin.readline", return_value="s\n"):
+        class Terminal(io.StringIO):   # on Windows menu.tty also asks the console behind a real stdin
+            def isatty(self):
+                return True
+
+        with patch("sys.stdin", Terminal("s\n")):
             done = self.import_from(self.target, yes=False, lang="pt")
         self.assertEqual(len(done["imported"]), 2)
 

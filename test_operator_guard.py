@@ -20,6 +20,14 @@ CLEAN = {name: "" for name in AGENT_MARKERS}
 LESSON = "When a CSV import fails, check the header row before retrying."
 
 
+class Terminal(io.StringIO):
+    """A stdin someone types in. Patching only isatty() is not enough on Windows, where menu.tty also asks the
+    console behind the real handle."""
+
+    def isatty(self):
+        return True
+
+
 class GuardBase(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -55,12 +63,12 @@ class GuardTest(GuardBase):
             self.run_cli(evolution_action="lessons", lessons_action="add", text=LESSON, tool="terminal",
                          activate=True, yes=False)
         self.assertIn("--yes", str(refused.exception))
-        with patch("sys.stdin.isatty", return_value=True), patch("sys.stdin.readline", return_value="y\n"), \
+        with patch("sys.stdin", Terminal("y\n")), \
                 contextlib.redirect_stderr(io.StringIO()):
             activated = self.run_cli(evolution_action="lessons", lessons_action="add", text=LESSON + " Always.",
                                      tool="terminal", activate=True, yes=False)
         self.assertEqual(activated["status"], "active")
-        with patch("sys.stdin.isatty", return_value=True), patch("sys.stdin.readline", return_value="\n"), \
+        with patch("sys.stdin", Terminal("\n")), \
                 contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as cancelled:
                 self.run_cli(evolution_action="lessons", lessons_action="approve", id=added["id"], yes=False)

@@ -169,6 +169,12 @@ class ProfilesTest(unittest.TestCase):
 
 # ── F4: only the newest decision on a proposal is undone ─────────────────────────────────────────────────────────
 class UndoOrderTest(Base):
+    def setUp(self):
+        super().setUp()
+        executable = patch.object(admin, "hermes_executable", return_value="/x/hermes")   # no Hermes on CI runners
+        executable.start()
+        self.addCleanup(executable.stop)
+
     def test_undoing_an_older_rejection_never_reopens_what_was_refused_since(self):
         proposal = propose(self.home, "skill_lock", "hermes-admin", evidence=LOCK)
         with experience(self.home) as conn:
