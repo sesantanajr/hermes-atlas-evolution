@@ -69,6 +69,11 @@ class ScanCostTest(Folder):
             for index in range(12):
                 skill(home, f"c{index % 3}/s{index:02d}", description=f"skill {index}", body="steps " * 20)
             plugin(home, "web", code=WEB_ONLY, hooks=["transform_tool_result"])
+            # plugin() dates its files from the tests' fixed clock (2027): on Windows the stamp is the mtime, and a
+            # time ahead of the real clock is never cached, so put them an hour into the real past
+            past = time.time() - 3600
+            for item in [home / "plugins" / "web", *(home / "plugins" / "web").rglob("*")]:
+                os.utime(item, (past, past))
         settle()
 
     def test_the_skill_cache_has_a_ceiling_and_keeps_its_first_skills_past_it(self):
@@ -467,9 +472,9 @@ class CareSizeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "plugins" / "x").mkdir(parents=True)
-            (root / "plugins" / "x" / "code.py").write_text("x = 1\n", encoding="utf-8")
+            (root / "plugins" / "x" / "code.py").write_bytes(b"x = 1\n")   # "\n" on every system
             for name in (".env", "prod.env", "auth.json"):
-                (root / "plugins" / "x" / name).write_text("SECRET=1\n", encoding="utf-8")
+                (root / "plugins" / "x" / name).write_bytes(b"SECRET=1\n")
             touched = []
             real_scandir = os.scandir
 
