@@ -52,8 +52,14 @@ def _read_json(path: Path, limit: int = 2_000_000):
         return None
 
 
+def _credential(name: str) -> bool:
+    """A credential store's file name (.env, *.env, auth.json): never measured (catalog rule 11)."""
+    folded = name.casefold()
+    return folded == "auth.json" or folded.endswith(".env")
+
+
 def _size(path: Path, deadline: float) -> int | None:
-    """Bytes under `path` (no symlink followed), or None when the time budget ran out."""
+    """Bytes under `path` (no symlink followed, credential files left out), or None when the time budget ran out."""
     total = 0
     stack = [path]
     while stack:
@@ -66,7 +72,7 @@ def _size(path: Path, deadline: float) -> int | None:
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(Path(entry.path))
-                        elif entry.is_file(follow_symlinks=False):
+                        elif not _credential(entry.name) and entry.is_file(follow_symlinks=False):
                             total += entry.stat(follow_symlinks=False).st_size
                     except OSError:
                         continue
@@ -419,9 +425,15 @@ def live_gateways(home: Path, *, now: float) -> list[dict]:
 
 
 QUICK_CHECK_SECONDS = 5.0
+# SQLite calls the progress handler every this many steps of its virtual machine, and an integrity check takes long
+# ones: at 10,000 a 5 s budget took 9.9 s on a 441 MB state.db (at 100, a 1 s budget took 1.02 s).
+QUICK_CHECK_STEPS = 100
 
 
-def database(home: Path, *, quick: bool) -> dict:
+def database(home: Path, *, quick: bool, budget: float = QUICK_CHECK_SECONDS) -> dict:
+    """The session database: present, its write-ahead log's size, journal mode and, when `quick`, PRAGMA
+    quick_check for at most `budget` seconds (None: not finished in time). Below a second left, no quick check is
+    started at all (no `quick_check` key: not taken)."""
     path = Path(home) / "state.db"
     report: dict = {"present": path.exists()}
     if not report["present"]:
@@ -436,9 +448,9 @@ def database(home: Path, *, quick: bool) -> dict:
         conn = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=2)
         try:
             report["journal"] = conn.execute("PRAGMA journal_mode").fetchone()[0]
-            if quick:   # read-only and bounded: a large database is checked for at most QUICK_CHECK_SECONDS
-                limit = time.monotonic() + QUICK_CHECK_SECONDS
-                conn.set_progress_handler(lambda: 1 if time.monotonic() > limit else 0, 10_000)
+            if quick and budget >= 1:   # read-only and bounded: a large database is checked for `budget` at most
+                limit = time.monotonic() + min(budget, QUICK_CHECK_SECONDS)
+                conn.set_progress_handler(lambda: 1 if time.monotonic() > limit else 0, QUICK_CHECK_STEPS)
                 try:
                     report["quick_check"] = conn.execute("PRAGMA quick_check(3)").fetchone()[0]
                 except sqlite3.OperationalError as error:
@@ -499,20 +511,21 @@ def _in_use_by(store: Path, sources, *, exact=()) -> dict[str, list[str]]:
     return found
 
 
-def running_programs(root: Path = Path("/"), *, budget: float = 2.0) -> list[tuple[str, str]]:
-    """("pid <n>", program) of the processes running now, from <root>/proc/<pid>/exe (Linux; nothing elsewhere,
-    and nothing for a process this user may not look at): a program running from a tools folder keeps it in use."""
+def scan_programs(root: Path = Path("/"), *, budget: float = 2.0) -> tuple[list[tuple[str, str]], str | None]:
+    """(running_programs, why the list is not whole): "no_proc" (no <root>/proc to read: macOS, Windows), "budget"
+    (the time budget ran out first) or "too_many" (more than PROCESS_SCAN processes); None when it is whole."""
     proc = Path(root) / "proc"
-    found = []
+    found: list[tuple[str, str]] = []
     deadline = time.monotonic() + budget
     try:
         with os.scandir(proc) as entries:
-            pids = [entry.name for entry in entries if entry.name.isdigit()][:PROCESS_SCAN]
+            pids = [entry.name for entry in entries if entry.name.isdigit()]
     except OSError:
-        return found
-    for pid in pids:
-        if time.monotonic() > deadline:
-            break
+        return found, "no_proc"
+    why = "too_many" if len(pids) > PROCESS_SCAN else None
+    for pid in pids[:PROCESS_SCAN]:
+        if time.monotonic() >= deadline:
+            return found, "budget"
         try:
             target = os.readlink(proc / pid / "exe")
         except OSError:
@@ -520,7 +533,14 @@ def running_programs(root: Path = Path("/"), *, budget: float = 2.0) -> list[tup
         if target.endswith(" (deleted)"):
             target = target[:-len(" (deleted)")]
         found.append((f"pid {pid}", target))
-    return found
+    return found, why
+
+
+def running_programs(root: Path = Path("/"), *, budget: float = 2.0) -> list[tuple[str, str]]:
+    """("pid <n>", program) of the processes running now, from <root>/proc/<pid>/exe (Linux; nothing elsewhere,
+    and nothing for a process this user may not look at): a program running from a tools folder keeps it in use.
+    Whether that list is whole: scan_programs."""
+    return scan_programs(root, budget=budget)[0]
 
 
 def _launcher_target(path: Path) -> tuple[Path | None, Path | None]:
@@ -744,14 +764,20 @@ def tool_store(home: Path, *, budget: float = 4.0, in_use=(), processes=None, ro
     leave that service failing at its next start (status=203/EXEC), or delete a running program's files.
     `gc_unsafe`: what makes the answer unknown, so gc must wait: a systemd scope whose units could not be read
     (`unverified`: a stopped gateway unit there may start a Python gc deletes), the store gc sweeps cannot be told,
-    it has no facts.json (gc would delete every tool) or one gc cannot read."""
+    it has no facts.json (gc would delete every tool) or one gc cannot read, or the running programs could not all be
+    read (`processes_unknown:<why>`, scan_programs: no /proc on macOS and Windows, or out of time)."""
     import sys
 
     report: dict = {"unused": [], "in_use_unreferenced": [], "in_use_by": {}, "in_use_kind": {}, "gc_model": GC_MODEL,
                     "stores": [],
                     "gc_unsafe": [f"unverified:{scope}" for scope in sorted(set(unverified or ()))], "store": None}
     deadline = time.monotonic() + budget
-    running = running_programs(root) if processes is None else list(processes)
+    if processes is None:
+        running, partial = scan_programs(root, budget=max(0.0, min(2.0, budget)))
+        if partial:   # a program this scan missed may run from a folder gc deletes
+            report["gc_unsafe"].append(f"processes_unknown:{partial}")
+    else:
+        running = list(processes)
     sources = list(in_use)
     # this process' own program is a real path, taken as it is: only that folder of this store is in use (a launcher
     # Python of another Hermes in a same-named tools folder elsewhere says nothing of this store)
@@ -896,6 +922,16 @@ def gc_unsafe_words(items, lang: str = "en") -> list[str]:
         elif kind == "unreadable":
             words.append(f"o facts.json do depósito {rest} não pôde ser lido" if pt else
                          f"the facts.json of the store {rest} cannot be read")
+        elif kind == "processes_unknown" and rest == "no_proc":
+            words.append("este sistema não mostra de onde rodam os programas em execução (sem /proc): um deles pode "
+                         "rodar de uma pasta que o gc apagaria" if pt else
+                         "this system does not show where the running programs run from (no /proc): one may run "
+                         "from a folder gc would delete")
+        elif kind == "processes_unknown":
+            words.append("os programas em execução não puderam ser todos lidos (o tempo acabou, ou são muitos): um "
+                         "deles pode rodar de uma pasta que o gc apagaria" if pt else
+                         "the running programs could not all be read (out of time, or too many): one may run from a "
+                         "folder gc would delete")
     return words
 
 
@@ -1098,20 +1134,42 @@ GATEWAY_UNIT_KEYS = ("unit", "scope", "enabled", "active", "active_state", "sub_
                      "exec_missing", "restart_loop", "main_pid")
 
 
+CHECK_BUDGET_SECONDS = 120   # a whole check at most, a systemd that answers slowly included
+
+
 def check(home: Path, *, now: float | None = None, history: list[dict] | None = None, quick: bool = False,
-          root: Path = Path("/"), host=None, fresh: bool = False) -> dict:
+          root: Path = Path("/"), host=None, fresh: bool = False, deadline: float | None = None) -> dict:
     """Read-only. `history`: earlier records [{"at", "sizes", "free", "rss"}], oldest first. `host`: the machine
     (system_update.Host) whose systemd units are read; by default this one, on Linux with systemd only. `fresh`:
-    the units as systemd says now, never the minute-old list another check of this pass kept."""
-    from .system_update import Host, _linger, _user_units
+    the units as systemd says now, never the minute-old list another check of this pass kept. Taken within
+    `deadline` (time.monotonic) and CHECK_BUDGET_SECONDS: each step gets what is left at most, and none starts once
+    it is spent (what was not read is unknown: a scope's units unverified, gc held back)."""
+    from .system_update import Host
+
+    limit = time.monotonic() + CHECK_BUDGET_SECONDS
+    limit = limit if deadline is None else min(limit, deadline)
+    unit_host = None
+    if host is not None or (os.name == "posix" and Path("/run/systemd/system").is_dir()):
+        unit_host = host or Host(root=root)
+    previous = unit_host.deadline if unit_host is not None else None
+    if unit_host is not None:
+        unit_host.deadline = limit if previous is None else min(previous, limit)
+    try:
+        return _check(home, now=now, history=history, quick=quick, root=root, unit_host=unit_host, fresh=fresh,
+                      left=lambda: max(0.0, limit - time.monotonic()))
+    finally:
+        if unit_host is not None:
+            unit_host.deadline = previous
+
+
+def _check(home: Path, *, now, history, quick: bool, root: Path, unit_host, fresh: bool, left) -> dict:
+    from .system_update import _linger, _user_units
 
     now = time.time() if now is None else now
     home = Path(home)
-    report: dict = {"at": now, "gateway": gateway(home, now=now), "database": database(home, quick=quick)}
-    units, unit_host = [], None
-    if host is not None or (os.name == "posix" and Path("/run/systemd/system").is_dir()):
-        unit_host = host or Host(root=root)
-        units = _user_units(unit_host, fresh=fresh)
+    report: dict = {"at": now, "gateway": gateway(home, now=now),
+                    "database": database(home, quick=quick, budget=min(QUICK_CHECK_SECONDS, left()))}
+    units = _user_units(unit_host, fresh=fresh) if unit_host is not None else []
     # this profile's own unit (or the root's, when its gateway serves this profile), never another profile's
     unit = _gateway_unit(units, home, served=bool(report["gateway"].get("served_by_root")), host=unit_host)
     report["gateway_unit"] = {key: unit.get(key) for key in GATEWAY_UNIT_KEYS} if unit else None
@@ -1130,12 +1188,12 @@ def check(home: Path, *, now: float | None = None, history: list[dict] | None = 
         report["load"] = {"1m": round(load[0], 2), "15m": round(load[2], 2), "cpus": os.cpu_count()}
     except (OSError, AttributeError):
         report["load"] = None
-    report["sizes"] = sizes(home)
+    report["sizes"] = sizes(home, budget=min(SIZE_BUDGET_SECONDS, left()))
     # every command of every Hermes unit (ExecStart, ExecStop...) and every program running now keeps its folder
     from .system_update import unit_paths
 
     store = tool_store(home, in_use=[(item.get("unit"), path) for item in units
-                                     for path in unit_paths(unit_host, item)], root=root,
+                                     for path in unit_paths(unit_host, item)], root=root, budget=min(4.0, left()),
                        unverified=sorted(unit_host.unverified) if unit_host is not None else ())
     report["unused_tools"] = store["unused"]
     report["in_use_unreferenced"], report["in_use_by"] = store["in_use_unreferenced"], store["in_use_by"]
@@ -1210,9 +1268,11 @@ def check(home: Path, *, now: float | None = None, history: list[dict] | None = 
     return report
 
 
-def cached(conn, home: Path, *, now: float, force: bool = False, host=None, fresh: bool = False) -> dict | None:
+def cached(conn, home: Path, *, now: float, force: bool = False, host=None, fresh: bool = False,
+           deadline: float | None = None) -> dict | None:
     """The latest check, taken at most every CHECK_EVERY_SECONDS by the learning pass, with its history. `host`:
-    the machine whose units are read (check); `fresh`: never a cached list of units (what gc relies on)."""
+    the machine whose units are read (check); `fresh`: never a cached list of units (what gc relies on);
+    `deadline` (time.monotonic): the check is taken within it (check)."""
     row = conn.execute("SELECT value FROM cursor WHERE key='care_check'").fetchone()
     try:
         last = json.loads(row[0]) if row else None
@@ -1232,9 +1292,9 @@ def cached(conn, home: Path, *, now: float, force: bool = False, host=None, fres
         quick = quick_row is None or now - float(quick_row[0] or 0) >= QUICK_CHECK_EVERY_SECONDS   # weekly, even when asked
     except (TypeError, ValueError):
         quick = True
-    found = check(home, now=now, history=history, quick=quick, fresh=fresh,
+    found = check(home, now=now, history=history, quick=quick, fresh=fresh, deadline=deadline,
                   **({} if host is None else {"host": host, "root": Path(host.root)}))
-    if quick:
+    if quick and "quick_check" in found["database"]:   # one left out for lack of time is taken at the next check
         conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('care_quick_check', ?)", (str(now),))
     record = {"at": now, "sizes": found["sizes"], "free": found["free"], "rss": found["gateway"]["rss"]}
     keep = [item for item in history if now - _when(item) <= HISTORY_DAYS * 86_400]

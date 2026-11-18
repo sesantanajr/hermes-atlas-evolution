@@ -147,26 +147,157 @@ def _kill_tree(process) -> None:
             time.sleep(0.1)
 
 
+# Approval bypasses no command this plugin starts inherits (catalog rule 12): Hermes' --yolo (HERMES_YOLO_MODE, and
+# the HERMES_YOLO a TUI forwards), ACP's auto-approve, shell hooks accepted without asking, the TUI's skipped
+# confirmation and the computer-use driver's bypass.
+UNSAFE_ENV = ("HERMES_YOLO_MODE", "HERMES_YOLO", "HERMES_ACP_AUTO_APPROVE", "HERMES_ACCEPT_HOOKS",
+              "HERMES_TUI_NO_CONFIRM", "CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS")
+# What is kept of each stream a command prints (characters): its start and its end, so a command that prints without
+# end never fills the memory (its last lines say why it failed).
+OUTPUT_HEAD, OUTPUT_TAIL = 64 * 1024, 192 * 1024
+EOF_GRACE_SECONDS = 2.0   # once a command ended, how long its pipes get to close (a helper it left may hold them)
+
+
+def child_environment(base=None, **values) -> dict:
+    """The environment of a command this plugin starts: `base` (this process' own by default) with `values`, without
+    any approval bypass of UNSAFE_ENV (in any case: Windows' names are not case-sensitive)."""
+    env = dict(os.environ if base is None else base, **values)
+    for key in [key for key in env if str(key).upper() in UNSAFE_ENV]:
+        del env[key]
+    return env
+
+
+class _Kept:
+    """The first `head` and the last `tail` characters of a stream; where anything was left out, an ellipsis line
+    stands for it and neither side keeps half a line (a parser would read a cut line as a whole one)."""
+
+    def __init__(self, head: int, tail: int):
+        import collections
+        import threading
+
+        self.head, self.tail = max(0, head), max(0, tail)
+        self.start: list[str] = []
+        self.start_size = 0
+        self.end: collections.deque = collections.deque()
+        self.end_size = 0
+        self.dropped = 0
+        self.lock = threading.Lock()
+
+    def add(self, chunk: str) -> None:
+        with self.lock:
+            if self.start_size < self.head:
+                first = chunk[:self.head - self.start_size]
+                self.start.append(first)
+                self.start_size += len(first)
+                chunk = chunk[len(first):]
+            if not chunk:
+                return
+            self.end.append(chunk)
+            self.end_size += len(chunk)
+            while self.end and self.end_size - len(self.end[0]) >= self.tail:
+                self.end_size -= len(self.end[0])
+                self.dropped += len(self.end.popleft())
+
+    def text(self) -> str:
+        with self.lock:
+            start, end, dropped = "".join(self.start), "".join(self.end), self.dropped
+        if len(end) > self.tail:
+            dropped += len(end) - self.tail
+            end = end[len(end) - self.tail:] if self.tail else ""
+        if not dropped:
+            return start + end
+        cut = start.rfind("\n")   # a line longer than what is kept stays cut: better than nothing
+        start = start[:cut + 1] if cut >= 0 else start + "\n" if start else ""
+        cut = end.find("\n")
+        end = end[cut + 1:] if 0 <= cut < len(end) - 1 else end
+        return start + "…\n" + end
+
+
+def _reader(stream, kept: _Kept):
+    """A daemon thread reading `stream` (a binary pipe) to its end into `kept`, decoded as text mode would (UTF-8,
+    errors replaced, universal newlines). Once `abandoned` it only drains: a helper left holding the pipe never
+    blocks on a full pipe nor dies of a broken one."""
+    import codecs
+    import io
+    import threading
+
+    def run():
+        decoder = io.IncrementalNewlineDecoder(codecs.getincrementaldecoder("utf-8")("replace"), translate=True)
+        read = getattr(stream, "read1", stream.read)   # what is there now, never a wait for a full buffer
+        try:
+            while True:
+                data = read(65_536)
+                if not data:
+                    break
+                if not thread.abandoned:
+                    kept.add(decoder.decode(data))
+            if not thread.abandoned:
+                kept.add(decoder.decode(b"", final=True))
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=run, name="atlas-evolution-output", daemon=True)
+    thread.abandoned = False
+    thread.start()
+    return thread
+
+
+def collect(process, *, timeout, kill, head: int = OUTPUT_HEAD, tail: int = OUTPUT_TAIL,
+            grace: float = EOF_GRACE_SECONDS) -> tuple[str, str]:
+    """(stdout, stderr) of a started process with binary pipes ("" for a stream not piped), each read in a thread
+    that keeps its first `head` and last `tail` characters only (_Kept). `timeout` is the process' own: once it
+    ended, its pipes get `grace` seconds to close, and a helper it left running past that (a daemon it started)
+    keeps them, is left alone and has its output read away. Past `timeout`, `kill(process)` ends it and what it
+    started, and subprocess.TimeoutExpired is raised with what was read; any other exception (Ctrl-C) kills too."""
+    import time
+
+    streams = (process.stdout, process.stderr)
+    kept = [_Kept(head, tail) for _stream in streams]
+    readers = [_reader(stream, store) if stream is not None else None for stream, store in zip(streams, kept)]
+
+    def finish(wait: float) -> tuple[str, str]:
+        give_up = time.monotonic() + wait
+        for reader in readers:
+            if reader is not None:
+                reader.join(max(0.0, give_up - time.monotonic()))
+        for reader in readers:
+            if reader is not None and reader.is_alive():
+                reader.abandoned = True
+        return kept[0].text(), kept[1].text()
+
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill(process)
+        out, err = finish(5.0)
+        raise subprocess.TimeoutExpired(process.args, timeout, output=out, stderr=err) from None
+    except BaseException:
+        kill(process)
+        finish(1.0)
+        raise
+    return finish(grace)
+
+
 def run_command(argv: list, *, env=None, cwd=None, timeout=None, **_ignored) -> subprocess.CompletedProcess:
     """subprocess.run(argv, capture_output=True, text=True) for Hermes' command line, in its own process group, so a
-    timeout ends everything it started (_kill_tree) before subprocess.TimeoutExpired is raised. A .cmd launcher runs
-    with every argument quoted (_batch_command_line)."""
+    timeout (or the owner's Ctrl-C) ends everything it started (_kill_tree) before subprocess.TimeoutExpired is
+    raised. The timeout is the command's own: one that ended is never a timeout, whatever helper it left holding its
+    output (collect). Its output is kept to its start and end (OUTPUT_HEAD, OUTPUT_TAIL) and its environment never
+    carries an approval bypass (child_environment). A .cmd launcher runs with every argument quoted
+    (_batch_command_line)."""
     options: dict = {"start_new_session": True} if not _WINDOWS else {
         "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
     command = argv
     if _WINDOWS and str(argv[0]).lower().endswith((".cmd", ".bat")):
         command = _batch_command_line(argv)
-    process = subprocess.Popen(command, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, encoding="utf-8", errors="replace", **options)
-    try:
-        out, err = process.communicate(timeout=timeout)
-    except BaseException:   # a timeout, or the owner's Ctrl-C: nothing Hermes started is left running
-        _kill_tree(process)
-        try:
-            process.communicate(timeout=5)
-        except (subprocess.SubprocessError, OSError, ValueError):
-            pass
-        raise
+    process = subprocess.Popen(command, env=child_environment(env), cwd=cwd, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
+    out, err = collect(process, timeout=timeout, kill=_kill_tree)
     return subprocess.CompletedProcess(argv, process.returncode, out, err)
 
 
@@ -234,7 +365,7 @@ def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout:
     if runner is None and not (profile / "config.yaml").is_file():
         # Hermes bootstraps a home it has never seen (and its shared install with it): only real profiles.
         raise ValueError("Not a Hermes profile (no config.yaml)")
-    env = dict(os.environ, HERMES_HOME=str(profile))
+    env = child_environment(HERMES_HOME=str(profile))   # never an approval bypass (UNSAFE_ENV)
     env.pop("HERMES_PROFILE", None)   # the launch profile's own marker; --profile names the one changed
     run = run_command if runner is None else runner
     try:
@@ -262,7 +393,7 @@ def hermes_output(home: Path, args: list, *, runner=None, executable=None, timeo
         return 127, "The hermes command was not found: run this where `hermes --version` works"
     if runner is None and not (profile / "config.yaml").is_file():
         return 127, "Not a Hermes profile (no config.yaml)"
-    env = dict(os.environ, HERMES_HOME=str(profile), NO_COLOR="1")
+    env = child_environment(HERMES_HOME=str(profile), NO_COLOR="1")
     env.pop("HERMES_PROFILE", None)
     run = run_command if runner is None else runner
     try:

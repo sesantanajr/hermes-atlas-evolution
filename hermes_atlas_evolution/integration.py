@@ -32,7 +32,8 @@ PLAYBOOK_BUSY_SECONDS = 0.25   # the lessons section reads on the prompt path: a
 
 
 def _managed_files() -> list:
-    """The administrator's managed configuration files, when Hermes has a managed scope (read-only lookup)."""
+    """The administrator's managed configuration files, when Hermes has a managed scope (read-only lookup). Only its
+    YAML settings: its `.env` files hold credentials, which the plugin never touches, not even to look at their dates."""
     module = sys.modules.get("hermes_cli.managed_scope")
     try:
         folder = module.get_managed_dir() if module is not None else None
@@ -41,7 +42,7 @@ def _managed_files() -> list:
     if folder is None:
         return []
     try:
-        return sorted(Path(folder).glob("*.yaml"))[:8] + sorted(Path(folder).glob("*.env"))[:4]
+        return sorted(Path(folder).glob("*.yaml"))[:8]
     except OSError:
         return []
 
@@ -611,10 +612,17 @@ class _Plugin:
             self._settings_lock.release()
 
     def tick(self) -> None:
-        """The idle clock's nudge (every 10 minutes): settings first, this process's cost per hook written; then, with
-        the learning pass by hand only (autopilot_minutes 0), the retention the pass would run, once a UTC day."""
+        """The idle clock's nudge (every 10 minutes): settings first, this process's cost per hook written, the
+        write-ahead log folded into the database (hook writes never do it themselves); then, with the learning pass by
+        hand only (autopilot_minutes 0), the retention the pass would run, once a UTC day."""
         self.refresh_settings()
         self.save_cost()
+        try:
+            from .operations import checkpoint
+
+            checkpoint(self.home)
+        except Exception:   # busy now, or the store is unusable: the next tick tries again
+            pass
         autopilot = getattr(self, "autopilot", None)
         if autopilot is None or autopilot.interval_s:
             return
@@ -925,10 +933,12 @@ def _preload() -> None:
     running gateway keeps the code it loaded. Most modules are imported on first use, so one first used after an
     update would come from the new files and run next to old ones. Loaded at start, the process runs one version
     until it is restarted, and `status` says when that version is behind the files."""
+    import os
+
     from .status import process_kind
 
-    if process_kind() == "cli":
-        return   # a short-lived process ends before an update could matter
+    if process_kind() == "cli" and os.environ.get("HERMES_PLUGIN_HOST_PROCESS") != "1":
+        return   # a short-lived process ends before an update could matter; a plugin host lives as long as Hermes
 
     def load():
         import importlib
@@ -1028,7 +1038,7 @@ def register(ctx):
 
     def learning_pass():
         try:
-            return autopilot_pass(home, plugin.reflect, cancelled=lambda: plugin.autopilot.stopped,
+            return autopilot_pass(home, plugin.reflect, cancelled=plugin.autopilot.cancelled,
                                   reflector_reload=plugin.reflector_possible,
                                   events=plugin.pass_events if plugin.emit is not None else None)
         finally:
@@ -1069,9 +1079,11 @@ def register(ctx):
     _register_session_marker(ctx)
     on_unload = getattr(ctx, "on_unload", None)
     if callable(on_unload):
-        from .operations import close_observers
+        from .operations import close_observer
 
-        on_unload(close_observers)            # write queued counters and release the shared connection
+        # write queued counters and release this profile's shared connection, the other profiles a gateway serves keep
+        # theirs (Hermes runs these in reverse order: this one last, once the cost below is saved)
+        on_unload(lambda: close_observer(home))
         on_unload(plugin.autopilot.stop)      # stop the idle clock of this load before a reload starts another
         on_unload(plugin.save_cost)           # what this load measured, before it goes
         plugin.clock_allowed = True

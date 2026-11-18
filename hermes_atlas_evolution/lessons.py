@@ -258,7 +258,8 @@ def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> li
     if mode not in MODES or mode == "off":
         return []
     # Only failures a template can describe are read, so the batch is never filled with ones that cannot become a
-    # lesson (no template, no detail where the template needs one, no tool name, one session on one day).
+    # lesson (no template, no detail where the template needs one, no tool name, one session on one day). A lesson
+    # that expired unseen (_expire, its lesson_auto row still there) comes back only once its failure is seen again.
     classes = list(TEMPLATES)
     detailed = [klass for klass, template in TEMPLATES.items() if template[0]]
     rows = conn.execute(f"""SELECT f.signature, f.tool, f.klass, f.hint, f.total, f.sessions,
@@ -267,7 +268,9 @@ def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> li
         WHERE f.total >= ? AND f.tool != 'unknown' AND f.klass IN ({",".join("?" * len(classes))})
           AND (f.hint != '' OR f.klass NOT IN ({",".join("?" * len(detailed))}))
           AND (f.sessions >= 2 OR (SELECT COUNT(*) FROM failure_daily d WHERE d.signature=f.signature) >= 2)
-          AND (l.id IS NULL OR l.origin='derived' AND l.status='retired' AND l.verdict IS '{WITHDRAWN}')
+          AND (l.id IS NULL OR l.origin='derived' AND l.status='retired' AND l.verdict IS '{WITHDRAWN}'
+               AND (f.last_seen > l.updated OR NOT EXISTS (SELECT 1 FROM lesson_auto a
+                    WHERE a.lesson_id=l.id AND a.activated IS l.activated)))
         ORDER BY f.total DESC LIMIT ?""", (MIN_TOTAL, *classes, *detailed, DERIVE_BATCH)).fetchall()
     created = []
     rewriters = rewriter_binaries(conn)
@@ -303,6 +306,7 @@ def derive(conn: sqlite3.Connection, *, now: float, mode: str = "suggest") -> li
         created.append(lesson_id)
         if status == "active":
             _record_change(conn, lesson_id, now, row["tool"])
+            _mark_auto(conn, lesson_id, now)
         elif mode == "auto":   # waits only for the owner's own evidence
             conn.execute("INSERT OR REPLACE INTO lesson_owner_wait VALUES (?, ?)", (lesson_id, row["signature"]))
     # A reflector draft withdrawn when its evidence faded goes back to the queue once its failure meets the rule again.
@@ -342,9 +346,65 @@ def promote(conn: sqlite3.Connection, *, now: float, mode: str) -> list[int]:
               baseline_failures=NULL, baseline_calls=NULL WHERE id=? AND status='candidate'""", (now, now, lesson_id))
         if cursor.rowcount:
             _record_change(conn, lesson_id, now, next(row["tool"] for row in rows if row["lesson_id"] == lesson_id))
+            _mark_auto(conn, lesson_id, now)
             activated.append(lesson_id)
     conn.executemany("DELETE FROM lesson_owner_wait WHERE lesson_id=?", [(item,) for item in [*stale, *promoted]])
     return activated
+
+
+def _mark_auto(conn: sqlite3.Connection, lesson_id: int, activated: float) -> None:
+    """The plugin activated this lesson by itself (auto mode), at `activated`: only such a lesson may expire unseen."""
+    conn.execute("INSERT OR REPLACE INTO lesson_auto VALUES (?, ?)", (lesson_id, activated))
+
+
+# An active lesson the plugin activated by itself, that no prompt and no tool hint showed in this activation, and whose
+# failure has not come back for EXPIRE_DAYS, is taken back (withdrawn, like a candidate the evidence no longer
+# supports): the agent never read it, so it changed nothing and cannot be measured, yet it kept a place in the
+# playbook's order and its failure's record for ever. 30 days are twice the 14-day windows a verdict compares, so a
+# lesson that could still be judged is never taken back, and a month without its failure means it no longer earns a
+# place. derive brings it back, same id and text, once the failure is seen again. A lesson the owner wrote or
+# approved, or a pack brought in, is never taken back silently: it only drops in the order (active_lessons).
+EXPIRE_DAYS = 30
+AUTO_MARKED = "lesson_auto_since"   # cursor: the lessons auto mode activated before 0.13.0 were marked
+
+
+def _mark_earlier_auto(conn: sqlite3.Connection, now: float) -> None:
+    """Once per database: mark the active lessons auto mode activated before 0.13.0 kept that record. Only those
+    activated the moment they were derived (activated = created, which only auto mode does), with no decision of the
+    owner on them in the history, none kept by the owner and none from a pack; a promoted one is never marked, so
+    every doubt keeps a lesson."""
+    if conn.execute("SELECT 1 FROM cursor WHERE key=?", (AUTO_MARKED,)).fetchone():
+        return
+    conn.execute("""INSERT OR IGNORE INTO lesson_auto(lesson_id, activated)
+        SELECT l.id, l.activated FROM lesson l WHERE l.status='active' AND l.origin='derived' AND l.activated = l.created
+          AND NOT EXISTS (SELECT 1 FROM lesson_import i WHERE i.lesson_id=l.id)
+          AND NOT EXISTS (SELECT 1 FROM lesson_keep k WHERE k.lesson_id=l.id)
+          AND NOT EXISTS (SELECT 1 FROM decision_log d WHERE d.kind='lesson' AND d.target=CAST(l.id AS TEXT))
+          AND NOT EXISTS (SELECT 1 FROM proposal p WHERE p.code='lesson:' || l.id AND p.status='applied')""")
+    conn.execute("INSERT OR REPLACE INTO cursor VALUES (?, ?)", (AUTO_MARKED, repr(now)))
+
+
+def _expire(conn: sqlite3.Connection, *, now: float) -> list[int]:
+    """Take back the active lessons EXPIRE_DAYS describes. Returns their ids. The lesson_auto row stays: it tells derive
+    that the lesson comes back only when its failure is seen again. A lesson counts as read when a prompt or a hint
+    ever showed it (its counters), or since its activation (lesson_measure, which _migrate_measure fills first for a
+    database an earlier version kept: there a lesson read 57 times had no row yet)."""
+    _migrate_measure(conn, now)
+    _mark_earlier_auto(conn, now)
+    cutoff = now - EXPIRE_DAYS * 86_400
+    rows = conn.execute("""SELECT l.id FROM lesson l JOIN lesson_auto a ON a.lesson_id=l.id AND a.activated=l.activated
+          LEFT JOIN failure f ON f.signature=l.signature
+        WHERE l.status='active' AND l.origin='derived' AND l.activated < ? AND COALESCE(f.last_seen, 0) < ?
+          AND l.shown = 0 AND l.hints = 0
+          AND NOT EXISTS (SELECT 1 FROM lesson_measure m WHERE m.lesson_id=l.id AND m.activated=l.activated)
+          AND NOT EXISTS (SELECT 1 FROM lesson_import i WHERE i.lesson_id=l.id)""", (cutoff, cutoff)).fetchall()
+    expired = []
+    for (lesson_id,) in rows:   # only if still active: an operator may have decided on it meanwhile
+        cursor = conn.execute(f"""UPDATE lesson SET status='retired', verdict='{WITHDRAWN}', updated=?
+            WHERE id=? AND status='active'""", (now, lesson_id))
+        if cursor.rowcount:
+            expired.append(lesson_id)
+    return expired
 
 
 def rewriter_binaries(conn: sqlite3.Connection) -> set[str]:
@@ -360,7 +420,8 @@ def tidy(conn: sqlite3.Connection, *, now: float) -> int:
     (seen at least MIN_TOTAL times, in 2 sessions or on 2 days; a replay that recounted the history can
     lower it), when it would say the same sentence as another lesson (active, turned down, or a candidate with
     more evidence), when its missing binary turned out to come from another plugin's rewrite, or, for a draft,
-    when it only gives advice every failure would get. Active, retired and operator lessons are never touched.
+    when it only gives advice every failure would get. Retired and operator lessons are never touched, nor active
+    ones, except one auto mode activated that nobody ever read and whose failure stopped (EXPIRE_DAYS).
     A lesson a pack brought in (packs.apply) is not withdrawn for lacking local failures: its evidence was
     gathered in another profile, and it waits for the owner's own turns here.
     A withdrawn lesson stays as retired with the verdict WITHDRAWN, so its id is never given to another lesson,
@@ -392,7 +453,7 @@ def tidy(conn: sqlite3.Connection, *, now: float) -> int:
         if cursor.rowcount:
             taken_back.append(lesson_id)
     conn.executemany("DELETE FROM lesson_owner_wait WHERE lesson_id=?", [(item,) for item in taken_back])
-    return len(taken_back)
+    return len(taken_back) + len(_expire(conn, now=now))
 
 
 def add_custom(conn: sqlite3.Connection, text: str, *, tool: str, origin: str, now: float, active: bool = False) -> int:
@@ -455,10 +516,20 @@ def keep(conn: sqlite3.Connection, lesson_id: int, *, now: float) -> None:
         SELECT id, activated, ? FROM lesson WHERE id=? AND status='active' AND activated IS NOT NULL""", (now, lesson_id))
 
 
-def active_lessons(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return conn.execute("""SELECT l.*, COALESCE(f.total, 0) AS evidence FROM lesson l
-        LEFT JOIN failure f ON f.signature=l.signature WHERE l.status='active'
-        ORDER BY (l.verdict='effective') DESC, evidence DESC, l.id""").fetchall()
+RECENT_DAYS = 30   # the playbook's order counts the failures of this many days
+
+
+def active_lessons(conn: sqlite3.Connection, *, now: float | None = None) -> list[sqlite3.Row]:
+    """Active lessons, the most needed now first: by their failures of the last RECENT_DAYS, then effective ones, then
+    all their failures. Effective first and all-time totals kept the oldest lessons in the prompt's few places for
+    good, so a new one was never shown, never measured and never retired."""
+    import time
+
+    since = day_offset(time.time() if now is None else now, RECENT_DAYS - 1)
+    return conn.execute("""SELECT l.*, COALESCE(f.total, 0) AS evidence,
+          (SELECT COALESCE(SUM(d.count), 0) FROM failure_daily d WHERE d.signature=l.signature AND d.day >= ?) AS recent
+        FROM lesson l LEFT JOIN failure f ON f.signature=l.signature WHERE l.status='active'
+        ORDER BY recent DESC, (l.verdict='effective') DESC, evidence DESC, l.id""", (since,)).fetchall()
 
 
 def templated(row) -> bool:

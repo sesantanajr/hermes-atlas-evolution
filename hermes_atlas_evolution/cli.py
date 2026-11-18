@@ -841,9 +841,9 @@ def _evolution(args, home: Path, *, now: float, runtime_config=None, reflect=Non
                                     lang)[0]["evidence"]
             read, again = (_hermes_cmd(home, "evolution proposals list"),
                            _hermes_cmd(home, f"evolution proposals approve {args.id} --yes"))
-            if explain.plan(dict(row)) is not None:   # a reversible change the plugin applies with Hermes' command
+            if explain.plan(dict(row), home=home) is not None:   # a reversible change the plugin applies with Hermes' command
                 item = {**dict(row), "evidence": evidence}
-                told = explain.describe(item, lang)
+                told = explain.describe(item, lang, home=home)
                 shown = [f"{told['title']} · {row['subject']}", _if_approved(item, told, home, lang)]
                 if told.get("undo"):
                     shown.append(f"{_H[lang if lang in _H else 'en']['undo_label']}: {_undo_words(told['undo'])}")
@@ -1298,7 +1298,7 @@ def _fleet_update(args, home: Path, lang: str) -> dict:
         sys.stderr.write(_say(lang, f"  updating {name}...\n", f"  atualizando {name}...\n"))
         sys.stderr.flush()
 
-    return {"results": fleet_update.run(chosen, install_missing=args.install_missing, progress=progress)}
+    return {"results": fleet_update.run(chosen, install_missing=args.install_missing, here=home, progress=progress)}
 
 
 GATEWAY_UNITS = {"user": ["hermes-gateway.service"], "system": ["hermes-gateway.service"]}
@@ -2318,7 +2318,7 @@ def _proposals_md(rows: list, home: Path, lang: str, *, everything: bool) -> str
     if not rows:
         return "\n".join(lines + [t["proposals_none_all" if everything else "proposals_none"]]) + "\n"
     for item in rows:
-        told = explain.describe(item, lang)
+        told = explain.describe(item, lang, home=home)
         evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
         title = told["title"]
         if item.get("kind") in ("lesson", "lesson_retire") and evidence.get("lesson_id") is not None:

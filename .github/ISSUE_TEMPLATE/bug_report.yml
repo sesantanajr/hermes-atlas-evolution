@@ -13,7 +13,7 @@ body:
     attributes:
       label: Plugin version
       description: The `version` field of `plugin.yaml`.
-      placeholder: "0.12.0"
+      placeholder: "0.13.0"
     validations:
       required: true
   - type: input
@@ -50,7 +50,8 @@ body:
       options:
         - Evolution loop (signals, lessons, skills by outcome, measurement, proposals, digest)
         - Reflector
-        - Mode auto (automatic actions, the gateway repair, the plugin's sync across profiles)
+        - Mode auto (automatic actions, the gateway repair, the install by catalog name in other profiles)
+        - Updating (evolution update, install.sh)
         - Runtime guard (a command vetoed, or one that should have been)
         - Dashboard panel
         - Terminal menu

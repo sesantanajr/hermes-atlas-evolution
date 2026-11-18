@@ -1,6 +1,6 @@
 # Atlas Evolution documentation
 
-**English** · [Português (Brasil)](../pt-BR/README.md) · [Back to the project](../../README.md#en-us)
+**English** · [Português (Brasil)](../pt-BR/README.md) · [Back to the project](../../README.md)
 
 Atlas Evolution is a Hermes Agent plugin that learns from the agent's mistakes, measures whether the agent is getting better, keeps every profile of a Hermes healthy and repairs itself. These pages explain how to use it and how it works.
 

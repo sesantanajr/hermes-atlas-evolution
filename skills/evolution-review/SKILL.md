@@ -5,10 +5,13 @@ description: Run the Atlas Evolution review with the owner - read the digest, ex
 
 # Evolution review
 
-Atlas Evolution measures this profile and proposes improvements. In Auto mode (the default) it applies by itself only
-safe changes that can be undone: it removes duplicate memory entries (keeps a copy of the file first), locks skills the
-curator keeps rewriting, installs itself in profiles that never had it, cleans failed installs and runs a weekly
-`hermes pm gc`, each in the history with its undo; everything else waits for the owner. In this conversation you
+Atlas Evolution measures this profile and proposes improvements. In Assisted mode (the default) it only removes, by
+itself, a memory entry repeated word for word between MEMORY.md and USER.md (it keeps a copy of the file first). In
+Auto mode, which only the owner turns on, it also applies by itself safe changes that can be undone: it locks skills
+the curator keeps rewriting, installs itself from the Hermes plugin catalog in profiles in use that never had it,
+moves failed installs to its trash, repairs the gateway's service when no gateway is alive and frees old tool versions
+with a weekly `hermes pm gc` (which cannot be undone), each in the history. It never updates itself: updates come
+from Hermes. Everything else waits for the owner. In this conversation you
 inform and recommend; the owner decides in their own terminal. Answer in the owner's language (Brazilian Portuguese
 or English), with the plugin's names for things: "Auto mode / Modo Auto", "Assisted / Assistido", "Manual / Manual",
 "lessons waiting for you / lições esperando você", "learning pass / rodada de aprendizado", "built-in template /

@@ -25,7 +25,7 @@ In Auto mode the plugin repairs this by itself, at most once a day, only a user 
 
 **Why** that profile's copy was installed at a fixed commit, and Hermes keeps the pin on every reinstall.
 
-**Do** `hermes -p <profile> evolution update --profiles <profile>` (or `--all`): it moves the pin to the latest commit with Hermes' own `plugins install <url> --force --ref <commit>`. In Auto mode the profile that looks after the whole Hermes keeps every copy on its own commit.
+**Do** `hermes -p <lead> evolution update --profiles <profile>`, run from the profile whose code you want there (`<lead>`): it moves the pin to the commit that profile runs, with Hermes' own `plugins install <url> --force --ref <commit>`, and only when both copies come from this repository. To choose another commit yourself, run that `plugins install` command with the commit you want. The plugin never picks a commit and never moves a pin by itself, in any mode.
 
 ## `hermes evolution` is not found, or a profile shows "no events today"
 

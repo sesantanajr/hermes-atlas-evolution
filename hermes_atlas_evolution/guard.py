@@ -16,19 +16,22 @@ command, a relative path, an unknown tool) lets the command through. Hermes bloc
 from __future__ import annotations
 
 import fnmatch
+import functools
 import os
 import posixpath
 import re
 import shlex
 import sys
+import threading
 from pathlib import Path, PurePosixPath
 
 TERMINAL_TOOLS = frozenset({"terminal", "shell", "bash", "run_command", "execute_command"})
 # Hermes' process_manage `write` and `submit` send text to a background process, often a shell (Hermes 0.23.1).
 PROCESS_TOOLS = frozenset({"process_manage", "process"})
 _PROCESS_INPUT = frozenset({"write", "submit"})
-_COMMAND_LIMIT = 20_000   # the real command is read up to here; trailing padding (comments, heredoc bodies) is cut first
-_SCAN_LIMIT = 100_000     # never strip/scan more than this much raw text, so a huge input cannot cost much
+_COMMAND_LIMIT = 20_000   # the real command is read whole up to here; past it, its beginning and its end this long
+_SCAN_LIMIT = 500_000     # raw text cut (heredoc bodies, comments) in one pass; past it, its two halves are cut apart
+_KEPT_BODIES = 8_192      # here-document bodies an oversized command keeps, in all (the first ones)
 _MAX_SUBCHECKS = 2_000    # how many commands-inside-commands (substitutions, nesting, piped-into shells) are looked at
 _MAX_HEREDOC_BODIES = 64  # here-document bodies kept for a shell reading them on stdin; the rest is padding
 _MAX_FED = 64             # paths carried along a pipeline for a later `xargs rm`; past this it is not a tidy removal
@@ -261,6 +264,8 @@ def protected_trees() -> tuple[Path, ...]:
 
 # `<<EOF`, `<<-'EOF'`; never the here-string `<<<word`, which feeds one word and has no body.
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_]\w*)\2")
+_OPENER_MARKS = re.compile(r"[\\'\"#<]")
+_COMMENT_MARKS = re.compile(r"[\\'\"#]")
 
 
 def _heredoc_openers(line: str, single: bool, double: bool) -> tuple[list[tuple[bool, bool, str]], bool, bool]:
@@ -269,17 +274,27 @@ def _heredoc_openers(line: str, single: bool, double: bool) -> tuple[list[tuple[
     across lines). A `<<<word` here-string is not one, and a quoted or in-word `<<` is ignored."""
     openers, index, length = [], 0, len(line)
     while index < length:
+        if single:   # inside single quotes only the closing quote means anything
+            end = line.find("'", index)
+            if end < 0:
+                break
+            single, index = False, end + 1
+            continue
+        found = _OPENER_MARKS.search(line, index)   # the next character that may matter, found at C speed
+        if found is None:
+            break
+        index = found.start()
         char = line[index]
-        if char == "\\" and not single and index + 1 < length:
+        if char == "\\" and index + 1 < length:
             index += 2
             continue
         if char == "'" and not double:
-            single = not single
-        elif char == '"' and not single:
+            single = True
+        elif char == '"':
             double = not double
-        elif char == "#" and not single and not double and (index == 0 or line[index - 1] in " \t\r;&|()"):
+        elif char == "#" and not double and (index == 0 or line[index - 1] in " \t\r;&|()"):
             break   # the rest of the line is a comment
-        elif char == "<" and not single and not double:
+        elif char == "<" and not double:
             match = _HEREDOC.match(line, index)
             if match:
                 openers.append((match.group(1) == "-", bool(match.group(2)), match.group(3)))
@@ -289,35 +304,63 @@ def _heredoc_openers(line: str, single: bool, double: bool) -> tuple[list[tuple[
     return openers, single, double
 
 
-def _heredocs(command: str) -> tuple[str, list[str]]:
+def _delimiter_line(command: str, delimiter: str, tabs: bool, position: int) -> tuple[int, int] | None:
+    """(start, end) of the first line from `position` (a line start) on that is the here-document's delimiter (after
+    leading tabs with `<<-`), or None. Found with str.find, so a long body costs no Python loop over its lines."""
+    size, length = len(delimiter), len(command)
+    if not tabs:
+        at, needle = position - 1, "\n" + delimiter   # command[position - 1] is the newline that ends the opener's line
+        while True:
+            found = command.find(needle, at)
+            if found < 0:
+                return None
+            if found + 1 + size == length or command[found + 1 + size] == "\n":
+                return found + 1, found + 1 + size
+            at = found + 1
+    at = position
+    while True:
+        found = command.find(delimiter, at)
+        if found < 0:
+            return None
+        start = found
+        while start > position and command[start - 1] == "\t":
+            start -= 1
+        if (start == position or command[start - 1] == "\n") and (found + size == length or command[found + size] == "\n"):
+            return start, found + size
+        at = found + 1
+
+
+def _heredocs(command: str, keep: int = 0) -> tuple[str, list[str]]:
     """(the command without its here-document bodies, the bodies of the unquoted ones): a body is data written
     somewhere (a script, a note), not a command run now, but the shell still expands $(...) in an unquoted one.
-    A `<<` is read only outside quotes and comments; an unterminated heredoc's lines are kept as commands."""
+    A `<<` is read only outside quotes and comments; an unterminated heredoc's lines are kept as commands. Bodies of
+    `keep` characters in all, the first ones, stay in the text with their delimiter lines (an oversized command keeps
+    the small script a `bash <<EOF` runs, and drops a huge note written to a file)."""
     if "<<" not in command:
         return command, []   # no here-document: nothing to cut (the common case, and cheap)
-    lines, kept, expanded, index = command.split("\n"), [], [], 0
-    single = double = False
-    while index < len(lines):
-        line = lines[index]
+    kept, expanded, single, double = [], [], False, False
+    position, length = 0, len(command)
+    while position <= length:   # one line at a time, outside bodies; a body is skipped whole (_delimiter_line)
+        newline = command.find("\n", position)
+        end = length if newline < 0 else newline
+        line = command[position:end]
         kept.append(line)
-        index += 1
+        position = end + 1
         openers, single, double = _heredoc_openers(line, single, double)
         for tabs, quoted, delimiter in openers:
-            body, found = [], False
-            while index < len(lines):
-                stripped = lines[index].lstrip("\t") if tabs else lines[index]
-                index += 1
-                if stripped == delimiter:
-                    found = True
-                    break
-                body.append(stripped)
-            if found:
-                if not quoted:
-                    expanded.extend(body)
-            else:   # no delimiter line: those lines are commands, not a body, so keep them for inspection
-                kept.extend(body)
-                index = len(lines)
-                break
+            found = _delimiter_line(command, delimiter, tabs, position) if position <= length else None
+            if found is None:   # no delimiter line: those lines are commands, not a body, so keep them for inspection
+                if position <= length:
+                    rest = command[position:]
+                    kept.extend([item.lstrip("\t") for item in rest.split("\n")] if tabs else [rest])
+                return "\n".join(kept), expanded
+            if found[0] > position and not quoted:
+                body = command[position:found[0] - 1].split("\n")
+                expanded.extend([item.lstrip("\t") for item in body] if tabs else body)
+            if found[1] - position <= keep:
+                kept.append(command[position:found[1]])
+                keep -= found[1] - position
+            position = found[1] + 1
     return "\n".join(kept), expanded
 
 
@@ -359,25 +402,32 @@ def _strip_comments(command: str) -> str:
     kept, so the lexer sees it as part of the word."""
     if "#" not in command:
         return command   # no `#` at all: no comment to cut
-    out, index, single, double = [], 0, False, False
-    while index < len(command):
+    out, start, index, double, length = [], 0, 0, False, len(command)
+    while index < length:
+        found = _COMMENT_MARKS.search(command, index)   # the next character that may matter, found at C speed
+        if found is None:
+            break
+        index = found.start()
         char = command[index]
-        if char == "\\" and not single and index + 1 < len(command):
-            out.append(command[index:index + 2])
+        if char == "\\":
             index += 2
-            continue
-        if char == "'" and not double:
-            single = not single
-        elif char == '"' and not single:
+        elif char == "'" and not double:   # a single-quoted span: nothing in it means anything
+            end = command.find("'", index + 1)
+            if end < 0:
+                break
+            index = end + 1
+        elif char == '"':
             double = not double
-        elif char == "#" and not single and not double and (index == 0 or command[index - 1] in " \t\r\n;&|()"):
+            index += 1
+        elif char == "#" and not double and (index == 0 or command[index - 1] in " \t\r\n;&|()"):
+            out.append(command[start:index])
             newline = command.find("\n", index)
             if newline < 0:
-                break
-            index = newline   # keep the newline so the separators around the comment survive
-            continue
-        out.append(char)
-        index += 1
+                return "".join(out)
+            start = index = newline   # keep the newline so the separators around the comment survive
+        else:
+            index += 1
+    out.append(command[start:])
     return "".join(out)
 
 
@@ -816,17 +866,28 @@ def _glob_match(path: PurePosixPath, pattern: PurePosixPath) -> bool:
     return all(fnmatch.fnmatchcase(part, glob) for part, glob in zip(path.parts, pattern.parts))
 
 
+@functools.lru_cache(maxsize=256)
+def _ancestry(protected, windows: bool) -> tuple | None:
+    """(the protected path in comparable form, it and its ancestors, the same as a set), computed once per path:
+    `_hits` runs for every path of every removal. `windows` keys the cache by how paths are compared."""
+    target = _canonical(str(protected))
+    if target is None:
+        return None
+    chain = (target, *target.parents)
+    return target, chain, frozenset(chain)
+
+
 def _hits(pattern: PurePosixPath, protected, *, tree: bool = False) -> bool:
     """True when removing `pattern` would remove `protected`: the same path, an ancestor, or a glob of either.
     With `tree`, anything inside `protected` counts too (`rm -rf venv/lib`, `rm -rf venv/*`)."""
-    target = _canonical(str(protected))
-    if target is None:
+    found = _ancestry(protected, _WINDOWS)
+    if found is None:
         return False
-    chain = [target, *target.parents]
+    target, chain, members = found
     globbed = any(char in str(pattern) for char in "*?[")
     if globbed and any(_glob_match(item, pattern) for item in chain):
         return True
-    if not globbed and pattern in chain:
+    if not globbed and pattern in members:
         return True
     if tree:   # the part of the pattern before its first glob is the folder it reaches into
         parts = []
@@ -1206,7 +1267,7 @@ def _find_hit(starts: list[str], globs: list[tuple[str, bool]], *, protected, tr
 
 def _hit(paths: list[str], *, protected, home: Path, profile: Path | None = None, trees=(),
          cwd: PurePosixPath | None = None) -> str | None:
-    for token in paths:
+    for token in dict.fromkeys(paths):   # a path given many times (padding) is judged once
         pattern = _expand(token, home, profile, cwd)
         if pattern is None:
             continue
@@ -1502,57 +1563,313 @@ def _operands(rest: list[str], verb: str) -> tuple[list[str], list[str], str | N
     return options, operands, pattern
 
 
-_PATTERN_LIMIT = 200   # longer agent-written patterns are not run as regular expressions
+_PATTERN_LIMIT = 64   # longer agent-written patterns are not run as regular expressions
+# The backtracking tries one pattern may cost against one text, as _risky_pattern counts them: a few ms for `.*`, up to
+# ~0.3 s for a repeated group. `pkill -f '.*.*.*.*X'` against the gateway's 363-character command line took 75 s
+# holding the GIL (0.12.0): the whole gateway stood still, and Hermes then failed every tool closed.
+_REGEX_BUDGET = 10_000_000
+# ... and all the patterns of one command together: one `pkill -f` with 110 patterns of 0.3 s each took 34 s, past
+# Hermes' 30 s veto timeout. Past it, the rest are read by their literal fragments (_fragments_match).
+_CHECK_REGEX_BUDGET = 20_000_000
+_REGEX_LEFT = threading.local()   # what check() has left of _CHECK_REGEX_BUDGET in this thread
+_QUANTIFIER = re.compile(r"(?:[*+?]|\{(\d*)(,?)(\d*)\})[?+]?")
+_VERBOSE = re.compile(r"\(\?[a-zA-Z-]*x")   # (?x): blanks and `#` comments are ignored, so the counting misreads it
 
 
-def _risky_pattern(pattern: str) -> bool:
-    """A pattern Python's backtracking engine may take exponential time on: too long, or a group that holds a
-    quantifier or an alternation and is itself repeated (`(a+)+`, `(\\w*)*`, `(a|aa)+`)."""
-    if len(pattern) > _PATTERN_LIMIT:
-        return True
-    stack, index = [], 0
-    while index < len(pattern):
+def _risky_pattern(pattern: str, size: int = 0) -> bool:
+    return _pattern_cost(pattern, size) > _REGEX_BUDGET
+
+
+def _pattern_cost(pattern: str, size: int = 0) -> float:
+    """The backtracking tries Python's engine may take on this pattern against a text of `size` characters; infinite
+    for one too long, in verbose mode, or with a group that holds a quantifier or an alternation and is itself repeated
+    (`(a+)+`, `(\\w*)*`, `(a|aa)+`). Each unbounded quantifier (`*`, `+`, `{n,}`) lets the match try every length, so
+    k of them cost about size^(k+1)/(k+1)! tries; each bounded one (`?`, `{n,m}`) multiplies that by its choices, each
+    `|` by two, and a fixed count (`{14}`) by what each try then reads (`.{0,9}` six times took 1.1 s against the
+    gateway's command line, `.?` twelve times 0.4 s, `.?` fourteen times and `[^Z]{14}` 0.3 s)."""
+    if len(pattern) > _PATTERN_LIMIT or _VERBOSE.search(pattern):
+        return float("inf")
+    stack, index, length = [], 0, len(pattern)
+    unbounded, choices, width = 0, 1, 1
+    while index < length:
         char = pattern[index]
         if char == "\\":
             index += 2
             if stack:
-                stack[-1] = stack[-1] or (index < len(pattern) and pattern[index] in "*+?{")
+                stack[-1] = stack[-1] or (index < length and pattern[index] in "*+?{")
             continue
         if char == "[":   # a character class: its insides are not quantifiers
             end = index + 1
-            if end < len(pattern) and pattern[end] == "^":
+            if end < length and pattern[end] == "^":
                 end += 1
-            if end < len(pattern) and pattern[end] == "]":
+            if end < length and pattern[end] == "]":
                 end += 1
             end = pattern.find("]", end)
-            index = len(pattern) if end < 0 else end + 1
+            index = length if end < 0 else end + 1
+            continue
+        if pattern.startswith("(?#", index):   # a comment: nothing in it is read
+            end = pattern.find(")", index)
+            index = length if end < 0 else end + 1
             continue
         if char == "(":
             stack.append(False)
-        elif char == ")" and stack:
+            index += 2 if pattern.startswith("(?", index) else 1   # (?:, (?P<name>, (?=: that `?` repeats nothing
+            continue
+        if char == ")" and stack:
             inner = stack.pop()
-            repeated = index + 1 < len(pattern) and pattern[index + 1] in "*+{"
+            repeated = index + 1 < length and pattern[index + 1] in "*+{"
             if inner and repeated:
-                return True
+                return float("inf")
             if stack:
                 stack[-1] = stack[-1] or inner or repeated
-        elif char in "*+{|" or (char == "?" and index > 0 and pattern[index - 1] not in "(*+?}"):
+        elif char == "|":
+            choices *= 2
             if stack:
                 stack[-1] = True
+        elif char in "*+?{":
+            found = _QUANTIFIER.match(pattern, index)
+            if found is None:   # a `{` that is not a repeat count is a literal brace
+                index += 1
+                continue
+            if char in "*+" or char == "{" and found.group(2) and not found.group(3):
+                unbounded += 1
+            elif char == "?":
+                choices *= 2
+            elif found.group(2):   # {n,m}
+                choices *= max(1, int(found.group(3)) - int(found.group(1) or 0) + 1)
+            if char == "{":
+                width += min(10_000, int(found.group(1) or 0))
+            if stack and (char != "{" or found.group(2)):
+                stack[-1] = True
+            if choices > _REGEX_BUDGET:
+                return float("inf")
+            index = found.end()   # a lazy `?` or a possessive `+` after it is part of the same quantifier
+            continue
         index += 1
+    tries = size + 1
+    for count in range(1, unbounded + 1):
+        tries = tries * (size + 1) / (count + 1)
+    return tries * choices * width
+
+
+def _flat(pattern: str) -> list[tuple[str, str]] | None:
+    """The pattern as (atom, quantifier) pairs when it is a plain sequence: literal characters (escaped punctuation
+    too), `.`, a leading `^` and a trailing `$`. None for anything else: a group, a class, an alternation, an escape
+    such as \\d, a brace that is not a repeat count."""
+    items, index, length = [], 0, len(pattern)
+    while index < length:
+        char = pattern[index]
+        if char == "\\":
+            if index + 1 >= length or pattern[index + 1].isalnum() or pattern[index + 1].isspace():
+                return None
+            atom, index = pattern[index:index + 2], index + 2
+        elif char in "()[]|{}*+?" or char == "^" and index or char == "$" and index != length - 1:
+            return None
+        else:
+            atom, index = char, index + 1
+        quantifier = ""
+        if atom not in ("^", "$") and index < length and pattern[index] in "*+?{":
+            found = _QUANTIFIER.match(pattern, index)
+            if found is None:
+                return None
+            quantifier, index = found.group(), found.end()
+        items.append((atom, quantifier))
+    return items
+
+
+def _simplified(pattern: str, *, whole: bool) -> str:
+    """The same pattern with fewer quantifiers where that changes nothing it matches: a run of `.*` and `.+` is one
+    (`.*.*` is `.*`, `.+.+` is `..+`), and a search needs no `.*` at either end (`.*X` finds what `X` finds, `.+X`
+    what `.X` finds). Laziness (`.*?`) never changes whether a pattern matches."""
+    items = _flat(pattern)
+    if items is None:
+        return pattern
+    out: list[tuple[str, str]] = []
+    for atom, quantifier in items:
+        if atom == "." and quantifier in ("*", "+", "*?", "+?"):
+            quantifier = quantifier[0]
+            if out and out[-1][0] == "." and out[-1][1] in ("*", "+"):
+                least = (out.pop()[1] == "+") + (quantifier == "+")
+                out.extend([(".", "")] * max(0, least - 1))
+                quantifier = "+" if least else "*"
+        out.append((atom, quantifier))
+    if not whole:
+        if out and out[0][0] == "." and out[0][1] in ("*", "+"):
+            out[0:1] = [] if out[0][1] == "*" else [(".", "")]
+        if out and out[-1][0] == "." and out[-1][1] in ("*", "+"):
+            out[-1:] = [] if out[-1][1] == "*" else [(".", "")]
+    return "".join(atom + quantifier for atom, quantifier in out)
+
+
+def _in_order(pattern: str, text: str, *, whole: bool) -> bool | None:
+    """Match a plain pattern made of fixed parts (literals and `.`) joined by `.*` or `.+`, with an optional `^` and
+    `$`, in one linear pass: each part at its first place after the one before, which is exact for fixed parts. None
+    for any other pattern, or for a text of several lines (`.` does not cross a line)."""
+    items = _flat(pattern)
+    if items is None or "\n" in text:
+        return None
+    parts, gaps, current, first, last = [], [], [], whole, whole
+    for atom, quantifier in items:
+        if atom in ("^", "$"):
+            first, last = first or atom == "^", last or atom == "$"
+        elif not quantifier:
+            current.append(atom)
+        elif atom == "." and quantifier in ("*", "+", "*?", "+?"):
+            parts.append(current)
+            gaps.append(int(quantifier[0] == "+"))
+            current = []
+        else:
+            return None
+    parts.append(current)
+    try:
+        compiled = [re.compile("".join(part)) for part in parts]
+    except re.error:
+        return None
+    position = 0
+    for number, (part, regex) in enumerate(zip(parts, compiled)):
+        begin = position + (gaps[number - 1] if number else 0)
+        if begin > len(text):   # a `.+` with nothing left to take
+            return False
+        anchored = number == 0 and first
+        if number == len(parts) - 1 and last:   # the last part ends the text
+            at = len(text) - len(part)
+            return (at == begin if anchored else at >= begin) and regex.fullmatch(text, at) is not None
+        found = regex.match(text, begin) if anchored else regex.search(text, begin)
+        if found is None:
+            return False
+        position = found.end()
+    return True
+
+
+_ESCAPE_TAIL = {"x": 2, "u": 4, "U": 8}   # the hex digits that belong to \\x, \\u and \\U
+
+
+def _fragments(pattern: str) -> tuple[list[list[str]], bool]:
+    """(for each top-level alternative, its literal fragments in order; whether the pattern ignores case). A fragment
+    is a run of literal characters outside any group, class or escape such as \\s, without a character a quantifier
+    repeats: whatever the pattern matches holds them, in that order."""
+    branches, current, fragment = [], [], []
+    depth, index, length, folded = 0, 0, len(pattern), False
+    after_literal = -1   # where the last literal character added ends: a quantifier there repeats it
+    verbose = bool(_VERBOSE.search(pattern))   # (?x): blanks are not part of the pattern, `#` starts a comment
+
+    def close():
+        if fragment:
+            current.append("".join(fragment))
+            fragment.clear()
+
+    while index < length:
+        char = pattern[index]
+        if char == "\\" and index + 1 < length:
+            following = pattern[index + 1]
+            index += 2
+            if following.isalnum():   # \\s, \\d, \\b, \\1, \\x41...: not a literal
+                if depth == 0:
+                    close()
+                if following in _ESCAPE_TAIL:
+                    index += _ESCAPE_TAIL[following]
+                elif following == "N" and pattern.startswith("{", index):
+                    index = pattern.find("}", index) + 1 or length
+                elif following.isdigit():
+                    while index < length and pattern[index].isdigit():
+                        index += 1
+                continue
+            if depth == 0:
+                fragment.append(following)
+                after_literal = index
+            continue
+        if pattern.startswith("(?#", index):   # a comment, read to its first `)`: a quantifier after it repeats
+            end = pattern.find(")", index)       # what came before it
+            if after_literal == index:
+                after_literal = length if end < 0 else end + 1
+            index = length if end < 0 else end + 1
+            continue
+        if char == "[":   # a class: one character of many, never a literal
+            end = index + 1
+            if end < length and pattern[end] == "^":
+                end += 1
+            if end < length and pattern[end] == "]":
+                end += 1
+            while end < length and pattern[end] != "]":
+                end += 2 if pattern[end] == "\\" else 1
+            if depth == 0:
+                close()
+            index = end + 1
+            continue
+        if char == "(":
+            if depth == 0:
+                close()
+            flags = re.match(r"\(\?([a-zA-Z]+)[):-]", pattern[index:index + 16])
+            folded = folded or bool(flags and "i" in flags.group(1))
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif depth:
+            pass
+        elif char == "|":
+            close()
+            branches.append(current)
+            current = []
+        elif char in "*+?{" and (char != "{" or _QUANTIFIER.match(pattern, index)):
+            found = _QUANTIFIER.match(pattern, index)
+            if fragment and after_literal == index:
+                fragment.pop()   # the `s` of `hermes+` or `hermes?` may be there many times, or not at all
+            close()
+            index = found.end() if found else index + 1
+            continue
+        elif char in ".^$" or verbose and char.isspace():
+            close()
+        elif verbose and char == "#":   # a comment to the end of the line
+            close()
+            newline = pattern.find("\n", index)
+            index = length if newline < 0 else newline
+            continue
+        else:
+            fragment.append(char)
+            after_literal = index + 1
+        index += 1
+    close()
+    branches.append(current)
+    return branches, folded
+
+
+def _fragments_match(pattern: str, text: str) -> bool:
+    """Whether some alternative of the pattern has all its literal fragments in `text`, in order: true wherever the
+    pattern matches, and sometimes where it does not, so a pattern too costly to run leans to the veto. A pattern
+    with no literal fragment at all matches. Linear: one str.find per fragment."""
+    branches, folded = _fragments(pattern)
+    if folded:
+        text = text.lower()
+    for fragments in branches:
+        position = 0
+        for fragment in fragments:
+            found = text.find(fragment.lower() if folded else fragment, position)
+            if found < 0:
+                break
+            position = found + len(fragment)
+        else:
+            return True
     return False
 
 
 def _search(pattern: str, text: str, *, whole: bool = False) -> bool:
-    """`re.search` (or fullmatch) of an agent-written pattern, bounded: a risky or invalid pattern is matched as the
-    literal text it names, its metacharacters left out."""
-    if not _risky_pattern(pattern):
+    """`re.search` (or fullmatch) of an agent-written pattern, bounded: a pattern whose backtracking could take long on
+    this text, or past what the command's patterns may cost together (_CHECK_REGEX_BUDGET), is matched in one pass:
+    exactly when it is a plain one (literals and `.` joined by `.*`), else by its literal fragments, leaning to the
+    veto. An invalid one is matched as the literal text it names, its metacharacters left out."""
+    pattern = _simplified(pattern, whole=whole)
+    cost = _pattern_cost(pattern, len(text))
+    left = getattr(_REGEX_LEFT, "value", None)
+    if cost <= _REGEX_BUDGET and (left is None or cost <= left):
+        if left is not None:
+            _REGEX_LEFT.value = left - cost
         try:
             return bool((re.fullmatch if whole else re.search)(pattern, text))
         except re.error:
-            pass
-    literal = re.sub(r"[\\^$.|?*+()\[\]{}]", "", pattern)
-    return bool(literal) and (literal == text if whole else literal in text)
+            literal = re.sub(r"[\\^$.|?*+()\[\]{}]", "", pattern)
+            return bool(literal) and (literal == text if whole else literal in text)
+    found = _in_order(pattern, text, whole=whole)
+    return found if found is not None else _fragments_match(pattern, text)
 
 
 def _lookup_patterns(rest: list[str], verb: str) -> list[str]:
@@ -1646,16 +1963,114 @@ def check(tool_name, args, *, protected, home: Path, profile: Path | None = None
         return None
     if not isinstance(command, str) or not command.strip():
         return None
-    if len(command) > _COMMAND_LIMIT:
-        # The limit is on the real command, not on padding: a trailing comment or a huge here-document body cannot
-        # disable the guard. Cut both first, bound the work, and scan at most the first _COMMAND_LIMIT characters.
-        command = _strip_comments(_strip_heredocs(command[:_SCAN_LIMIT]))
-        if len(command) > _COMMAND_LIMIT:
-            command = command[:_COMMAND_LIMIT]
+    # The limit is on the real command, not on padding: a comment, a huge here-document body, or thousands of `true;`
+    # before or after it cannot disable the guard (_oversized).
+    parts = _oversized(command) if len(command) > _COMMAND_LIMIT else [command]
     workdir = args.get("workdir") if tool_name in TERMINAL_TOOLS else None
     cwd = _expand(workdir, home, profile) if isinstance(workdir, str) and workdir.strip() else None
-    return _check_command(command, protected=protected, home=home, profile=profile, depth=0, trees=trees, own=own,
-                          process=process, cwd=cwd, budget=[_MAX_SUBCHECKS, {}])
+    budget = [_MAX_SUBCHECKS, {}]   # shared: the parts of one command cost no more sub-checks than one command
+    _REGEX_LEFT.value = _CHECK_REGEX_BUDGET   # and no more regular-expression work than one costly pattern or two
+    try:
+        for part in parts:
+            found = _check_command(part, protected=protected, home=home, profile=profile, depth=0, trees=trees,
+                                   own=own, process=process, cwd=cwd, budget=budget)
+            if found:
+                return found
+    finally:
+        _REGEX_LEFT.value = None
+    return None
+
+
+def _oversized(command: str) -> list[str]:
+    """What is checked of a command longer than _COMMAND_LIMIT. Its here-document bodies and comments are cut first, in
+    one linear pass over the whole text; what is left, the real command, is checked whole when it fits the limit,
+    otherwise its beginning and its end (_head, _tail). Past _SCAN_LIMIT characters the beginning is read from the
+    first half of the text and the end from the last, each cut on its own."""
+    if len(command) <= _SCAN_LIMIT:
+        real = _strip_comments(_heredocs(command, _KEPT_BODIES)[0])
+        return [real] if len(real) <= _COMMAND_LIMIT else [_head(real), _tail(real)]
+    half = _SCAN_LIMIT // 2
+    last = command[-half:]
+    cut = last.find("\n")
+    if cut < 0:   # no line start: a word start, not the middle of a word
+        found = re.search(r"\s", last)
+        cut = found.start() if found else -1
+    return [_head(_strip_comments(_heredocs(command[:half], _KEPT_BODIES)[0])),
+            _tail(_strip_comments(_heredocs(last[cut + 1:], _KEPT_BODIES)[0]))]
+
+
+_BREAKS = re.compile(r"[\\'\"\s;&|]")
+_COMMAND_BREAKS = frozenset(";&|\n")
+_TAIL = _COMMAND_LIMIT // 2   # the end of an oversized real command read besides its beginning
+_WORD_LIMIT = 4096            # a word longer than this is cut where the end starts
+
+
+def _breaks(text: str):
+    """(position, character) of each separator (; & | newline) and blank outside quotes, in order."""
+    double, index, length = False, 0, len(text)
+    while index < length:
+        found = _BREAKS.search(text, index)
+        if found is None:
+            return
+        index = found.start()
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "'" and not double:   # a single-quoted span: nothing in it breaks anything
+            end = text.find("'", index + 1)
+            if end < 0:
+                return
+            index = end + 1
+            continue
+        if char == '"':
+            double = not double
+        elif not double:
+            yield index, char
+        index += 1
+
+
+def _head(real: str) -> str:
+    """The first _COMMAND_LIMIT characters of a real command, as 0.12.0 read them, up to their last separator outside
+    quotes (else their last blank), so they are not cut inside a quoted word, which the lexer would refuse (and let
+    through)."""
+    if len(real) <= _COMMAND_LIMIT:
+        return real
+    separator = blank = None
+    for index, char in _breaks(real[:_COMMAND_LIMIT]):
+        separator, blank = (index, blank) if char in _COMMAND_BREAKS else (separator, index)
+    return real[:separator if separator is not None else blank if blank is not None else _COMMAND_LIMIT]
+
+
+def _tail(real: str) -> str:
+    """The last _TAIL characters of a real command, read besides its beginning, so padding before the command (`true; `
+    thousands of times) cannot push it out of what is read. They start with the word the cut falls in (the first word
+    after it, when that is a long word or a long quoted span) and, when that word belongs to a command that started
+    earlier, get that command's first words in front of them: `rm -rf <padding> <path>; true` still reads as a
+    removal."""
+    start = len(real) - _TAIL
+    if start <= 0:
+        return real
+    begin = word = 0   # where the command and the word the cut falls in start
+    after = None       # the first break past the cut
+    for index, char in _breaks(real):
+        if index >= start:
+            after = (index, char in _COMMAND_BREAKS)
+            break
+        word = index + 1
+        if char in _COMMAND_BREAKS:
+            begin = word
+    if start - word > _WORD_LIMIT:
+        if after is None:
+            return real[start:]
+        word = after[0] + 1
+        if after[1]:
+            begin = word
+    if begin == word:   # it starts with a command of its own
+        return real[word:]
+    words = real[begin:min(begin + 512, word)]
+    blanks = [index for index, _char in _breaks(words)]
+    return (words[:blanks[-1]] if blanks else words) + " " + real[word:]
 
 
 def _stdin_payloads(rest: list[str], seg_op: str, prior, body_map: dict) -> list[str]:

@@ -25,7 +25,7 @@ No Modo Auto o plugin repara isso sozinho, no máximo uma vez por dia, só um se
 
 **Por quê** a cópia daquele perfil foi instalada num commit fixo, e o Hermes mantém a fixação em toda reinstalação.
 
-**Faça** `hermes -p <perfil> evolution update --profiles <perfil>` (ou `--all`): ele move a fixação para o último commit com o próprio `plugins install <url> --force --ref <commit>` do Hermes. No Modo Auto, o perfil que cuida do Hermes inteiro mantém cada cópia no commit dele.
+**Faça** `hermes -p <líder> evolution update --profiles <perfil>`, rodado a partir do perfil cujo código você quer ali (`<líder>`): ele move a fixação para o commit que esse perfil roda, com o próprio `plugins install <url> --force --ref <commit>` do Hermes, e só quando as duas cópias vêm deste repositório. Para escolher outro commit você mesmo, rode esse `plugins install` com o commit que quiser. O plugin nunca escolhe um commit e nunca move uma fixação sozinho, em nenhum modo.
 
 ## `hermes evolution` não é encontrado, ou um perfil mostra "nenhum evento hoje"
 

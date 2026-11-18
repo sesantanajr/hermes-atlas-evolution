@@ -150,6 +150,10 @@ ADDITIVE_TABLES = (
     ("playbook", "CREATE TABLE IF NOT EXISTS playbook (situation TEXT PRIMARY KEY, level TEXT NOT NULL, "
                  "risk TEXT NOT NULL, action TEXT NOT NULL, undo TEXT NOT NULL, title_en TEXT NOT NULL, "
                  "title_pt TEXT NOT NULL, advice_en TEXT NOT NULL, advice_pt TEXT NOT NULL) WITHOUT ROWID"),
+    # 0.13.0: the lessons the plugin activated by itself (auto mode: lessons.derive and promote), tied to that
+    # activation. Only these may be taken back unseen (lessons.tidy); one the owner wrote or approved never is.
+    ("lesson_auto", "CREATE TABLE IF NOT EXISTS lesson_auto (lesson_id INTEGER PRIMARY KEY, activated REAL NOT NULL) "
+                    "WITHOUT ROWID"),
     # Per-signature lookups (lessons, promotion, the listing) would scan these tables once per signature.
     ("failure_daily_signature", "CREATE INDEX IF NOT EXISTS failure_daily_signature ON failure_daily(signature)"),
     ("failure_owner_daily_signature",
@@ -196,7 +200,7 @@ def record(home: Path, job, *, now: float | None = None) -> None:
 
     `job(connection)` may run later on another thread, so it must hold only values that are safe to store.
     """
-    _operations.record(Path(home), job, now=now)
+    _operations.record(home, job, now=now)   # `home` as given: a hook's batch is matched by it (operations.coalesced)
 
 
 # Columns added after a table first shipped: (table, column, declaration).
@@ -211,6 +215,7 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
+DECISIONS_KEPT = 1000        # the owner's latest decisions, always kept (the history shows 200); older ones go with retention
 RETENTION_STEP_DAYS = 2      # how far past the newest day stored a prune may date its retention window
 RETENTION_CONFIRM_DAYS = 3   # days stored past the clock the last prune used before a jump of the clock is believed
 _DAILY_TABLES = ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "review_daily",
@@ -261,6 +266,10 @@ def prune(conn: sqlite3.Connection, *, now: float) -> float:
                  "(SELECT signature FROM lesson WHERE signature IS NOT NULL AND status IN ('active','candidate'))", (old,))
     conn.execute("DELETE FROM change WHERE at < ?", (old,))
     conn.execute("DELETE FROM proposal WHERE status NOT IN ('open','approved') AND updated < ?", (old,))
+    # The decision log grew without end. What the history lists and can undo is among the newest DECISIONS_KEPT, which
+    # always stay; the newest row stays too, so an id is never given again.
+    conn.execute("""DELETE FROM decision_log WHERE at < ? AND id < (SELECT MIN(id) FROM
+        (SELECT id FROM decision_log ORDER BY id DESC LIMIT ?))""", (old, DECISIONS_KEPT))
     # Lessons are kept, retired ones included: a deleted row would free its id for another lesson, and a sentence
     # the owner turned down would come back as new once its record was gone.
     # Excerpts expire here too, so they do not outlive their window when no learning pass runs. They expire by the

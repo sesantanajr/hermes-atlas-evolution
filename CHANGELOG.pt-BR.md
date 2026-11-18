@@ -2,6 +2,57 @@
 
 *In English: [CHANGELOG.md](CHANGELOG.md), with every version.*
 
+## 0.13.0
+
+Pronto para o catálogo de plugins do Hermes: o plugin não se atualiza mais sozinho nem usa a rede, o Assistido é o modo padrão, e três auditorias (regras do catálogo, os ganchos dentro do Hermes, o trabalho em segundo plano) acharam os erros corrigidos abaixo.
+
+### Mudanças: pronto para o catálogo
+
+- **Nenhuma autoatualização e nenhum acesso à rede próprio (regra 3 do catálogo).** Saíram o `git ls-remote`, a sincronização das cópias do plugin entre perfis no Modo Auto e todo "mover para o último commit", do plugin e do `install.sh`. Só o Hermes decide o código de cada perfil: `hermes -p <perfil> plugins update hermes-atlas-evolution` leva uma instalação do catálogo ao commit revisado e puxa uma instalação por git da origem dela. O `hermes -p <perfil> evolution update` roda esse comando em cada perfil escolhido (primeiro no perfil que o roda); uma cópia que o Hermes fixou com `--ref` só vai para o commit do perfil que roda o comando; uma atualização que falha é informada, nunca seguida de reinstalação; o `--force` não vai mais na atualização (ele só pulava a pergunta da varredura do Hermes). Para atualizar sem ninguém olhando, use o `plugins.auto_apply` do próprio Hermes.
+- **O Assistido é o modo padrão (regra 12 do catálogo).** Sozinho, o plugin agora só remove uma entrada repetida palavra por palavra entre `MEMORY.md` e `USER.md`. O Auto é escolha sua: `hermes -p <perfil> config set plugins.entries.hermes-atlas-evolution.settings.mode auto`. Um perfil sem `mode` definido passa a Assistido ao atualizar.
+- **O Modo Auto só se instala sozinho a partir do catálogo.** Num perfil em uso que nunca o teve, pelo nome no catálogo (o commit revisado), quando o perfil que cuida de todos veio do catálogo. Pelo repositório, no commit desse perfil, só com a sua tecla.
+- **Uma instalação do catálogo nunca conta como "fixada" para o plugin:** o `plugins update` a move, então o status, a atualização e as sugestões a tratam assim.
+- **O `install.sh` só roda comandos do próprio Hermes:** `plugins update` onde o plugin está, `plugins install` onde falta (pelo GitHub, ou pelo catálogo com o novo `--catalog`), e uma cópia fixada fica como está, com o comando que a move. O exemplo que mandava um download direto para o shell saiu do script.
+- **Os comandos que o plugin inicia nunca herdam um atalho de aprovação:** `HERMES_YOLO_MODE`, `HERMES_YOLO`, `HERMES_ACP_AUTO_APPROVE`, `HERMES_ACCEPT_HOOKS`, `HERMES_TUI_NO_CONFIRM` e `CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS` saem do ambiente de todo filho, inclusive do script do resumo semanal (um resumo agendado antes mantém o script antigo até você agendá-lo de novo).
+- **Arquivos de credenciais nunca são tocados (regra 11 do catálogo).** `.env` e `auth.json` deixaram de marcar um perfil, e nenhuma varredura, medida de tamanho ou observação das configurações olha um arquivo `.env`, `*.env` ou `auth.json`, nem para ver se existe (o `install.sh` também). Uma pasta só com esses arquivos não conta mais como perfil.
+- **O painel só decide com o veredito do Hermes.** Sem o veredito de login do próprio Hermes, um cookie com nome de login não dá mais direito de decisão: o painel responde só para leitura.
+- **README em inglês primeiro, depois em português, em Markdown simples,** com uma seção de Transparência (o que ele lê, grava e roda, e o que o agente vê) e imagens fixadas num commit, para a página do plugin no catálogo mostrá-lo inteiro.
+
+### Correções
+
+**Proteção do Hermes**
+
+- **Um padrão podia congelar o gateway inteiro.** `pkill -f '.*.*.*.*X'` fazia a busca da Proteção na linha de comando do próprio gateway levar 75 segundos ou mais, segurando a trava do Python: toda sessão parava, e depois o Hermes bloqueava todas as ferramentas. Padrões caros agora são simplificados ou casados numa passada linear, só padrões de até 64 caracteres chegam ao motor de expressões regulares, e 3.000 padrões aleatórios levam no máximo 0,15 s.
+- **Enchimento não esconde mais um comando.** Corpos de here-doc e comentários saem numa passada linear pelo texto inteiro (até 500.000 caracteres), e um comando com mais de 20.000 caracteres é lido no começo e no fim.
+
+**Estabilidade**
+
+- **Duas rodadas de aprendizado nunca rodam juntas.** A rodada agora renova o seu lease enquanto trabalha e para se outro processo o tomou; antes, uma rodada longa passava do lease, uma segunda começava ao lado e o resultado da primeira se perdia.
+- **Fim do "database is locked" na rodada de aprendizado.** Sob carga (o gateway gravando enquanto a rodada refazia as propostas), 34 de 60 rodadas falhavam e ficavam para 10 minutos depois; agora nenhuma.
+- **As checagens diárias de saúde cabem no tempo da rodada.** Elas pedem 5 minutos de folga, recebem o prazo da rodada, e a checagem do Hermes para em 2 minutos; antes podiam terminar minutos depois do prazo. A checagem rápida do banco cumpre os seus 5 segundos (levava 9,9 s num `state.db` de 441 MB).
+- **A saída de um comando tem limite.** Ficam o começo e o fim, com uma linha "…" entre eles (400 MB de saída ocupavam 1,2 GB de memória; agora 16 MB).
+- **Um comando que inicia um auxiliar não é "não respondeu".** Um comando do Hermes que terminou bem mas deixou um auxiliar segurando a saída era dado como travado, e o auxiliar era morto; agora ele termina quando o comando termina e o auxiliar fica em paz.
+- **As checagens do `doctor` terminam com o plugin.** O processo que roda as checagens do `hermes doctor` para quando o processo do plugin morre, ou no tempo limite mais 15 segundos.
+- **O `hermes pm gc` espera quando não enxerga o que roda.** Sem `/proc` (macOS, Windows) ou quando a leitura dos programas em execução estourou o tempo, o Modo Auto, o `care gc` e o menu seguram o gc e dizem por quê ("não foi possível ler quais programas rodam").
+- **Sessões longas são relidas em partes.** A releitura do histórico na primeira rodada cumpre o orçamento de tempo dentro de uma sessão longa (150.000 chamadas: 47 s e +223 MB antes, 20 s e +20 MB agora) e continua dali na rodada seguinte.
+- **Com `plugins.isolation: host`,** a rodada de aprendizado e a limpeza rodam no plugin host, e o `status` enxerga a versão do host.
+
+**Eficiência**
+
+- **Gravações mais leves a cada chamada de ferramenta.** A tabela de deduplicação `seen` virou uma pequena memória do processo: o banco cresce cerca de 7 vezes menos, com 2 quadros de diário por chamada em vez de 5,6. Os checkpoints do diário saíram dos ganchos para o relógio de 10 minutos, e o diário volta a 1 MiB.
+- **Um processo que atende muitos perfis** (9 ou mais) não reabre mais o banco a cada gravação: 1,3 ms → 0,09 ms.
+- **Varredura bem mais rápida de um Hermes grande.** 20 perfis com 60.000 skills: 12 s → 2,6 s com cache; 5.850 skills: 1,6 s → 0,4 s. O código de cada plugin é analisado uma vez por processo.
+
+**Aprendizado**
+
+- **Lições novas chegam ao prompt.** O playbook agora põe primeiro as lições cuja falha aconteceu nos últimos 30 dias; antes as lições antigas ficavam com as 8 linhas, e as novas nunca eram mostradas, medidas nem aposentadas.
+- **Uma lição automática que ninguém viu expira.** Uma lição que o modo ativou sozinho, nunca mostrada ao agente, cuja falha não voltou em 30 dias, é retirada; ela volta se a falha voltar. Lições que você escreveu, aprovou, manteve ou importou nunca expiram.
+- **O histórico de decisões tem limite.** As 1.000 entradas mais novas sempre ficam (o histórico mostra 200); além disso, as com mais de 90 dias saem.
+
+### Atualizar
+
+Veja [Atualizar para a 0.13.0](docs/pt-BR/upgrading.md#atualizar-para-a-0130). A suíte de testes tem 783 testes, no ramo `tests`.
+
 ## 0.12.0
 
 Uma auditoria completa da 0.11.0 e as correções que ela pediu: ações automáticas mais seguras, uma Proteção do Hermes mais forte, lições julgadas pelo que o agente leu de fato e a suíte de testes de volta ao CI.

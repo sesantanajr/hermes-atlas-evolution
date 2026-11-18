@@ -38,7 +38,11 @@ def plugin_version(home: Path | None = None) -> str:
 
 
 def process_kind() -> str:
-    """gateway, dashboard or cli: long-running hosts are the ones that can keep old code loaded."""
+    """gateway, dashboard, plugin_host or cli: long-running hosts are the ones that can keep old code loaded. The
+    plugin host (`plugins.isolation: host`) lives as long as the Hermes that started it."""
+    if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1" or any(
+            "plugin_host_child" in str(item) for item in sys.argv[:3]):
+        return "plugin_host"
     words = [os.path.basename(str(item)) for item in sys.argv[:6]]
     if "gateway" in words and "run" in words:
         return "gateway"
@@ -344,10 +348,12 @@ def _profiles(home: Path, *, now: float) -> list[dict]:
         rows.append({"profile": name, "current": folder.resolve() == home,
                      "sessions_7d": _sessions(folder, since=now - 7 * 86_400) or 0, "plugin": state,
                      "last_pass": last, "lessons_active": active, "lessons_waiting": waiting,
-                     "install": _command(name, f"plugins install {REPOSITORY} --enable"),
+                     # Hermes' own command with the plugin's name (the catalog's reviewed pin): never a URL or a
+                     # commit the plugin picks
+                     "install": _command(name, f"plugins install {PLUGIN_DIR} --enable"),
                      "migrate": f"{_command(name, 'plugins remove ' + LEGACY_DIRS[0])} && " + (
                          _command(_gateway_of(folder, name), "gateway restart") if state == "both"
-                         else _command(name, f"plugins install {REPOSITORY} --enable")),
+                         else _command(name, f"plugins install {PLUGIN_DIR} --enable")),
                      "status": _command(name, "evolution status")})
     return rows
 
@@ -1694,11 +1700,11 @@ _ENV_TEXT = {
            "where": "Decide in profile `{lead}`: `hermes{p} evolution proposals list` shows each one's number; then run "
                     "`hermes{p} evolution proposals approve <id>` or `hermes{p} evolution proposals reject <id>`.",
            "pinned": "Pinned to a commit in {profiles}: `hermes plugins update` refuses it there (\"is pinned to "
-                     "<sha>\"). Installing it again from its repository without `--ref` drops the pin; run the "
-                     "command for each profile, then `hermes gateway restart`.",
+                     "<sha>\"). The command for each profile moves the pin to the commit profile `{lead}` runs; "
+                     "then `hermes gateway restart`.",
            "self_skew": "{profiles} run(s) another commit of Atlas Evolution than profile `{lead}` (the version "
-                        "number may be the same). Install it again from its repository in each, then "
-                        "`hermes gateway restart`.",
+                        "number may be the same). Update it in each with Hermes' own "
+                        "`hermes -p <profile> plugins update hermes-atlas-evolution`, then `hermes gateway restart`.",
            "yes": "yes", "no": "no"},
     "pt": {"none": "Nenhum perfil tem o Atlas Evolution ligado, então ninguém cuida do Hermes inteiro ainda. Ligue-o "
                    "num perfil: `hermes -p <perfil> plugins enable hermes-atlas-evolution`.",
@@ -1714,11 +1720,11 @@ _ENV_TEXT = {
            "where": "Decida no perfil `{lead}`: `hermes{p} evolution proposals list` mostra o número de cada uma; depois "
                     "rode `hermes{p} evolution proposals approve <id>` ou `hermes{p} evolution proposals reject <id>`.",
            "pinned": "Fixado num commit em {profiles}: ali o `hermes plugins update` recusa (\"is pinned to <sha>\"). "
-                     "Instalar de novo a partir do repositório, sem `--ref`, tira a fixação; rode o comando de cada "
-                     "perfil e depois `hermes gateway restart`.",
+                     "O comando de cada perfil leva a fixação para o commit que o perfil `{lead}` roda; depois "
+                     "`hermes gateway restart`.",
            "self_skew": "{profiles} roda(m) outro commit do Atlas Evolution que o perfil `{lead}` (o número da versão "
-                        "pode ser o mesmo). Instale de novo a partir do repositório em cada um e depois "
-                        "`hermes gateway restart`.",
+                        "pode ser o mesmo). Atualize em cada um com o comando do próprio Hermes, "
+                        "`hermes -p <perfil> plugins update hermes-atlas-evolution`, e depois `hermes gateway restart`.",
            "yes": "sim", "no": "não"},
 }
 

@@ -6,13 +6,14 @@ runs by itself at the end of each learning pass:
 - assist ("safe"): an entry said character for character in both MEMORY.md and USER.md (both loaded) is taken out
   of MEMORY.md, only while the copy in USER.md is still there (a copy of the file is kept); nothing else. A repeat
   inside one file is left to Hermes, which drops it itself. An entry the owner put back stays.
-- auto ("full", the default): also the reversible changes of explain.AUTOMATIC (locking a skill the curator keeps
-  rewriting, installing this plugin where a profile in use never had it, moving a failed install's folder to the
-  trash), at most MAX_CHANGES_PER_PASS per pass, with Hermes' own command; one Hermes refuses waits a day. The plugin
-  installs itself only while the repository's default branch is on the commit the lead runs. The lead profile also
-  brings this plugin's copy in the other profiles to its own commit (fleet_update.auto_sync: a pinned, older,
-  different or half-installed copy), where that profile's own mode is auto too. A profile with `fleet_managed: false`
-  is never changed by itself.
+- auto ("full", chosen by the owner; assist is the default since 0.13.0): also the reversible changes of
+  explain.AUTOMATIC (locking a skill the curator keeps rewriting, installing this plugin where a profile in use never
+  had it, moving a failed install's folder to the trash), at most MAX_CHANGES_PER_PASS per pass, with Hermes' own
+  command; one Hermes refuses waits a day. The plugin installs itself by itself only from the Hermes plugin catalog,
+  by name (the reviewed pin, when the lead is a catalog install); from the repository, at the lead's own commit, only
+  with the owner's key (fleet_update.source). It never updates a copy by itself (that is `hermes evolution update`,
+  or Hermes' own `plugins.auto_apply`). A profile with
+  `fleet_managed: false` is never changed by itself.
 
 Every action is recorded in the decision history with "automatic" as the actor and can be undone from the menu,
 the panel or `hermes evolution decisions undo <id>`. An automatic change the owner undoes is never applied
@@ -271,7 +272,7 @@ def apply_proposal(home: Path, proposal_id: int, *, now: float, actor: str = "te
         row = conn.execute("SELECT * FROM proposal WHERE id=?", (int(proposal_id),)).fetchone()
         if row is None:
             raise ValueError(f"Unknown proposal id {proposal_id}")
-        found = explain.plan(dict(row))
+        found = explain.plan(dict(row), home=home)
         if found is None:
             raise ValueError("The plugin cannot apply this proposal; approve it to see the command")
         previous = row["status"]
@@ -280,7 +281,7 @@ def apply_proposal(home: Path, proposal_id: int, *, now: float, actor: str = "te
         from .environment import verify
 
         fresh = verify(home, dict(row), now=now)
-        again = explain.plan(fresh) if fresh is not None else None
+        again = explain.plan(fresh, home=home) if fresh is not None else None
         if again is None or again != found:
             with experience(home) as conn:
                 conn.execute("UPDATE proposal SET status='expired', updated=? WHERE id=? AND status IN ('open', 'approved')",
@@ -422,21 +423,12 @@ def _memory(home: Path, runtime_config, *, now: float) -> list[dict]:
 
 
 def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=None, usage=None,
-              deadline: float | None = None, remote=None) -> dict:
+              deadline: float | None = None) -> dict:
     """The automatic actions of one pass. Failures are reported, never raised: the pass itself must not fail.
-    `deadline` (time.monotonic) leaves Hermes commands out when one might not finish before it. `remote` replaces
-    fleet_update.remote_head (the commit the repository's default branch is on), read once per pass."""
+    `deadline` (time.monotonic) leaves Hermes commands out when one might not finish before it."""
     import time
 
     from .experience import experience
-    from .fleet_update import remote_head
-
-    head: dict = {}
-
-    def latest() -> str | None:
-        if "sha" not in head:
-            head["sha"] = (remote or remote_head)()
-        return head["sha"]
 
     done: dict = {"mode": mode if mode in MODES else "off", "memory": [], "applied": [], "failed": []}
     try:   # whatever the mode: the trash keeps what it got for 30 days, and no longer
@@ -474,7 +466,7 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
         expected = (f"env:{row['kind']}:{str(row['subject']).replace('/', ':', 1)}" if row["kind"] in explain.FLEET
                     else f"{row['kind']}:{row['subject']}")
         if row["code"] != expected or f"auto_skip:{row['code']}" in held or row["code"] in shared_skips \
-                or explain.plan(dict(row)) is None:
+                or explain.plan(dict(row), home=home) is None:
             continue   # only the proposals the loop writes itself, with a plain name, and never one the owner undid
         try:
             failed_at = float(held.get(f"auto_fail:{row['code']}") or 0)
@@ -483,16 +475,13 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
         if now - failed_at < FAILURE_BACKOFF_SECONDS:
             continue
         if row["kind"] == "self_missing":
-            # Hermes installs the repository's default branch as it is now (never `--ref`: a pin there breaks every
-            # later update), so the plugin installs itself only while that is the very commit the lead runs, as
-            # fleet_update.auto_sync spreads only code the owner already runs; else it waits for the next pass.
-            from .environment import self_sha
+            from .fleet_update import PLUGIN, source
 
-            if "lead" not in head:
-                head["lead"] = self_sha(home)
-            if not head["lead"] or latest() != head["lead"]:
+            if source(home) != [PLUGIN]:
+                # By itself only from the Hermes plugin catalog (its reviewed pin, by name). An install from the
+                # repository, even at the lead's own commit, waits for the owner's key (catalog rule 3).
                 done.setdefault("waiting", []).append({"proposal": row["id"], "kind": row["kind"],
-                                                       "subject": row["subject"], "reason": "lead_commit"})
+                                                       "subject": row["subject"], "reason": "not_catalog"})
                 continue
         try:
             result = apply_proposal(home, row["id"], now=now, actor="automatic", runner=runner, usage=usage)
@@ -508,14 +497,6 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
         if result.get("applied"):
             done["applied"].append({"proposal": row["id"], "kind": row["kind"], "subject": row["subject"],
                                     "decision": result["decision"]})
-    try:   # this plugin in every other profile on the lead's code: a pinned, older or half-installed copy
-        from .fleet_update import auto_sync
-
-        synced = auto_sync(home, now=now, runner=runner, deadline=deadline, remote=latest)
-        if synced is not None:
-            done["plugin_sync"] = synced
-    except Exception as error:   # never fails the pass
-        done["failed"].append({"what": "plugin_sync", "error": type(error).__name__})
     try:   # the gateway that cannot start because its service names a Python Hermes removed (203/EXEC)
         repaired = repair_gateway(home, now=now, deadline=deadline)
         if repaired is not None:

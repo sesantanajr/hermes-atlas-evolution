@@ -22,7 +22,17 @@ SCHEMA_VERSION = 8
 OBSERVER_BUSY_SECONDS = 0.035
 _OBSERVER_LOCK_SECONDS = 0.05
 _OBSERVER_QUEUE = 512
-_OBSERVER_LIMIT = 8
+# Shared connections kept per process: one per profile a gateway serves. Past the limit the least recently used goes,
+# and so does one idle that long: with 9 profiles and a limit of 8, every hook write closed and opened a connection.
+_OBSERVER_LIMIT = 64
+_OBSERVER_IDLE_SECONDS = 600
+# Hook writes leave folding the write-ahead log into the database to the plugin's 10-minute clock and to a short thread
+# of its own after this many of them (checkpoint), both on the hooks' own connection while they wait: with a writer
+# that never stops, a checkpoint from another connection never let the log start over (23 MB and growing). The hook
+# connection's own automatic checkpoint stays as a ceiling, at a size only a process with neither ever reaches.
+_CHECKPOINT_WRITES = 256
+_WAL_CEILING_PAGES = 4_000
+JOURNAL_LIMIT_BYTES = 1 << 20   # the WAL file is cut back to this after a checkpoint (it stayed at its 4-5 MB peak)
 # Every table stays, so a database written by an earlier version opens as it is: maintenance and control are the
 # 0.3 `tick` policy's, no longer written; native_activity keeps only post_compaction rows (radar.observe_compaction).
 SCHEMA = """
@@ -213,6 +223,7 @@ def _open_once(path: Path, timeout: float, **options) -> sqlite3.Connection:
         # A newer version of the plugin only ever adds tables and columns, so a database it upgraded still
         # works here after a downgrade: what this version reads and writes is all still there.
         connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(f"PRAGMA journal_size_limit={JOURNAL_LIMIT_BYTES}")
         if sys.platform == "darwin":
             # macOS fsync does not order writes: a checkpoint cut by a shutdown can leave half-written pages.
             # Hermes forces full syncs there for its own state.db (hermes_state_wal.py); so does this database.
@@ -313,6 +324,8 @@ class _Observer:
         self.closed = False   # set once: a closed observer never opens a connection again
         self._depth = 0       # nested holds of `lock` by its owner thread
         self._checked = float("-inf")   # when the file's identity was last read (time.monotonic)
+        self.used = time.monotonic()    # last handed out by _observer: an observer idle that long is closed
+        self.writes = 0                 # hook writes since the write-ahead log was last folded in (checkpoint)
 
     def _file(self):
         try:
@@ -337,9 +350,13 @@ class _Observer:
             raise _ObserverClosed()
         connection = _open(_database_path(self.home), OBSERVER_BUSY_SECONDS, check_same_thread=False)
         try:
-            if connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal" and sys.platform != "darwin":
-                # Counters can lose the last moments before a power failure. WAL keeps the file consistent.
-                connection.execute("PRAGMA synchronous=NORMAL")
+            if connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+                # About one hook write in 65 paid for a checkpoint (copying the log into the database and syncing it)
+                # inside the tool call. The plugin's clock and a thread of its own do it instead (checkpoint).
+                connection.execute(f"PRAGMA wal_autocheckpoint={_WAL_CEILING_PAGES}")
+                if sys.platform != "darwin":
+                    # Counters can lose the last moments before a power failure. WAL keeps the file consistent.
+                    connection.execute("PRAGMA synchronous=NORMAL")
         except BaseException:
             connection.close()
             raise
@@ -370,8 +387,49 @@ class _Observer:
             self._depth -= 1
             if self.closed and not self._depth:
                 self._release()   # closed while this thread held it: the last holder frees the handle
+                self._hand_over()
         finally:
             self.lock.release()
+
+    def _hand_over(self) -> None:
+        """Updates a closed observer could not write go to the profile's current observer, or the next one: never
+        lost without a trace (what does not fit its queue counts as dropped)."""
+        with self.guard:
+            jobs, dropped = list(self.pending), self.dropped
+            self.pending.clear()
+            self.dropped = 0
+        if not jobs and not dropped:
+            return
+        key = os.fspath(self.home)
+        with _OBSERVERS_GUARD:
+            current = _OBSERVERS.get(key)
+            if current is None or current is self or current.closed:
+                held, count = _ORPHANS.get(key, ([], 0))
+                _ORPHANS[key] = (held + jobs, count + dropped)
+                return
+        with current.guard:
+            current.dropped += dropped
+        if not current._defer(jobs):
+            with _OBSERVERS_GUARD:
+                held, count = _ORPHANS.get(key, ([], 0))
+                _ORPHANS[key] = (held + jobs, count)
+
+    def checkpoint(self, wait: float = 1.0) -> bool:
+        """Fold the write-ahead log into the database (PASSIVE) on this connection, holding it, so no write of this
+        process lands meanwhile and the log can start over at the next one. Never opens a connection."""
+        if self.closed or not self._enter(wait):
+            return False
+        try:
+            connection = self.connection
+            if self.closed or connection is None or connection.in_transaction:
+                return False
+            connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
+            self.writes = 0
+            return True
+        except sqlite3.Error:
+            return False
+        finally:
+            self._exit()
 
     @contextmanager
     def session(self):
@@ -473,6 +531,10 @@ class _Observer:
                 connection.execute("""INSERT INTO metric VALUES (?, 'observer', '', '', 'dropped', ?, 0, 0, 0, 0, 0, 0, 0)
                     ON CONFLICT DO UPDATE SET requests=requests+excluded.requests""", (day, dropped + lost))
             connection.execute("COMMIT")
+            self.writes += 1
+            if self.writes >= _CHECKPOINT_WRITES:
+                self.writes = 0
+                checkpoint_soon(self.home)
         except BaseException as error:
             _rollback(connection)
             if isinstance(error, sqlite3.Error) and _busy(error):
@@ -514,19 +576,75 @@ class _Observer:
 _OBSERVERS: OrderedDict[str, _Observer] = OrderedDict()
 _OBSERVERS_GUARD = threading.Lock()
 _INHERITED: list[sqlite3.Connection] = []
+_ORPHANS: dict[str, tuple[list, int]] = {}   # profile -> (updates, dropped) a closed observer left for the next one
 
 
 def _observer(home: Path) -> _Observer:
     key = os.fspath(home)
     with _OBSERVERS_GUARD:
+        moment = time.monotonic()   # under the guard: no other thread hands out an observer later than this
         observer = _OBSERVERS.get(key)
         if observer is None:
             observer = _OBSERVERS[key] = _Observer(home)
+            jobs, dropped = _ORPHANS.pop(key, ([], 0))
+            observer.pending.extend(jobs[:_OBSERVER_QUEUE])
+            observer.dropped = dropped + max(0, len(jobs) - _OBSERVER_QUEUE)
         _OBSERVERS.move_to_end(key)
-        retired = [_OBSERVERS.popitem(last=False)[1] for _ in range(len(_OBSERVERS) - _OBSERVER_LIMIT)]
+        observer.used = moment
+        retired = []
+        while len(_OBSERVERS) > 1:   # the least recently used first: past the limit, or idle for long
+            oldest = next(iter(_OBSERVERS.values()))
+            if len(_OBSERVERS) <= _OBSERVER_LIMIT and not moment - oldest.used >= _OBSERVER_IDLE_SECONDS:
+                break
+            retired.append(_OBSERVERS.popitem(last=False)[1])
     for other in retired:
         other.close(wait=0)   # never blocks the hook thread; a thread still using it frees the handle
     return observer
+
+
+def close_observer(home: Path) -> None:
+    """Write what waits and close this process's shared connection of one profile (its plugin unloads): another
+    profile served by the same process keeps its own."""
+    with _OBSERVERS_GUARD:
+        observer = _OBSERVERS.pop(os.fspath(home), None)
+    if observer is not None:
+        observer.close()
+
+
+_CHECKPOINTS: set[str] = set()   # profiles whose checkpoint thread is running
+_CHECKPOINTS_GUARD = threading.Lock()
+
+
+def checkpoint(home: Path) -> bool:
+    """Fold the write-ahead log into the database (PASSIVE) on the hooks' shared connection of this profile, while
+    they wait for it (_Observer.checkpoint). The 10-minute clock calls it; True when it ran. A process that has not
+    written to this profile has nothing to fold in: it opens nothing."""
+    observer = _OBSERVERS.get(os.fspath(home))
+    return observer is not None and observer.checkpoint()
+
+
+def checkpoint_soon(home: Path) -> None:
+    """Run `checkpoint` on a short thread of its own, at most one per profile at a time; never raises."""
+    key = os.fspath(home)
+    with _CHECKPOINTS_GUARD:
+        if key in _CHECKPOINTS:
+            return
+        _CHECKPOINTS.add(key)
+
+    def run():
+        try:
+            checkpoint(Path(key))
+        except (OSError, ValueError, sqlite3.Error):
+            pass   # busy or unusable now: the next one tries again
+        finally:
+            with _CHECKPOINTS_GUARD:
+                _CHECKPOINTS.discard(key)
+
+    try:
+        threading.Thread(target=run, name="hermes-atlas-evolution-checkpoint", daemon=True).start()
+    except RuntimeError:   # the interpreter is shutting down
+        with _CHECKPOINTS_GUARD:
+            _CHECKPOINTS.discard(key)
 
 
 _BATCH = threading.local()
@@ -540,7 +658,7 @@ def record(home: Path, job, *, now: float | None = None) -> None:
     ``batched(home)`` on the same thread, the job is collected instead and written with the batch.
     """
     jobs = getattr(_BATCH, "jobs", None)
-    if jobs is not None and _BATCH.home == Path(home):
+    if jobs is not None and (_BATCH.home is home or _BATCH.key == os.fspath(home)):
         jobs.append(job)
         return
     now = time.time() if now is None else now
@@ -558,11 +676,12 @@ def coalesced(home: Path):
         yield
         return
     jobs: list = []
-    _BATCH.jobs, _BATCH.home = jobs, Path(home)
+    # `home` as given and its text: record() compares them on every update, a new Path per update was 13% of a hook
+    _BATCH.jobs, _BATCH.home, _BATCH.key = jobs, home, os.fspath(home)
     try:
         yield
     finally:
-        _BATCH.jobs = _BATCH.home = None
+        _BATCH.jobs = _BATCH.home = _BATCH.key = None
         if jobs:
             now = time.time()
             for _ in range(3):   # an observer closed meanwhile hands the jobs to the current one
@@ -583,11 +702,11 @@ def batched(home: Path, *, check=None, timeout: float = 10.0):
     if getattr(_BATCH, "jobs", None) is not None:
         raise RuntimeError("batched() does not nest")
     jobs: list = []
-    _BATCH.jobs, _BATCH.home = jobs, Path(home)
+    _BATCH.jobs, _BATCH.home, _BATCH.key = jobs, home, os.fspath(home)
     try:
         yield jobs
     finally:
-        _BATCH.jobs = _BATCH.home = None
+        _BATCH.jobs = _BATCH.home = _BATCH.key = None
     if not jobs and check is None:
         return
     connection = _open(_database_path(Path(home)), timeout)
@@ -617,10 +736,14 @@ def close_observers() -> None:
 
 def _forget_inherited_observers() -> None:
     # A forked child must neither use the parent's SQLite handles nor wait on a lock held at fork time.
-    global _OBSERVERS_GUARD
+    global _OBSERVERS_GUARD, _DELIVERIES_GUARD, _CHECKPOINTS_GUARD
     _INHERITED.extend(item.connection for item in _OBSERVERS.values() if item.connection is not None)
     _OBSERVERS.clear()
+    _ORPHANS.clear()   # the parent writes them
     _OBSERVERS_GUARD = threading.Lock()
+    _DELIVERIES_GUARD = threading.Lock()
+    _CHECKPOINTS.clear()   # those threads stayed in the parent
+    _CHECKPOINTS_GUARD = threading.Lock()
 
 
 atexit.register(close_observers)
@@ -689,6 +812,25 @@ def _outcome(event: str, info: dict) -> str:
     return "ok"
 
 
+# An event delivered twice (a plugin registered twice) arrives within seconds, in the same process: the delivery ids
+# of the latest events are kept in memory. Until 0.13.0 they went to the `seen` table: 99% of the database (37 MB for
+# 200,000 rows) and most of each hook's write. The table stays, empty, for earlier versions that still write it.
+_DELIVERY_LIMIT = 4096
+_DELIVERIES: OrderedDict[bytes, None] = OrderedDict()
+_DELIVERIES_GUARD = threading.Lock()
+
+
+def _first_delivery(key: bytes) -> bool:
+    """False when this delivery id was among the latest _DELIVERY_LIMIT this process saw."""
+    with _DELIVERIES_GUARD:
+        if key in _DELIVERIES:
+            return False
+        _DELIVERIES[key] = None
+        while len(_DELIVERIES) > _DELIVERY_LIMIT:
+            _DELIVERIES.popitem(last=False)
+    return True
+
+
 def observe(home: Path, event: str, info: dict, *, now: float | None = None) -> None:
     """Store numeric usage and allowlisted metadata. Never copy raw payload fields."""
     if event not in {"api", "api_error", "aux", "tool"}:
@@ -723,15 +865,14 @@ def observe(home: Path, event: str, info: dict, *, now: float | None = None) -> 
         attempt = (retry if type(retry) is int and event == "api_error" else None,
                    ended if type(ended) in (int, float) and math.isfinite(ended) else None)
     identity = (event, turn, correlation, *(attempt if any(part is not None for part in attempt) else ()))
-    delivery = None
     if event != "aux" and all(isinstance(part, str) and 0 < len(part) <= 400 for part in (turn, correlation)):
-        delivery = hashlib.sha256(repr(identity).encode()).hexdigest()
+        delivery = hashlib.blake2b(repr((os.fspath(home), *identity)).encode(), digest_size=16).digest()
+        if not _first_delivery(delivery):
+            return   # the same event, delivered again
     day = _day(now)
     row = (day, lane, provider, model, outcome, measured, *(_tokens(usage.get(key)) for key in BUCKETS), duration)
 
     def write(conn):
-        if delivery and not conn.execute("INSERT OR IGNORE INTO seen VALUES (?, ?)", (delivery, day)).rowcount:
-            return
         conn.execute("""
             INSERT INTO metric VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT DO UPDATE SET requests=requests+1, usage_samples=usage_samples+excluded.usage_samples,
@@ -781,9 +922,6 @@ def summarize(conn: sqlite3.Connection, *, days: int, now: float, rates: dict) -
             "estimated_usd": round(estimate, 8) if priced_calls else None, "dropped_events": dropped}
 
 
-SEEN_DAYS = 2   # delivery ids only guard against an event delivered twice, which happens within seconds
-
-
 def _prune(conn: sqlite3.Connection, now: float) -> None:
     from .experience import prune, utc_datetime
 
@@ -793,4 +931,5 @@ def _prune(conn: sqlite3.Connection, now: float) -> None:
     cutoff = (today - timedelta(days=RETENTION_DAYS - 1)).isoformat()
     for table in ("metric", "research_latency", "native_activity"):
         conn.execute(f"DELETE FROM {table} WHERE day < ?", (cutoff,))
-    conn.execute("DELETE FROM seen WHERE day < ?", ((today - timedelta(days=SEEN_DAYS - 1)).isoformat(),))
+    # Delivery ids live in memory now (_first_delivery): only an earlier version still running somewhere writes these
+    conn.execute("DELETE FROM seen")

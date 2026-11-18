@@ -28,6 +28,8 @@ import json
 import os
 import re
 import stat
+import struct
+import sys
 import time
 from pathlib import Path
 
@@ -37,6 +39,10 @@ PROFILE_MAX = 100
 PLUGIN_MAX = 200
 SKILL_MAX = 3000
 SKILL_WALK_MAX = 20_000          # entries looked at under one profile's skills/
+# What one process keeps between scans (scan cost): parsed SKILL.md files and listed skill folders, in all profiles.
+# A larger Hermes is still scanned in full; past these, the rest is read again on every scan.
+SKILLS_KEPT = 100_000
+_FOLDERS_KEPT = 120_000
 SOURCE_FILES_MAX = 400           # Python files read per plugin
 SOURCE_FILE_BYTES = 128 * 1024   # a larger file is skipped (its hooks count as acting on any tool)
 SOURCE_PLUGIN_BYTES = 384 * 1024    # parsed per plugin (only the files that register hooks and define their callbacks)
@@ -127,6 +133,77 @@ def read_text(path: Path, limit: int, *, part: str = "") -> str | None:
         return None
 
 
+class _Recent:
+    """A bounded map read and written from several threads. `cap` counts entries, or what `weight` gives each value.
+    `touched` counts the entries a lookup found or a write added: after a whole scan, `trim(touched during it)` keeps
+    only what that scan used, so the map holds the Hermes as it is now, never every Hermes the process looked at.
+
+    When full, `keep_first` leaves what is there and caches nothing more (a scan reads in the same order every time, so
+    the first `cap` entries keep being found); otherwise the least recently used goes first."""
+
+    def __init__(self, cap: int, *, weight=None, keep_first: bool = False):
+        import threading
+        from collections import OrderedDict
+
+        self.cap, self.weight, self.keep_first = cap, weight, keep_first
+        self.touched, self.size, self.items, self.lock = 0, 0, OrderedDict(), threading.Lock()
+
+    def _weigh(self, value) -> int:
+        return self.weight(value) if self.weight is not None else 1
+
+    def get(self, key):
+        with self.lock:
+            value = self.items.get(key)
+            if value is not None:
+                self.touched += 1
+                self.items.move_to_end(key)
+            return value
+
+    def put(self, key, value) -> None:
+        with self.lock:
+            old = self.items.get(key)
+            grown = self.size - (self._weigh(old) if old is not None else 0) + self._weigh(value)
+            if self.keep_first and grown > self.cap:   # no room: this one is not cached (an older copy goes)
+                if old is not None:
+                    self.size -= self._weigh(self.items.pop(key))
+                return
+            self.items[key] = value
+            self.items.move_to_end(key)
+            self.size, self.touched = grown, self.touched + (old is None)
+            while self.size > self.cap and self.items:
+                self.size -= self._weigh(self.items.popitem(last=False)[1])
+
+    def pop(self, key) -> None:
+        with self.lock:
+            old = self.items.pop(key, None)
+            if old is not None:
+                self.size -= self._weigh(old)
+
+    def trim(self, keep: int) -> None:
+        with self.lock:
+            while len(self.items) > max(keep, 0):
+                self.size -= self._weigh(self.items.popitem(last=False)[1])
+
+
+_RACY_NS = 2_000_000_000   # a file or folder changed this recently may change again within its clock tick: never cached
+_STAMP = struct.Struct("<QqqQ")
+
+
+def _stamp(info: os.stat_result) -> bytes | None:
+    """What tells a file's (or folder's) content changed without reading it: size, change times and inode, packed (32
+    bytes, not a tuple of four ints). On POSIX ctime moves to the current time on every change and no program can set
+    it (a copy or `touch -d` that sets mtime still gets a new one); Windows has only mtime. None when that time is in
+    the last _RACY_NS (or ahead of the clock): a second change inside the same tick of the file system's clock would
+    leave the same stamp."""
+    changed = info.st_mtime_ns if os.name == "nt" else info.st_ctime_ns
+    if time.time_ns() - changed < _RACY_NS:
+        return None
+    try:
+        return _STAMP.pack(info.st_size, info.st_mtime_ns, info.st_ctime_ns, getattr(info, "st_ino", 0) & (2 ** 64 - 1))
+    except (struct.error, OverflowError, TypeError):
+        return None
+
+
 def _is_dir(path: Path) -> bool:
     """A real folder (not a link to one)."""
     try:
@@ -171,9 +248,19 @@ def _entries(folder: Path, limit: int) -> list[os.DirEntry]:
 
 
 # ── profiles and the lead ────────────────────────────────────────────────────────────────────────────────────────
-_HOME_MARKERS = ("config.yaml", ".env", "state.db")   # hermes_constants._HERMES_HOME_MARKERS
-# hermes_constants._PROFILE_IDENTITY_MARKERS: a folder under profiles/ is a profile only with one of these
-_IDENTITY_MARKERS = ("config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json", "state.db")
+# hermes_constants._HERMES_HOME_MARKERS and _PROFILE_IDENTITY_MARKERS (a folder under profiles/ is a profile only with
+# one of these) without .env and auth.json: the plugin never touches a credential file, not even to see it is there
+# (catalog rule 11), so a profile that holds nothing but credentials is not seen as one
+_HOME_MARKERS = ("config.yaml", "state.db")
+_IDENTITY_MARKERS = ("config.yaml", "SOUL.md", "profile.yaml", "state.db")
+
+
+def credential_file(name: str) -> bool:
+    """A file name of a credential store (.env, *.env, auth.json): never opened, looked at or measured."""
+    folded = name.casefold()
+    return folded in (".env", "auth.json") or folded.endswith(".env")
+
+
 _TOMBSTONES = ".deleted"   # profiles/.deleted/<name>: `hermes profile delete` marked the profile gone
 
 
@@ -625,7 +712,11 @@ def install_record(home: Path, name: str, folder: str) -> dict:
         local = {}
     if isinstance(local, dict):
         record = {**local, **record}
-    record["pinned"] = _pin_of(record) or _pin_of(local if isinstance(local, dict) else {})
+    # A catalog install is on the catalog's reviewed pin, and `plugins update <name>` moves it to the next one: for the
+    # plugin it is never "pinned" (only Hermes and a reviewed catalog change decide its commit).
+    catalog = record.get("catalog")
+    record["pinned"] = "" if isinstance(catalog, dict) and catalog.get("name") else (
+        _pin_of(record) or _pin_of(local if isinstance(local, dict) else {}))
     return record
 
 
@@ -650,6 +741,8 @@ def _size(folder: Path, limit: int = 4000) -> tuple[int, float]:
         current = stack.pop()
         for entry in _entries(current, limit):
             seen += 1
+            if credential_file(entry.name):   # a plugin's own .env: never looked at, not even its size
+                continue
             try:
                 info = entry.stat(follow_symlinks=False)
             except OSError:
@@ -828,7 +921,7 @@ def _rewrites_command(function) -> bool:
 def _python_files(folder: Path) -> list[Path]:
     found = []
     for entry in _entries(folder, 2000):
-        if entry.name.startswith((".", "__pycache__")):
+        if entry.name.startswith((".", "__pycache__")) or credential_file(entry.name):
             continue
         path = Path(entry.path)
         try:
@@ -839,7 +932,7 @@ def _python_files(folder: Path) -> list[Path]:
             found.append(path)
         elif stat.S_ISDIR(info.st_mode) and entry.name not in ("tests", "test", "node_modules", "venv", ".venv"):
             for inner in _entries(path, 2000):
-                if inner.name.startswith((".", "__pycache__")):
+                if inner.name.startswith((".", "__pycache__")) or credential_file(inner.name):
                     continue
                 try:
                     kind = inner.stat(follow_symlinks=False).st_mode
@@ -865,23 +958,44 @@ def code_hooks(folder: Path, budget: dict | None = None) -> dict | None:
     and helpers called with ("hook", f) are both read; `f` is looked up in every file of the plugin (an imported
     function too). None when the scan's source budget is spent: nothing is concluded from this plugin's code."""
     budget = budget if budget is not None else {"left": SOURCE_SCAN_BYTES}
-    texts, read, skipped = [], 0, False
+    files, fresh, read, skipped = [], {}, 0, False
     for path in _python_files(folder):
-        text = read_text(path, SOURCE_FILE_BYTES)
-        if text is None:
-            skipped = True   # too large or not a regular file: what it registers is unknown
-            continue
-        read += len(text)
+        stamp, known = _source_digest(path)
+        if known is None:
+            text = read_text(path, SOURCE_FILE_BYTES)
+            if text is None:
+                skipped = True   # too large or not a regular file: what it registers is unknown
+                continue
+            known = _remember_source(path, stamp, text)
+            fresh[path] = text
+        read += known[1]
         if read > SOURCE_READ_BYTES:
             skipped = True
             break
-        texts.append((path.relative_to(folder).as_posix(), text))
-    key = hashlib.sha256(repr((skipped, texts)).encode("utf-8", "surrogatepass")).hexdigest()
+        files.append((path, path.relative_to(folder).as_posix(), known[0]))
+    # the key is the content (each file's digest), never the folder: the same copy in every profile is one entry
+    key = hashlib.sha256(repr((skipped, [(name, digest) for _path, name, digest in files])).encode(
+        "utf-8", "surrogatepass")).hexdigest()
     memo = budget.setdefault("memo", {})
     if key in memo:   # the same plugin in another profile: read once, and no budget spent again
-        return memo[key]
+        return _hooks_copy(memo[key])
     if budget["left"] <= 0:
         return None
+    parsed = _HOOKS.get(key)
+    if parsed is not None:   # read by an earlier scan: its budget is spent as then, so warm and cold agree
+        result, used = parsed
+        budget["left"] -= used
+        memo[key] = result
+        return _hooks_copy(result)
+    texts, changed = [], False
+    for path, name, _digest in files:
+        text = fresh.get(path)
+        if text is None:
+            text = read_text(path, SOURCE_FILE_BYTES)
+            if text is None:   # gone or grown since its stamp was read: this answer is not the key's
+                skipped = changed = True
+                continue
+        texts.append((name, text))
     # Parse only what matters: the files that register hooks, then the files that define the functions they register
     # (and the module-level constants beside them). Text search first; `ast` only on those files.
     registering = [(name, text) for name, text in texts if "hook" in text and "register" in text]
@@ -955,7 +1069,43 @@ def code_hooks(folder: Path, budget: dict | None = None) -> dict | None:
     if skipped and not result:
         result = {"_unread": {"scope": "unknown", "tools": [], "rewrites": False}}
     memo[key] = result
-    return result
+    if not changed:
+        _HOOKS.put(key, (result, used))
+    return _hooks_copy(result)
+
+
+# a plugin's source, read once per process and not again while it is the same: .py path -> (stamp, digest, length),
+# and content key -> (code_hooks result, bytes parsed). One entry per distinct copy, not per profile.
+_SOURCES = _Recent(20_000, keep_first=True)
+_HOOKS = _Recent(PLUGIN_MAX * 4)
+
+
+def _source_digest(path: Path) -> tuple[bytes | None, tuple[str, int] | None]:
+    """(stamp, (digest, length)) of a plugin's .py file, the second from _SOURCES while the stamp is the same, else
+    None: the file must be read. The stamp is taken before any read, so a change during it is seen next time."""
+    try:
+        info = os.lstat(path)
+    except (OSError, ValueError):
+        return None, None
+    stamp = _stamp(info) if stat.S_ISREG(info.st_mode) and info.st_size <= SOURCE_FILE_BYTES else None
+    cached = _SOURCES.get(os.fspath(path))
+    if cached is None or stamp is None or cached[0] != stamp:
+        return stamp, None
+    return stamp, (cached[1], cached[2])
+
+
+def _remember_source(path: Path, stamp: bytes | None, text: str) -> tuple[str, int]:
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+    if stamp is None:
+        _SOURCES.pop(os.fspath(path))
+    else:
+        _SOURCES.put(os.fspath(path), (stamp, digest, len(text)))
+    return digest, len(text)
+
+
+def _hooks_copy(result: dict) -> dict:
+    """A remembered result handed out: the caller's to keep, the memo's never changed through it."""
+    return {hook: {**entry, "tools": list(entry.get("tools") or ())} for hook, entry in result.items()}
 
 
 def overlap(first: dict | None, later: dict | None) -> tuple[str, list[str]]:
@@ -1009,6 +1159,8 @@ def _plugins_of(home: Path, enabled, disabled, bundled: Path | None, *, now: flo
         if origin == "profile" and not _is_dir(base):
             continue
         for entry in _entries(base, PLUGIN_MAX * 3):
+            if credential_file(entry.name):   # a credential file beside the plugins: never looked at
+                continue
             path = Path(entry.path)
             if origin == "profile" and _LEFTOVER.fullmatch(entry.name):
                 if not _is_dir(path):
@@ -1094,51 +1246,120 @@ def _bundled(base: Path) -> set[str]:
     return {line.split(":", 1)[0].strip() for line in text.splitlines() if line.strip()}
 
 
+_SKIP_FOLDERS = frozenset(("node_modules", "venv", "__pycache__", "dist", "build"))
+_DIR, _FILE, _OTHER = 1, 2, 0
+_NOTHING: tuple = ((), b"")
+_LEAF: tuple = (("SKILL.md",), bytes((_FILE,)))
+# skills/ of a profile -> {folder under it: (stamp, names, kinds)} as its last walk listed them, _FOLDERS_KEPT folders
+# at most in all (past that, a profile's tree is listed each time). A folder whose stamp
+# is the same lists the same entries (adding, removing or renaming one changes its mtime), so an unchanged tree is
+# walked with one lstat per folder and no listing; each walk keeps only the folders it went through.
+_TREES = _Recent(_FOLDERS_KEPT, weight=len, keep_first=True)
+
+
+def _listing(folder: str, key: str, before: dict, after: dict, limit: int) -> tuple[tuple, bytes]:
+    """(names, kinds) of a real folder's entries as _entries gives them (safe names, the first `limit`, by name),
+    from `before` while the folder's stamp is the same; what can be kept goes to `after`. A link or anything but a
+    folder lists nothing."""
+    try:
+        info = os.lstat(folder)
+    except (OSError, ValueError):
+        return _NOTHING
+    if not stat.S_ISDIR(info.st_mode):
+        return _NOTHING
+    stamp = _stamp(info)
+    cached = before.get(key)
+    if cached is not None and stamp is not None and cached[0] == stamp:
+        after[key] = cached
+        return cached[1], cached[2]
+    items, intern = [], sys.intern
+    try:
+        with os.scandir(folder) as found:
+            for entry in found:
+                if not safe_name(entry.name):
+                    continue
+                try:   # the type of the entry itself (d_type where the system gives it): a link is neither; what
+                    # the walk skips by name (hidden, a credential file) is never looked at
+                    kind = _OTHER if entry.name.startswith(".") or credential_file(entry.name) else (
+                        _DIR if entry.is_dir(follow_symlinks=False) else
+                        _FILE if entry.is_file(follow_symlinks=False) else _OTHER)
+                except OSError:
+                    kind = _OTHER
+                items.append((intern(entry.name), kind))
+                if len(items) >= limit:
+                    break
+    except OSError:
+        return _NOTHING
+    items.sort()
+    names, kinds = tuple(name for name, _kind in items), bytes(kind for _name, kind in items)
+    if (names, kinds) == _LEAF:   # most folders of a skills tree: one shared listing, not one each
+        names, kinds = _LEAF
+    if stamp is not None:
+        after[key] = (stamp, names, kinds)
+    return names, kinds
+
+
+def _path_order(path: str) -> list[str]:
+    """The order of Path objects (by parts, case-folded where the system ignores case), for plain strings."""
+    return os.path.normcase(path).split(os.sep)
+
+
+def _skill_paths(base: str) -> list[str]:
+    """_skill_files as plain strings (no Path built per entry), in the same order."""
+    found, seen = [], 0
+    before, after = _TREES.get(base) or {}, {}
+    stack = [(base, "", 0)]
+    join = os.path.join
+    while stack and seen < SKILL_WALK_MAX and len(found) < SKILL_MAX:
+        folder, key, depth = stack.pop()
+        names, kinds = _listing(folder, key, before, after, 5000)
+        for name, kind in zip(names, kinds):
+            seen += 1
+            if name.startswith("."):
+                continue
+            if kind == _DIR and depth < 5 and name not in _SKIP_FOLDERS:
+                stack.append((join(folder, name), f"{key}/{name}" if key else name, depth + 1))
+            elif kind == _FILE and name == "SKILL.md" and depth > 0:
+                found.append(join(folder, name))
+    _TREES.put(base, after)
+    found.sort(key=_path_order)
+    return found
+
+
 def _skill_files(base: Path) -> list[Path]:
     """SKILL.md files under skills/, at most 5 folders deep, hidden folders (.archive, .hub) and links left out."""
-    found, seen = [], 0
-    stack = [(base, 0)]
-    while stack and seen < SKILL_WALK_MAX and len(found) < SKILL_MAX:
-        folder, depth = stack.pop()
-        for entry in _entries(folder, 5000):
-            seen += 1
-            if entry.name.startswith("."):
-                continue
-            try:
-                info = entry.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            if stat.S_ISDIR(info.st_mode) and depth < 5 and entry.name not in ("node_modules", "venv", "__pycache__", "dist", "build"):
-                stack.append((Path(entry.path), depth + 1))
-            elif stat.S_ISREG(info.st_mode) and entry.name == "SKILL.md" and depth > 0:
-                found.append(Path(entry.path))
-    return sorted(found)
+    return [Path(path) for path in _skill_paths(os.fspath(base))]
 
 
-_SKILL_CACHE: dict[str, tuple] = {}
-_SKILL_CACHE_MAX = 20_000
+# SKILL.md path -> (stamp, name, description, sha, body sha), at most SKILLS_KEPT (about 0.7 KB each). When full it
+# keeps the skills it has and caches no more: a scan reads in the same order each time, so the first SKILLS_KEPT stay
+# found (an LRU, or a cache cleared when full as up to 0.12.0, read in a cycle larger than itself keeps nothing).
+# A whole scan trims it to what it read.
+_SKILL_CACHE = _Recent(SKILLS_KEPT, keep_first=True)
 
 
-def _skill_text(path: Path) -> tuple[str, str, str, str] | None:
-    """(name, description, sha, body sha) of a SKILL.md, from the cache while its size and change time are the same."""
+def _skill_text(path: Path | str) -> tuple[str, str, str, str] | None:
+    """(name, description, sha, body sha) of a SKILL.md, from the cache while its stamp is the same."""
+    key = os.fspath(path)
     try:
-        info = os.lstat(path)
-    except OSError:
+        info = os.lstat(key)
+    except (OSError, ValueError):
         return None
-    key, stamp = os.fspath(path), (info.st_size, info.st_mtime_ns, getattr(info, "st_ino", 0))
+    stamp = _stamp(info)
     cached = _SKILL_CACHE.get(key)
-    if cached is not None and cached[0] == stamp:
-        return cached[1]
-    text = read_text(path, 256 * 1024)
+    if cached is not None and stamp is not None and cached[0] == stamp:
+        return cached[1:]
+    text = read_text(key, 256 * 1024)
     if text is None:
-        _SKILL_CACHE.pop(key, None)
+        _SKILL_CACHE.pop(key)
         return None
     name, description, body = _front(text)
     parsed = (name, description, hashlib.sha256(text.encode()).hexdigest()[:16],
               hashlib.sha256(body.strip().encode()).hexdigest()[:16])
-    if len(_SKILL_CACHE) >= _SKILL_CACHE_MAX:
-        _SKILL_CACHE.clear()   # bounded: a gateway that looked at a huge Hermes once does not keep it all
-    _SKILL_CACHE[key] = (stamp, parsed)
+    if stamp is None:
+        _SKILL_CACHE.pop(key)
+    else:
+        _SKILL_CACHE.put(key, (stamp, *parsed))
     return parsed
 
 
@@ -1153,14 +1374,18 @@ def _skills_of(home: Path) -> list[dict]:
         usage = {}
     usage = usage if isinstance(usage, dict) else {}
     found = []
-    for path in _skill_files(base):
+    root = os.fspath(base)
+    cut, dirname, basename = len(root) + 1, os.path.dirname, os.path.basename
+    for path in _skill_paths(root):
         parsed = _skill_text(path)
         if parsed is None:
             continue
         name, description, sha, body_sha = parsed
-        folder = path.parent.name
+        parent = dirname(path)
+        folder = basename(parent)
+        relative = parent[cut:] if os.sep == "/" else parent[cut:].replace(os.sep, "/")
         record = usage.get(folder) if isinstance(usage.get(folder), dict) else {}
-        found.append({"folder": folder, "path": path.parent.relative_to(base).as_posix(), "name": name or folder,
+        found.append({"folder": folder, "path": relative, "name": name or folder,
                       "description": description, "sha": sha, "body_sha": body_sha,
                       "last_used": _iso(record.get("last_used_at")), "created": _iso(record.get("created_at")),
                       "uses": record.get("use_count") if type(record.get("use_count")) is int else 0,
@@ -1188,9 +1413,9 @@ def _own_transform(home: Path, config) -> bool:
 def _created(home: Path) -> float | None:
     """When a profile folder was made, as near as the system tells (Hermes records no creation date): its birth time
     where the file system keeps one (macOS, Windows, BSD), else the oldest change time (ctime) of the folder and of
-    what lies directly in it. A copy keeps a file's modification time (`hermes profile create --clone` copies
-    config.yaml, .env and SOUL.md) but never its change time, so a profile made minutes ago never looks old. None when
-    the folder cannot be read."""
+    what lies directly in it (a credential file left out, never looked at). A copy keeps a file's modification time
+    (`hermes profile create --clone` copies config.yaml, .env and SOUL.md) but never its change time, so a profile made
+    minutes ago never looks old. None when the folder cannot be read."""
     try:
         info = os.lstat(home)
     except (OSError, ValueError):
@@ -1200,6 +1425,8 @@ def _created(home: Path) -> float | None:
         return float(birth)
     oldest = info.st_ctime
     for entry in _entries(Path(home), 2000):
+        if credential_file(entry.name):
+            continue
         try:
             oldest = min(oldest, entry.stat(follow_symlinks=False).st_ctime)
         except OSError:
@@ -1246,6 +1473,8 @@ def scan(root: Path, *, now: float | None = None, read_config=None, bundled: Pat
     if sessions is None:
         from .status import _sessions as sessions
     rows, budget = [], {"left": SOURCE_SCAN_BYTES}
+    caches = (_TREES, _SKILL_CACHE, _SOURCES, _HOOKS)
+    started = [cache.touched for cache in caches]
     for name, home in profiles(root):
         if only is not None and name != only:
             continue
@@ -1253,6 +1482,9 @@ def scan(root: Path, *, now: float | None = None, read_config=None, bundled: Pat
             raise ScanTimeout(name)
         rows.append(scan_profile(name, home, now=now, read_config=read_config, bundled=bundled, sessions=sessions,
                                  budget=budget))
+    if only is None:   # the whole Hermes was read: what it did not use (a skill, a plugin gone since) is let go
+        for cache, mark in zip(caches, started):
+            cache.trim(cache.touched - mark)
     return {"at": now, "root": str(root), "profiles": rows, "complete": budget["left"] > 0}
 
 
@@ -1325,9 +1557,17 @@ def _newer(candidate: str, current: str) -> bool:
         return False
 
 
+def _self_install(source: list | None) -> str:
+    """`plugins install …` for this plugin in another profile: the code the lead runs (fleet_update.source: its catalog
+    name, or this repository at its commit), else the catalog name."""
+    if source and len(source) == 3:
+        return f"plugins install {source[0]} --enable {source[1]} {source[2]}"
+    return f"plugins install {(source or [PLUGIN_ID])[0]} --enable"
+
+
 def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet: dict | None = None,
-                     self_sha: str = "") -> list[dict]:
-    """The situations of one profile."""
+                     self_sha: str = "", self_source: list | None = None) -> list[dict]:
+    """The situations of one profile. `self_source`: fleet_update.source() of the lead."""
     from .ecosystem import obsolete, removed_reason
 
     notes = known.get("plugins") or {}
@@ -1443,12 +1683,12 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
                                   evidence={"sessions_7d": row["sessions_7d"], "disabled": row["self_disabled"],
                                             "installed": row["self_installed"]},
                                   command=_cmd(profile, f"plugins enable {PLUGIN_ID}" if row["self_installed"]
-                                               else f"plugins install {REPOSITORY} --enable")))
+                                               else _self_install(self_source))))
         else:
-            # never `--ref`: Hermes pins an install made with one, and every later `plugins update` there fails
+            # the code the lead runs: its catalog name (the reviewed pin) or this repository at the lead's commit
             found.append(_finding("self_missing", profile, PLUGIN_ID, risk="low",
                                   evidence={"sessions_7d": row["sessions_7d"]},
-                                  command=_cmd(profile, f"plugins install {REPOSITORY} --enable")))
+                                  command=_cmd(profile, _self_install(self_source))))
     # unused for 30 days only when it is at least that old: a profile made minutes ago has had no session yet (a row
     # stored by an older version has no date: as before); a date that cannot be read says nothing
     created = row.get("created", 0)
@@ -1494,13 +1734,13 @@ SELF_URL = f"https://github.com/{REPOSITORY}.git"
 def _bring_current(profile: str, pinned: bool, sha: str = "") -> str:
     """The command that brings this plugin's copy in `profile` to current code. Hermes keeps a pin when a plugin is
     installed again without --ref (it reinstalls the pinned commit) and `plugins update` refuses a pinned copy, so a
-    pin moves with `--ref <commit>`: the lead's own commit when known, else the plugin's own update, which reads the
-    repository's latest one."""
+    pin moves with `--ref <commit>`: the lead's own commit when known (the code the owner runs there, never one the
+    plugin picks), else `hermes evolution update`, which does the same from the profile it runs in."""
     if pinned:
         if _SHA.fullmatch(sha or ""):
             return _cmd(profile, f"plugins install {SELF_URL} --force --ref {sha}")
         return f"hermes evolution update --profiles {profile}"
-    return _cmd(profile, f"plugins update {PLUGIN_ID} --force")
+    return _cmd(profile, f"plugins update {PLUGIN_ID}")
 
 
 def _update_command(name: str, item: dict) -> str:
@@ -1536,7 +1776,7 @@ def _self_drift(reading: dict, self_sha: str, *, already=()) -> list[dict]:
 
 
 def findings(reading: dict, catalog: dict, known: dict, *, now: float | None = None, fleet: dict | None = None,
-             self_sha: str = "") -> list[dict]:
+             self_sha: str = "", self_source: list | None = None) -> list[dict]:
     """The situations of the playbook found in a scan, most important first."""
     from .ecosystem import lookup
 
@@ -1545,7 +1785,7 @@ def findings(reading: dict, catalog: dict, known: dict, *, now: float | None = N
     copies: dict[str, set[str]] = {}
     updates: dict[str, dict] = {}
     for row in reading.get("profiles") or ():
-        found += profile_findings(row, catalog, known, now=now, fleet=fleet, self_sha=self_sha)
+        found += profile_findings(row, catalog, known, now=now, fleet=fleet, self_sha=self_sha, self_source=self_source)
         for item in row["skills"]:
             if item["state"] == "active" and not item.get("bundled"):
                 copies.setdefault(item["sha"], set()).add(row["profile"])
@@ -1649,7 +1889,10 @@ def refresh(home: Path, *, now: float, force: bool = False, read_config=None, de
     remember(root, seen=seen)
     catalog = load_catalog([Path(row["home"]) for row in reading["profiles"]])
     known = knowledge()
-    found = findings(reading, catalog, known, now=now, fleet=state(root), self_sha=self_sha(home))
+    from .fleet_update import source
+
+    found = findings(reading, catalog, known, now=now, fleet=state(root), self_sha=self_sha(home),
+                     self_source=source(home))
     doctor_seen = _doctor(home, reading, found, now=now, deadline=deadline, force=force)
     tiers: dict[str, int] = {}
     for entry in catalog["entries"].values():
@@ -1737,8 +1980,10 @@ def verify(home: Path, proposal: dict, *, now: float | None = None, read_config=
         return None
     row = reading["profiles"][0]
     # the kill list is read per profile by removed_reason; the catalog's entries matter only for update advice
+    from .fleet_update import source
+
     fresh = profile_findings(row, {"entries": {}, "removed": []}, knowledge(), now=now, fleet=state(root),
-                             self_sha=self_sha(home))
+                             self_sha=self_sha(home), self_source=source(home))
     return next((item for item in fresh if item["code"] == proposal.get("code")), None)
 
 

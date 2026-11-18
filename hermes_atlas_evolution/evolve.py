@@ -22,7 +22,7 @@ CONFIG_UNREAD = "_atlas_evolution_config_unread"
 
 DEFAULTS = {"lessons": "auto", "tool_hints": False, "feedback_signals": True, "language": "auto",
             "slow_turn_seconds": 60, "owner_sender_ids": (), "owner_platforms": (), "reflector": True, "reflector_daily_limit": 6,
-            "autopilot_minutes": 60, "runtime_guard": True, "mode": "auto", "fleet_managed": True}
+            "autopilot_minutes": 60, "runtime_guard": True, "mode": "assist", "fleet_managed": True}
 # The 0.8.3 setting `auto_actions` maps on the mode when `mode` is not set (an owner who chose it keeps it).
 LEGACY_ACTIONS = {"off": "manual", "safe": "assist", "full": "auto"}
 MODE_ACTIONS = {"auto": "full", "assist": "safe", "manual": "off"}
@@ -83,9 +83,10 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
     autopilot = checked("autopilot_minutes", _whole(raw.get("autopilot_minutes", DEFAULTS["autopilot_minutes"])),
                         lambda value: type(value) is int and (value == 0 or 15 <= value <= 1440),
                         "evolution.autopilot_minutes must be 0 (manual only) or an integer from 15 to 1440", 0)
-    # The operating mode. auto (default): the plugin looks at every profile of this Hermes and applies by itself
-    # what is safe and reversible, the rest waits for you; assist: only identical memory copies by itself, everything
-    # else waits; manual: it only measures and proposes. An invalid value means manual: nothing runs by itself.
+    # The operating mode. assist (the default since 0.13.0): only identical memory copies by itself, everything else
+    # waits for the owner; auto (the owner's choice): the plugin looks at every profile of this Hermes and applies by
+    # itself what is safe and reversible, the rest waits; manual: it only measures and proposes. An invalid value means
+    # manual: nothing runs by itself.
     if "mode" in raw:
         chosen = raw.get("mode")
     elif "auto_actions" in raw:
@@ -131,6 +132,16 @@ def _fleet_managed(raw: dict, runtime_config, home, unread: bool) -> bool:
     return not (unread or value.strip().lower() in _OFF_WORDS)
 
 
+class Cancelled(Exception):
+    """The pass was told to stop at a safe point (`cancelled`: the plugin unloaded, or another process holds the pass
+    now that its lease ran out). Each phase before it was committed whole, and the next pass does them all again."""
+
+
+def _stop_if(cancelled) -> None:
+    if cancelled is not None and cancelled():
+        raise Cancelled()
+
+
 def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None,
           strict: bool = True, backfill_budget_s: float = 20.0, deadline: float | None = None, cancelled=None,
           reflector_reload: bool = False) -> dict:
@@ -140,7 +151,9 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     `reflector_reload`: inside Hermes, the plugin loaded with the reflector off, so its model access exists only
     after the next load (the reflector's status says so instead of "not available outside Hermes").
     `strict=False` (the autopilot) lets each invalid setting fall back safely instead of failing the pass.
-    Until it is done, each pass first replays up to `backfill_budget_s` seconds of Hermes' own history."""
+    Until it is done, each pass first replays up to `backfill_budget_s` seconds of Hermes' own history.
+    `cancelled()` is asked between phases (and inside the replay): when it says so, the pass raises Cancelled there,
+    after the last phase committed whole, and leaves the rest to the next pass."""
     from . import backfill
     from .operations import _prune as prune_all, database
 
@@ -155,7 +168,9 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     history = backfill.step(home, now=now, budget_s=budget, owner_sender_ids=opts["owner_sender_ids"],
                             owner_platforms=opts["owner_platforms"], owner_known=owner_known, cancelled=cancelled,
                             sample=opts["reflector"] and opts["lessons"] != "off", slow_ms=opts["slow_turn_seconds"] * 1000)
+    _stop_if(cancelled)
     fleet = _environment(home, now=now, runtime_config=runtime_config, deadline=deadline)
+    _stop_if(cancelled)
     with experience(home) as conn:
         # Short transactions: hook writers of a running gateway share this database, so no phase keeps the
         # write lock while it reads files or waits for a model.
@@ -173,6 +188,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         # Only once the history is replayed: while it is, failure totals are still being counted (or recounted).
         withdrawn = lessons.tidy(conn, now=now) if history.get("status") in backfill.SETTLED else 0
         conn.commit()
+        _stop_if(cancelled)
         if not opts["reflector"]:
             conn.execute("DELETE FROM failure_sample")   # nothing waits for a reflector that is off
             reflection = {"status": "off"}
@@ -188,11 +204,13 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             reflection = reflector.reflect(conn, reflect, now=now, lang=opts["language"],
                                            daily_limit=opts["reflector_daily_limit"], deadline=deadline)
         conn.commit()
+        _stop_if(cancelled)
         # Baselines wait for history the backfill has not settled yet: still replaying ("running"), before the mark
         # ("waiting"), or a pass that could not read it ("unreadable"), so none is frozen from part of the history.
         pending = backfill.replay_until(home) if history.get("status") not in backfill.SETTLED else None
         effects = lessons.evaluate(conn, now=now, mode=opts["lessons"], history_until=pending)
         conn.commit()   # the skill files and the Curator ledger are read with no write lock held
+        _stop_if(cancelled)
         skills = skill_health(home, now=now, days=7)
         detected = experiments.detect_changes(conn, home, runtime_config, now=now)
         conn.commit()
@@ -202,6 +220,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         except (sqlite3.Error, ValueError, OSError):
             verdicts = experiments.evaluate_changes(conn, None, now=now)
         conn.commit()
+        _stop_if(cancelled)
         # Every recurring failure that could warrant an investigation, not only the week's most frequent ones: a
         # proposal must not expire and come back as the ranking moves.
         failures = proposals.investigate_candidates(conn, now=now, days=7)
@@ -222,6 +241,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
 
         recover(conn)   # before the refresh: a claim the loop did not write itself expires there
         conn.commit()   # Hermes' state.db is read with no write lock held on this database
+        _stop_if(cancelled)
         reading = radar.scan(home, conn, now=now, own_transform=opts["tool_hints"] and opts["lessons"] != "off")
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
                                     changes=verdicts, outcomes=outcomes,
@@ -231,8 +251,10 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in fresh]
     from . import actions
 
+    _stop_if(cancelled)
     automatic = actions.automatic(home, now=now, mode=opts["auto_actions"], runtime_config=runtime_config, usage=usage,
                                   deadline=deadline)
+    _stop_if(cancelled)
     care = _daily_checks(home, now=now, deadline=deadline)
     index = None
     try:   # after the health checks: today's index counts what they found
@@ -271,26 +293,32 @@ def _environment(home: Path, *, now: float, runtime_config=None, deadline: float
         return None
 
 
+# What a pass must have left to start the daily checks: Hermes' (hermes_care.CHECK_BUDGET_SECONDS at most) and then
+# the system's, each within the pass' deadline; with less they wait for the next pass.
+DAILY_CHECKS_SECONDS = 300
+
+
 def _daily_checks(home: Path, *, now: float, deadline: float | None) -> dict:
     """Hermes' own health (hermes_care, every 6 hours) and the operating system's (system_update, daily): read-only,
-    no model, no network; their findings go to `status` and the menu. Never fails the pass."""
+    no model, no network; their findings go to `status` and the menu. Both end by the pass' `deadline`. Never fails
+    the pass."""
     import time as _time
 
     from . import hermes_care, system_update
 
     found: dict = {}
-    if deadline is not None and deadline - _time.monotonic() < 30:
+    if deadline is not None and deadline - _time.monotonic() < DAILY_CHECKS_SECONDS:
         return found
     # Only for a profile Hermes set up (a scratch folder has no config.yaml).
     if not (Path(home) / "config.yaml").exists():
         return found
     try:
         with experience(home) as conn:
-            care = hermes_care.cached(conn, home, now=now)
+            care = hermes_care.cached(conn, home, now=now, deadline=deadline)
             found["hermes"] = care.get("findings") if isinstance(care, dict) else None
         if Path("/etc/os-release").exists():
             with experience(home) as conn:
-                system = system_update.cached(conn, home, now=now)
+                system = system_update.cached(conn, home, now=now, deadline=deadline)
                 found["system"] = system.get("findings") if isinstance(system, dict) else None
     except (OSError, ValueError, sqlite3.Error, RecursionError) as error:
         found["error"] = type(error).__name__
@@ -305,9 +333,8 @@ def notify_view(result: dict) -> dict | None:
     urgent = [item for item in result["open_proposals"] if item["risk"] == "high" and item["created"] == result.get("now")]
     drafts = result.get("reflector", {}).get("drafted") or []
     automatic = result.get("automatic") or {}
-    synced = automatic.get("plugin_sync") or {}
-    acted = automatic.get("applied") or automatic.get("memory") or automatic.get("failed") or synced.get("synced") \
-        or synced.get("failed") or automatic.get("gateway_repair")
+    acted = automatic.get("applied") or automatic.get("memory") or automatic.get("failed") \
+        or automatic.get("gateway_repair")
     spiking = result.get("failure_spikes") or []   # set by the caller (insights.untold_spikes): each told once a day
     if not (result["new_lessons"] or regressions or retired or urgent or drafts or acted or spiking):
         return None
@@ -327,7 +354,7 @@ def digest_schedule_spec(home: Path, *, weekday: int = 1, hour: int = 8, days: i
     import shlex
 
     from .i18n import text
-    from .admin import _profile_args
+    from .admin import UNSAFE_ENV, _profile_args
 
     if type(weekday) is not int or not 0 <= weekday <= 6 or type(hour) is not int or not 0 <= hour <= 23:
         raise ValueError("Use a weekday from 0 (Sunday) to 6 and an hour from 0 to 23")
@@ -346,16 +373,18 @@ import subprocess
 launcher = shutil.which("hermes")
 if not launcher:
     raise SystemExit({text("Hermes CLI is not on the scheduler PATH.", lang)!r})
+# the scheduler's environment, without any approval bypass it may carry (--yolo, auto-approve)
+env = {{key: value for key, value in os.environ.items() if key.upper() not in {tuple(UNSAFE_ENV)!r}}}
+env["HERMES_HOME"] = {str(profile)!r}
 try:   # a fresh pass first, best effort: the digest is delivered even when it fails or runs out of time. A plain
     # pass: nobody reads its output here, so it must not mark today's failure spikes as told
     subprocess.run([launcher, *{arguments[:-6] + ["evolution", "learn"]!r}],
-                   capture_output=True, text=True, env=dict(os.environ, HERMES_HOME={str(profile)!r}),
-                   encoding="utf-8", errors="replace", timeout=300, check=False)
+                   capture_output=True, text=True, env=env, encoding="utf-8", errors="replace", timeout=300,
+                   check=False)
 except (OSError, subprocess.TimeoutExpired):
     pass
 try:
-    result = subprocess.run([launcher, *{arguments!r}], capture_output=True, text=True,
-                            env=dict(os.environ, HERMES_HOME={str(profile)!r}),
+    result = subprocess.run([launcher, *{arguments!r}], capture_output=True, text=True, env=env,
                             encoding="utf-8", errors="replace", timeout=120, check=False)
     if result.returncode or len(result.stdout) > 65_536:
         raise SystemExit({text("Atlas Evolution digest failed. Run `hermes evolution report` in this profile to inspect.", lang)!r})

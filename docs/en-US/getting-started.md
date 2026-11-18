@@ -12,9 +12,18 @@ From nothing to a Hermes that learns from its mistakes, in about ten minutes.
 
 ## 2. Install
 
-Hermes loads plugins **per profile**. Pick one of the two ways.
+Hermes loads plugins **per profile**. Pick one of the ways below.
 
-**One profile** (the default one, or a named one with `-p`):
+**One profile, from the Hermes plugin catalog** (the reviewed version; for a named profile, add `-p <profile>`):
+
+```bash
+hermes plugins install hermes-atlas-evolution
+hermes plugins enable hermes-atlas-evolution
+hermes -p work plugins install hermes-atlas-evolution
+hermes -p work plugins enable hermes-atlas-evolution
+```
+
+**One profile, from GitHub** (it follows this repository instead of the catalog's reviewed pin):
 
 ```bash
 hermes plugins install sesantanajr/hermes-atlas-evolution --enable
@@ -25,11 +34,12 @@ hermes -p work plugins install sesantanajr/hermes-atlas-evolution --enable
 
 ```bash
 git clone https://github.com/sesantanajr/hermes-atlas-evolution.git
-sh hermes-atlas-evolution/install.sh --install-missing                # lists your profiles and asks which (Enter = all)
-sh hermes-atlas-evolution/install.sh --all --yes --install-missing    # every profile, no questions
+sh hermes-atlas-evolution/install.sh --install-missing                          # lists your profiles and asks which (Enter = all)
+sh hermes-atlas-evolution/install.sh --all --yes --install-missing              # every profile, from GitHub, no questions
+sh hermes-atlas-evolution/install.sh --all --yes --install-missing --catalog    # the same, from the Hermes plugin catalog
 ```
 
-`--install-missing` is what installs the plugin where it is not yet; without it the installer only updates the copies already there. It also takes `--profiles default,work` and `--restart` (restart the gateway at the end, after checking that its service can start).
+The installer only runs Hermes' own commands: `plugins update hermes-atlas-evolution` where the plugin is, and, with `--install-missing`, `plugins install` where it is not yet (from GitHub, or by catalog name with `--catalog`). A copy pinned to a commit is left as it is, with the command that moves it. It also takes `--profiles default,work` and `--restart` (restart the gateway at the end, after checking that its service can start).
 
 Installing loads the plugin into a running gateway: no restart is needed. The dashboard shows the **Evolution** tab once it reloads its plugins (restart the dashboard if the tab does not appear).
 
@@ -40,7 +50,7 @@ Every command names the profile it is for: `hermes -p default evolution …` for
 1. **Two minutes after loading**, the plugin's clock starts the first **learning pass** in the background. Want it now? Run `hermes -p <profile> evolution learn`.
 2. The first pass **replays up to 14 days** of the profile's history (sessions, tool calls, turns), so lessons and numbers do not start from zero.
 3. It reads **every profile** of this Hermes (plugins, skills, memory) and runs **Hermes' own doctor checks** offline.
-4. In **Auto mode** (the default) it already applies what is safe and reversible: an entry repeated in both memory files taken out, a skill the curator keeps rewriting locked, old tool versions freed, the plugin installed in other profiles in use and every copy kept on the same code, the gateway's service repaired when Hermes removed the Python it started. Everything goes to the history with its undo.
+4. In **Assist mode** (the default) it only takes out an entry repeated, word for word, in both memory files, after keeping a copy of the file. Everything else becomes a proposal that waits for you. In **Auto mode**, which you turn on, it also applies what is safe and reversible: a skill the curator keeps rewriting locked, old tool versions freed, failed install folders moved to its trash, the gateway's service repaired when Hermes removed the Python it started, and the plugin installed in other profiles in use (by itself only from the Hermes plugin catalog, by name). Everything goes to the history with its undo.
 
 Then look at it:
 
@@ -51,10 +61,10 @@ hermes -p <profile> evolution status   # one page: what needs attention, the Evo
 
 ## 4. Make it yours
 
-**Choose a mode.** Auto acts by itself on what is safe; Assist only removes an entry repeated, identical, in both memory files; Manual only measures and proposes.
+**Choose a mode.** Assist (the default) only removes an entry repeated, identical, in both memory files; Auto acts by itself on what is safe and can be undone, in every profile of this Hermes; Manual only measures and proposes.
 
 ```bash
-hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.mode assist
+hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.mode auto
 ```
 
 **Tell it who you are in chats.** Your CLI, TUI and Desktop always count as you. For Telegram, Discord or the API server, mark your sender id or a channel that is only yours, so your failures teach and your chats get every lesson:
@@ -79,9 +89,11 @@ hermes -p <profile> evolution schedule-digest --deliver telegram
 ## 6. Update and remove
 
 ```bash
-hermes -p <profile> evolution update --all      # this plugin in every profile (a pinned profile moves to the latest commit)
+hermes -p <profile> evolution update --all      # Hermes' own `plugins update` in every profile, this one first
 hermes gateway restart                          # once, to load the new code
 ```
+
+The plugin never updates itself: new code comes only from Hermes (`plugins update`, "Update all" in Desktop and the dashboard, or `plugins.auto_apply`). A copy Hermes pinned with `--ref` moves only to the commit of the profile you run `evolution update` in ([Updating](upgrading.md)).
 
 To remove it from a profile: `hermes -p <profile> plugins remove hermes-atlas-evolution`. Its data stays in `<profile home>/evolution/` until you delete that folder.
 

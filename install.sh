@@ -5,46 +5,46 @@
 #   sh install.sh --all --yes          # every profile, no questions
 #   sh install.sh --profiles default,work --install-missing
 #   sh install.sh --all --yes --restart
+#   sh install.sh --all --install-missing --catalog   # from the Hermes plugin catalog (the reviewed version)
 #
-# Remote, without cloning first:
-#   curl -fsSL https://raw.githubusercontent.com/sesantanajr/hermes-atlas-evolution/main/install.sh | sh -s -- --all --yes
-#
-# It only runs Hermes' own commands, one profile at a time:
-#   installed            -> hermes --profile <p> plugins update hermes-atlas-evolution --force
-#   pinned to a commit   -> hermes --profile <p> plugins install <url> --force --ref <latest commit>
-#                           (Hermes keeps a pin on a plain reinstall; --ref moves it to the latest commit)
-#   half-installed       -> hermes --profile <p> plugins install <url> --force
-#   missing (on request) -> hermes --profile <p> plugins install <url> --enable
-# A development link is never touched, nor a fork's pinned or half-installed copy; a failed update is installed
-# again only over a copy of this repository. A failure in one profile never stops the others. With --restart it
-# checks the gateway's service first (a service pointing at a Python that no longer exists cannot start) and only
-# then restarts it. Everything runs from main(), called on the last line: a download cut short runs nothing.
+# It only runs Hermes' own commands, one profile at a time, and never picks a commit itself:
+#   installed            -> hermes --profile <p> plugins update hermes-atlas-evolution
+#                           (Hermes decides: the catalog's reviewed pin, or a pull of the source you installed from)
+#   pinned to a commit   -> left as it is, with the command that moves it
+#   half-installed       -> hermes --profile <p> plugins install <source> --force
+#   missing (on request) -> hermes --profile <p> plugins install <source> --enable
+# <source> is this repository, or with --catalog the catalog name. A development link is never touched, nor a fork's
+# pinned or half-installed copy, and a failed update is reported, never followed by a reinstall. A failure in one
+# profile never stops the others. With --restart it checks the gateway's service first (a service pointing at a Python
+# that no longer exists cannot start) and only then restarts it. Everything runs from main(), called on the last line.
 set -u
 
 PLUGIN="hermes-atlas-evolution"
 URL="https://github.com/sesantanajr/hermes-atlas-evolution.git"
 OURS="github.com/sesantanajr/hermes-atlas-evolution"
-ALL=0; YES=0; MISSING=0; RESTART=0; PROFILES=""; LATEST=""
+ALL=0; YES=0; MISSING=0; RESTART=0; PROFILES=""; SOURCE="$URL"
 
 say() { printf '%s\n' "$*"; }
 err() { printf '%s\n' "$*" >&2; }
 usage() {
   case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in
     pt*|PT*)
-      say "Uso: sh install.sh [--all | --profiles a,b] [--install-missing] [--yes] [--restart]"
+      say "Uso: sh install.sh [--all | --profiles a,b] [--install-missing] [--catalog] [--yes] [--restart]"
       say "  --all              todos os perfis deste Hermes"
       say "  --profiles a,b     só estes perfis"
       say "                     (sem nenhum dos dois, pergunta no terminal quais; sem terminal, para)"
       say "  --install-missing  instala também onde o plugin ainda não está"
+      say "  --catalog          instala pelo catálogo de plugins do Hermes (a versão revisada), não pelo GitHub"
       say "  --yes              sem perguntas"
       say "  --restart          reinicia o gateway no fim (depois de conferir o serviço dele)"
       return ;;
   esac
-  say "Usage: sh install.sh [--all | --profiles a,b] [--install-missing] [--yes] [--restart]"
+  say "Usage: sh install.sh [--all | --profiles a,b] [--install-missing] [--catalog] [--yes] [--restart]"
   say "  --all              every profile of this Hermes"
   say "  --profiles a,b     only these profiles"
   say "                     (with neither, it asks on the terminal which ones; without a terminal it stops)"
   say "  --install-missing  also install where the plugin is missing"
+  say "  --catalog          install from the Hermes plugin catalog (the reviewed version), not from GitHub"
   say "  --yes              no questions"
   say "  --restart          restart the gateway at the end (after checking its service)"
 }
@@ -63,7 +63,8 @@ home_of() { if [ "$1" = default ]; then printf '%s' "$ROOT"; else printf '%s/pro
 is_profile() {   # a folder under profiles/ that Hermes lists: an identity file, no tombstone (profile delete)
   [ -d "$1" ] && [ ! -L "$1" ] || return 1
   [ -e "$ROOT/profiles/.deleted/$(basename "$1")" ] && return 1
-  for marker in config.yaml .env SOUL.md profile.yaml auth.json state.db; do
+  # Hermes' identity files without .env and auth.json: a credential file is never touched, not even tested for
+  for marker in config.yaml SOUL.md profile.yaml state.db; do
     if [ -f "$1/$marker" ] || [ -L "$1/$marker" ]; then return 0; fi
   done
   return 1
@@ -114,6 +115,8 @@ record_of() {
 
 pinned_of() {   # the commit the profile is pinned to ("pinned" when the record names none), empty when not pinned
   rec="$(record_of "$1")"
+  # a catalog install sits on the catalog's reviewed pin, and `plugins update` moves it: never "pinned" here
+  printf '%s' "$rec" | grep -Eq '"catalog"[[:space:]]*:[[:space:]]*\{' && return 0
   printf '%s' "$rec" | grep -Eq '"pinned"[[:space:]]*:[[:space:]]*true' || return 0
   sha="$(printf '%s' "$rec" | sed -n 's/.*"revision"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p')"
   printf '%s' "${sha:-pinned}"
@@ -150,27 +153,14 @@ state_of() {   # linked | broken | pinned | installed | missing
 }
 
 run_in() {   # profile, args...: always that profile's own home and name, whatever HERMES_HOME the shell has
+  # never with an approval bypass the calling shell may carry (the plugin's own children drop the same ones)
   profile="$1"; shift
-  (unset HERMES_PROFILE; HERMES_HOME="$(home_of "$profile")"; export HERMES_HOME
+  (unset HERMES_PROFILE HERMES_YOLO_MODE HERMES_YOLO HERMES_ACP_AUTO_APPROVE HERMES_ACCEPT_HOOKS HERMES_TUI_NO_CONFIRM \
+     CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS
+   HERMES_HOME="$(home_of "$profile")"; export HERMES_HOME
    exec "$HERMES" --profile "$profile" "$@" </dev/null)
 }
 
-read_latest() {   # the repository's latest commit (git ls-remote), empty when it cannot be read
-  GIT_TERMINAL_PROMPT=0 git ls-remote "$URL" HEAD 2>/dev/null |
-    awk '$2 == "HEAD" && $1 ~ /^[0-9a-f]+$/ && length($1) == 40 { print $1; exit }'
-}
-
-move_pin() {   # profile: move a pinned install to the latest commit (Hermes' own way: --force --ref <sha>)
-  if [ -z "$LATEST" ]; then
-    err "   pinned, and the repository's latest commit could not be read (network or git): left as it is"
-    return 1
-  fi
-  if [ "$(pinned_of "$1")" = "$LATEST" ] && [ -f "$(home_of "$1")/plugins/$PLUGIN/plugin.yaml" ]; then
-    say "   already on the latest commit ($(printf '%s' "$LATEST" | cut -c1-8))"
-    return 0
-  fi
-  run_in "$1" plugins install "$URL" --force --ref "$LATEST"
-}
 
 gateway_exec_ok() {
   command -v systemctl >/dev/null 2>&1 || return 0
@@ -199,6 +189,7 @@ main() {
       --yes|-y) YES=1 ;;
       --install-missing) MISSING=1 ;;
       --restart) RESTART=1 ;;
+      --catalog) SOURCE="$PLUGIN" ;;
       --profiles)
         [ $# -ge 2 ] || { err "--profiles needs a value, e.g. --profiles default,work"; exit 2; }
         shift; PROFILES="$1" ;;
@@ -282,12 +273,6 @@ Profiles to update (Enter = all, e.g. 1,3 or default,work; q = quit): "; then
   fi
 
   # ---- run ------------------------------------------------------------------------------------------------
-  # The repository's latest commit, read once, here, before any profile: a pinned profile moves to it, and every
-  # profile gets the very same commit (read inside each command it changed between calls, or came back empty).
-  for name in $CHOSEN; do
-    if [ -n "$(pinned_of "$name")" ]; then LATEST="$(read_latest)"; break; fi
-  done
-
   OK=0; FAILED=""
   for name in $CHOSEN; do
     state="$(state_of "$name")"
@@ -299,27 +284,19 @@ Profiles to update (Enter = all, e.g. 1,3 or default,work; q = quit): "; then
         say "   development link: left as it is"; continue ;;
       missing)
         if [ "$MISSING" -ne 1 ]; then say "   not installed: skipped (use --install-missing)"; continue; fi
-        if [ -n "$(pinned_of "$name")" ] && [ -n "$LATEST" ]; then
-          run_in "$name" plugins install "$URL" --enable --ref "$LATEST" || status=$?
-        else
-          run_in "$name" plugins install "$URL" --enable || status=$?
-        fi ;;
-      pinned|broken)
+        run_in "$name" plugins install "$SOURCE" --enable || status=$? ;;
+      pinned)
+        say "   pinned to $(pinned_of "$name" | cut -c1-12) by Hermes: left as it is. To move it:"
+        say "   hermes -p $name plugins install $URL --force --ref <40-character commit>"
+        continue ;;
+      broken)
         if [ "$origin" = other ]; then
           say "   a copy from a fork or another repository: left as it is"; continue
         fi
-        if [ -n "$(pinned_of "$name")" ]; then move_pin "$name" || status=$?
-        else run_in "$name" plugins install "$URL" --force || status=$?; fi ;;
+        run_in "$name" plugins install "$SOURCE" --force || status=$? ;;
       *)
-        if ! run_in "$name" plugins update "$PLUGIN" --force; then
-          # a pin the record did not show, an older Hermes, or a copy that is not a git checkout: installed again,
-          # only over a copy of this very repository (a fork's code is never replaced)
-          if [ "$origin" != self ]; then
-            err "   the update failed, and this copy does not come from $OURS: left as it is"
-            status=1
-          elif [ -n "$(pinned_of "$name")" ]; then move_pin "$name" || status=$?
-          else run_in "$name" plugins install "$URL" --force || status=$?; fi
-        fi ;;
+        # Hermes decides what code comes: the catalog's reviewed pin, or a pull of the source it was installed from
+        run_in "$name" plugins update "$PLUGIN" || status=$? ;;
     esac
     if [ "$status" -eq 0 ]; then OK=$((OK + 1)); else FAILED="$FAILED $name"; fi
   done
