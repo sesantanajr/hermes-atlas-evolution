@@ -2,28 +2,30 @@
 
 **English** · [Português (Brasil)](../pt-BR/troubleshooting.md) · [Documentation home](README.md)
 
-Each entry: what you see, why, and what to do. `hermes evolution status` is always the first look: it lists what needs attention with the command that fixes it.
+Each entry: what you see, why, and what to do. `hermes -p <profile> evolution status` is always the first look: it lists what needs attention with the command that fixes it. `<profile>` is the profile's name, `default` for the root profile.
 
 ## The gateway does not come back after Hermes updated itself
 
-**You see** `status=203/EXEC` in `systemctl --user status hermes-gateway`, a restart loop, or `hermes gateway restart` waiting for minutes.
+**You see** `status=203/EXEC` in `systemctl --user status hermes-gateway`, a restart loop, or `hermes gateway restart` waiting for minutes. Or `status` says the gateway runs but the program its service starts was deleted: it runs now, and the next restart fails.
 
 **Why** Hermes replaced its bundled Python and the gateway's systemd service still starts the old one.
 
 **Do**
 
 ```bash
-hermes evolution care fix-gateway     # points the service at the Python Hermes uses now (a copy of the file is kept)
-hermes evolution care undo-gateway    # puts the file back, if you ever need to
+hermes -p <profile> evolution care fix-gateway     # points the service at the Python Hermes uses now (a copy of the file is kept)
+hermes -p <profile> evolution care undo-gateway    # puts the file back, if you ever need to
 ```
 
-In Auto mode the plugin repairs this by itself (at most once a day, only the profile's own user service, never while a gateway runs) and records it in the history. While a service still starts from an old tools folder, `hermes pm gc` is held back so it never deletes that Python.
+The gateway is repaired (by the Mode auto or `care fix-gateway`) only when no gateway of this Hermes runs, degraded and starting ones included, and no gateway service of either scope runs, starts or stops, and only the service Hermes names for this home and that runs this `HERMES_HOME`. The one exception is the service being repaired: when it is the one running (its program was deleted under it), `care fix-gateway` fixes its file and starting it changes nothing; the Mode auto never touches a service that runs. `hermes pm gc` deletes every tools folder `facts.json` does not name; any folder a service or running program uses blocks it. `care undo-gateway` works from any profile, undoes one repair at a time back to the original file, and an undone repair is never repeated automatically.
+
+In Auto mode the plugin repairs this by itself, at most once a day, only a user service, and records it in the history. When `care fix-gateway` says "Not now", it names what is in the way (a gateway that runs, a service that starts or stops, a scope it could not read, a service of another Hermes); nothing was changed. "Still starting" means systemd is starting the gateway: check again in a minute.
 
 ## `hermes plugins update` says "is pinned to"
 
 **Why** that profile's copy was installed at a fixed commit, and Hermes keeps the pin on every reinstall.
 
-**Do** `hermes evolution update --profiles <profile>` (or `--all`): it moves the pin to the latest commit with Hermes' own `plugins install <url> --force --ref <commit>`. In Auto mode the profile that looks after the whole Hermes keeps every copy on its own commit.
+**Do** `hermes -p <profile> evolution update --profiles <profile>` (or `--all`): it moves the pin to the latest commit with Hermes' own `plugins install <url> --force --ref <commit>`. In Auto mode the profile that looks after the whole Hermes keeps every copy on its own commit.
 
 ## `hermes evolution` is not found, or a profile shows "no events today"
 
@@ -47,13 +49,13 @@ hermes gateway restart
 
 **Why** it needs at least two parts with enough data over the last 7 days, for example 40 tool calls and 20 interactive turns.
 
-**Do** nothing: it appears by itself after a few days of normal use. `hermes evolution status --format json` shows the sample behind each part.
+**Do** nothing: it appears by itself after a few days of normal use. `hermes -p <profile> evolution status --format json` shows the sample behind each part.
 
 ## `status` says the plugin is adding time to a call
 
 **Why** the slow tail (p95) of one of its hooks passed 50 ms over at least 200 calls; a slow disk or a database another process keeps busy is the usual cause.
 
-**Do** look at `hermes evolution care check` (disk, the session database, memory). If the disk is a network or synced folder (OneDrive, NFS), move `HERMES_HOME` to a local disk.
+**Do** look at `hermes -p <profile> evolution care check` (disk, the session database, memory). If the disk is a network or synced folder (OneDrive, NFS), move `HERMES_HOME` to a local disk.
 
 ## `status` says the plugin's database was damaged and started again
 
@@ -65,7 +67,7 @@ hermes gateway restart
 
 **Why** the agent's command would restart or kill the gateway, delete what Hermes runs on, or change this plugin.
 
-**Do** run the command yourself in your own terminal if you meant it. To switch the guard off for a profile (not recommended): `hermes config set plugins.entries.hermes-atlas-evolution.settings.runtime_guard false`, then `hermes gateway restart`.
+**Do** run the command yourself in your own terminal if you meant it. To switch the guard off for a profile (not recommended): `hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.runtime_guard false`, then `hermes gateway restart`.
 
 ## A command answers "Another learning pass is running in this profile"
 
@@ -81,9 +83,27 @@ hermes gateway restart
 
 ## A setting I changed did not apply
 
-**Why** most settings apply within a minute; `runtime_guard`, `tool_hints` and turning `agent_tools` on decide which hooks Hermes calls, so they apply at the next load.
+**Why** most settings apply within a minute; `runtime_guard`, `tool_hints`, and turning `agent_tools` or `reflector` on, decide what the plugin registers in Hermes, so they apply at the next load. Or the value is in `settings.json` and would widen trust: `owner_sender_ids`, `owner_platforms`, `agent_tools` on, `tool_hints` on, `reflector_daily_limit` above 6, `runtime_guard` off and a `mode` other than `manual` count only from Hermes' configuration, because the agent's file tools can write `settings.json`.
 
-**Do** `hermes gateway restart` (in the terminal, the next session picks it up). `status` lists the settings waiting for it.
+**Do** `hermes gateway restart` (in the terminal, the next session picks it up). `status` lists the settings waiting for it, and the keys of `settings.json` it ignored, under Needs attention. Set those with `hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.<key> <value>` from your own terminal.
+
+## `status` says `config.yaml` was not read
+
+**Why** the plugin could not read the profile's `config.yaml`: the standalone runner without PyYAML, a file over 1 MiB, or a YAML error. Without it the plugin does not know what you chose, so it acts as in Manual mode: nothing changes by itself, and the values shown are the defaults.
+
+**Do** run the command through Hermes (`hermes -p <profile> evolution …`), or install PyYAML for the standalone runner, or fix the file (`hermes -p <profile> config check` shows what Hermes thinks of it).
+
+## The gateway shows "running (degraded…)"
+
+**Why** Hermes started the gateway and no chat platform is connected yet; scheduled tasks still run. The plugin counts it as running: it never repairs or starts a gateway while one like this is up.
+
+**Do** check the platform's credentials with `hermes -p <profile> gateway status`. Nothing to do on the plugin's side.
+
+## The panel shows "(text hidden: read it in your terminal)"
+
+**Why** the dashboard has no login, so anyone who can load the page, the agent's terminal included, could read it. The panel then leaves out the text of lessons written by you, the reflector or the agent, as the terminal does in an agent's shell. Template lessons stay.
+
+**Do** read them with `hermes -p <profile> evolution lessons list` in your own terminal, or turn on the dashboard's login.
 
 ## Remove the plugin completely
 
@@ -95,4 +115,4 @@ Then delete `<profile home>/evolution/` in each profile to remove its data (less
 
 To stop it without removing it, `hermes -p <profile> plugins disable hermes-atlas-evolution` makes a running gateway unload it; after a removal, run `hermes gateway restart`. Neither command deletes the data folder. In Auto mode, the profile that looks after the whole Hermes remembers where the plugin has been and never installs it there again by itself.
 
-**Still stuck?** Open an issue with the output of `hermes evolution status --format json` (it holds no conversation text): [issues](https://github.com/sesantanajr/hermes-atlas-evolution/issues).
+**Still stuck?** Open an issue with the output of `hermes -p <profile> evolution status --format json` (it holds no conversation text): [issues](https://github.com/sesantanajr/hermes-atlas-evolution/issues).

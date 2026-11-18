@@ -80,10 +80,12 @@ CACHE_ROLES = {
 # SystemExit subclasses for some config problems: caught too, so one check never hides the others.
 BOOT = r"""
 import contextlib, io, json, os, sys
-sys.path[:0] = [p for p in json.loads(os.environ.pop("ATLAS_EVOLUTION_PATH", "[]")) if isinstance(p, str)]
-skip = set(json.loads(os.environ.pop("ATLAS_EVOLUTION_SKIP", "[]")))
-only = set(json.loads(os.environ.pop("ATLAS_EVOLUTION_ONLY", "[]")))
-marker = os.environ.pop("ATLAS_EVOLUTION_MARKER")
+# Read, never popped: importing Hermes 0.23.2 can relaunch this very process (same argv, same environment), and the
+# second run must still find them.
+sys.path[:0] = [p for p in json.loads(os.environ.get("ATLAS_EVOLUTION_PATH", "[]")) if isinstance(p, str)]
+skip = set(json.loads(os.environ.get("ATLAS_EVOLUTION_SKIP", "[]")))
+only = set(json.loads(os.environ.get("ATLAS_EVOLUTION_ONLY", "[]")))
+marker = os.environ.get("ATLAS_EVOLUTION_MARKER", "@@ATLAS-EVOLUTION-DOCTOR@@")
 os.environ.setdefault("HERMES_INTERACTIVE", "1")
 real = sys.stdout
 def done(payload):
@@ -97,6 +99,24 @@ try:
 except BaseException as error:
     done({"error": "unavailable", "detail": type(error).__name__})
     os._exit(0)
+# Tool Availability resolves each tool's auxiliary model through Hermes' auto chain, and Hermes' auxiliary client
+# logs a WARNING for every provider it cannot use (no Nous login...) into the profile's errors.log: one look by the
+# plugin wrote about nine lines there. What the checks find is what they print and list, never those log lines, so
+# below ERROR the auxiliary client's records are dropped here (and only here: this process ends after the checks).
+import logging
+class _QuietAuxiliary(logging.Filter):
+    def filter(self, record):
+        return record.levelno >= logging.ERROR or not record.name.startswith(("agent.auxiliary", "agent.aux_"))
+_quiet = _QuietAuxiliary()
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_quiet)
+try:
+    import pkgutil, agent
+    _names = [item.name for item in pkgutil.iter_modules(agent.__path__) if item.name.startswith(("auxiliary", "aux_"))]
+except BaseException:
+    _names = ["auxiliary_client"]
+for _name in _names:
+    logging.getLogger("agent." + _name).addFilter(_quiet)
 result = {"checks": []}
 with installs_held():
     for title, check in checks:

@@ -258,9 +258,14 @@ def _what(kind: str, subject: str, evidence: dict, lang: str) -> str:
     if kind == "lesson":
         return str(e.get("lesson") or "")
     if kind == "lesson_retire":
-        return (f"Falhas por chamada antes {_n(e.get('rate_before'), lang, 2)}, depois {_n(e.get('rate_after'), lang, 2)}:"
+        # The rate the verdict compared (lessons.evaluate): per call with enough calls on both sides, else per day.
+        # A proposal from before 0.12.0 has no basis: its rates are named without a unit.
+        unit = {"failures_per_call": ("Falhas por chamada", "Failures per call"),
+                "failures_per_day": ("Falhas por dia", "Failures per day")}.get(e.get("basis"),
+                                                                           ("Taxa de falhas", "Failure rate"))
+        return (f"{unit[0]} antes {_n(e.get('rate_before'), lang, 2)}, depois {_n(e.get('rate_after'), lang, 2)}:"
                 " a lição não ajudou." if pt else
-                f"Failures per call before {_n(e.get('rate_before'), lang, 2)}, after {_n(e.get('rate_after'), lang, 2)}:"
+                f"{unit[1]} before {_n(e.get('rate_before'), lang, 2)}, after {_n(e.get('rate_after'), lang, 2)}:"
                 " the lesson did not help.")
     if kind in ("skill_rollback", "config_review"):
         worse = ", ".join(str(item) for item in e.get("worse") or ())
@@ -276,9 +281,9 @@ def _does(kind: str, subject: str, lang: str) -> str:
                        " e as suas próprias edições continuam valendo.",
                        "Locks the skill: the agent and the curator stop rewriting it; it is still read and loaded, and"
                        " your own edits still apply."),
-        "skill_archive": ("Arquiva a skill: ela sai da lista ativa. No Hermes 0.23.1, `hermes curator restore` não a"
+        "skill_archive": ("Arquiva a skill: ela sai da lista ativa. No Hermes, `hermes curator restore` não a"
                           " devolve ao mesmo lugar; por isso o plugin só mostra o comando.",
-                          "Archives the skill: it leaves the active list. In Hermes 0.23.1, `hermes curator restore` does"
+                          "Archives the skill: it leaves the active list. In Hermes, `hermes curator restore` does"
                           " not put it back where it was, so the plugin only shows the command."),
         "lesson": ("Ativa a lição: o agente passa a lê-la no começo de cada sessão.",
                    "Activates the lesson: the agent reads it at the start of every session."),
@@ -530,7 +535,8 @@ def _env_what(kind: str, subject: str, e: dict, lang: str) -> str:
         hermes = str(e.get("hermes") or "")
         told = doctor_explain(hermes, lang, profile=where,
                               tools=[item for item in e.get("tools") or () if isinstance(item, str)])
-        quote = (f"O `hermes doctor` diz, em inglês: “{hermes}”" if pt else f"`hermes doctor` says: “{hermes}”")
+        # it follows a colon or an opening parenthesis: lower case in Portuguese
+        quote = (f"o `hermes doctor` diz, em inglês: “{hermes}”" if pt else f"`hermes doctor` says: “{hermes}”")
         others = [item for item in e.get("profiles") or () if isinstance(item, str) and item != where]
         machine = ((" Vale para a máquina inteira" + (f" (também em {', '.join(others[:6])})" if others else "") + ".")
                    if pt else (" It concerns the whole machine" + (f" (also in {', '.join(others[:6])})" if others else "")

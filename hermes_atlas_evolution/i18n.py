@@ -38,14 +38,16 @@ def normalize(value) -> str | None:
 
 
 def _hermes_env_language() -> str | None:
+    """HERMES_LANGUAGE as Hermes reads it (agent.i18n._resolve_language): the profile's scoped value, and the
+    process environment where the read is unscoped (the default profile's own process)."""
     try:
         from agent.secret_scope import get_secret
     except ImportError:
         return os.environ.get("HERMES_LANGUAGE")
     try:
         value = get_secret("HERMES_LANGUAGE")
-    except Exception:   # an unscoped read in a multiplexed process must not break the caller
-        value = None
+    except Exception as error:   # never breaks the caller; unscoped means the environment is this profile's own
+        value = os.environ.get("HERMES_LANGUAGE") if type(error).__name__ == "UnscopedSecretError" else None
     return value if isinstance(value, str) else None
 
 

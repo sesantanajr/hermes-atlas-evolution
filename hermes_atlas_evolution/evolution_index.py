@@ -6,7 +6,8 @@ higher is better), each counted only with enough data behind it:
 - tools: the share of tool calls that did not fail;
 - turns: interactive turns that neither failed nor ran slow;
 - you: how rarely the owner had to correct or ask again (corrections per 100 turns);
-- lessons: of the active lessons the plugin could judge, the share that cut their failure by half or more;
+- lessons: of the lessons the plugin judged (the active ones, and those retired in the window), the share that cut
+  their failure by half or more: a lesson retired for not helping still counts against the week it was retired in;
 - health: Hermes' own health and the server's, from the latest checks (each problem takes points off).
 
 The index is their weighted mean (WEIGHTS), renormalized over the parts that have data; with fewer than two parts
@@ -26,9 +27,10 @@ WEIGHTS = {"tools": 0.30, "turns": 0.25, "you": 0.20, "lessons": 0.10, "health":
 MIN_TOOL_CALLS, MIN_TURNS, MIN_JUDGED = 40, 20, 1
 # What stops or endangers the agent costs 25 points; a problem worth fixing soon 8; housekeeping (old tool versions to
 # free, lists to refresh, an update waiting) nothing: the index is about how the agent works, not about chores.
-_HEALTH_HIGH = frozenset({"gateway_exec_missing", "gateway_crashed", "gateway_restart_loop", "state_db_damaged",
-                          "state_db_unreadable", "disk_critical", "tools_in_use_unreferenced", "unit_exec_missing",
-                          "unit_restart_loop", "dpkg_interrupted", "apt_broken", "package_manager_stuck"})
+_HEALTH_HIGH = frozenset({"gateway_exec_missing", "gateway_program_deleted", "gateway_crashed", "gateway_restart_loop",
+                          "state_db_damaged", "state_db_unreadable", "disk_critical", "tools_in_use_unreferenced",
+                          "unit_exec_missing", "unit_restart_loop", "dpkg_interrupted", "apt_broken",
+                          "package_manager_stuck"})
 _HEALTH_LOW = frozenset({"gateway_heartbeat_stale", "gateway_memory_growth", "disk_low", "disk_filling", "memory_low",
                          "swap_full", "cpu_saturated", "state_db_wal_large", "security_updates", "reboot_required",
                          "gateway_not_at_boot", "unit_not_enabled", "user_units_without_linger"})
@@ -51,8 +53,11 @@ def parts(conn, *, now: float, care: dict | None = None, system: dict | None = N
         WHERE day BETWEEN ? AND ?""", (start, end)).fetchone()
     corrections = conn.execute("""SELECT COALESCE(SUM(count),0) FROM feedback_daily WHERE day BETWEEN ? AND ?
         AND kind IN ('correction','reask')""", (start, end)).fetchone()[0]
-    judged = dict(conn.execute("""SELECT verdict, COUNT(*) FROM lesson WHERE status='active'
-        AND verdict IN ('effective','ineffective') GROUP BY verdict""").fetchall())
+    # Active lessons by their latest verdict, and those retired within the window by the verdict they had: counting
+    # the active ones only would drop every failure the week it is retired, and the part would only ever rise.
+    judged = dict(conn.execute("""SELECT verdict, COUNT(*) FROM lesson WHERE verdict IN ('effective','ineffective')
+        AND (status='active' OR status='retired' AND updated >= ?) GROUP BY verdict""",
+                               (now - WINDOW_DAYS * 86_400,)).fetchall())
     found = {"tools": None, "turns": None, "you": None, "lessons": None, "health": None,
              "sample": {"tool_calls": calls, "turns": turns, "lessons_judged": sum(judged.values())}}
     if calls >= MIN_TOOL_CALLS:

@@ -70,10 +70,26 @@ class ScanTimeout(Exception):
 
 
 # ── reading, safely ──────────────────────────────────────────────────────────────────────────────────────────────
-def read_text(path: Path, limit: int) -> str | None:
-    """A regular file's text, at most `limit` bytes, or None: a link, a named pipe, a device, a larger file or an
-    unreadable one is never read (opening a pipe would block the pass for good)."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+def _read_up_to(handle: int, size: int) -> bytes:
+    chunks, left = [], size
+    while left > 0:
+        chunk = os.read(handle, min(left, 1 << 20))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        left -= len(chunk)
+    return b"".join(chunks)
+
+
+def read_bytes(path: Path, limit: int, *, part: str = "") -> bytes | None:
+    """The one reader of a file the plugin did not write (a memory file, a SKILL.md, a manifest, Hermes' records):
+    a regular file's bytes, or None. A link, a named pipe, a device or an unreadable file is never read (opening a
+    pipe would block the pass for good, a device could stream for ever): the path is looked at without following a
+    link, opened with O_NOFOLLOW and O_NONBLOCK, and checked again on the open file. A file larger than `limit` is
+    refused; with `part="head"` its first `limit` bytes are read instead, with `part="tail"` its last ones from the
+    first whole line."""
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+             | getattr(os, "O_BINARY", 0))
     try:
         if not stat.S_ISREG(os.lstat(path).st_mode):
             return None
@@ -82,16 +98,33 @@ def read_text(path: Path, limit: int) -> str | None:
         return None
     try:
         info = os.fstat(handle)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+        if not stat.S_ISREG(info.st_mode):
             return None
-        data = os.read(handle, limit + 1)
-        if len(data) > limit:
+        if info.st_size > limit and part == "tail":
+            os.lseek(handle, info.st_size - limit, os.SEEK_SET)
+            data = _read_up_to(handle, limit)
+            return data.split(b"\n", 1)[1] if b"\n" in data else b""
+        if info.st_size > limit and part != "head":
             return None
-        return data.decode("utf-8-sig", errors="replace")
-    except (OSError, MemoryError):
+        data = _read_up_to(handle, limit + 1)
+        if len(data) > limit:   # it grew while it was read
+            return data[:limit] if part == "head" else None
+        return data
+    except (OSError, MemoryError, OverflowError):
         return None
     finally:
         os.close(handle)
+
+
+def read_text(path: Path, limit: int, *, part: str = "") -> str | None:
+    """read_bytes as text (UTF-8, a byte order mark left out, an invalid byte replaced)."""
+    data = read_bytes(path, limit, part=part)
+    if data is None:
+        return None
+    try:
+        return data.decode("utf-8-sig", errors="replace")
+    except MemoryError:
+        return None
 
 
 def _is_dir(path: Path) -> bool:
@@ -138,26 +171,118 @@ def _entries(folder: Path, limit: int) -> list[os.DirEntry]:
 
 
 # ── profiles and the lead ────────────────────────────────────────────────────────────────────────────────────────
-def root_of(home: Path) -> Path:
-    # <root>/profiles/<name> as Hermes names it, before links are followed: a profile folder that links elsewhere
-    # still belongs to <root>, and is never taken for a root (and a default profile) of its own
+_HOME_MARKERS = ("config.yaml", ".env", "state.db")   # hermes_constants._HERMES_HOME_MARKERS
+# hermes_constants._PROFILE_IDENTITY_MARKERS: a folder under profiles/ is a profile only with one of these
+_IDENTITY_MARKERS = ("config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json", "state.db")
+_TOMBSTONES = ".deleted"   # profiles/.deleted/<name>: `hermes profile delete` marked the profile gone
+
+
+def _real_profiles_folder(folder: Path) -> bool:
+    """Hermes' _is_hermes_profiles_root: `folder` is <home>/profiles of a real Hermes home (one named .hermes, one
+    with Hermes' own files, or a profiles folder with tombstones), not any folder that happens to be named so."""
+    root = folder.parent
+    if root.name == ".hermes":
+        return True
+    try:
+        return _is_dir(folder / _TOMBSTONES) or any(os.path.exists(root / marker) for marker in _HOME_MARKERS)
+    except (OSError, ValueError):
+        return False
+
+
+def home_parts(home: Path) -> tuple[Path, str]:
+    """(root, profile name) of a Hermes home, the way Hermes reads them (hermes_constants.named_profile_home and
+    hermes_cli.profiles.profile_root_for_env_home):
+    - `<root>/profiles/<name>` as written, before links are followed: a profile folder that links elsewhere is still
+      profile <name> of <root>, and `hermes --profile <name>` with HERMES_HOME so spelled finds it;
+    - a default home (`~/.hermes`) is a root and the default profile, wherever it links to;
+    - any other path is followed to where it leads, and is a named profile only under the profiles folder of a real
+      Hermes home: a link to /srv/profiles/alice never makes /srv a root whose other folders are profiles."""
     plain = Path(os.path.abspath(home))
-    if plain.parent.name == "profiles":
-        return plain.parent.parent.resolve()
-    home = plain.resolve()
-    return home.parent.parent if home.parent.name == "profiles" else home
+    if plain.parent.name == "profiles" and not plain.name.startswith("."):
+        return plain.parent.parent, plain.name
+    if plain.name == ".hermes":
+        return plain, "default"
+    try:
+        real = plain.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return plain, "default"
+    if real != plain and real.parent.name == "profiles" and not real.name.startswith(".") \
+            and _real_profiles_folder(real.parent):
+        return real.parent.parent, real.name
+    return plain, "default"
+
+
+def root_of(home: Path) -> Path:
+    """The root of the Hermes a home belongs to (home_parts), spelled as given: links are not followed in it, so the
+    homes of its profiles, and the HERMES_HOME the plugin gives Hermes' commands, keep the spelling Hermes reads."""
+    return home_parts(home)[0]
+
+
+def deleted_profile(folder: Path) -> bool:
+    """Whether `hermes profile delete` marked this profile folder gone (a tombstone in profiles/.deleted/), even while
+    the folder is still there."""
+    try:
+        return os.path.lexists(Path(folder).parent / _TOMBSTONES / Path(folder).name)
+    except (OSError, ValueError):
+        return True
+
+
+def is_profile(folder: Path) -> bool:
+    """A named profile as Hermes lists one (hermes_cli.profiles._iter_named_profile_dirs): a real folder (here never
+    a link) that holds one of Hermes' identity files and has no tombstone. What cron or a log rotation leaves under
+    profiles/, or a profile `hermes profile delete` marked gone, is not one."""
+    folder = Path(folder)
+    if not _is_dir(folder) or deleted_profile(folder):
+        return False
+    try:
+        return any(os.path.isfile(folder / marker) or os.path.islink(folder / marker) for marker in _IDENTITY_MARKERS)
+    except (OSError, ValueError):
+        return False
 
 
 def profiles(root: Path) -> list[tuple[str, Path]]:
-    """(name, home) of every profile of this Hermes: the default one (the root) first. A profile folder that is a
-    link, or whose name is not a profile name, is not one."""
+    """(name, home) of every profile of this Hermes: the default one (the root) first, then the ones Hermes itself
+    lists (is_profile), by name. A profile folder that is a link, a folder named `default`, or one whose name is not
+    a profile name, is not one."""
     found = [("default", Path(root))]
     for entry in _entries(Path(root, "profiles"), PROFILE_MAX * 4):
         if len(found) > PROFILE_MAX:
             break
-        if _PROFILE.fullmatch(entry.name) and not entry.name.startswith(".") and _is_dir(Path(entry.path)):
+        if entry.name != "default" and _PROFILE.fullmatch(entry.name) and is_profile(Path(entry.path)):
             found.append((entry.name, Path(entry.path)))
     return found
+
+
+_OFF_WORDS = ("false", "off", "no", "0")
+
+
+def fleet_managed(home: Path, *, read_config=None) -> bool:
+    """Whether the profile that looks after the whole Hermes may install this plugin, update it or move a folder to
+    the trash in this profile by itself (the Mode auto). A profile opts out with
+    `hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.fleet_managed false`, or with
+    {"evolution": {"fleet_managed": false}} in its evolution/settings.json (which can only narrow it). Both are read
+    with the plugin's safe readers. A config.yaml that cannot be read now (missing, invalid while it is edited, too
+    large) counts as not managed: an opt-out it may hold is never missed; an unreadable settings.json narrows nothing."""
+    def off(value) -> bool:
+        return value is False or (isinstance(value, str) and value.strip().lower() in _OFF_WORDS) \
+            or (type(value) is int and value == 0)
+
+    config = (read_config or _read_config)(Path(home))
+    if not isinstance(config, dict):
+        return False
+    section = config.get("plugins")
+    entries = section.get("entries") if isinstance(section, dict) else None
+    entry = entries.get(PLUGIN_ID) if isinstance(entries, dict) else None
+    settings = entry.get("settings") if isinstance(entry, dict) else None
+    if isinstance(settings, dict) and off(settings.get("fleet_managed")):
+        return False
+    text = read_text(Path(home) / "evolution" / "settings.json", 65_536)
+    try:
+        own = json.loads(text) if text else {}
+    except (ValueError, RecursionError):
+        own = {}
+    own = own.get("evolution") if isinstance(own, dict) else None
+    return not (isinstance(own, dict) and off(own.get("fleet_managed")))
 
 
 def _read_config(home: Path):
@@ -287,39 +412,77 @@ def remember(root: Path, *, seen=(), skip=()) -> None:
         _remember(root, folder, seen, skip)
 
 
+def exclusive_lock(lock_path: Path, *, wait_s: float):
+    """An exclusive lock on the file `lock_path` across processes, the way Hermes takes its own (flock on POSIX,
+    msvcrt.locking of its first byte on Windows), never through a link. It is waited for `wait_s` at most: past it,
+    TimeoutError (a process stuck while it holds the lock must not hang every pass and every menu). OSError when the
+    lock file cannot be opened. Where the system has neither (no known platform), nothing is locked."""
+    import contextlib
+
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
+
+    @contextlib.contextmanager
+    def held():
+        handle = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
+                         0o600)
+        locked = False
+        try:
+            give_up = time.monotonic() + wait_s
+            while fcntl is not None or msvcrt is not None:
+                try:
+                    if fcntl is not None:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    else:
+                        os.lseek(handle, 0, os.SEEK_SET)
+                        msvcrt.locking(handle, msvcrt.LK_NBLCK, 1)
+                    locked = True
+                    break
+                except OSError:
+                    if time.monotonic() >= give_up:
+                        raise TimeoutError(str(lock_path)) from None
+                    time.sleep(0.1)
+            yield
+        finally:
+            if locked:
+                with contextlib.suppress(OSError):
+                    if fcntl is not None:
+                        fcntl.flock(handle, fcntl.LOCK_UN)
+                    else:
+                        os.lseek(handle, 0, os.SEEK_SET)
+                        msvcrt.locking(handle, msvcrt.LK_UNLCK, 1)
+            os.close(handle)
+    return held()
+
+
 def _locked(folder: Path):
-    """An exclusive lock on the shared state across processes (POSIX); a no-op where there is none."""
+    """An exclusive lock on the shared state across processes (exclusive_lock: POSIX and Windows); when the lock file
+    cannot be made at all, the write goes on unlocked, as before."""
     import contextlib
 
     @contextlib.contextmanager
     def held():
         try:
-            import fcntl
-        except ImportError:
-            yield
-            return
-        try:
             folder.mkdir(mode=0o700, exist_ok=True)
-            handle = os.open(folder / ".fleet-state.lock", os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            lock = exclusive_lock(folder / ".fleet-state.lock", wait_s=LOCK_WAIT_SECONDS)
+            lock.__enter__()
+        except TimeoutError:
+            raise TimeoutError(f"The shared state of this Hermes ({folder / '.fleet-state.lock'}) stayed locked by "
+                               f"another process for {LOCK_WAIT_SECONDS} s; nothing was written. Try again; if it "
+                               "lasts, look for a stuck `hermes` process.") from None
         except OSError:
             yield
             return
         try:
-            # never wait for good: a process stuck while it held the lock must not hang every pass and every menu
-            give_up = time.monotonic() + LOCK_WAIT_SECONDS
-            while True:
-                try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    if time.monotonic() >= give_up:
-                        raise TimeoutError(f"The shared state of this Hermes ({folder / '.fleet-state.lock'}) stayed "
-                                           f"locked by another process for {LOCK_WAIT_SECONDS} s; nothing was "
-                                           "written. Try again; if it lasts, look for a stuck `hermes` process.") from None
-                    time.sleep(0.1)
             yield
         finally:
-            os.close(handle)
+            lock.__exit__(None, None, None)
     return held()
 
 
@@ -1022,6 +1185,28 @@ def _own_transform(home: Path, config) -> bool:
         return False
 
 
+def _created(home: Path) -> float | None:
+    """When a profile folder was made, as near as the system tells (Hermes records no creation date): its birth time
+    where the file system keeps one (macOS, Windows, BSD), else the oldest change time (ctime) of the folder and of
+    what lies directly in it. A copy keeps a file's modification time (`hermes profile create --clone` copies
+    config.yaml, .env and SOUL.md) but never its change time, so a profile made minutes ago never looks old. None when
+    the folder cannot be read."""
+    try:
+        info = os.lstat(home)
+    except (OSError, ValueError):
+        return None
+    birth = getattr(info, "st_birthtime", None)
+    if isinstance(birth, (int, float)) and birth > 0:
+        return float(birth)
+    oldest = info.st_ctime
+    for entry in _entries(Path(home), 2000):
+        try:
+            oldest = min(oldest, entry.stat(follow_symlinks=False).st_ctime)
+        except OSError:
+            continue
+    return float(oldest)
+
+
 def scan_profile(name: str, home: Path, *, now: float, read_config, bundled: Path | None, sessions,
                  budget: dict | None = None) -> dict:
     config = read_config(home)
@@ -1036,6 +1221,7 @@ def scan_profile(name: str, home: Path, *, now: float, read_config, bundled: Pat
             "config_read": isinstance(config, dict) and (Path(home) / "config.yaml").is_file(),
             "sessions_7d": sessions(home, since=now - 7 * 86_400) or 0,
             "sessions_30d": sessions(home, since=now - IDLE_PROFILE_DAYS * 86_400) or 0,
+            "created": _created(home),
             "plugins": plugins, "leftovers": leftovers, "skills": _skills_of(home),
             "self": has_plugin(home, config),
             "self_installed": _is_plugin_dir(Path(home) / "plugins" / PLUGIN_ID),
@@ -1263,7 +1449,11 @@ def profile_findings(row: dict, catalog: dict, known: dict, *, now: float, fleet
             found.append(_finding("self_missing", profile, PLUGIN_ID, risk="low",
                                   evidence={"sessions_7d": row["sessions_7d"]},
                                   command=_cmd(profile, f"plugins install {REPOSITORY} --enable")))
-    if row["sessions_30d"] == 0 and profile != "default" and row["config_read"]:
+    # unused for 30 days only when it is at least that old: a profile made minutes ago has had no session yet (a row
+    # stored by an older version has no date: as before); a date that cannot be read says nothing
+    created = row.get("created", 0)
+    if row["sessions_30d"] == 0 and profile != "default" and row["config_read"] \
+            and created is not None and now - created >= IDLE_PROFILE_DAYS * 86_400:
         found.append(_finding("profile_idle", profile, "", risk="low",
                               evidence={"days": IDLE_PROFILE_DAYS, "plugins": len(on), "skills": len(row["skills"])},
                               command="hermes profile list"))

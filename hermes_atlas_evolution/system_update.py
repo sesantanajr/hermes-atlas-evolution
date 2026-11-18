@@ -291,8 +291,14 @@ def attention_of(name: str) -> list[str]:
     return [code for code, prefixes in ATTENTION if any(name == p or name.startswith(p) for p in prefixes)]
 
 
+# Every command a unit runs (systemd prints one line per command: a unit with two ExecStop= has two ExecStop lines)
+EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop", "ExecStopPost")
 SHOW_PROPERTIES = ("Id", "LoadState", "ActiveState", "SubState", "Result", "NRestarts", "ExecMainCode", "ExecMainStatus",
-                   "ExecStart", "FragmentPath", "DropInPaths", "NeedDaemonReload")
+                   *EXEC_KEYS, "FragmentPath", "DropInPaths", "NeedDaemonReload", "MainPID", "User", "Environment",
+                   "EnvironmentFiles")
+_REPEATED = (*EXEC_KEYS, "EnvironmentFiles")   # kept whole, one per line: never only the last one
+# systemd's own form, `{ path=<program> ; argv[]=<words> ; ...}` (Hermes reads it so too): a path may hold spaces
+_EXEC_PATH = re.compile(r"\{ path=(.*?) ; argv\[\]=")
 RESTART_LOOP = 3          # NRestarts from this many on, with the unit restarting or failed, is a loop
 EXEC_FAILED = 203         # systemd's status=203/EXEC: the program to start could not be run
 UNIT_CACHE_SECONDS = 60   # hermes_care and system_update read the units in the same pass: once is enough
@@ -353,7 +359,11 @@ def show_units(host: Host, scope: str, names: list[str], *, timeout: int = 10) -
             continue
         key, sep, value = line.partition("=")
         if sep:
-            current[key.strip()] = value.strip()
+            key = key.strip()
+            if key in _REPEATED and current.get(key):
+                current[key] += "\n" + value.strip()
+            else:
+                current[key] = value.strip()
     if current:
         blocks.append(current)
     found = {}
@@ -448,10 +458,61 @@ def replacement_python(host: Host, exec_path: str | None, *, current_only: bool 
     return None
 
 
+def exec_paths(raw: dict, keys=EXEC_KEYS) -> list[str]:
+    """The programs a unit's commands start (`keys` of what `systemctl show` printed), each once, in order."""
+    found: list[str] = []
+    for key in keys:
+        for path in _EXEC_PATH.findall(raw.get(key) or ""):
+            path = path.strip()
+            if path and path not in found:
+                found.append(path)
+    return found[:40]
+
+
+KEPT_ENVIRONMENT = ("HERMES_HOME", "PATH")   # what a unit's environment is read for; the rest may hold tokens
+
+
+def _environment_values(value: str) -> tuple[bool, dict]:
+    """(readable, {HERMES_HOME, PATH}) from systemd's `Environment=` as `systemctl show` prints it (space-separated
+    assignments, a value with spaces quoted). Only KEPT_ENVIRONMENT is kept: the rest may hold tokens."""
+    import shlex
+
+    if not value or not any(f"{key}=" in value for key in KEPT_ENVIRONMENT):
+        return True, {}
+    try:
+        words = shlex.split(value)
+    except ValueError:
+        return False, {}
+    found = {}
+    for word in words:
+        key, sep, item = word.partition("=")
+        if sep and key in KEPT_ENVIRONMENT:
+            found[key] = item.strip() or None
+    return True, found
+
+
+def _environment_home(value: str) -> tuple[bool, str | None]:
+    """(readable, HERMES_HOME) from systemd's `Environment=` (_environment_values)."""
+    readable, found = _environment_values(value)
+    return readable, found.get("HERMES_HOME")
+
+
+def _environment_files(value: str) -> list[tuple[str, bool]]:
+    """(path, ignore_errors) of each `EnvironmentFiles=` line of `systemctl show`."""
+    found = []
+    for line in (value or "").splitlines():
+        match = re.fullmatch(r"\s*(.+?) \(ignore_errors=(yes|no)\)\s*", line)
+        if match:
+            found.append((match[1], match[2] == "yes"))
+        elif line.strip():
+            found.append((line.strip(), False))
+    return found[:20]
+
+
 def unit_detail(host: Host, unit: str, scope: str, raw: dict) -> dict:
     """What `systemctl show` says of a unit, and what that means: the program it starts, whether that program
     still exists, how often systemd restarted it."""
-    paths = re.findall(r"\bpath=([^\s;]+)", raw.get("ExecStart") or "")
+    paths = exec_paths(raw, ("ExecStart",))
     exec_path = paths[0] if paths else None
     exec_exists = None if exec_path is None else _executable(host, exec_path)   # None: unknown, never "missing"
     # still there, but in a tools folder Hermes no longer points at: the next `hermes pm gc` removes it
@@ -463,7 +524,16 @@ def unit_detail(host: Host, unit: str, scope: str, raw: dict) -> dict:
               "exec_main_code": _int(raw.get("ExecMainCode")), "exec_main_status": _int(raw.get("ExecMainStatus")),
               "exec_path": exec_path, "exec_exists": exec_exists, "exec_unreferenced": unreferenced,
               "drop_ins": drop_ins[:20], "fragment": fragment,
-              "need_reload": raw.get("NeedDaemonReload") == "yes", "exec_source": None, "replacement": None}
+              "need_reload": raw.get("NeedDaemonReload") == "yes", "exec_source": None, "replacement": None,
+              # every program its commands start (ExecStartPre, ExecStop...): each holds a tools folder in use
+              "exec_paths": exec_paths(raw) or ([exec_path] if exec_path else []),
+              "main_pid": _int(raw.get("MainPID")), "user": (raw.get("User") or "").strip() or None}
+    readable, values = _environment_values(raw.get("Environment") or "")
+    # the HERMES_HOME it runs with (service_home reads it) and its PATH (a tools folder named there is in use),
+    # never the rest of its environment
+    detail["env_home"], detail["env_readable"] = values.get("HERMES_HOME"), readable
+    detail["env_path"] = [item for item in (values.get("PATH") or "").split(":") if item][:40]
+    detail["env_files"] = [list(item) for item in _environment_files(raw.get("EnvironmentFiles") or "")]
     if exec_exists is False or unreferenced:
         detail["exec_source"] = _exec_source(host, exec_path, drop_ins, fragment)
         detail["replacement"] = replacement_python(host, exec_path, current_only=unreferenced)
@@ -472,6 +542,9 @@ def unit_detail(host: Host, unit: str, scope: str, raw: dict) -> dict:
         (detail["n_restarts"] or 0) >= RESTART_LOOP and detail["sub_state"] in ("auto-restart", "failed")
         or detail["exec_main_status"] == EXEC_FAILED and detail["active_state"] != "active")
     return detail
+
+
+ENABLED_STATES = ("enabled", "enabled-runtime", "static", "alias", "indirect", "linked", "linked-runtime")
 
 
 def _user_units(host: Host, *, fresh: bool = False) -> list[dict]:
@@ -506,9 +579,7 @@ def _user_units(host: Host, *, fresh: bool = False) -> list[dict]:
             else:   # an older systemd, or a show that said nothing of it: the plain question
                 _code, answer, _err = host.run(["systemctl", *prefix, "is-active", unit], timeout=10)
                 detail, active = {}, answer.strip() == "active"
-            units.append({"unit": unit, "scope": scope, "enabled": state in ("enabled", "enabled-runtime", "static",
-                                                                             "alias", "indirect", "linked",
-                                                                             "linked-runtime"),
+            units.append({"unit": unit, "scope": scope, "enabled": state in ENABLED_STATES,
                           "state": state, "active": active, **detail})
     if key is not None:
         _UNIT_CACHE.clear()
@@ -535,6 +606,159 @@ def probe_units(names: dict, *, host: Host | None = None, timeout: int = 4) -> d
         except Exception:   # a look is a bonus: what could not be read is unverified, never a failure of the caller
             host.unverified.add(scope)
     return {"units": units, "unverified": sorted(host.unverified)}
+
+
+BUSY_STATES = ("active", "activating", "reloading", "deactivating")   # a process of the unit may run (or is starting)
+GATEWAY_PATTERN = "hermes-gateway*"
+
+
+def probe_gateway_units(host: Host | None = None, *, timeout: int = 10) -> dict:
+    """Every Hermes gateway unit of this machine, in both scopes, as systemd says now: the unit files
+    (`list-unit-files`, with whether each comes back after a reboot) and the units systemd has loaded (`list-units
+    --all`: a transient or runtime one too), each with what `systemctl show` says (unit_detail). What a start must
+    look at first, so a second gateway never starts beside a running one. {"units": [...], "unverified": [scopes]}.
+    Never raises."""
+    host = host or Host()
+    units = []
+    for scope, prefix in (("system", []), ("user", ["--user"])):
+        try:
+            names: dict = {}
+            code, out, err = host.run(["systemctl", *prefix, "list-unit-files", "--no-legend", "--plain",
+                                       GATEWAY_PATTERN], timeout=timeout)
+            if bus_failed(code, err) or code not in (0, 1):
+                host.unverified.add(scope)
+                continue
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].endswith(".service") and not parts[0].endswith("@.service"):
+                    names[parts[0]] = parts[1]
+            code, out, err = host.run(["systemctl", *prefix, "list-units", "--all", "--no-legend", "--plain",
+                                       GATEWAY_PATTERN], timeout=timeout)
+            if bus_failed(code, err) or code not in (0, 1):
+                host.unverified.add(scope)
+                continue
+            for line in out.splitlines():
+                parts = [part for part in line.split() if part not in ("●", "*")]
+                if parts and parts[0].endswith(".service"):
+                    names.setdefault(parts[0], None)
+            wanted = [name for name in names if _UNIT_NAME.fullmatch(name)][:40]
+            shown = show_units(host, scope, wanted, timeout=timeout) if wanted else {}
+            if shown is None:
+                continue   # unverified (show_units named it)
+            for name in wanted:
+                raw = shown.get(name)
+                if not raw or not raw.get("ActiveState") or raw.get("LoadState") == "not-found" \
+                        and raw.get("ActiveState") == "inactive":
+                    continue
+                state = names.get(name)
+                units.append({"unit": name, "scope": scope, "state": state,
+                              "enabled": None if state is None else state in ENABLED_STATES,
+                              "active": raw.get("ActiveState") == "active", **unit_detail(host, name, scope, raw)})
+        except Exception:   # what could not be read is unverified, never "no gateway"
+            host.unverified.add(scope)
+    return {"units": units, "unverified": sorted(host.unverified)}
+
+
+def unit_busy(unit: dict) -> bool:
+    """A unit whose process runs or is being started or stopped now. A failing unit waiting for its next try
+    (activating, auto-restart) runs nothing."""
+    state = (unit or {}).get("active_state")
+    return state in BUSY_STATES and not (state == "activating" and unit.get("sub_state") == "auto-restart")
+
+
+def _account_home(user: str | None = None) -> Path | None:
+    try:
+        import pwd
+
+        if user:
+            entry = pwd.getpwuid(int(user)) if user.isdecimal() else pwd.getpwnam(user)
+        else:
+            entry = pwd.getpwuid(os.getuid())
+        return Path(entry.pw_dir)
+    except (ImportError, KeyError, OSError, ValueError, AttributeError):
+        return None
+
+
+def _file_values(host: Host, path: str) -> tuple[bool, dict]:
+    """(readable, {HERMES_HOME, PATH}) set by an environment file (`KEY=value` lines, as systemd reads them). Only
+    KEPT_ENVIRONMENT is read: the rest of the file may hold tokens."""
+    text = host.read(path, 1_000_000)
+    if text is None:
+        return False, {}
+    found = {}
+    for line in text.splitlines():
+        body = line.strip()
+        if body.startswith("export "):
+            body = body[len("export "):].lstrip()
+        key, sep, value = body.partition("=")
+        if sep and key.strip() in KEPT_ENVIRONMENT:
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            found[key.strip()] = value or None
+    return True, found
+
+
+def _file_home(host: Host, path: str) -> tuple[bool, str | None]:
+    """(readable, HERMES_HOME) set by an environment file (_file_values)."""
+    readable, found = _file_values(host, path)
+    return readable, found.get("HERMES_HOME")
+
+
+def unit_paths(host: Host, unit: dict) -> list[str]:
+    """Every program and folder a unit uses: its commands' programs (Exec*=) and the folders of the PATH it runs
+    with (Environment= and its environment files). A tools folder named in any of them is in use."""
+    unit = unit if isinstance(unit, dict) else {}
+    found = [str(path) for path in unit.get("exec_paths") or [unit.get("exec_path")] if path]
+    found += [str(path) for path in unit.get("env_path") or () if path]
+    for path, _ignore in unit.get("env_files") or ():
+        readable, values = _file_values(host, str(path))
+        if readable and values.get("PATH"):
+            found += [item for item in values["PATH"].split(":") if item][:40]
+    return found
+
+
+def service_home(host: Host, unit: dict) -> tuple[str | None, str]:
+    """The HERMES_HOME the unit's gateway runs with, as systemd builds its environment: what an environment file
+    sets (it overrides Environment=), else Environment=, else the user manager's own environment (user scope), else
+    `~/.hermes` of the account it runs as (Hermes' default). (home, "ok") or (None, why it cannot be told)."""
+    unit = unit if isinstance(unit, dict) else {}
+    if not unit.get("env_readable", True):
+        return None, "unreadable"
+    home = unit.get("env_home")
+    for path, ignore in unit.get("env_files") or ():
+        readable, value = _file_home(host, str(path))
+        if not readable:
+            if ignore:
+                continue
+            return None, "unreadable"
+        if value:
+            home = value
+    if not home and unit.get("scope") == "user":
+        code, out, err = host.run(["systemctl", "--user", "show-environment"], timeout=10)
+        if code != 0:
+            return None, "unreadable"
+        for line in out.splitlines():
+            if line.startswith("HERMES_HOME="):
+                home = line.split("=", 1)[1].strip() or None
+    if not home:
+        # User= names the account; a user unit runs as the user whose manager it is (this one); else root
+        account = _account_home(unit.get("user") or (None if unit.get("scope") == "user" else "0"))
+        if account is None:
+            return None, "unreadable"
+        home = str(account / ".hermes")
+    if "$" in home or "%" in home:
+        return None, "unreadable"   # a specifier or a variable systemd expands: never guessed
+    return home, "ok"
+
+
+def same_home(first, second) -> bool:
+    """Whether two Hermes homes are the same folder (links followed)."""
+    try:
+        return os.path.normcase(os.path.realpath(os.path.expanduser(str(first)))) == \
+            os.path.normcase(os.path.realpath(os.path.expanduser(str(second))))
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def refresh_units(stored: dict, *, host: Host | None = None, timeout: int = 10) -> dict:
@@ -1252,37 +1476,77 @@ def _systemctl(host: Host, scope: str, *args: str, timeout: int = 30) -> dict:
             "tail": " ".join((err or out).split())[-200:]}
 
 
+def _exec_value(line: str) -> tuple[str, str] | None:
+    """(key, value) of a unit file's `Exec*=` line (ExecStart=, ExecStop=...), else None."""
+    key, sep, value = line.strip().partition("=")
+    return (key.strip(), value.strip()) if sep and key.strip() in EXEC_KEYS else None
+
+
 def _exec_program(text: str) -> str | None:
-    """The program a unit file's last `ExecStart=` line starts (its `-@:+!` prefixes left out), None when it sets none."""
-    values = [line.split("=", 1)[1].strip() for line in text.splitlines() if line.strip().startswith("ExecStart=")]
+    """The program a unit file's last `ExecStart=` line starts (its `-@:+!` prefixes and quotes left out), None
+    when it sets none."""
+    import shlex
+
+    values = [found[1] for found in map(_exec_value, text.splitlines()) if found and found[0] == "ExecStart"]
     values = [value for value in values if value]
-    words = values[-1].split() if values else []
+    if not values:
+        return None
+    try:
+        words = shlex.split(values[-1])
+    except ValueError:
+        words = values[-1].split()
     if not words:
         return None
     return words[0].lstrip("-@:+!") or None
 
 
-def _restart(host: Host, scope: str, name: str) -> tuple[list[dict], str]:
-    """daemon-reload, reset-failed and start, each bounded; then whether it runs."""
+START_WAIT_SECONDS = 180   # a Type=notify gateway may take minutes to say it is ready: started, then watched
+
+
+def _restart(host: Host, scope: str, name: str, *, wait: float | None = None) -> tuple[list[dict], str]:
+    """daemon-reload, reset-failed and `start --no-block` (systemd starts it; this never waits on the job), then
+    whether it runs: asked every 2 s while it is still starting (activating), `wait` seconds at most."""
     steps = [_systemctl(host, scope, "daemon-reload"), _systemctl(host, scope, "reset-failed", name),
-             _systemctl(host, scope, "start", name, timeout=90)]
-    _code, state, _err = host.run(["systemctl", *(["--user"] if scope == "user" else []), "is-active", name], timeout=10)
-    return steps, state.strip()
+             _systemctl(host, scope, "start", "--no-block", name)]
+    prefix = ["--user"] if scope == "user" else []
+    until = time.monotonic() + max(0.0, float(START_WAIT_SECONDS if wait is None else wait))
+    state = ""
+    while True:
+        code, out, _err = host.run(["systemctl", *prefix, "is-active", name], timeout=10)
+        state = out.strip() if code != 124 else ""
+        if state not in ("activating", "reloading") or time.monotonic() >= until:
+            break
+        time.sleep(2)
+    return steps, state
 
 
-def fix_unit_exec(host: Host, unit: dict, *, now: float | None = None) -> dict:
+def _digest(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _refuse(lang: str, en: str, pt: str):
+    """A refusal written in both languages here (the person's is chosen), never looked up in the catalog."""
+    raise ValueError(pt if lang == "pt" else en)
+
+
+def fix_unit_exec(host: Host, unit: dict, *, now: float | None = None, home=None,
+                  wait: float | None = None, lang: str = "en") -> dict:
     """Point a Hermes unit whose ExecStart names a program that is gone (Hermes replaced its bundled Python) at the
     same program in the tools folder Hermes points at (tools/facts.json), else the newest one that has it, then
-    daemon-reload, reset-failed and start. A program that still runs from a tools folder facts.json no longer points
-    at (the next `hermes pm gc` removes it) is moved the same way, to the one facts.json points at only. When the file
-    on disk is right already and only systemd has not read it again (NeedDaemonReload), nothing is written: reload,
-    reset-failed and start.
+    daemon-reload, reset-failed and start (without waiting on the job; then `wait` seconds at most for it to run). A
+    program that still runs from a tools folder facts.json no longer points at (the next `hermes pm gc` removes it)
+    is moved the same way, to the one facts.json points at only. When the file on disk is right already and only
+    systemd has not read it again (NeedDaemonReload), nothing is written: reload, reset-failed and start.
 
-    Only the file that sets ExecStart (a drop-in, or the unit file), only the interpreter's path on its ExecStart
-    lines; a copy of the file is kept next to it (`<file>.atlas-<time>.bak`, a name systemd never loads) and
-    undo_unit_exec puts it back. Called from the owner's terminal (`care fix-gateway`), and by the Mode auto only for
-    this profile's own user unit whose program is gone while no gateway runs (actions.repair_gateway). ValueError
-    says why nothing was changed; nothing else is raised (a host without systemctl is refused before any write)."""
+    `home`: the Hermes home this unit must run (its HERMES_HOME, as systemd builds it: service_home); a unit that
+    runs another one, or whose home cannot be told, is never touched. Only the file that sets ExecStart (a drop-in,
+    or the unit file), only the interpreter's path, on every `Exec*=` line that names it (ExecStop=, ExecStopPost=...
+    too); a copy of the file is kept next to it (`<file>.atlas-<time>.bak`, a name systemd never loads) and
+    undo_unit_exec puts it back. The caller decides whether a start is safe (hermes_care.start_blockers): this
+    never checks for a second gateway. ValueError says why nothing was changed; nothing else is raised (a host
+    without systemctl is refused before any write)."""
     now = time.time() if now is None else now
     unit = unit if isinstance(unit, dict) else {}
     name, scope = str(unit.get("unit") or ""), unit.get("scope")
@@ -1294,6 +1558,16 @@ def fix_unit_exec(host: Host, unit: dict, *, now: float | None = None) -> dict:
         raise ValueError("Only Hermes' own services are repaired here")
     if not host.which("systemctl"):
         raise ValueError("systemd is not available here: nothing was changed")
+    if home is not None:
+        runs, _why = service_home(host, unit)
+        if runs is None:
+            _refuse(lang, "Which Hermes this service runs (its HERMES_HOME) cannot be told from here: nothing was "
+                          "changed. Reinstall it with `hermes gateway install` from its own Hermes",
+                    "Não dá para saber daqui qual Hermes este serviço roda (o HERMES_HOME dele): nada foi mudado. "
+                    "Reinstale-o com `hermes gateway install` a partir do próprio Hermes dele")
+        if not same_home(runs, home):
+            _refuse(lang, f"This service runs another Hermes (HERMES_HOME={runs}), not {home}: nothing was changed",
+                    f"Este serviço roda outro Hermes (HERMES_HOME={runs}), não {home}: nada foi mudado")
     exists = _executable(host, old)
     stale = exists is True and unreferenced_python(host, old)   # read again here, never taken from `unit`
     if exists is True and not stale:
@@ -1312,12 +1586,13 @@ def fix_unit_exec(host: Host, unit: dict, *, now: float | None = None) -> dict:
     except (OSError, UnicodeError):
         raise ValueError("The unit's file cannot be read: nothing was changed") from None
     lines = text.splitlines(keepends=True)
-    changed = [index for index, line in enumerate(lines) if line.lstrip().startswith("ExecStart=") and old in line]
-    if not changed:
+    found = [(index, _exec_value(line)) for index, line in enumerate(lines)]
+    starts = [index for index, item in found if item and item[0] == "ExecStart" and old in item[1]]
+    if not starts:
         program = _exec_program(text)
         if unit.get("need_reload") and program and program != old and _executable(host, program) is True:
             # put right already (by hand, or a repair whose reload failed): systemd only has to read it again
-            steps, state = _restart(host, scope, name)
+            steps, state = _restart(host, scope, name, wait=wait)
             return {"ok": all(step["exit"] == 0 for step in steps) and state == "active", "unit": name, "scope": scope,
                     "file": source, "backup": None, "from": old, "to": program, "lines": 0, "reload_only": True,
                     "steps": steps, "state": state or None, "undo": None}
@@ -1325,8 +1600,10 @@ def fix_unit_exec(host: Host, unit: dict, *, now: float | None = None) -> dict:
     new = replacement_python(host, old, current_only=stale)
     if not new:
         raise ValueError("No newer Hermes Python was found to point the unit at: reinstall Hermes' service instead")
+    changed = [index for index, item in found if item and old in item[1]]   # ExecStop=, ExecStopPost=... too
     for index in changed:
         lines[index] = lines[index].replace(old, new)
+    written = "".join(lines)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
     backup = path.with_name(f"{path.name}.atlas-{stamp}-{secrets.token_hex(3)}.bak")
     try:
@@ -1335,7 +1612,7 @@ def fix_unit_exec(host: Host, unit: dict, *, now: float | None = None) -> dict:
         raise ValueError("The unit's file cannot be written (run this as the user it belongs to, or as root): "
                          "nothing was changed") from None
     try:
-        _write_atomic(path, "".join(lines), stat.S_IMODE(info.st_mode))
+        _write_atomic(path, written, stat.S_IMODE(info.st_mode))
     except OSError:
         try:
             os.unlink(backup)
@@ -1343,26 +1620,59 @@ def fix_unit_exec(host: Host, unit: dict, *, now: float | None = None) -> dict:
             pass
         raise ValueError("The unit's file cannot be written (run this as the user it belongs to, or as root): "
                          "nothing was changed") from None
-    steps, state = _restart(host, scope, name)
+    was_running = unit_busy(unit)   # its process keeps the old program until it restarts: start changes nothing
+    steps, state = _restart(host, scope, name, wait=wait)
     return {"ok": all(step["exit"] == 0 for step in steps) and state == "active", "unit": name, "scope": scope,
             "file": source, "backup": str(backup), "from": old, "to": new, "lines": len(changed), "steps": steps,
-            "state": state or None, "reload_only": False,
-            "undo": {"unit": name, "scope": scope, "file": source, "backup": str(backup)}}
+            "state": state or None, "reload_only": False, "was_running": was_running,
+            "undo": {"unit": name, "scope": scope, "file": source, "backup": str(backup), "from": old, "to": new,
+                     "after_sha256": _digest(written)}}
 
 
-def undo_unit_exec(host: Host, record: dict) -> dict:
-    """Put back the file fix_unit_exec changed, from its copy, and reload systemd (the unit is left as it is).
-    ValueError says why nothing was changed; nothing else is raised."""
+def undoable(host: Host, record: dict) -> str | None:
+    """Why a repair fix_unit_exec recorded can no longer be undone, None when it can: "not_ours" (not a record of
+    this plugin), "backup_gone" (its copy is gone or is not where the repair left it) or "changed" (the file is not
+    what the repair wrote any more: Hermes reinstalled the service, or the owner edited it)."""
     record = record if isinstance(record, dict) else {}
     name, scope = str(record.get("unit") or ""), record.get("scope")
     source, backup = record.get("file"), Path(str(record.get("backup") or ""))
     if not _UNIT_NAME.fullmatch(name) or scope not in ("user", "system") or not isinstance(source, str) or not source:
-        raise ValueError("Not a repair of this plugin")
+        return "not_ours"
     path = host.path(source)
     try:
         if backup.parent != path.parent or not backup.name.startswith(path.name + ".atlas-") or backup.is_symlink() \
                 or not backup.is_file():
-            raise ValueError("The copy of the unit's file is gone: nothing was changed")
+            return "backup_gone"
+    except OSError:
+        return "backup_gone"
+    expected = record.get("after_sha256")
+    if isinstance(expected, str) and expected:
+        try:
+            current = path.read_text(encoding="utf-8") if not path.is_symlink() else None
+        except (OSError, UnicodeError):
+            current = None
+        if current is None or _digest(current) != expected:
+            return "changed"
+    return None
+
+
+def undo_unit_exec(host: Host, record: dict, *, lang: str = "en") -> dict:
+    """Put back the file fix_unit_exec changed, from its copy, and reload systemd (the unit is left as it is). A
+    file changed since the repair (`after_sha256` of the record no longer matches: Hermes reinstalled the service,
+    or the owner edited it) is never overwritten (undoable). ValueError says why nothing was changed; nothing else
+    is raised."""
+    record = record if isinstance(record, dict) else {}
+    why = undoable(host, record)
+    if why == "not_ours":
+        raise ValueError("Not a repair of this plugin")
+    if why == "backup_gone":
+        raise ValueError("The copy of the unit's file is gone: nothing was changed")
+    if why == "changed":
+        _refuse(lang, "The unit's file changed since the repair (reinstalled or edited): nothing was changed",
+                "O arquivo do serviço mudou depois do reparo (reinstalado ou editado): nada foi mudado")
+    name, scope, source = str(record.get("unit")), record.get("scope"), str(record.get("file"))
+    path, backup = host.path(source), Path(str(record.get("backup")))
+    try:
         text, mode = backup.read_text(encoding="utf-8"), stat.S_IMODE(os.lstat(backup).st_mode)
     except (OSError, UnicodeError):
         raise ValueError("The copy of the unit's file is gone: nothing was changed") from None
@@ -1372,7 +1682,8 @@ def undo_unit_exec(host: Host, record: dict) -> dict:
         raise ValueError("The unit's file cannot be written (run this as the user it belongs to, or as root): "
                          "nothing was changed") from None
     step = _systemctl(host, scope, "daemon-reload")
-    return {"ok": step["exit"] == 0, "unit": name, "file": source, "restored_from": str(backup), "steps": [step]}
+    return {"ok": step["exit"] == 0, "unit": name, "scope": scope, "file": source, "restored_from": str(backup),
+            "steps": [step]}
 
 
 UNIT_KEEP = ("unit", "scope", "enabled", "active", "state", "active_state", "sub_state", "result", "n_restarts",

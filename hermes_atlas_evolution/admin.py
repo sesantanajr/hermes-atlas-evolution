@@ -26,11 +26,12 @@ from pathlib import Path
 PLUGIN_ID = "hermes-atlas-evolution"
 SETTINGS = ("lessons", "language", "tool_hints", "feedback_signals", "agent_tools", "slow_turn_seconds",
             "owner_sender_ids", "owner_platforms", "reflector", "reflector_daily_limit", "autopilot_minutes",
-            "runtime_guard", "mode")
-BOOLEANS = ("tool_hints", "feedback_signals", "agent_tools", "reflector", "runtime_guard")
+            "runtime_guard", "mode", "fleet_managed")
+BOOLEANS = ("tool_hints", "feedback_signals", "agent_tools", "reflector", "runtime_guard", "fleet_managed")
 CHOICES = {"lessons": ("auto", "suggest", "off"), "language": ("auto", "en", "pt"), "mode": ("auto", "assist", "manual")}
 NUMBERS = ("slow_turn_seconds", "reflector_daily_limit", "autopilot_minutes")
 RELOAD_KEYS = ("runtime_guard", "tool_hints")   # applied at the next load of the plugin (integration.RELOAD_KEYS)
+_WINDOWS = os.name == "nt"
 
 
 def current_settings(home: Path, runtime_config: dict) -> dict:
@@ -63,26 +64,110 @@ def validate_settings(values: dict) -> None:
 
 
 def hermes_executable() -> str | None:
-    """The `hermes` command that runs this profile's Hermes (a .bat or .cmd shim is never run with a list argv)."""
+    """The `hermes` command that runs this profile's Hermes. A real program comes first everywhere: on Windows
+    `hermes.exe` (beside the `hermes.cmd` shim PATH names, in Hermes' own `.hermes/bin`, or in the older
+    `venv/Scripts`); the published `hermes.cmd` shim is used only when there is no program, and run_command then
+    quotes every argument for cmd.exe (refusing one it would read as something else). A .bat is never run."""
     import shutil
 
     import sys
 
+    windows = _WINDOWS
     found = shutil.which("hermes")
     candidates = [found]
+    if found and Path(found).suffix.lower() in (".cmd", ".bat"):
+        candidates.insert(0, str(Path(found).with_suffix(".exe")))   # the program the shim starts
     # A service (the gateway, the dashboard) may run with a PATH that lacks it: the launcher this process came from,
     # then the launchers inside Hermes' own install, then the usual places.
-    if Path(sys.argv[0] if sys.argv else "").name == "hermes":
+    if Path(sys.argv[0] if sys.argv else "").stem.lower() == "hermes":
         candidates.append(sys.argv[0])
     module = sys.modules.get("hermes_cli")
     if getattr(module, "__file__", None):
         root = Path(module.__file__).resolve().parent.parent
-        candidates += [str(root / ".hermes" / "bin" / "hermes"), str(root / "venv" / "bin" / "hermes")]
-    candidates += ["/usr/local/bin/hermes", str(Path.home() / ".local" / "bin" / "hermes")]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file() and Path(candidate).suffix.lower() not in (".bat", ".cmd"):
-            return os.path.abspath(candidate)   # absolute: a script or a job run from another folder finds it too
-    return None
+        if windows:
+            candidates += [str(root / ".hermes" / "bin" / "hermes.exe"), str(root / "venv" / "Scripts" / "hermes.exe"),
+                           str(root / ".hermes" / "bin" / "hermes.cmd")]
+        else:
+            candidates += [str(root / ".hermes" / "bin" / "hermes"), str(root / "venv" / "bin" / "hermes")]
+    if not windows:
+        candidates += ["/usr/local/bin/hermes", str(Path.home() / ".local" / "bin" / "hermes")]
+    existing = [item for item in candidates if item and Path(item).is_file()]
+    program = next((item for item in existing if Path(item).suffix.lower() not in (".bat", ".cmd")), None)
+    if program is None and windows:
+        program = next((item for item in existing if Path(item).suffix.lower() == ".cmd"), None)
+    return os.path.abspath(program) if program else None   # absolute: a job run from another folder finds it too
+
+
+# A batch file runs under cmd.exe, which reads its command line again: only arguments without its special characters
+# are passed to one (each then quoted), anything else is refused rather than escaped.
+_BATCH_SAFE = re.compile(r'[^"%!^&|<>()\r\n\x00]*')
+
+
+def _batch_command_line(argv: list) -> str:
+    """The command line for a .cmd launcher, every argument quoted; ValueError for an argument cmd.exe would read as
+    something else."""
+    parts = []
+    for item in (str(value) for value in argv):
+        if not _BATCH_SAFE.fullmatch(item) or item.endswith("\\"):
+            raise ValueError("This value cannot be passed to Hermes' hermes.cmd launcher; run the command by hand")
+        parts.append(f'"{item}"')
+    return " ".join(parts)
+
+
+def _kill_tree(process) -> None:
+    """End a command and every process it started: Hermes' launcher hands the work to a child Python, so ending the
+    launcher alone left the child running after a timeout. Its own process group on POSIX (a polite TERM, then KILL),
+    `taskkill /T /F` on Windows."""
+    import signal
+    import time
+
+    if _WINDOWS:
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            process.kill()
+        except OSError:
+            pass
+        return
+    for sig, grace in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 0.0)):
+        try:
+            os.killpg(process.pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        give_up = time.monotonic() + grace
+        while time.monotonic() < give_up:
+            if process.poll() is not None:
+                try:
+                    os.killpg(process.pid, 0)   # the launcher ended: anything left of its group?
+                except (ProcessLookupError, PermissionError, OSError):
+                    return
+            time.sleep(0.1)
+
+
+def run_command(argv: list, *, env=None, cwd=None, timeout=None, **_ignored) -> subprocess.CompletedProcess:
+    """subprocess.run(argv, capture_output=True, text=True) for Hermes' command line, in its own process group, so a
+    timeout ends everything it started (_kill_tree) before subprocess.TimeoutExpired is raised. A .cmd launcher runs
+    with every argument quoted (_batch_command_line)."""
+    options: dict = {"start_new_session": True} if not _WINDOWS else {
+        "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    command = argv
+    if _WINDOWS and str(argv[0]).lower().endswith((".cmd", ".bat")):
+        command = _batch_command_line(argv)
+    process = subprocess.Popen(command, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, encoding="utf-8", errors="replace", **options)
+    try:
+        out, err = process.communicate(timeout=timeout)
+    except BaseException:   # a timeout, or the owner's Ctrl-C: nothing Hermes started is left running
+        _kill_tree(process)
+        try:
+            process.communicate(timeout=5)
+        except (subprocess.SubprocessError, OSError, ValueError):
+            pass
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, out, err)
 
 
 def _decision_id(body: dict) -> int:
@@ -100,11 +185,12 @@ def _decision_id(body: dict) -> int:
 
 
 def profile_name(home: Path) -> str:
-    plain = Path(os.path.abspath(home))   # before links: a linked profile folder keeps its own name
-    if plain.parent.name == "profiles":
-        return plain.name
-    home = plain.resolve()
-    return home.name if home.parent.name == "profiles" else "default"
+    """The profile a home is, as Hermes names it (environment.home_parts): read before links are followed, so a
+    linked profile folder keeps its own name and a default home that links into another Hermes' profiles folder is
+    still the default one."""
+    from .environment import home_parts
+
+    return home_parts(home)[1]
 
 
 _PROFILE_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
@@ -120,6 +206,17 @@ def _profile_args(profile: Path) -> list[str]:
     return ["--profile", name]
 
 
+def launch_spelling(home: Path) -> tuple[Path, str]:
+    """(HERMES_HOME, profile name) for Hermes' command line in this home. Hermes finds a profile from HERMES_HOME's
+    spelling (`<root>/profiles/<name>` names <root>; anything else is a root), so the home is spelled the way
+    environment.home_parts read it, never as the place its links lead to: a resolved profile folder outside its
+    Hermes would make `--profile <name>` look for it in the wrong place, and `--profile default` run another Hermes."""
+    from .environment import home_parts
+
+    root, name = home_parts(home)
+    return (root if name == "default" else root / "profiles" / name), name
+
+
 def launch_home(home: Path) -> Path:
     """The root Hermes home of a profile (<root>/profiles/<name> belongs to <root>): environment.root_of."""
     from .environment import root_of
@@ -130,7 +227,7 @@ def launch_home(home: Path) -> Path:
 def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout: int = 60, what: str = "setting") -> None:
     """Run `hermes --profile <name> <args...>` for this profile, Hermes' public command line, with an argument list
     (no shell). Raises ValueError with Hermes' own message when it refuses, fails or does not answer in time."""
-    profile = Path(home).resolve()
+    profile, name = launch_spelling(home)
     command_path = executable() if callable(executable) else (executable or hermes_executable())
     if command_path is None:
         raise ValueError("The hermes command was not found: run this where `hermes --version` works")
@@ -139,9 +236,9 @@ def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout:
         raise ValueError("Not a Hermes profile (no config.yaml)")
     env = dict(os.environ, HERMES_HOME=str(profile))
     env.pop("HERMES_PROFILE", None)   # the launch profile's own marker; --profile names the one changed
-    run = subprocess.run if runner is None else runner
+    run = run_command if runner is None else runner
     try:
-        result = run([command_path, "--profile", profile_name(profile), *[str(item) for item in args]], env=env,
+        result = run([command_path, "--profile", name, *[str(item) for item in args]], env=env,
                      cwd=str(profile), stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8",
                      errors="replace", timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
@@ -159,7 +256,7 @@ def run_hermes(home: Path, args: list, *, runner=None, executable=None, timeout:
 def hermes_output(home: Path, args: list, *, runner=None, executable=None, timeout: int = 300) -> tuple[int, str]:
     """Run `hermes --profile <name> <args...>` and return (exit code, what it printed), never raising for its exit
     code: for Hermes' own checks, whose exit code says "issues found" (124 = it did not answer in time)."""
-    profile = Path(home).resolve()
+    profile, name = launch_spelling(home)
     command_path = executable() if callable(executable) else (executable or hermes_executable())
     if command_path is None:
         return 127, "The hermes command was not found: run this where `hermes --version` works"
@@ -167,15 +264,15 @@ def hermes_output(home: Path, args: list, *, runner=None, executable=None, timeo
         return 127, "Not a Hermes profile (no config.yaml)"
     env = dict(os.environ, HERMES_HOME=str(profile), NO_COLOR="1")
     env.pop("HERMES_PROFILE", None)
-    run = subprocess.run if runner is None else runner
+    run = run_command if runner is None else runner
     try:
-        result = run([command_path, "--profile", profile_name(profile), *[str(item) for item in args]], env=env,
+        result = run([command_path, "--profile", name, *[str(item) for item in args]], env=env,
                      cwd=str(profile), stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8",
                      errors="replace", timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         return 124, "Hermes did not answer in time; check the result before trying again"
-    except (OSError, subprocess.SubprocessError) as error:
-        return 126, type(error).__name__
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        return 126, str(error)[:200] if isinstance(error, ValueError) else type(error).__name__
     return result.returncode, (result.stdout or "") + (result.stderr or "")
 
 
@@ -263,8 +360,9 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
     if kind == "memory":
         if body.get("action") != "remove":
             raise ValueError("Invalid decision")
-        return memory_care.remove(home, str(body.get("file")), str(body.get("fingerprint")), now=now, actor=actor,
-                                  runtime_config=runtime_config)
+        # the copy the owner keeps is named too: nothing is taken out unless it is still there (memory_care.remove)
+        return memory_care.remove(home, str(body.get("file")), str(body.get("fingerprint")), keep=body.get("keep"),
+                                  now=now, actor=actor, runtime_config=runtime_config)
     with experience(home) as conn:
         if kind == "lesson":
             return decisions.decide_lesson(conn, _decision_id(body), str(body.get("action")), now=now, actor=actor,
@@ -349,11 +447,13 @@ def profile_home(own_home: Path, name: str, *, read_config=None) -> tuple[Path, 
     if name == "default":
         home = root
     else:
+        from .environment import deleted_profile
+
         folder = root / "profiles" / name
         resolved = folder.resolve()   # resolved once: the checks and the result are the same path
         if folder.is_symlink() or resolved.parent != (root / "profiles").resolve() or not resolved.is_dir() \
-                or resolved.is_symlink():
-            raise ValueError("Unknown profile")
+                or resolved.is_symlink() or deleted_profile(folder):
+            raise ValueError("Unknown profile")   # `hermes profile delete` marked it gone: never served again
         home = resolved
     if not (home / "plugins" / PLUGIN_ID / "plugin.yaml").is_file():
         raise ValueError("Atlas Evolution is not installed in that profile")

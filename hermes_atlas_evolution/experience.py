@@ -118,6 +118,11 @@ ADDITIVE_TABLES = (
     # retires them for that activation (lessons.evaluate). `activated` ties the decision to one activation.
     ("lesson_keep", "CREATE TABLE IF NOT EXISTS lesson_keep (lesson_id INTEGER PRIMARY KEY, activated REAL NOT NULL, "
                     "at REAL NOT NULL) WITHOUT ROWID"),
+    # 0.12.0: when the agent first read a lesson in this activation (its session prompt or a tool hint), the rate its
+    # last verdict compared (failures per call or per day) and the days its per-day baseline divides by (frozen). A lesson is measured from that moment only: one
+    # the prompt's cap never showed changed nothing it could be judged on (lessons.evaluate).
+    ("lesson_measure", "CREATE TABLE IF NOT EXISTS lesson_measure (lesson_id INTEGER PRIMARY KEY, activated REAL NOT NULL, "
+                       "first_shown REAL NOT NULL, basis TEXT NOT NULL DEFAULT '', baseline_days INTEGER) WITHOUT ROWID"),
     # Reflector calls that raised, per failure signature: after a few in a row the signature waits, so one
     # excerpt a provider keeps refusing does not take every call of every day (reflector.reflect).
     ("reflector_backoff", "CREATE TABLE IF NOT EXISTS reflector_backoff (signature TEXT PRIMARY KEY, "

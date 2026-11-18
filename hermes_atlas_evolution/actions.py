@@ -3,13 +3,16 @@
 The `mode` (a setting the agent cannot widen, see cli.TRUSTED_ONLY; internally auto_actions full/safe/off) says what
 runs by itself at the end of each learning pass:
 - manual ("off"): nothing; everything waits for the owner.
-- assist ("safe"): copies of a memory entry that are the very same text, character for character, are taken
-  out of Hermes' memory (a copy of the file is kept); nothing else. An entry the owner put back stays.
+- assist ("safe"): an entry said character for character in both MEMORY.md and USER.md (both loaded) is taken out
+  of MEMORY.md, only while the copy in USER.md is still there (a copy of the file is kept); nothing else. A repeat
+  inside one file is left to Hermes, which drops it itself. An entry the owner put back stays.
 - auto ("full", the default): also the reversible changes of explain.AUTOMATIC (locking a skill the curator keeps
   rewriting, installing this plugin where a profile in use never had it, moving a failed install's folder to the
-  trash), at most MAX_CHANGES_PER_PASS per pass, with Hermes' own command; one Hermes refuses waits a day. The lead
-  profile also brings this plugin's copy in the other profiles to its own commit (fleet_update.auto_sync: a pinned,
-  older, different or half-installed copy), where that profile's own mode is auto too.
+  trash), at most MAX_CHANGES_PER_PASS per pass, with Hermes' own command; one Hermes refuses waits a day. The plugin
+  installs itself only while the repository's default branch is on the commit the lead runs. The lead profile also
+  brings this plugin's copy in the other profiles to its own commit (fleet_update.auto_sync: a pinned, older,
+  different or half-installed copy), where that profile's own mode is auto too. A profile with `fleet_managed: false`
+  is never changed by itself.
 
 Every action is recorded in the decision history with "automatic" as the actor and can be undone from the menu,
 the panel or `hermes evolution decisions undo <id>`. An automatic change the owner undoes is never applied
@@ -145,10 +148,42 @@ def _trash(home: Path, target: Path, profile: str, folder: str, *, back: bool) -
     _purge(trash, now=now, keep=kept_name)
 
 
+def _writable_again(function, path, _error) -> None:
+    """shutil.rmtree's error handler: a read-only file (git keeps its packs read-only, and Windows refuses to delete
+    a read-only file) or a folder without write permission is made writable by its owner and deleted again. Never
+    through a link; what still cannot be deleted stays (the next pass tries again)."""
+    import os
+    import stat
+
+    try:
+        parent = os.path.dirname(path)
+        if parent and stat.S_ISDIR(os.lstat(parent).st_mode):
+            os.chmod(parent, stat.S_IMODE(os.lstat(parent).st_mode) | stat.S_IRWXU)
+        info = os.lstat(path)
+        if not stat.S_ISLNK(info.st_mode):
+            os.chmod(path, stat.S_IMODE(info.st_mode) | stat.S_IWRITE | stat.S_IREAD
+                     | (stat.S_IXUSR if stat.S_ISDIR(info.st_mode) else 0))
+        function(path)
+    except (OSError, NotImplementedError):
+        pass
+
+
+def _delete_tree(path: str) -> bool:
+    """Delete a folder of the trash, read-only files included; whether it is gone."""
+    import os
+    import shutil
+    import sys
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_writable_again)
+    else:
+        shutil.rmtree(path, onerror=_writable_again)
+    return not os.path.lexists(path)
+
+
 def _purge(trash: Path, *, now: float, keep: str = "") -> int:
     """Delete what entered one trash folder more than 30 days ago; the number of entries deleted."""
     import os
-    import shutil
 
     try:
         entries = list(os.scandir(trash))
@@ -159,8 +194,7 @@ def _purge(trash: Path, *, now: float, keep: str = "") -> int:
         try:
             if entry.name != keep and _TRASHED.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False) \
                     and now - entry.stat(follow_symlinks=False).st_mtime > TRASH_KEEP_SECONDS:
-                shutil.rmtree(entry.path, ignore_errors=True)
-                gone += 1
+                gone += _delete_tree(entry.path)
         except OSError:
             continue
     return gone
@@ -195,23 +229,16 @@ def recover(conn) -> None:
 def _held_by_owner(home: Path, subject: str, usage: dict) -> bool:
     """Whether the skill is already locked or pinned. Hermes keys both by the skill's folder, which may differ from the
     name a proposal carries (the SKILL.md frontmatter): the folders that declare this name count too."""
+    from .environment import _is_dir, _skill_files, _skill_text
+
     names = {subject}
     root = Path(home) / "skills"
-    try:
-        for found, skill_file in enumerate(root.rglob("SKILL.md")):
-            if found >= 2000:
-                break
-            if len(skill_file.relative_to(root).parts) > 5:
-                continue   # too deep for a skill; the ones after it in the walk still count
-            try:
-                head = skill_file.read_text(encoding="utf-8", errors="replace")[:4096]
-            except OSError:
-                continue
-            if any(line.split(":", 1)[1].strip().strip("'\"") == subject for line in head.splitlines()[:30]
-                   if line.startswith("name:")):
-                names.add(skill_file.parent.name)
-    except OSError:
-        pass
+    # the walk and the reading of the environment scan: never through a link, never a pipe or a device, each file
+    # up to 256 KB, at most 3,000 skills five folders deep
+    for skill_file in _skill_files(root) if _is_dir(root) else ():
+        parsed = _skill_text(skill_file)
+        if parsed is not None and parsed[0] == subject:
+            names.add(skill_file.parent.name)
     return any(isinstance(usage.get(name), dict) and (usage[name].get("locked") or usage[name].get("pinned"))
                for name in names)
 
@@ -322,22 +349,44 @@ def apply_many(home: Path, ids: list, *, now: float, actor: str = "terminal", ru
 
 
 def undo_applied(home: Path, result: dict, *, now: float, runner=None) -> dict:
-    """Undo an applied proposal (decisions.undo derived the undo from what was applied): run it, close the proposal as
-    the owner's refusal, and keep the autopilot from applying it again."""
+    """Undo an applied proposal (decisions.undo derived the undo from what was applied). The owner's "no" is written
+    first: the skip markers (here, and in the shared state for a change in another profile) and the proposal marked as
+    being undone. Only then Hermes runs, and the proposal is closed as the owner's refusal. A failure in between (a
+    busy database, the shared state's lock) never leaves an undone change the Mode auto would apply again; a failure
+    before Hermes runs changes nothing in Hermes."""
+    import time
+
     from . import decisions
     from .experience import experience
 
-    _hermes(home, list(result["undo"]), runner=runner)
+    code, proposal = str(result.get("code") or ""), int(result["proposal"])
     with experience(home) as conn:
-        conn.execute("UPDATE proposal SET status='rejected', note='undone', updated=? WHERE id=?",
-                     (now, int(result["proposal"])))
-        if result.get("code"):
-            conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES (?, ?)", (f"auto_skip:{result['code']}", str(now)))
-        decisions.mark_undone(conn, result["id"], now=now)
-    if str(result.get("code") or "").startswith("env:"):
+        if code:
+            conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES (?, ?)", (f"auto_skip:{code}", str(now)))
+        conn.execute("UPDATE proposal SET note='undoing', updated=? WHERE id=? AND status='applied'", (now, proposal))
+    if code.startswith("env:"):
         from .environment import remember, root_of
 
-        remember(root_of(home), skip=[result["code"]])   # kept for whichever profile looks after the Hermes next
+        remember(root_of(home), skip=[code])   # kept for whichever profile looks after the Hermes next
+    try:
+        _hermes(home, list(result["undo"]), runner=runner)
+    except BaseException:
+        try:   # nothing was undone: the proposal stays applied (the owner's "no" stays too: never re-applied by itself)
+            with experience(home) as conn:
+                conn.execute("UPDATE proposal SET note=NULL WHERE id=? AND note='undoing'", (proposal,))
+        except (sqlite3.Error, OSError):
+            pass
+        raise
+    for attempt in range(3):   # Hermes undid it: the record must not be lost to a busy moment
+        try:
+            with experience(home) as conn:
+                conn.execute("UPDATE proposal SET status='rejected', note='undone', updated=? WHERE id=?", (now, proposal))
+                decisions.mark_undone(conn, result["id"], now=now)
+            break
+        except (sqlite3.Error, OSError):
+            if attempt == 2:
+                raise
+            time.sleep(0.5 * (attempt + 1))
     return {**result, "undone": True}
 
 
@@ -347,8 +396,11 @@ def memory_skip(conn, name: str, mark: str, now: float) -> None:
 
 
 def _memory(home: Path, runtime_config, *, now: float) -> list[dict]:
-    """Take out copies of an entry that are the very same text, character for character. An entry that differs in
-    anything, case and spacing included (a path, a password, an indented block), is the owner's to decide."""
+    """Take out an entry said word for word in both MEMORY.md and USER.md while Hermes loads both: the copy in
+    MEMORY.md, each time only while the copy in USER.md is still there (memory_care.cross_file_copies, remove). A
+    repeat inside one file is left alone: Hermes drops it itself when it loads or writes the file, so taking it out
+    saves nothing and could take the only copy left. An entry that differs in anything, case and spacing included (a
+    path, a password, an indented block), is the owner's to decide; nothing goes when the configuration was not read."""
     from . import memory_care
     from .experience import experience
 
@@ -356,13 +408,12 @@ def _memory(home: Path, runtime_config, *, now: float) -> list[dict]:
         skipped = {row[0] for row in conn.execute("SELECT key FROM cursor WHERE key LIKE 'auto_skip:memory:%'")}
     removed = []
     for _ in range(MAX_MEMORY_PER_PASS):   # read again after each removal: positions and repeats change
-        issues = [item for item in memory_care.review(home, runtime_config)["issues"]
-                  if item["kind"] == "exact" and item.get("identical")
-                  and f"auto_skip:memory:{item['suggested_drop']['file']}:{item['suggested_drop']['fingerprint']}" not in skipped]
-        if not issues:
+        pairs = [pair for pair in memory_care.cross_file_copies(home, runtime_config)
+                 if f"auto_skip:memory:{pair['drop']['file']}:{pair['drop']['fingerprint']}" not in skipped]
+        if not pairs:
             break
-        drop = issues[0]["suggested_drop"]
-        result = memory_care.remove(home, drop["file"], drop["fingerprint"], now=now, actor="automatic",
+        drop, keep = pairs[0]["drop"], pairs[0]["keep"]
+        result = memory_care.remove(home, drop["file"], drop["fingerprint"], keep=keep, now=now, actor="automatic",
                                     runtime_config=runtime_config)
         if not result.get("removed"):
             break
@@ -371,12 +422,21 @@ def _memory(home: Path, runtime_config, *, now: float) -> list[dict]:
 
 
 def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=None, usage=None,
-              deadline: float | None = None) -> dict:
+              deadline: float | None = None, remote=None) -> dict:
     """The automatic actions of one pass. Failures are reported, never raised: the pass itself must not fail.
-    `deadline` (time.monotonic) leaves Hermes commands out when one might not finish before it."""
+    `deadline` (time.monotonic) leaves Hermes commands out when one might not finish before it. `remote` replaces
+    fleet_update.remote_head (the commit the repository's default branch is on), read once per pass."""
     import time
 
     from .experience import experience
+    from .fleet_update import remote_head
+
+    head: dict = {}
+
+    def latest() -> str | None:
+        if "sha" not in head:
+            head["sha"] = (remote or remote_head)()
+        return head["sha"]
 
     done: dict = {"mode": mode if mode in MODES else "off", "memory": [], "applied": [], "failed": []}
     try:   # whatever the mode: the trash keeps what it got for 30 days, and no longer
@@ -422,6 +482,18 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
             failed_at = 0
         if now - failed_at < FAILURE_BACKOFF_SECONDS:
             continue
+        if row["kind"] == "self_missing":
+            # Hermes installs the repository's default branch as it is now (never `--ref`: a pin there breaks every
+            # later update), so the plugin installs itself only while that is the very commit the lead runs, as
+            # fleet_update.auto_sync spreads only code the owner already runs; else it waits for the next pass.
+            from .environment import self_sha
+
+            if "lead" not in head:
+                head["lead"] = self_sha(home)
+            if not head["lead"] or latest() != head["lead"]:
+                done.setdefault("waiting", []).append({"proposal": row["id"], "kind": row["kind"],
+                                                       "subject": row["subject"], "reason": "lead_commit"})
+                continue
         try:
             result = apply_proposal(home, row["id"], now=now, actor="automatic", runner=runner, usage=usage)
         except Stale:
@@ -439,7 +511,7 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
     try:   # this plugin in every other profile on the lead's code: a pinned, older or half-installed copy
         from .fleet_update import auto_sync
 
-        synced = auto_sync(home, now=now, runner=runner, deadline=deadline)
+        synced = auto_sync(home, now=now, runner=runner, deadline=deadline, remote=latest)
         if synced is not None:
             done["plugin_sync"] = synced
     except Exception as error:   # never fails the pass
@@ -463,17 +535,26 @@ def automatic(home: Path, *, now: float, mode: str, runtime_config=None, runner=
 
 def _target_allows(home: Path, subject) -> bool:
     """A change by itself in another profile: allowed where the plugin is not on (the lead's mode decides), and where
-    it is on only if that profile's own mode is auto too."""
-    from .environment import profile_mode
+    it is on only if that profile's own mode is auto too; never in a profile that opted out of the fleet
+    (environment.fleet_managed: `fleet_managed: false`), nor in one whose configuration cannot be read now (invalid
+    while it is edited, too large): its owner's choices are unknown there, so nothing runs by itself this pass. The
+    configuration is read once, and every answer comes from that one reading."""
+    from .environment import _read_config, fleet_managed, profile_mode
 
     profile = str(subject or "").split("/", 1)[0]
     try:
         target = _profile_home(home, profile)
     except ValueError:
         return False
+    config = _read_config(target)
+    if not isinstance(config, dict):
+        return False
+    reader = lambda _home: config   # noqa: E731
+    if not fleet_managed(target, read_config=reader):
+        return False
     if Path(target).resolve() == Path(home).resolve():
         return True
-    mode = profile_mode(target)
+    mode = profile_mode(target, read_config=reader)
     return mode is None or mode == "auto"
 
 
@@ -483,10 +564,14 @@ GATEWAY_REPAIR_EVERY_SECONDS = 86_400   # an automatic repair that did not bring
 def repair_gateway(home: Path, *, now: float, deadline: float | None = None, host=None) -> dict | None:
     """Self-repair of the Mode auto: the gateway's own systemd unit (user scope) names a Python that no longer exists
     (Hermes replaced its bundled Python; systemd fails with status=203/EXEC and loops), so it is pointed at the Python
-    Hermes uses now, exactly as `hermes evolution care fix-gateway` does: a copy of the file is kept, and
-    `hermes evolution care undo-gateway` puts it back. Only by the profile that looks after the whole Hermes, only for
-    the unit Hermes names for this profile, never while any gateway unit runs, never for a unit that is off and not
-    failing, never in system scope (root's), at most once a day. Recorded in the history. None when nothing was due."""
+    Hermes uses now, exactly as `hermes evolution care fix-gateway` does: a copy of the file is kept, the journal of
+    repairs records it, and `hermes evolution care undo-gateway` puts it back (from any profile). Only by the profile
+    that looks after the whole Hermes, only for the unit Hermes names for this home (or for the root whose gateway
+    serves it, never a profile's legacy unit then), only when it runs this Hermes (its HERMES_HOME), never while any
+    gateway of this Hermes runs (its process, heartbeat, pid file, lock, host record) or any gateway unit of either
+    scope runs, starts or stops (hermes_care.start_blockers), never for a unit that is off and not failing, never in
+    system scope (root's), never again for a situation the owner undid, at most once a day. Recorded in the history.
+    None when nothing was due."""
     import os
     import time
 
@@ -513,56 +598,59 @@ def repair_gateway(home: Path, *, now: float, deadline: float | None = None, hos
         return None
     if deadline is not None and deadline - time.monotonic() < 120:
         return None
-    gate = hermes_care.gateway(home, now=now)
-    if gate.get("running"):
-        return None
-    served = bool(gate.get("served_by_root"))
-    names = hermes_care.expected_gateway_units(home, served=served)
-    if not names:
-        return None
+    if hermes_care.live_gateways(home, now=now):
+        return None   # a gateway of this Hermes runs (degraded and starting ones too): nothing is down
+    served = bool(hermes_care.gateway(home, now=now).get("served_by_root"))
     host = host or system_update.Host()
-    probe = system_update.probe_units({"user": names}, host=host, timeout=10)
+    probe = system_update.probe_gateway_units(host, timeout=10)
     units = probe.get("units") or []
-    if any(item.get("active") for item in units):
-        return None   # a gateway runs from one of them: nothing is down
-    broken = [item for item in units if item.get("scope") == "user" and item.get("exec_exists") is False
-              and item.get("replacement")]
-    unit = hermes_care.pick_gateway_unit(broken, home=home, served=served) if broken else None
+    names = hermes_care.expected_gateway_units(home, served=served, host=host)
+    broken = [item for item in units if item.get("scope") == "user" and item.get("unit") in names
+              and item.get("exec_exists") is False and item.get("replacement")]
+    unit = hermes_care.pick_gateway_unit(broken, home=home, served=served, host=host) if broken else None
     if unit is None or unit.get("enabled") is False and not (unit.get("restart_loop") or unit.get("exec_missing")
                                                             or unit.get("active_state") == "failed"):
         return None   # a leftover that is off says nothing about the gateway
+    if hermes_care.repair_skipped(home, unit):
+        return None   # the owner undid this very repair: never again by itself
+    if hermes_care.start_blockers(home, unit, units, now=now, unverified=probe.get("unverified") or (),
+                                  automatic=True, served=served, host=host):
+        return None   # a second gateway could start, or the unit is not this Hermes' gateway
     with experience(home) as conn:   # marked before it runs: another process never repairs the same unit meanwhile
         conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('auto_gateway_repair', ?)", (str(now),))
+    root = root_of(Path(home))
+    service = root if unit.get("unit") == hermes_care.gateway_unit_name(root, host=host) else Path(home)
+    wait = system_update.START_WAIT_SECONDS if deadline is None else \
+        max(10.0, min(system_update.START_WAIT_SECONDS, deadline - time.monotonic() - 60))
     try:
-        result = system_update.fix_unit_exec(host, unit, now=now)
+        result = system_update.fix_unit_exec(host, unit, now=now, home=service, wait=wait)
     except ValueError as error:
         result = {"ok": False, "unit": unit.get("unit"), "error": str(error)[:160]}
-    if result.get("undo"):   # the same record `care undo-gateway` reads
-        record = Path(home) / "evolution" / "gateway-repair.json"
+    if result.get("undo"):   # what `care undo-gateway` reads, from any profile of this Hermes
         try:
-            record.parent.mkdir(parents=True, exist_ok=True)
-            temporary = record.with_name(f".{record.name}.tmp")
-            temporary.write_text(json.dumps(result["undo"]), encoding="utf-8")
-            os.replace(temporary, record)
+            hermes_care.record_repair_event(home, {"event": "repair", "at": now, "actor": "automatic",
+                                                   "profile": profile_name(home), **result["undo"]})
         except OSError:
             pass
-    hermes_care.refresh_after_repair(home, now)
+    hermes_care.refresh_after_repair(home, now, host=host)
     with experience(home) as conn:
         decision = decisions.record_gateway_repair(conn, str(result.get("unit") or unit.get("unit")),
                                                    before=str(result.get("from") or unit.get("exec_path") or ""),
                                                    after=str(result.get("to") or ""), ok=bool(result.get("ok")),
                                                    undo=bool(result.get("undo")), now=now)
     return {"unit": result.get("unit") or unit.get("unit"), "ok": bool(result.get("ok")), "from": result.get("from"),
-            "to": result.get("to"), "error": result.get("error"), "decision": decision}
+            "to": result.get("to"), "error": result.get("error"), "state": result.get("state"), "decision": decision}
 
 
 RECLAIM_EVERY_SECONDS = 7 * 86_400
 
 
-def reclaim(home: Path, *, now: float, runner=None, timeout: int | None = None) -> dict | None:
+def reclaim(home: Path, *, now: float, runner=None, timeout: int | None = None, host=None) -> dict | None:
     """Free old tool versions nothing references with Hermes' own `hermes pm gc`, when the health check found 300 MB
-    or more of them, at most once a week. Recorded in the history (nothing to undo: Hermes fetches a version again if
-    something asks for it)."""
+    or more of them, at most once a week. Right before, the health check is taken again (the stored one may be hours
+    old): gc runs only if nothing it would delete is in use (a service's command, a running program) and every store
+    it sweeps can be read (hermes_care.gc_blocked). `host`: the machine whose units are read. Recorded in the
+    history (nothing to undo: Hermes fetches a version again if something asks for it)."""
     from . import decisions, hermes_care
     from .experience import experience
 
@@ -574,15 +662,23 @@ def reclaim(home: Path, *, now: float, runner=None, timeout: int | None = None) 
         ran = float(last[0]) if last else 0.0
     except (ValueError, TypeError):
         care, ran = {}, 0.0
-    if "unused_tools" not in (care.get("findings") or ()) or now - ran < RECLAIM_EVERY_SECONDS:
+    if not isinstance(care, dict) or "unused_tools" not in (care.get("findings") or ()) \
+            or now - ran < RECLAIM_EVERY_SECONDS:
         return None
     if hermes_care.gc_blocked(care):
-        return None   # a tools folder facts.json dropped is one a service still starts from: gc would delete it
+        return None   # a tools folder gc would delete is one a service still starts from (or the check is old)
     from .admin import profile_name
     from .environment import lead, root_of
 
     if lead(root_of(Path(home)), now=now) not in (None, profile_name(home)):
         return None   # one tool store for the whole Hermes: the profile that looks after all of it frees it
+    try:   # what is in use now, not hours (nor the minute a unit list is cached) ago
+        with experience(home) as conn:
+            care = hermes_care.cached(conn, home, now=now, force=True, host=host, fresh=True)
+    except Exception:
+        return None
+    if not isinstance(care, dict) or "unused_tools" not in (care.get("findings") or ()) or hermes_care.gc_blocked(care):
+        return None
     with experience(home) as conn:   # marked before it runs: a second process never starts another one meanwhile
         conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('auto_gc', ?)", (str(now),))
     result = hermes_care.run_action(home, "pm_gc", runner=runner, **({} if timeout is None else {"timeout": timeout}))

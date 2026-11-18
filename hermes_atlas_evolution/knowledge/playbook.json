@@ -79,8 +79,8 @@
    "undo": "",
    "title_en": "A profile nobody used in 30 days",
    "title_pt": "Perfil que ninguém usou em 30 dias",
-   "advice_en": "If it is not coming back, delete it with Hermes (hermes profile delete <name>) after a backup; its plugins and skills stop being maintained for nothing.",
-   "advice_pt": "Se ele não vai voltar, apague com o Hermes (hermes profile delete <nome>) depois de um backup; os plugins e skills dele deixam de ser mantidos à toa."
+   "advice_en": "If it is not coming back, delete it with Hermes (`hermes profile delete <name>`) after a backup; its plugins and skills stop being maintained for nothing.",
+   "advice_pt": "Se ele não vai voltar, apague com o Hermes (`hermes profile delete <nome>`) depois de um backup; os plugins e skills dele deixam de ser mantidos à toa."
   },
   "skills_unused": {
    "level": "manual",

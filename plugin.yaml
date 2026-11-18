@@ -1,5 +1,5 @@
 name: hermes-atlas-evolution
-version: "0.11.0"
+version: "0.12.0"
 requires_hermes: ">=0.23.1"
 description: >-
   Looks after your whole Hermes Agent, every profile at once. Every day it runs Hermes' own doctor checks
@@ -38,6 +38,8 @@ provides_hooks:
   - post_compaction
   - on_session_finalize
   - on_kanban_dispatch_tick
+  - on_session_reset
+  - on_session_delete
 config_schema:
   lessons:
     type: str
@@ -65,10 +67,11 @@ config_schema:
     label: "Add the lesson to the failing tool result · Juntar a lição ao resultado da ferramenta que falhou"
     description: >-
       Once per session. Off by default: Hermes keeps only the first plugin's change to a tool result, so this would
-      discard another plugin's change. Applies after hermes gateway restart (in the terminal, at the next session).
+      discard another plugin's change. Turning it on counts only from Hermes' configuration. Applies after hermes
+      gateway restart (in the terminal, at the next session).
       — Uma vez por sessão. Desligado por padrão: o Hermes fica só com a mudança do primeiro plugin no resultado de uma
-      ferramenta, então isto descartaria a mudança de outro plugin. Vale depois de hermes gateway restart (no terminal,
-      na próxima sessão).
+      ferramenta, então isto descartaria a mudança de outro plugin. Ligar só vale pela configuração do Hermes. Vale
+      depois de hermes gateway restart (no terminal, na próxima sessão).
   feedback_signals:
     type: bool
     default: true
@@ -98,12 +101,14 @@ config_schema:
     default: []
     label: "Senders that count as you · Remetentes que contam como você"
     description: >-
-      Your sender ids in chat channels (such as a Telegram id). Their turns count as yours: you get every lesson
-      there, and the failures teach. Your CLI, TUI and Desktop always count. To see and mark the senders: hermes
-      evolution, option 7 (Which chats count as you).
-      — Os seus ids de remetente nos canais de chat (como um id do Telegram). Os turnos deles contam como seus: ali
-      você recebe todas as lições, e as falhas ensinam. A sua CLI, TUI e Desktop sempre contam. Para ver e marcar os
-      remetentes: hermes evolution, opção 7 (Quem é você nos chats).
+      Your sender ids in chat channels (such as a Telegram id). Their turns count as yours: in direct chats you get
+      every lesson from your first message (the ones the chat's prompt leaves out come with it, once per chat; never
+      in groups or threads), and the failures teach. Your CLI, TUI and Desktop always count. Counts only from Hermes' configuration. To see and mark
+      the senders: hermes evolution, option 7 (Which chats count as you).
+      — Os seus ids de remetente nos canais de chat (como um id do Telegram). Os turnos deles contam como seus: nas
+      conversas diretas você recebe todas as lições desde a sua primeira mensagem (as que o prompt do chat deixa de
+      fora chegam com ela, uma vez por conversa; nunca em grupos ou tópicos), e as falhas ensinam. A sua CLI, TUI e Desktop sempre contam. Só vale pela configuração
+      do Hermes. Para ver e marcar os remetentes: hermes evolution, opção 7 (Quem é você nos chats).
   owner_platforms:
     type: list
     default: []
@@ -120,17 +125,20 @@ config_schema:
     description: >-
       An AI model (Hermes' auxiliary task evolution_reflector) drafts lessons for failures with no built-in template,
       in your own turns only; it keeps one excerpt of the error, without sensitive data, per failure until a draft
-      exists. Drafts always wait for you.
+      exists. Drafts always wait for you. Turning it on applies after hermes gateway restart (in the terminal, at the
+      next session); turning it off applies at the next learning pass.
       — Um modelo de IA (a tarefa auxiliar evolution_reflector do Hermes) rascunha lições para falhas sem padrão fixo,
       só nos seus próprios turnos; guarda um trecho do erro sem dados sensíveis por falha até haver um rascunho. Os
-      rascunhos sempre esperam você.
+      rascunhos sempre esperam você. Ligar vale depois de hermes gateway restart (no terminal, na próxima sessão);
+      desligar vale na próxima rodada de aprendizado.
   reflector_daily_limit:
     type: int
     default: 6
     label: "Reflector calls per day · Chamadas do refletor por dia"
     description: >-
-      Most model calls the reflector makes in a day. From 1 to 50.
-      — Máximo de chamadas ao modelo que o refletor faz por dia. De 1 a 50.
+      Most model calls the reflector makes in a day. From 1 to 50; above 6 counts only from Hermes' configuration.
+      — Máximo de chamadas ao modelo que o refletor faz por dia. De 1 a 50; acima de 6 só vale pela configuração do
+      Hermes.
   autopilot_minutes:
     type: int
     default: 60
@@ -158,6 +166,16 @@ config_schema:
       falharam, repara o serviço do gateway quando o Hermes removeu o Python que ele iniciava e libera versões antigas
       de ferramentas; o resto espera você. assist = Assistido: sozinho, só remove entradas repetidas da memória; o resto espera você.
       manual = Manual: só mede e propõe. Cada ação fica no histórico com o seu desfazer.
+  fleet_managed:
+    type: bool
+    default: true
+    label: "Let the lead profile act here · Deixar o perfil que cuida de todos agir aqui"
+    description: >-
+      Off = the lead profile, which looks after every profile of this Hermes, never installs, updates or moves
+      anything to the trash in this profile by itself; it still shows what it finds. settings.json can only turn it
+      off.
+      — Desligado = o perfil que cuida de todos os perfis deste Hermes nunca instala, atualiza nem move nada para a
+      lixeira neste perfil sozinho; continua mostrando o que encontra. O settings.json só pode desligar.
   runtime_guard:
     type: bool
     default: true

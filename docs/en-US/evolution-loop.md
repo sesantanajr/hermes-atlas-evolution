@@ -88,16 +88,16 @@ flowchart LR
 7. **Health radar.** Sessions that end as orphans, a heavy context per agent call, compactions that keep most of the context, plugins that fail to load or compete for one hook, and tool failures caused by another plugin become advisory proposals with the command to inspect them.
 8. **Proposals and digest.** One queue with evidence, risk and the exact command, and a digest that includes the cost of background reviews and a "Hermes health" section.
 
-All of this runs by itself: the [autopilot](#the-autopilot) runs a pass in the background at most once an hour by default, and `hermes evolution status` shows whether the plugin is observing, learning and protecting each profile. The runtime guard, also on by default, vetoes agent terminal commands that would restart or kill the gateway the agent runs on, or delete what the running Hermes needs ([Hermes integration](hermes-integration.md#the-runtime-guard)). Model calls, tokens and their cost are in [Usage and cost](#usage-and-cost); Hermes' own health and the operating system are in [Maintenance](maintenance.md).
+All of this runs by itself: the [autopilot](#the-autopilot) runs a pass in the background at most once an hour by default, and `hermes -p <profile> evolution status` shows whether the plugin is observing, learning and protecting each profile. The runtime guard, also on by default, vetoes agent terminal commands that would restart or kill the gateway the agent runs on, or delete what the running Hermes needs ([Hermes integration](hermes-integration.md#the-runtime-guard)). Model calls, tokens and their cost are in [Usage and cost](#usage-and-cost); Hermes' own health and the operating system are in [Maintenance](maintenance.md).
 
 ## One pass
 
 Hooks record signals while the agent works. Everything else happens in a pass (`evolve.cycle`), which reads Hermes' own records, updates the plugin's tables and never changes Hermes. A pass runs when:
 
 - the autopilot finds one due, at most once per `autopilot_minutes` (default 60; see [The autopilot](#the-autopilot));
-- you run `hermes evolution learn`;
+- you run `hermes -p <profile> evolution learn`;
 - the weekly digest recipe runs, which calls `learn --notify-only` before `report`;
-- `hermes evolution status` runs in a profile that never had a pass, unless you pass `--no-learn` (see [Status and owner notice](#status-and-owner-notice)).
+- `hermes -p <profile> evolution status` runs in a profile that never had a pass, unless you pass `--no-learn` (see [Status and owner notice](#status-and-owner-notice)).
 
 All of them claim the same pass, so two passes of one profile never run at the same time, and each pass counts as the latest one for the others. With `autopilot_minutes` set to 0 and none of the others, signals accumulate but no lesson is derived and nothing is measured.
 
@@ -132,14 +132,15 @@ The autopilot (`autopilot`) runs the pass by itself, in a background daemon thre
   - `on_kanban_dispatch_tick`, which Hermes fires once per Kanban dispatcher tick (every 60 seconds by default), for the gateway's own profile, and only where the dispatcher runs inside the gateway (`kanban.dispatch_in_gateway`).
 
   A nudge only compares two clocks: a check starts at most once every 60 seconds per process (`CHECK_SECONDS`), in a background thread (`hermes-atlas-evolution-autopilot`).
-- **One pass per profile.** Every process of the profile, whether a gateway or a CLI session, claims the pass with a compare-and-set in the plugin's database: in one write transaction it reads when the last pass ended and who holds the lease, and takes the lease. A lease lasts 15 minutes (`LEASE_SECONDS`), so a process that dies in the middle of a pass leaves a lease that expires, and the pass is tried again. A failed pass is tried again after 10 minutes (`RETRY_SECONDS`) instead of a full interval, and the first failure in a process is logged once.
+- **Only processes that stay up.** A gateway, the dashboard, `hermes serve`, the backend of the TUI or Desktop, an editor's ACP server or an interactive CLI in a terminal claims the pass. A run that ends in seconds (`hermes -z`, a scripted `hermes chat -q`, a Kanban worker, any other subcommand) only reads the settings: it would end in the middle of a pass.
+- **One pass per profile.** Every process of the profile that runs passes claims the pass with a compare-and-set in the plugin's database: in one write transaction it reads when the last pass ended and who holds the lease, and takes the lease. A lease lasts 15 minutes (`LEASE_SECONDS`), so a process that dies in the middle of a pass leaves a lease that expires, and the pass is tried again. A failed pass is tried again after 10 minutes (`RETRY_SECONDS`) instead of a full interval, and the first failure in a process is logged once.
 - **A process that exits in the middle of a pass.** When the interpreter exits while its pass is still running, as a short-lived command can, the process frees the lease at exit and records the pass as failed (`ProcessExit`), so another process tries again 10 minutes later instead of waiting for the lease to expire.
 - **The right profile.** Hermes keeps the active profile, and the scope of its secrets, in context variables that new threads do not inherit. The thread pins the plugin's own profile home and secret scope before anything reads Hermes' configuration, so in a gateway that serves several profiles a reflector call uses that profile's provider keys, not the gateway's.
 - **Unloading.** When the plugin unloads, the clock stops, a check already on its way gives back the pass it claimed, and a running pass stops its history replay at the next slice.
 - **Settings.** Each pass reads the settings again, and an invalid value falls back on its own instead of failing the pass (see [Settings and language](#settings-and-language)). The interval itself is set when the plugin loads.
-- **Manual passes.** `hermes evolution learn` waits up to 30 seconds for a running pass instead of running alongside it, and then counts as the latest pass, so the autopilot does not repeat it right away. A failed manual pass leaves the schedule as it was.
+- **Manual passes.** `hermes -p <profile> evolution learn` waits up to 30 seconds for a running pass instead of running alongside it, and then counts as the latest pass, so the autopilot does not repeat it right away. A failed manual pass leaves the schedule as it was.
 
-`hermes evolution status` shows the interval and the last pass: when it ended, whether it succeeded and how long it took (see [Status and owner notice](#status-and-owner-notice)). The autopilot is verified in tests and in the CLI.
+`hermes -p <profile> evolution status` shows the interval and the last pass: when it ended, whether it succeeded and how long it took (see [Status and owner notice](#status-and-owner-notice)). The autopilot is verified in tests and in the CLI.
 
 ## Learning from Hermes' history
 
@@ -174,7 +175,12 @@ The first run of the review counter also reads the rotated logs of the same 14 d
 
 The `post_tool_call` hook counts every call that ends with status `ok`, `error`, `blocked` or `timeout`, per tool and UTC day: calls, errors (a timeout is one), blocked calls and total duration. `timeout` is Hermes' own deadline for a tool call (`tools.sequential_call` and `concurrent_batch`, on by default in 0.23.1). Such a call is a failure of class `timeout`, so a tool that keeps hitting the deadline becomes a lesson and its time counts among the slow tools, and the history replay reads the text Hermes stores for it (`Error executing tool '<name>': timed out after ...`). A `cancelled` call (the owner interrupted the turn) is counted only by the usage observer ([Usage and cost](#usage-and-cost)) and does not enter the loop. Hermes wraps deferred tools in `tool_call`; a wrapper that carries a single call is attributed to the tool that ran, and an unresolved wrapper takes the tool name from Hermes' own error text.
 
-A call with status `error` or `blocked` is classified (`signals.classify`). The classifier first reads the text that Hermes or the tool wrote about the error: the error message (first 2,000 characters) and, when the result is a JSON object, its `error`, `hint`, `approval` and `message` fields. Only when that text matches no rule does it read the command output: the last 1,500 characters of the `output` field, or the first 1,500 characters of a result that is not JSON. It also reads `exit_code`. Results over 262,144 characters are not parsed as JSON. The text is classified in memory and discarded.
+A call with status `error` or `blocked` is classified (`signals.classify`). The classifier first reads the text that Hermes or the tool wrote about the error: the error message (first 2,000 characters) and, when the result is a JSON object, its `error`, `hint`, `approval` and `message` fields. Only when that text matches no rule does it read the command output: the `output` field, or the first 1,500 characters of a result that is not JSON. It also reads `exit_code`. Each text is read the way a person would:
+
+- a Python traceback is read at its end: only its exception lines count, never a frame's line number or source line, and a traceback nothing more specific explains is a `code_exception`;
+- a command's own output (the `output` field of a terminal-like result) is read in its last 5 non-empty lines, at most 600 characters, where it says why it failed; there `not found` counts only when it names a missing file or resource (`no such file`, `does not exist`, `ENOENT`, `404 Not Found`), not a line of progress;
+- an HTTP code counts only where it reads as one (`HTTP/1.1 429`, `HTTP Error 403`, `status code: 401`, `429 Client Error`), never a bare number (`1 failed, 429 passed`, `line 403`);
+- `timeout` counts only as a phrase that says something timed out (`read timeout`, `timeout exceeded`, `TimeoutError`), never the word alone (`timeout=30`). Results over 262,144 characters are not parsed as JSON. The text is classified in memory and discarded.
 
 The outcome is a signature: the first 20 hexadecimal characters of the SHA-256 of tool, class and detail. Two failures with the same tool, class and detail are the same failure.
 
@@ -191,16 +197,16 @@ Rules are tried in the order of the table and the first match names the class (`
 | `edit_precondition` | `Refusing to overwrite`, `has not seen its`, "must be read before" | none | yes |
 | `edit_mismatch` | `Could not find a match for old_string`, `No edit was applied` | none | yes |
 | `blocked_by_policy` | `BLOCKED:`, `flagged as dangerous`, `blocked by policy`, and any `blocked` call that matches no other rule | `inline_script` for inline code execution | yes |
-| `rate_limited` | `rate limit`, `too many requests`, `429`, `quota exceeded` | none | yes |
-| `timeout` | `timed out`, `timeout`, `deadline exceeded` | none | yes |
+| `rate_limited` | `rate limit`, `too many requests`, `quota exceeded`, `HTTP/1.1 429`, `status code: 429` | none | yes |
+| `timeout` | `timed out`, `TimeoutError`, `read timeout`, `timeout exceeded`, `deadline exceeded` | none | yes |
 | `missing_dependency` | `X: command not found`, `No module named X`, `Unable to locate package X` | the command, module or package | yes, when the name is known |
 | `permission_denied` | `permission denied`, `EACCES`, `operation not permitted` | none | yes |
-| `auth` | `401`, `403`, `unauthorized`, `invalid api key` | none | no |
+| `auth` | `unauthorized`, `forbidden`, `invalid api key`, `HTTP 401`, `status code: 403` | none | no |
 | `backend_unavailable` | `not initialized`, `connection refused`, `is not running` | none | yes |
 | `not_found` | `not found`, `no such file`, `does not exist`, `unknown tool` | `skill` or `file` | yes |
 | `limit_exceeded` | `exceeds`, `too long`, `too large`, `limit of N` | none | yes |
 | `invalid_argument` | `usage:`, `unrecognized arguments`, `invalid choice`, `must be one of` | none | yes |
-| `code_exception` | a Python traceback, `SyntaxError` | the exception class | no |
+| `code_exception` | a Python traceback that no rule above explains at its exception line, `SyntaxError` | the exception class | no |
 | `network` | `connection reset`, `network is unreachable`, an SSL error | none | no |
 | `command_failed` | no rule matched and the exit code is not zero | `exit_<code>` or `exit_signal` | no |
 | `other` | nothing matched | none | no |
@@ -258,7 +264,7 @@ The `on_skill_lifecycle` hook counts, per skill and day, the actions `loaded`, `
 
 ## Who is served
 
-A turn serves the owner when it runs on the owner's own surfaces (`local`), in their automations (`cron`), in a subagent delegated from a turn that served the owner (a delegated child serves whoever its parent served, so a child of a stranger's chat serves the stranger, and one whose parent the plugin has not seen serves someone else), in a chat (`gateway`) with a sender listed in `owner_sender_ids` (ids are compared as text, so a Telegram id typed as a number works), or in any chat of a platform listed in `owner_platforms`, such as a private bot or the owner's own interface through the API server. Everything else, a messaging chat with someone else, an integration or an A2A peer, serves someone else. The plugin keeps which of the two each session's latest turn was, in memory only.
+A turn serves the owner when it runs on the owner's own surfaces (`local`), in their automations (`cron`), in a subagent delegated from a turn that served the owner (a delegated child serves whoever its parent served, so a child of a stranger's chat serves the stranger, and one whose parent the plugin has not seen serves someone else), in a chat (`gateway`) with a sender listed in `owner_sender_ids` (ids are compared as text, so a Telegram id typed as a number works), or in any chat of a platform listed in `owner_platforms`, such as a private bot or the owner's own interface through the API server. Everything else, a messaging chat with someone else, an integration or an A2A peer, serves someone else. The plugin keeps which of the two each session's latest turn was, in memory only, and forgets it when the session is reset (`/new`, `/reset`) or deleted.
 
 | What | Owner's turn | Someone else's turn |
 |---|---|---|
@@ -269,9 +275,9 @@ A turn serves the owner when it runs on the owner's own surfaces (`local`), in t
 | The agent tools | answer | refuse |
 | Owner feedback | counted | not counted |
 
-The prompt section is built when a session starts, before anyone writes, so a chat session gets template lessons only even when the owner is the one writing, unless the session already had an owner's turn or its platform is listed in `owner_platforms`. A session the plugin has not seen a turn of since it loaded counts as someone else's. A delegated child's prompt follows its parent: Hermes' `subagent_start` names the parent before the child's prompt is built. With both settings empty, every messaging chat serves someone else.
+The prompt section is built when a session starts, before anyone writes, so a chat session gets template lessons only even when the owner is the one writing, unless the session already had an owner's turn or its platform is listed in `owner_platforms`. A session the plugin has not seen a turn of since it loaded counts as someone else's. **Your first message in a direct chat** brings the rest: when a direct chat (a DM, never a group, thread or topic) turns out to be yours (`owner_sender_ids`), the lessons its prompt left out (written by you, the reflector or the agent) come with your first message there, once per chat, at most 5 lines and 900 characters, added to that turn's message as Hermes does with a hook's context. Never in a chat someone else wrote in, and only from the process that built that chat's prompt. A delegated child's prompt follows its parent: Hermes' `subagent_start` names the parent before the child's prompt is built. With both settings empty, every messaging chat serves someone else.
 
-**Choosing who is you.** `hermes evolution owner` lists each chat channel of the last 30 days with its senders and how many sessions each had, and shows what already counts as you. `owner add <id>` and `owner remove <id>` change `owner_sender_ids`, `owner add-platform <name>` and `owner remove-platform <name>` change `owner_platforms`. Neither writes anything: each prints the `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> '[...]'` command, with the whole new list, that sets the value where the Hermes settings form keeps it, for you to run in your own terminal, then `hermes gateway restart` so the running hooks see it. Who counts as you decides what reaches the agent, so these settings count only from the Hermes configuration, which Hermes keeps out of reach of the agent's file tools; in `settings.json` they are ignored (see [Settings and language](#settings-and-language)). The command shows sender ids, so, like every decision, it refuses to run in the agent's terminal. List a platform only when nobody else writes to it: every chat there counts as yours.
+**Choosing who is you.** `hermes -p <profile> evolution owner` lists each chat channel of the last 30 days with its senders and how many sessions each had, and shows what already counts as you. `owner add <id>` and `owner remove <id>` change `owner_sender_ids`, `owner add-platform <name>` and `owner remove-platform <name>` change `owner_platforms`. Neither writes anything: each prints the `hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.<key> '[...]'` command, with the whole new list, that sets the value where the Hermes settings form keeps it, for you to run in your own terminal, then `hermes gateway restart` so the running hooks see it. Who counts as you decides what reaches the agent, so these settings count only from the Hermes configuration, which Hermes keeps out of reach of the agent's file tools; in `settings.json` they are ignored (see [Settings and language](#settings-and-language)). The command shows sender ids, so, like every decision, it refuses to run in the agent's terminal. List a platform only when nobody else writes to it: every chat there counts as yours.
 
 ## Lessons
 
@@ -306,7 +312,7 @@ The sentence comes from a fixed template in English and Portuguese (`lessons.TEM
 |---|---|---|---|
 | `off` | none are derived | nothing; the prompt section and the hint hook are not registered | a `lesson_retire` proposal |
 | `suggest` | created as `candidate`, each with a low-risk proposal | only lessons you approved | a `lesson_retire` proposal |
-| `auto` (default) | created as `active` | active lessons: in the prompt section from the next session and, with `tool_hints` on, as a hint on the failing result | retired by the pass when measured `ineffective` 14 days or more after activation; a `lesson_retire` proposal before that |
+| `auto` (default) | created as `active` | active lessons: in the prompt section from the next session and, with `tool_hints` on, as a hint on the failing result | retired by the pass when measured `ineffective` 14 days or more after its measurement started; a `lesson_retire` proposal before that |
 
 Signals and measurement continue in every mode. In every mode, lessons written by you without `--activate`, proposed by the agent or drafted by the reflector wait for approval: only the fixed templates in the code reach the agent without it, and only in `auto`.
 
@@ -324,7 +330,7 @@ Changing the mode does not change existing lessons. Candidates derived under `su
 | Origin | Created by | Bound to a failure | Proposal risk |
 |---|---|---|---|
 | `derived` | a pass, from a failure signature | yes | low |
-| `operator` | `hermes evolution lessons add` | no | low |
+| `operator` | `hermes -p <profile> evolution lessons add` | no | low |
 | `reflector` | a pass with the reflector on | yes | medium |
 | `agent` | the `hermes_atlas_evolution_lessons` tool, action `propose` | no | high |
 
@@ -353,8 +359,8 @@ Because the section is fixed for the whole session and the hint is appended to a
 
 Hermes loads plugins per profile, so each profile learns on its own: a tool that needs an argument in one profile fails three times in every other profile before the lesson exists there. A profile can take what another one learned.
 
-- `hermes evolution lessons export [--out FILE]` prints the profile's active lessons as a pack, or writes it to a new file (never over an existing one). A lesson measured as not helping is left out. A template lesson travels as its tool, failure class and detail, and the receiving profile renders the sentence from its own fixed templates, in its own language; a written lesson travels as its sentence. Nothing else leaves the profile: no counters of conversations, session ids, excerpts or settings. A pack is JSON with `format: hermes-atlas-evolution/lessons`, `version: 1` and at most 200 lessons.
-- `hermes evolution lessons import FILE` (or `-` for standard input), or `hermes evolution lessons import --from PROFILE` to read another profile of the same Hermes directly (`default` is the root profile), read-only. `--dry-run` shows what would come in and changes nothing; without `--yes` the command shows every sentence and asks first.
+- `hermes -p <profile> evolution lessons export [--out FILE]` prints the profile's active lessons as a pack, or writes it to a new file (never over an existing one). A lesson measured as not helping is left out. A template lesson travels as its tool, failure class and detail, and the receiving profile renders the sentence from its own fixed templates, in its own language; a written lesson travels as its sentence. Nothing else leaves the profile: no counters of conversations, session ids, excerpts or settings. A pack is JSON with `format: hermes-atlas-evolution/lessons`, `version: 1` and at most 200 lessons.
+- `hermes -p <profile> evolution lessons import FILE` (or `-` for standard input), or `hermes -p <profile> evolution lessons import --from PROFILE` to read another profile of the same Hermes directly (`default` is the root profile), read-only. `--dry-run` shows what would come in and changes nothing; without `--yes` the command shows every sentence and asks first.
 - Everything in a pack is checked as if the agent had written it: the tool must be an identifier, the class one of the templates, the detail must pass the same filter as a detail read from an error, and a written sentence must pass the [text rules](#text-rules) and must not be only advice every failure would get. Anything else is skipped with its reason.
 - A sentence already in the playbook, waiting or turned down here never comes in again.
 - An imported template lesson waits. In `auto` mode it activates by itself once the owner's own turns here hit its failure twice (`lessons.OWNER_ACTIVATION`): the pattern was already proven in the other profile, so it does not wait for three failures in two sessions first, and the queue cleaning does not withdraw it for lacking failures here. In `suggest` mode it waits for approval. An imported written lesson is quarantined, like any written lesson. `--activate` activates both at once, as `lessons add --activate` does.
@@ -387,7 +393,7 @@ When the failing call was a terminal command, the excerpt starts with the progra
 
 **When the excerpt is deleted.** As soon as the failure has a lesson, when the model declines or the draft is discarded, 14 days after its last update (`SAMPLE_DAYS`), and at every pass that runs with the reflector off. A provider error, or a pass without Hermes' model access, leaves the excerpt for a later pass.
 
-**Where it runs.** Only in a pass run inside Hermes, because the model access comes from Hermes: the autopilot of a Hermes process, `hermes evolution learn` or the weekly recipe. The model access is registered when the plugin loads, so turning the reflector on takes effect in Hermes processes started after the change. It runs only while `lessons` is not `off` (otherwise the block reports `lessons_off`, since an approved draft would never be shown). The standalone runner (`python -m hermes_atlas_evolution`) drafts nothing; its `learn` reports `unavailable_without_hermes_llm` and keeps the waiting excerpts for the next pass run by Hermes.
+**Where it runs.** Only in a pass run inside Hermes, because the model access comes from Hermes: the autopilot of a Hermes process, `hermes -p <profile> evolution learn` or the weekly recipe. The model access is registered when the plugin loads, so turning the reflector on takes effect in Hermes processes started after the change. It runs only while `lessons` is not `off` (otherwise the block reports `lessons_off`, since an approved draft would never be shown). The standalone runner (`python -m hermes_atlas_evolution`) drafts nothing; its `learn` reports `unavailable_without_hermes_llm` and keeps the waiting excerpts for the next pass run by Hermes.
 
 The `learn` output has a `reflector` block with the drafts, the number declined and failed, the calls made today and the daily limit.
 
@@ -395,15 +401,16 @@ The `learn` output has a `reflector` block with the drafts, the number declined 
 
 ## How a lesson is measured
 
-Each pass measures every active lesson that is bound to a failure signature (`lessons.evaluate`): derived lessons and approved reflector drafts.
+Each pass measures every active lesson that is bound to a failure signature (`lessons.evaluate`): derived lessons and approved reflector drafts. A lesson is measured from the first time the agent read it in this activation, in a session's prompt or in a tool hint (`lesson_measure`): the prompt shows at most 8 lessons and 1,200 characters, and a lesson it never showed changed nothing, so it is not judged at all.
 
 | Item | Value |
 |---|---|
-| Before window | the 14 days before the activation day (`BASELINE_DAYS`), plus the activation day up to the moment of activation (its failures and calls are kept when the lesson activates, in `lesson_activation`), counted at the first pass after activation in which the backfill has settled, and then frozen, so retention never changes it |
-| After window | the latest 14 days since activation (`AFTER_WINDOW_DAYS`): from the day after activation, or from 13 days before today when activation is older |
-| Activation day | its part before activation counts in the before window; the rest is left out of both |
-| Rate | failures of the signature per call of the tool, when both windows have at least 5 calls; otherwise failures per calendar day of each window |
-| First verdict | 5 days after activation or 20 calls of the tool after it, whichever comes first, and never on the activation day |
+| Start | the first reading: the activation itself when the agent read the lesson on its activation day, otherwise the moment of that first reading |
+| Before window | the 14 days before the start (`BASELINE_DAYS`), plus, for a lesson read on its activation day, that day up to the moment of activation (its failures and calls are kept when the lesson activates, in `lesson_activation`), counted at the first pass after the start in which the backfill has settled, and then frozen, so retention never changes it |
+| After window | the latest 14 days since the start (`AFTER_WINDOW_DAYS`): from the day after the start, or from 13 days before today when the start is older |
+| Starting day | its part before activation counts in the before window; the rest is left out of both |
+| Rate | failures of the signature per call of the tool, when both windows have at least 5 calls; otherwise failures per day: the after window divides by its days, the before window by the days the failure was observed in it (from its first day in the window), not always 14 |
+| First verdict | 5 days after the start or 20 calls of the tool after it, whichever comes first, and never on the starting day |
 
 | Verdict | Condition |
 |---|---|
@@ -411,7 +418,7 @@ Each pass measures every active lesson that is bound to a failure signature (`le
 | `ineffective` | at least 3 failures in the after window and a rate after of at least 90% of the rate before |
 | `inconclusive` | anything else, and always when the before window has no failure: there was nothing to reduce, so no rate after can show the lesson helped or did not |
 
-The verdict is recomputed at each pass while the lesson is active, and only while it still is: a lesson you retire while a pass runs stays retired. Activating a lesson again starts a new measurement with a new baseline. In `auto` mode a lesson that is `ineffective` 14 days or more after activation is retired (`RETIRE_AFTER_DAYS`), unless you rejected its `lesson_retire` proposal: that keeps it for this activation (`lesson_keep`), and its verdict is still reported. In the other cases an `ineffective` verdict opens a `lesson_retire` proposal.
+The verdict is recomputed at each pass while the lesson is active, and only while it still is: a lesson you retire while a pass runs stays retired. Activating a lesson again starts a new measurement with a new baseline. In `auto` mode a lesson that is `ineffective` 14 days or more after its start is retired (`RETIRE_AFTER_DAYS`), unless you rejected its `lesson_retire` proposal: that keeps it for this activation (`lesson_keep`), and its verdict is still reported. In the other cases an `ineffective` verdict opens a `lesson_retire` proposal, which says whether it compared failures per call or per day.
 
 This is a comparison of two periods for one failure. It does not control for changes in how the tool was used.
 
@@ -433,7 +440,7 @@ Only interactive turns are attributed, those on the local and gateway surfaces, 
 | interrupted | 10 percentage points |
 | corrected | 5 percentage points |
 
-A pass compares the last 14 days and opens a low-risk `skill_outcome` proposal for each flagged skill, with the command `hermes curator ledger --skill <skill>` as the next step. `hermes evolution skills --days N` returns the same comparison for its window in the `outcomes` block, and the digest shows it as "Skills by outcome".
+A pass compares the last 14 days and opens a low-risk `skill_outcome` proposal for each flagged skill, with the command `hermes curator ledger --skill <skill>` as the next step. `hermes -p <profile> evolution skills --days N` returns the same comparison for its window in the `outcomes` block, and the digest shows it as "Skills by outcome".
 
 **A skill rewrite judged by its own turns** (`skill_health.compare_skill_windows`). When the Curator ledger shows a rewrite, the change is judged by the turns that loaded that skill in the week before and the week after, not by the whole profile. Each window needs at least 5 such turns. A rate is worse when it rose by at least its margin and to at least 1.25 times its old value, and better when it fell by at least its margin and to at most 0.8 times its old value.
 
@@ -488,7 +495,7 @@ Turn metrics use interactive surfaces only (`local` and `gateway`). Owner correc
 
 Each verdict stores the samples behind it, the number of other changes within 7 days of this one (`concurrent_changes`) and a method label: `same_metrics_week_before_vs_week_after_correlational` for configuration and `turns_that_loaded_the_skill_week_before_vs_week_after` for skills. A verdict says the metrics moved after the change. It does not say the change caused it.
 
-`hermes evolution experiments` lists the changes with their verdicts.
+`hermes -p <profile> evolution experiments` lists the changes with their verdicts.
 
 ## Skill health
 
@@ -500,7 +507,7 @@ Skill health reads two Hermes files and nothing else (`skill_health`): `skills/.
 | `skill_unexercised_rewrites` | 5 or more rewrites since the skill was last reused after a patch | `skill_review`, low risk |
 | `skill_never_used` | created by the agent, active, never used and at least 21 days old | `skill_archive`, low risk |
 
-A flip-flop is a rewrite that returns a file to a hash it already had earlier in the window (A, then B, then A). Pinned and locked skills produce no finding. `hermes evolution skills` prints the same report for 1 to 35 days.
+A flip-flop is a rewrite that returns a file to a hash it already had earlier in the window (A, then B, then A). Pinned and locked skills produce no finding. `hermes -p <profile> evolution skills` prints the same report for 1 to 35 days.
 
 ## Learning yield
 
@@ -525,7 +532,7 @@ At each pass the radar (`radar`) reads what slows Hermes down or wastes its cont
 | Tool calls Hermes blocked because another plugin's `pre_tool_call` hung or raised (`plugin_fault`) | the plugin's own failure counts | at least 3 in the window | `plugin_health`, medium risk, `hermes plugins list` |
 | Terminal commands that failed after another plugin rewrote them (`rewritten_command`), including calls Hermes' middleware changed | the plugin's own failure counts | at least 3 in the window | `plugin_conflict`, medium risk, `hermes plugins list` |
 | Approvals refused where nobody could approve as the turn ran. The setting comes from Hermes' own refusal text, which names it whenever single-query mode, cron or an unattended platform (a webhook, a Microsoft Graph webhook, the API server without an approval channel) decides (`set approvals.<key>: approve`). A refusal a person made ("denied by user", "User denied ...", an approval transport, also in a subagent) counts as answered, except the automatic denial a CLI subagent gets (`delegation.subagent_auto_approve`). Failing both, the origin tells: a one-shot run (`approvals.single_query_mode`), cron (`approvals.cron_mode`), and Kanban, batch, the Curator, an A2A peer or a `--source tool` integration (`approvals`) | the refusals the plugin counted per session origin, tool and deciding setting (`approval_daily`) | at least 5 such refusals (`MIN_UNATTENDED_REFUSALS`) | `approval_policy`, low risk, `hermes config get approvals` (or `delegation` when subagents refuse most); the evidence counts the refusals per setting. Allow specific commands, never everything |
-| A tool that is slow call after call; tools that wait for a person (`clarify`, the Desktop onboarding `setup_beat` and tour `gui_tour`, `browser_vault` waiting for a typed code) or run a subagent (`delegate_task`) are left out | tool durations: exact from the hooks, approximate for replayed history | at least 5 calls (`MIN_SLOW_TOOL_CALLS`) averaging at least 20 seconds (`SLOW_TOOL_SECONDS`), whatever the tool's share of the total time | `tool_latency`, low risk, `hermes evolution report --days 7` |
+| A tool that is slow call after call; tools that wait for a person (`clarify`, the Desktop onboarding `setup_beat` and tour `gui_tour`, `browser_vault` waiting for a typed code) or run a subagent (`delegate_task`) are left out | tool durations: exact from the hooks, approximate for replayed history | at least 5 calls (`MIN_SLOW_TOOL_CALLS`) averaging at least 20 seconds (`SLOW_TOOL_SECONDS`), whatever the tool's share of the total time | `tool_latency`, low risk, `hermes -p <profile> evolution report --days 7` |
 
 The plugin readings come from the plugin list of Hermes' plugin manager, read only when that module is already loaded in the process; the radar does not import it. A process without it uses the snapshot of the last process that could take one, kept in the plugin's database, and with no snapshot the plugins are skipped. Manifests are read from the folder of the plugins bundled with Hermes and from `<HERMES_HOME>/plugins/`, at most 500 folders and 64 KiB per manifest. Competing plugins are listed in the alphabetical order of their keys, which is the order Hermes loads them in unless one plugin requires another. Atlas Evolution leaves itself out of the `transform_tool_result` list while `tool_hints` is off, the default: its hook returns nothing then, so it never discards another plugin's change.
 
@@ -537,15 +544,15 @@ Everything the loop wants changed goes through one queue (`proposals`). Each pro
 
 | Kind | Risk | Opened when | Command | On approval |
 |---|---|---|---|---|
-| `lesson` | by origin: derived or operator low, reflector medium, agent high | a lesson is `candidate` or `quarantined`; the evidence carries the exact sentence | `hermes evolution lessons approve <id>` | the plugin activates the lesson |
-| `lesson_retire` | low | an active lesson is measured `ineffective` | `hermes evolution lessons retire <id>` | the plugin retires the lesson |
-| `skill_lock` | medium | `skill_churn` | `hermes curator lock <skill>` | you run it |
+| `lesson` | by origin: derived or operator low, reflector medium, agent high | a lesson is `candidate` or `quarantined`; the evidence carries the exact sentence | `hermes -p <profile> evolution lessons approve <id>` | the plugin activates the lesson |
+| `lesson_retire` | low | an active lesson is measured `ineffective` | `hermes -p <profile> evolution lessons retire <id>` | the plugin retires the lesson |
+| `skill_lock` | medium | `skill_churn` | `hermes curator lock <skill>` | the plugin runs it with Hermes' own command, after showing it (undo: `hermes curator unlock`) |
 | `skill_review` | low | `skill_unexercised_rewrites` | `hermes curator ledger --skill <skill>` | you review the ledger |
 | `skill_archive` | low | `skill_never_used` | `hermes curator archive <skill>` | you run it |
 | `skill_outcome` | low | a skill's turns go worse than the profile | `hermes curator ledger --skill <skill>` | you review the skill |
-| `review_interval` | medium | at least 10 background reviews in the last 7 days and at least half produced nothing | `hermes config set skills.creation_nudge_interval 20` | you run it |
-| `investigate_failure` | low | a failure of `auth`, `code_exception`, `network`, `command_failed` or `other` seen at least 5 times on at least 2 of the last 7 days | `hermes evolution lessons add --tool <tool> "<what to do instead>"` | you write the lesson |
-| `investigate_latency` | medium | at least 20 interactive turns in 7 days and at least 30% of them slow | `hermes evolution report --days 7` | you investigate |
+| `review_interval` | medium | at least 10 background reviews in the last 7 days and at least half produced nothing | `hermes -p <profile> config set skills.creation_nudge_interval 20` | you run it |
+| `investigate_failure` | low | a failure of `auth`, `code_exception`, `network`, `command_failed` or `other` seen at least 5 times on at least 2 of the last 7 days | `hermes -p <profile> evolution lessons add --tool <tool> "<what to do instead>"` | you write the lesson |
+| `investigate_latency` | medium | at least 20 interactive turns in 7 days and at least 30% of them slow | `hermes -p <profile> evolution report --days 7` | you investigate |
 | `skill_rollback` | high | a skill change with verdict `regressed` | `hermes curator rollback <entry-id>` | you run it |
 | `config_review` | high | a configuration change with verdict `regressed` | `hermes config get <key>` | you review the setting |
 | `session_lifecycle` | low | many sessions end as orphans ([Health radar](#health-radar)) | `hermes sessions list` | you investigate |
@@ -554,9 +561,9 @@ Everything the loop wants changed goes through one queue (`proposals`). Each pro
 | `plugin_health` | low; medium for blocked calls | a plugin failed to load or registers hooks it does not declare, or another plugin's `pre_tool_call` made Hermes block at least 3 calls | `hermes plugins doctor <plugin>`, or `hermes plugins list` for blocked calls | you investigate |
 | `plugin_conflict` | medium | plugins compete for a transform hook where only the first result counts, or at least 3 commands failed after another plugin rewrote them | `hermes plugins list` | you review the plugins |
 | `approval_policy` | low | at least 5 approvals in 7 days refused where nobody could answer, with the Hermes setting that decided each | `hermes config get approvals` (or `delegation`) | you review those settings and the `command_allowlist`; never approve everything |
-| `tool_latency` | low | a tool averaging at least 20 seconds over at least 5 calls in 7 days | `hermes evolution report --days 7` | you investigate the tool |
+| `tool_latency` | low | a tool averaging at least 20 seconds over at least 5 calls in 7 days | `hermes -p <profile> evolution report --days 7` | you investigate the tool |
 
-The plugin applies only the two lesson kinds. For every other kind, `proposals approve` marks the proposal as approved and returns the command in the field `run_this`. Nothing is executed for you.
+The plugin applies the two lesson kinds, `skill_lock`, and the changes of [the environment](#the-environment) it can make with Hermes' own command (installing this plugin, turning one of two plugins off, moving a failed install's folder or a package cache to its trash), after showing the command; each is recorded with its undo. For every other kind, `proposals approve` marks the proposal as approved and returns the command in the field `run_this`: nothing is executed for you.
 
 ### Who can decide
 
@@ -571,7 +578,7 @@ The agent can only propose. With `agent_tools` on it can store up to 5 lessons p
 - `open`: waiting for a decision. Evidence is refreshed at each pass.
 - `applied`: an approved lesson or `lesson_retire` proposal, the same proposals settled directly by `lessons approve` or `lessons retire`, or a `skill_lock` proposal whose skill a later pass found locked or pinned.
 - `approved`: a native proposal you approved. Only `skill_lock` is closed automatically afterwards; the others stay approved as a record of the decision.
-- `rejected`: declined. Rejecting a `lesson` proposal also retires the lesson, and `lessons retire` marks the lesson's open proposal as rejected. A rejected proposal reopens after 30 days if the evidence is still there.
+- `rejected`: declined. Rejecting a `lesson` proposal turns the lesson down for good (it is retired), and `lessons retire` marks the lesson's open proposal as rejected. Rejecting a `lesson_retire` proposal keeps the lesson active. Any other rejected proposal reopens after 30 days if the evidence is still there, and a change the Mode auto could make is never made by it after you rejected it.
 - `expired`: the evidence was gone at a later pass. It reopens if the evidence returns.
 
 `proposals list` sorts by risk, highest first. `proposals approve` and `proposals reject` accept `--note` with up to 200 characters.
@@ -589,8 +596,8 @@ The agent can only propose. With `agent_tools` on it can store up to 5 lessons p
 | tools | tool calls that did not fail | 10% failing is 75, 40% is 0 | 40 calls |
 | turns | interactive turns that neither failed nor ran slow | each % failed costs 2.5 points, each % slow 1 | 20 turns |
 | you | your corrections and repeated questions per 100 turns | 10 per 100 turns is 70 | 20 turns |
-| lessons | of the active lessons already judged, the share that halved their failure (`effective`) | 0 to 100 | 1 judged lesson |
-| health | the latest Hermes and system checks | what stops the agent (gateway down or unable to start, a damaged session database, a full disk, a broken package system) costs 25 points; what to fix soon (low disk, memory, swap, a security update) 8; housekeeping (old tool versions, lists to refresh) nothing | a check |
+| lessons | of the lessons already judged, active ones and those retired in the last 7 days, the share that halved their failure (`effective`): a lesson retired for not helping still counts against the week it was retired in | 0 to 100 | 1 judged lesson |
+| health | the latest Hermes and system checks | what stops the agent (gateway down or unable to start, a gateway whose program was deleted under it, a damaged session database, a full disk, a broken package system) costs 25 points; what to fix soon (low disk, memory, swap, a security update) 8; housekeeping (old tool versions, lists to refresh) nothing | a check |
 
 The index is the weighted mean of the parts that have data (tools 30%, turns 25%, you 20%, lessons 10%, health 15%, renormalized over the parts present); with fewer than two parts it says "not yet". Each learning pass stores the day's value (one entry per UTC day, the latest of the day wins, 90 days kept in the `cursor` row `evolution_index`), so `status` shows the last 14 days as a small line and the trend against the latest value at least 7 days old. It counts only aggregates the plugin already keeps: no message text, no tool output.
 
@@ -610,7 +617,7 @@ Every hook the plugin registers is timed where it runs (`selfcost`: two clock re
 
 ## Digest
 
-`hermes evolution report` builds the digest for the last 1 to 35 days (default 7) and compares it with the same span before it.
+`hermes -p <profile> evolution report` builds the digest for the last 1 to 35 days (default 7) and compares it with the same span before it.
 
 | Section | Content |
 |---|---|
@@ -620,22 +627,24 @@ Every hook the plugin registers is timed where it runs (`selfcost`: two clock re
 | Failures that repeat | up to 8 signatures, with count, days and lesson status; `approval_refused` is marked as never a lesson |
 | Self-improvement loop | background reviews, share that produced nothing, tokens, share of tokens that went to learning, skill rewrites and the most rewritten skills |
 | Skills by outcome | the whole profile and up to 8 skills with at least 8 turns, marking those worse than the profile |
-| Playbook | counts by status and up to 8 active lessons with their measured effect |
+| Lessons | counts by status and up to 8 active lessons with their measured effect; in a dashboard without a login, the text of a lesson written by you, the reflector or the agent is hidden |
 | Changes and their measured effect | up to 8 changes that have a verdict |
 | Hermes health | the radar readings for the digest window, up to 14 days: how sessions ended, the context per agent call and its cached share, compactions, the plugins of this process, the failures caused by other plugins, the slowest tools, and the refused approvals per origin with the settings that decided those nobody could answer; then, for the whole window, web research turns (how many, the time 1 in 20 of them exceeds, how many took 120 s or more, research tool errors and calls) and the commands the runtime guard vetoed, by kind |
 | Proposals awaiting a decision | one line for the lessons awaiting approval (up to 10 named, whose text is in `lessons list`), then up to 20 other open proposals with their command |
+
+Failure classes are said in words ("a required argument was missing"), and every command names the profile (`hermes -p <profile> evolution …`).
 
 `--format json` returns the full structure, which also has cron and subagent turns, per-tool totals, skill events, the skill outcome block, the usage observed by the hooks, the radar readings (`health`), web research (`research`) and the guard vetoes by kind (`guard`). Where a number could not be measured the digest says "not measured".
 
 **Weekly delivery.** `report --schedule-spec` prints a recipe: a script and the arguments of a native `hermes cron create` in no-agent mode, by default on weekday 1 at hour 8 with local delivery (`--weekday`, `--hour`, `--deliver`, `--days` and `--lang` change it; weekday 0 is Sunday). The script runs `learn --notify-only` first, as a best effort, and then `report`, so the digest is delivered even when the pass fails. The command writes no file and creates no job: save the recipe's `script_content` at `script_path`, read it, then run its `posix_command`, a `hermes cron create` call.
 
 ```sh
-hermes evolution report --schedule-spec --weekday 1 --hour 8 --deliver local
+hermes -p <profile> evolution report --schedule-spec --weekday 1 --hour 8 --deliver local
 ```
 
 ### Example
 
-Illustrative output with made-up numbers: an excerpt in the format of the current code, from fictitious data. It is not a measurement of any real deployment.
+Illustrative output with made-up numbers, rendered by the current code from fictitious data. It is not a measurement of any real deployment.
 
 ```text
 # Atlas Evolution · 7-day digest (2026-11-09 to 2026-11-15, UTC)
@@ -643,33 +652,42 @@ Illustrative output with made-up numbers: an excerpt in the format of the curren
 ## Summary
 
 - **Interactive turns:** 42 · 0 failed · 0 interrupted · 2 slow
+- **Turn time:** half within 8.4 s · 1 in 20 takes more than 61 s
 - **Tool calls:** 168 · 3 errors (1.8%)
+- **Evolution index:** 84/100 (+6 in 7 days)
+- **Owner signals:** corrections 3 · repeated questions 0 · thanks 5
 
 ### Versus the previous 7 days
 
-- `turn_failed_pct`: 16.7 → 0.0 ▼
-- `tool_error_pct`: 6.5 → 1.8 ▼
-- `owner_corrections_per_100_turns`: 0.0 → 7.1 ▲
-- **verdict:** mixed
+- failed turns (%): 16.7 → 0.0 ▼
+- tool errors (%): 6.5 → 1.8 ▼
+- your corrections per 100 turns: 0.0 → 7.1 ▲
+- **Verdict:** mixed
 
 ## Failures that repeat
 
-- `example_search` · missing_argument (`query`): 3 times, 3 days · lesson: active
-- `terminal` · approval_refused: 2 times, 2 days · never a lesson: the user's approval decides
+- `example_search` · a required argument was missing (`query`): 3 times, 3 days · lesson: active
+- `terminal` · the approval was refused: 2 times, 2 days · never a lesson: the user's approval decides
 
 ## Self-improvement loop
 
 - 12 background reviews · 66.7% produced nothing
-- 9 skill rewrites (9 by the automatic review) · 1 skills
+- review tokens (input / output): 84,300 / 9,650
+- 9 skill rewrites (9 by the automatic review) · 1 skill
 
 ### Skills by outcome
 
 - whole profile: 42 turns · 0.0% failed · 7.1% corrected
 - `example-notes`: 12 turns · 0.0% failed · 25.0% corrected · 16.7% with tool errors · **worse than the profile**
 
-## Playbook
+## Lessons
 
+- active: 1 · awaiting approval: 2 · retired: 0
 - #1 When calling `example_search`, always pass the required argument `query`. · measured effect: effective (before 0.333 → after 0.071)
+
+## Changes and their measured effect
+
+No change evaluated yet.
 
 ## Hermes health
 
@@ -677,24 +695,28 @@ Illustrative output with made-up numbers: an excerpt in the format of the curren
 - **Context per agent call:** average of 41,200 tokens · 62.5% served from cache · 318 calls
 - **Plugins of this process:** 6 enabled · compete for `transform_tool_result` (only the first result counts): `example-filter` → `hermes-atlas-evolution`
 - **Slowest tools:** `example_query` 31.4 s on average (12 calls) · `terminal` 6.2 s on average (240 calls)
-- **Refused approvals:** 9 (oneshot 6, subagent 2, cli 1) · 8 where nobody could approve (decided by `approvals.single_query_mode` 6, `delegation.subagent_auto_approve` 2) · review those settings with `hermes config get`, and the `command_allowlist`; never approve everything
+- **Refused approvals:** 9 (one-shot runs 6, subagents 2, your terminal 1) · 8 where nobody could approve (decided by `approvals.single_query_mode` 6, `delegation.subagent_auto_approve` 2) · review those settings with `hermes config get`, and the `command_allowlist`; never approve everything
 - **Runtime guard:** 2 commands vetoed (gateway restart or kill 2)
 
 ## Proposals awaiting a decision
 
-- 2 lessons await approval (decide on each in your terminal with `hermes evolution lessons review`): #2 `example_fetch`, #3 `example_upload`
-- #1 [risk: medium] Lock a skill that keeps being rewritten · `example-notes` · apply with: `hermes curator lock example-notes`
-- #4 [risk: medium] Plugins compete for a hook where only the first counts · `transform_tool_result` · next step: `hermes plugins list`
-- #2 [risk: low] Review a skill whose turns go worse than the profile · `example-notes` · next step: `hermes curator ledger --skill example-notes`
-- #5 [risk: low] Many sessions end as orphans · `sessions` · next step: `hermes sessions list`
+- 2 lessons await approval (decide on each in your terminal with `hermes -p default evolution lessons review`): #2 `example_fetch`, #3 `example_upload`
+- Proposal #1 [risk: medium] Lock a skill that keeps being rewritten · `example-notes` · apply with: `hermes curator lock example-notes`
+- Proposal #4 [risk: medium] Plugins compete for a hook where only the first counts · `transform_tool_result` · next step: `hermes plugins list`
+- Proposal #2 [risk: low] Review a skill whose turns go worse than the profile · `example-notes` · next step: `hermes curator ledger --skill example-notes`
+- Proposal #5 [risk: low] Many sessions end as orphans · `sessions` · next step: `hermes sessions list`
+
+Decide on each of these in your terminal with `hermes -p default evolution proposals approve <id>` or `hermes -p default evolution proposals reject <id>`.
+
+_Aggregates only. No conversation text, tool output or memory content is stored._
 ```
 
 ## Usage and cost
 
-`hermes evolution usage [--days 1..35]` (7 days by default) shows the model calls and tokens the hooks counted (`observer_usage`) next to Hermes' own accounting, read from `session_model_usage` in `state.db` (`hermes_native_billing`). The two stay in separate fields, each with the data it covers, and a cost says whether it was measured or estimated.
+`hermes -p <profile> evolution usage [--days 1..35]` (7 days by default) shows the model calls and tokens the hooks counted (`observer_usage`) next to Hermes' own accounting, read from `session_model_usage` in `state.db` (`hermes_native_billing`). The two stay in separate fields, each with the data it covers, and a cost says whether it was measured or estimated.
 
 - **What the hooks count** (`operations`). `post_api_request`, `api_request_error` and `post_auxiliary_call` count each model call per UTC day, provider and model (auxiliary calls per task): its outcome, its tokens (input, output, cache read, cache write and reasoning) and its duration. Provider failures are classified from the verdict Hermes gives each failed attempt (rate limit, authentication, timeout, upstream), and every failed attempt of a retried request is counted. `post_tool_call` counts tool calls the same way, by outcome: a tool that exceeds its deadline is counted as `timeout`, and a `cancelled` call is counted only here.
-- **Prices.** `rates_usd_per_million`, in `<HERMES_HOME>/evolution/settings.json`, is a table by provider and model with the values `input`, `output`, `cache_read` and `cache_write`, each from 0 to 1,000,000 (US dollars per million tokens). Keys are matched against the provider name and the model the provider returned, in lower case, so write them in lower case. A row is priced only when all four values are there. Reasoning tokens are not priced separately. The estimate (`estimated_usd`) covers only the calls the hooks saw and priced (`priced_calls`), so it can differ from the invoice. The cost line of the digest comes from Hermes' own accounting, not from these prices.
+- **Prices.** `rates_usd_per_million`, in `<HERMES_HOME>/evolution/settings.json`, is a table by provider and model with the values `input`, `output`, `cache_read` and `cache_write`, each from 0 to 1,000,000 (US dollars per million tokens). Keys are matched against the provider name and the model the provider returned, in lower case, so write them in lower case. A row is priced only when all four values are there. Reasoning tokens are not priced separately. The estimate (`estimated_usd`) covers only the calls the hooks saw and priced (`priced_calls`), so it can differ from the invoice. The cost line of the digest comes from Hermes' own accounting, not from these prices. Hermes' accounting is read up to 20,000 records of the window: above that, the totals cover the newest 20,000 and say so ("at least US$ X", `partial`).
 - **Lost events.** `dropped_events` counts hook events dropped because the write queue was full; the totals are then a lower bound.
 - **Retention.** These counters are kept 35 days (`operations.RETENTION_DAYS`), pruned by the first hook write of each UTC day in each process; the delivery ids that stop one event from being counted twice, 2 days. Model calls are not replayed from Hermes' history, so they start when the plugin loads.
 
@@ -712,7 +734,7 @@ The provider, the model and the prices above are placeholders.
 
 ## Status and owner notice
 
-`hermes evolution status` (`status`) says whether the plugin is observing, learning and protecting this profile right now, and how the other profiles of the same Hermes stand. It prints Markdown by default, JSON with `--format json`, and accepts `--lang en|pt`.
+`hermes -p <profile> evolution status` (`status`) says whether the plugin is observing, learning and protecting this profile right now, and how the other profiles of the same Hermes stand. It prints Markdown by default, JSON with `--format json`, and accepts `--lang en|pt`.
 
 **The first pass.** In a profile that never finished a pass, `status` runs one at once, so the first look already shows the history it read. The pass is claimed like any other: `status` waits up to 5 seconds for a pass that is already running, and gives its own pass 90 seconds, at most 60 of them for the history. `--no-learn` never runs that pass.
 
@@ -722,7 +744,7 @@ The provider, the model and the prices above are placeholders.
 - the events the hooks saw today (UTC): turns, tool calls and model calls;
 - the autopilot interval and the last pass: when it ended, whether it succeeded and how long it took;
 - the backfill status and its totals of sessions, turns, tool calls and failures;
-- the reflector: on or off, calls today against the daily limit, and drafts waiting;
+- the reflector: on, off, or on after `hermes gateway restart` (turned on while Hermes runs), calls today against the daily limit, and drafts waiting;
 - lessons by state (active, awaiting approval, retired) and the number of open proposals;
 - the runtime guard: the commands it vetoed in the last 7 days and what it covers (systemd on Linux, launchd on macOS, Windows services and tasks, and the agent's changes to this plugin's settings), or that it is off because plugins run in a plugin host.
 
@@ -734,6 +756,9 @@ The provider, the model and the prices above are placeholders.
 
 A final list says what needs attention, with the command for each item:
 
+- first, when `config.yaml` could not be read (no PyYAML in the standalone runner, a file over 1 MiB, a YAML error): the values shown are the defaults and the mode is Manual;
+- settings that could not be used, by key, and the safe value that applies until they are fixed;
+- a gateway whose service starts a program that no longer exists, or that runs while that program was deleted under it, with `care fix-gateway`;
 - a Hermes process that still runs an older copy of the plugin than the one on disk;
 - no event from the hooks today;
 - the autopilot off, no pass yet, or a failed last pass;
@@ -741,7 +766,7 @@ A final list says what needs attention, with the command for each item:
 - profiles that still have the copy under the old name, with the commands that replace it (`plugins remove hermes-evolution`, then `plugins install sesantanajr/hermes-atlas-evolution --enable`), and profiles that have both copies, with the command that removes the old one followed by `hermes gateway restart`;
 - a busier profile: another profile with the plugin that had at least 10 sessions in 7 days and more than 4 times as many as this one, with the command that shows its status;
 - profiles used in the last 7 days that do not have the plugin, with the install command;
-- chat channels that count as someone else's, with their sessions and number of senders (never the ids), pointing to `hermes evolution owner`;
+- chat channels that count as someone else's, with their sessions and number of senders (never the ids), pointing to `hermes -p <profile> evolution owner`;
 - decisions waiting while no weekly digest is scheduled for the profile, with the command that prints the recipe;
 - a scheduled job that still runs the `tick` removed in 0.11.0 (it fails at every run), with the command that removes it;
 - values of `settings.json` that are ignored because they would widen trust (their keys, never their values), with where to set them instead;
@@ -754,29 +779,30 @@ After that list, **Do first** gives up to 3 steps ranked by the index points eac
 
 ## Commands
 
-Subcommands of `hermes evolution`. Every command prints readable text in the profile's language; `--format json` gives the machine-readable structure for scripts (the same JSON as before). `--lang en|pt` works before or after any subcommand.
+Subcommands of `hermes evolution`, run as `hermes -p <profile> evolution <subcommand>`. Every command except the menu prints readable text in the profile's language, and `--format json` gives the machine-readable structure for scripts. `--lang en|pt` works before or after any subcommand, and `--help` follows it. A number out of range is refused with one short sentence.
 
 | Command | What it does |
 |---|---|
 | *(none)*, `menu` | The interactive menu (see [The terminal menu](#the-terminal-menu)). Without a terminal to answer from, or in an agent's shell, the bare command prints `status`, and `menu` says why it did not open. |
-| `care [check\|pm-doctor\|doctor\|fix\|gc] [--yes]` | Hermes' health read from its own files (`check`, open to anyone), and Hermes' own checks and repairs (operator only). See [Maintenance](maintenance.md). |
+| `care [check\|pm-doctor\|doctor\|fix\|gc\|fix-gateway\|undo-gateway] [--yes]` | Hermes' health read from its own files (`check`, open to anyone), Hermes' own checks and repairs, and the repair of the gateway's service and its undo (operator only). See [Maintenance](maintenance.md). |
+| `update [--all \| --profiles a,b] [--install-missing] [--list] [--yes]` | This plugin in every profile, or in the ones you pick: updates each copy with Hermes' own command and moves a pinned one to the latest commit; `--install-missing` also installs it where it is missing; `--list` only shows each profile's version, commit and pin. Operator only. See [Updating](upgrading.md). |
 | `environment [show\|scan\|catalog]` | Every profile of this Hermes, from the last look of the profile that looks after it (`show`); `scan` looks again now, Hermes' doctor checks included, and refreshes the proposals; `catalog` prints Hermes' plugin catalog as the plugin keeps it. See [The environment](#the-environment). |
 | `system [check\|plan\|upgrade\|repair\|report] [--full] [--skip PKG...] [--yes]` | The operating system's update, Linux with apt: `check` and `report` read; `plan`, `upgrade` and `repair` are the operator's, as root. See [Maintenance](maintenance.md). |
 | `schedule-digest [--deliver local\|<channel>]` | The weekly digest as a Hermes scheduled task (cron) with no agent, once; undone from `decisions`. Operator only. |
 | `status [--format md\|json] [--no-learn]` | Shows whether the plugin is observing, learning and protecting this profile, and the state of every profile of the same Hermes root (see [Status and owner notice](#status-and-owner-notice)). Runs the first pass when the profile never had one, unless `--no-learn`. |
-| `owner [list \| add <id> \| remove <id> \| add-platform <name> \| remove-platform <name>]` | Who counts as you in chats (see [Who is served](#who-is-served)). Operator only. |
+| `owner [list \| add <id> \| remove <id> \| add-platform <name> \| remove-platform <name>] [--format md\|json]` | Who counts as you in chats (see [Who is served](#who-is-served)). Operator only. |
 | `learn [--notify-only]` | One pass now: replay history while the backfill is not done, derive lessons, ask the reflector if on, measure, read the radar, refresh proposals. Waits up to 30 seconds for a pass that is already running. |
 | `report [--days 1..35] [--format md\|json]` | The digest, compared with the previous period. |
 | `report --schedule-spec [--weekday 0..6] [--hour 0..23] [--deliver TARGET]` | Prints the weekly cron recipe. Creates nothing. |
 | `lessons list [--status STATUS]` | The playbook with origin, evidence and measured effect. In an agent's terminal the sentence of a written lesson is left out (`text_hidden`), because the terminal of a stranger's chat is an agent's terminal too; template lessons stay. |
-| `lessons review` | Shows each lesson that waits for approval with its exact text and asks: `a` approves, `r` rejects (the lesson is retired), Enter skips, `x` quits. Operator only, in your own terminal. |
+| `lessons review` | Shows each lesson that waits for approval with its exact text and its origin (yours, the agent's, a reflector draft) and asks: `a` approves, `r` rejects (the lesson is retired), Enter skips, `x` quits. Operator only, in your own terminal. |
 | `lessons approve <id> [--yes]`, `lessons approve --all [--yes]`, `lessons retire <id>` | Activates one lesson (after showing the text), every waiting lesson except the agent's own proposals (after showing every sentence), or retires one. Operator only. |
 | `decisions [list] [--limit N]`, `decisions undo <id>` | Your decisions on lessons, proposals and settings, from the terminal and the dashboard panel, newest first; the undo takes one back while what it changed is still as it left it (for a setting, it prints the `hermes config set` command that restores the value; an entry taken out of Hermes' memory is put back). Undo is operator only. |
 | `lessons add "<text>" [--tool NAME] [--activate] [--yes]` | Adds your lesson, quarantined unless `--activate`. Operator only. |
 | `lessons export [--out FILE]` | The active lessons as a pack, printed or written to a new file (see [Lesson packs](#lesson-packs)). Operator only. |
 | `lessons import (FILE \| - \| --from PROFILE) [--dry-run] [--activate] [--yes]` | Brings in the lessons of a pack or of another profile of this Hermes, after showing each one. Operator only. |
-| `proposals list [--all]` | Open proposals, highest risk first. In an agent's terminal a written lesson's sentence is left out, as in `lessons list`. |
-| `proposals approve <id> [--note TEXT] [--yes]`, `proposals reject <id> [--note TEXT]` | Decides a proposal. Operator only. A lesson takes effect; anything else returns the command for you to run. |
+| `proposals list [--all]` | Open proposals, highest risk first; `--all` adds decided and expired ones. A lesson's sentence is shown in your language; in an agent's terminal a written lesson's sentence is left out, as in `lessons list`. |
+| `proposals approve <id> [--note TEXT] [--yes]`, `proposals reject <id> [--note TEXT]` | Decides a proposal. Operator only. Approving a lesson activates it, and a change the plugin can make with Hermes' own command is applied after showing it; anything else returns the command for you to run. Rejecting a lesson turns it down for good; rejecting a proposal to retire a lesson keeps it active; any other proposal is hidden for 30 days and comes back only if the situation is still there. |
 | `skills [--days 1..35]` | Rewrites, flip-flops and unused rewrites per skill, plus skills by outcome. |
 | `experiments` | Tracked changes and their verdicts. |
 | `usage [--days 1..35]` | Calls and tokens seen by the hooks, next to Hermes' accounting ([Usage and cost](#usage-and-cost)). |
@@ -791,15 +817,15 @@ Under `plugins.isolation: host` Hermes does not register `hermes evolution` (it 
 python -m hermes_atlas_evolution --home /path/to/profile status
 ```
 
-`--home` defaults to `HERMES_HOME`. The runner never creates a `--home` that does not exist: a command that opens the plugin's database then fails. It reads the profile's `config.yaml` (up to 1 MiB) when PyYAML is installed, for the plugin's own settings and the Hermes settings it uses, `display.language` included; without PyYAML it uses the defaults (see [Learning from Hermes' history](#learning-from-hermes-history) for what that means for the owner settings). The reflector does not run there (`learn` reports `unavailable_without_hermes_llm` and keeps the waiting excerpts for a pass run by Hermes), and neither do the hooks, the autopilot, its clock and the runtime guard, which need the plugin loaded by Hermes.
+`--home` defaults to `HERMES_HOME`. The runner never creates a `--home` that does not exist: it says so in words and stops. It reads the profile's `config.yaml` (up to 1 MiB) when PyYAML is installed, for the plugin's own settings and the Hermes settings it uses, `display.language` included. Without PyYAML, or with a `config.yaml` it cannot read, it uses the defaults with the mode set to Manual, so nothing changes by itself, and `status` says so first (see [Learning from Hermes' history](#learning-from-hermes-history) for what that means for the owner settings). The reflector does not run there (`learn` reports `unavailable_without_hermes_llm` and keeps the waiting excerpts for a pass run by Hermes), and neither do the hooks, the autopilot, its clock and the runtime guard, which need the plugin loaded by Hermes.
 
 ## The terminal menu
 
-`hermes evolution` with no command (or `hermes evolution menu`) opens a menu in your own terminal. Each screen lists what there is with a number; you type the number, then a letter for the action (`a` approves, `r` rejects, `t` approves all), and Enter goes back. `0`, Ctrl-D or Ctrl-C leave. It is plain text, so it works the same on Linux, macOS and Windows, over SSH and with a screen reader, and it follows the plugin's language (`--lang` too).
+`hermes -p <profile> evolution` with no command (or `hermes -p <profile> evolution menu`) opens a menu in your own terminal. Each screen lists what there is with a number; you type the number, then a letter for the action (`a` approves, `r` rejects, `t` approves all), and Enter goes back. `0`, Ctrl-D or Ctrl-C leave. It is plain text, so it works the same on Linux, macOS and Windows, over SSH and with a screen reader, and it follows the plugin's language (`--lang` too). Colour is used only on a terminal that shows it: never with `NO_COLOR`, with `TERM=dumb` or when the output is not a terminal.
 
 | Screen | What it shows and does |
 |---|---|
-| Summary | The lessons mode, active and waiting lessons, open proposals, the last pass, the guard, the reflector and the automatic actions; what needs attention, in full sentences; and up to six **suggestions** with a letter (`a`, `b`…) that act at once: decide the waiting lessons, apply the recommended changes, turn on the complete automatic actions, tidy the memory, finish an interrupted system update or install security updates, free old tool versions, schedule the weekly digest, read the observations |
+| Summary | The lessons mode, active and waiting lessons, open proposals, the last pass, the guard, the reflector and the automatic actions; what needs attention, in full sentences, each item naming the letter of the suggestion that does it; and up to six **suggestions** with a letter (`a`, `b`…) that act at once: decide the waiting lessons, apply the recommended changes, turn on the complete automatic actions, tidy the memory, finish an interrupted system update or install security updates, free old tool versions, schedule the weekly digest, read the observations |
 | 1 Lessons waiting for you | Each one with its exact sentence and origin; approve or reject one, or approve all of them after reading every sentence (the agent's own proposals are approved one by one) |
 | 2 Open proposals | Grouped as changes the plugin applies, lessons, changes you apply and observations, each with its title, risk, what was seen (with the numbers), what applying it does and how to undo it. `a` applies a change now with Hermes' own command, `t` applies all of them, `d` dismisses an observation, `e` writes the lesson for a failure no template covers |
 | 3 Active lessons | With the measured effect; retire one |
@@ -809,7 +835,7 @@ python -m hermes_atlas_evolution --home /path/to/profile status
 | 7 Who is you in chats | Each channel of the last 30 days with its senders, the suggested ones marked; mark or unmark a whole channel or a sender as you |
 | 8 Hermes memory | See [Hermes memory](#hermes-memory) |
 | 9, 10 | The digest of 7 days and the full status |
-| 11 | A learning pass now |
+| 11 | A learning pass now (it can take up to the pass's 12 minutes) |
 | 12 Hermes health | Read from Hermes' own files, with no agent, network or token: the gateway, the session database, disk and folder growth, memory, swap, CPU, old tool versions; and Hermes' own `pm doctor`, `doctor` (exit 1 means problems found, shown with the doctor's own list of what to do), `doctor --fix` (after a quick backup, with what it may change shown first) and `pm gc` (see [Maintenance](maintenance.md)) |
 | 13 Operating system | The system's check, plan, update, repair and last report (Linux with apt; see [Maintenance](maintenance.md)) |
 | 14 Environment | Every profile of this Hermes (sessions, plugins on and never loaded, skills, and the last check by Hermes' own doctor), Hermes' plugin catalog, and what to fix across them, each with what was seen, what to do, the command and its undo; `v` looks again now (see [The environment](#the-environment)) |
@@ -818,21 +844,21 @@ A decision is made with the same code as the dashboard panel (`admin.py`) and re
 
 ## The mode and automatic actions
 
-`mode` says what the plugin does by itself at the end of each learning pass (the autopilot's, `learn`'s or the menu's). `auto` (default) is set over a narrower choice only from Hermes' configuration (the settings form, the panel, the menu or `hermes config set`), never from the plugin's `settings.json`, which the agent's file tools can write. The older setting `auto_actions` is still read when `mode` is not set: `off` is manual, `safe` assist, `full` auto.
+`mode` says what the plugin does by itself at the end of each learning pass (the autopilot's, `learn`'s or the menu's). `auto` (default) is set over a narrower choice only from Hermes' configuration (the settings form, the panel, the menu or `hermes -p <profile> config set`), never from the plugin's `settings.json`, which the agent's file tools can write. When `config.yaml` cannot be read, the mode is `manual`. The older setting `auto_actions` is still read when `mode` is not set: `off` is manual, `safe` assist, `full` auto.
 
 | Mode | What runs by itself |
 |---|---|
 | `manual` | Nothing. Every change waits for you. |
-| `assist` | Removes duplicate memory entries: copies that are the very same text, character for character, in one file or across both (the copy in `USER.md` stays). An entry that differs in anything, case and spacing included, and similar entries are never touched by themselves. An entry you put back is never taken out by itself again. |
-| `auto` (default) | Also locking a skill the curator keeps rewriting (`hermes curator lock`). And, from the profile that looks after the whole Hermes ([the environment](#the-environment)), across **every profile**: installing the plugin in a profile used in the last 7 days that never had it (`hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable`, with `--ref <commit>` of the lead's own copy when that copy is a checkout of the published repository); moving a failed install's folder (`plugins/.install-*`) to the lead's `evolution/trash/<profile>/`; and `hermes pm gc` once for the whole Hermes (one tool store, at the root) when 300 MB or more of old tool versions are unused, at most once a week. The plugin is never installed where it is on the list of plugins turned off, where you removed it (its data folder `evolution/evolution.sqlite3` stays and marks it), where it was configured or where it was ever seen. In a profile where the plugin is on with another mode, that profile's mode decides. At most 3 changes per pass; a change starts only when the pass has time left to finish it (an install: 210 seconds; `pm gc`: 330 seconds). |
+| `assist` | Removes an entry said in both memory files: the very same text, character for character, in `MEMORY.md` and in `USER.md` (the copy in `USER.md` stays). Hermes already drops a repeat inside one file. The copy taken out goes only after checking, under Hermes' lock on both files, that the copy kept is still there, so the last copy is never removed; nothing is removed when `config.yaml` was not read; the file keeps its mode and owner. An entry that differs in anything, case and spacing included, and similar entries are never touched by themselves. An entry you put back is never taken out by itself again. |
+| `auto` (default) | Also locking a skill the curator keeps rewriting (`hermes curator lock`). And, from the profile that looks after the whole Hermes ([the environment](#the-environment)), across **every profile**: installing the plugin in a profile used in the last 7 days that never had it (`hermes -p <profile> plugins install sesantanajr/hermes-atlas-evolution --enable`, with `--ref <commit>` of the lead's own copy when that copy is a checkout of the published repository), only while the repository's latest commit is the one the lead runs; keeping every other profile's copy on the lead's commit (at most two profiles per pass; see [Updating](upgrading.md)); repairing the gateway's service when Hermes removed the Python it started (at most once a day, a user service only, never while a gateway of this Hermes runs; see [The gateway's service](maintenance.md#the-gateways-service)); moving a failed install's folder (`plugins/.install-*`) to the lead's `evolution/trash/<profile>/`; and `hermes pm gc` once for the whole Hermes (one tool store, at the root) when 300 MB or more of old tool versions are unused, at most once a week, never while a folder it would delete is in use. The plugin is never installed where it is on the list of plugins turned off, where you removed it (its data folder `evolution/evolution.sqlite3` stays and marks it), where it was configured or where it was ever seen. In a profile where the plugin is on with another mode, that profile's mode decides, and a profile with `fleet_managed` off is never changed by the lead by itself (it still shows what it finds). At most 3 changes per pass; a change starts only when the pass has time left to finish it (an install: 210 seconds; `pm gc`: 330 seconds). |
 
-Each action is recorded in the decision history with `automatic` as the actor, shows up in the menu's summary and in the panel's header, and can be undone from the menu (screen 5 or 4), the panel's History or `hermes evolution decisions undo <id>`: a lock with `hermes curator unlock`, an install with `plugins remove`, a folder (a failed install or a cache folder) moved back from the trash, a memory entry put back from the copy kept (`hermes pm gc` has nothing to undo). An automatic change you undo is never applied by itself again, whichever profile looks after the Hermes later (the undone situations are kept in `<root>/evolution/fleet-state.json`). A skill already locked or pinned is left as it is. A failure (Hermes refusing, a timeout) is reported in the pass's result and never stops the pass. Whatever the mode, each pass also empties the trash of what entered it more than 30 days ago.
+Each action is recorded in the decision history with `automatic` as the actor, shows up in the menu's summary and in the panel's header, and can be undone from the menu (screen 5 or 4), the panel's History or `hermes -p <profile> evolution decisions undo <id>`: a lock with `hermes curator unlock`, an install with `plugins remove`, a folder (a failed install or a cache folder) moved back from the trash, a memory entry put back from the copy kept, a gateway repair with `care undo-gateway` (`hermes pm gc` has nothing to undo). An older decision is never undone over a newer one on the same proposal, and a decision whose trash entry was emptied or whose memory copy was pruned is no longer offered for undo. An automatic change you undo is never applied by itself again, whichever profile looks after the Hermes later (the undone situations are kept in `<root>/evolution/fleet-state.json`). A skill already locked or pinned is left as it is. A failure (Hermes refusing, a timeout) is reported in the pass's result and never stops the pass. Whatever the mode, each pass also empties the trash of what entered it more than 30 days ago.
 
 The same changes can be applied one at a time, or all at once, from the menu (**Apply now**, `t`, or screen 14) and the panel, in any mode. Two changes are applied with one key on that proposal only, never in **Apply all** and never by itself: turning off one of two plugins that do the same job or change the same tool's result (which plugin to keep is your call), and moving a package cache to the trash (one folder at a time). Undoing a cache move is refused when the folder exists again: the copy in the trash stays until it is deleted. **Before any change in a profile, the plugin reads that profile again from disk** and runs the command only if the same situation is still there; for a finding of Hermes' doctor, it runs that doctor check again for that profile. A stored proposal, the cached scan or another profile's files are never trusted. A proposal that is not true any more expires and leaves the cached look, so the next pass does not reopen it. A change across profiles that is true again a day after it was applied (you put it back by hand) is proposed again. Removing a plugin, updating one, archiving a skill, pruning rollback snapshots, a rollback or a change to a Hermes setting is never applied by the plugin: it shows the command, because its undo is not certain (Hermes 0.23.1's `curator restore` does not put an archived skill back where it was). An automatic change Hermes refuses is tried again a day later; a pass stops trying after two refusals.
 
 ## The environment
 
-One profile looks after the whole Hermes (the lead): of the profiles with the plugin on, the default one when it finished a learning pass in the last two days, else the first one (in name order) that did, else the default one or the first. A folder under `profiles/` counts as a profile only when its name follows Hermes' rule (`[a-z0-9][a-z0-9_-]{0,63}`) and it is not a link. A plugin installed as a link (a development checkout) counts as installed. At most every 6 hours, in its learning pass, or at once from the menu (screen 14, `v`) or `hermes evolution environment scan`, it reads every profile, read-only: its `config.yaml` (which plugins it enables or disables), each plugin's `plugin.yaml`, Hermes' install record, git checkout (`.git/config`, `HEAD`) and Python source, parsed with Python's `ast` and never imported or run, its skills (`SKILL.md`) and Hermes' skill records (`skills/.usage.json`), its sessions in the last 7 and 30 days, and Hermes' plugin catalog. Every file is opened as a regular file only (a link, a named pipe or a device is skipped) and up to a size limit (400 Python files per plugin, 128 KB per file, 384 KB parsed per plugin, 8 MB per scan; a file it could not read makes that plugin's hooks count as acting on any tool). Once a day it also runs Hermes' own doctor checks for each profile in use ([Maintenance](maintenance.md#hermes-own-doctor-once-a-day)). What it found becomes proposals of that profile, each with what was seen, what to do, the command and its undo:
+One profile looks after the whole Hermes (the lead): of the profiles with the plugin on, the default one when it finished a learning pass in the last two days, else the first one (in name order) that did, else the default one or the first. A folder under `profiles/` counts as a profile only as Hermes counts it: its name follows Hermes' rule (`[a-z0-9][a-z0-9_-]{0,63}`), it is not a link, it holds one of Hermes' identity files (`config.yaml`, `.env`, `SOUL.md`, `profile.yaml`, `auth.json`, `state.db`) and it was not deleted (`profiles/.deleted`); `profiles/default` is not a profile, and a `~/.hermes` that is a link is still `default`. A plugin installed as a link (a development checkout) counts as installed. At most every 6 hours, in its learning pass, or at once from the menu (screen 14, `v`) or `hermes -p <profile> evolution environment scan`, it reads every profile, read-only: its `config.yaml` (which plugins it enables or disables), each plugin's `plugin.yaml`, Hermes' install record, git checkout (`.git/config`, `HEAD`) and Python source, parsed with Python's `ast` and never imported or run, its skills (`SKILL.md`) and Hermes' skill records (`skills/.usage.json`), its sessions in the last 7 and 30 days, and Hermes' plugin catalog. Every file is opened as a regular file only (a link, a named pipe or a device is skipped) and up to a size limit (400 Python files per plugin, 128 KB per file, 384 KB parsed per plugin, 8 MB per scan; a file it could not read makes that plugin's hooks count as acting on any tool). Once a day it also runs Hermes' own doctor checks for each profile in use ([Maintenance](maintenance.md#hermes-own-doctor-once-a-day)). What it found becomes proposals of that profile, each with what was seen, what to do, the command and its undo:
 
 | Situation | When | What the plugin does |
 |---|---|---|
@@ -843,14 +869,14 @@ One profile looks after the whole Hermes (the lead): of the profiles with the pl
 | Installed and never loaded | A plugin folder of a profile has not been enabled there for more than a day. | Shows the command that removes it, with the room it takes. |
 | A failed install left a folder | `plugins/.install-*`, older than a day. | Auto mode moves it to the trash. |
 | A newer reviewed version | Hermes' catalog has a newer version of an installed plugin (one finding per plugin, every profile listed). | Shows the update command for each profile. |
-| A profile in use without this plugin | Sessions in the last 7 days. | Where it never was: Auto mode installs it there (Hermes downloads it). Where you turned it off, removed it or configured it: said only, with the command; your decision is kept. |
+| A profile in use without this plugin | Sessions in the last 7 days. | Where it never was: Auto mode installs it there (Hermes downloads it), while the repository's latest commit is the one the lead runs. Where you turned it off, removed it or configured it, or where `fleet_managed` is off: said only, with the command; your decision is kept. |
 | This plugin's hints hide another plugin's change | `tool_hints` is on in a profile where another plugin transforms the same tool's result. | Proposes `tool_hints false` in that profile; lessons still reach the agent at the start of each session. |
 | Two plugins may change the same result | Their code does not show which tools they act on. | Advice only: check the two plugins' documentation and keep the one you need for that tool. |
 | A profile nobody used in 30 days | No session in 30 days (the default profile is left out). | Advice only: if it is not coming back, delete it with Hermes after a backup. |
 | Hermes' doctor found a problem | The daily doctor check of a profile in use: a security advisory or a suspicious MCP server (high risk, first), a large cache folder Hermes never cleans, rollback snapshots above Hermes' cap, or any other problem it lists. A problem of the whole machine is listed once, on the first profile that saw it (the lead first), with the other profiles named. | A package cache that rebuilds itself (`uv`, `pnpm`, `npm`, `pip`, `yarn`, `huggingface`, `piper-voices`): one key moves it to the trash, one at a time (undo puts it back). Any other cache folder is yours: the item says what it holds and gives a `du` command to look inside. Everything else: what was seen, what to do and the `hermes -p <profile> ...` command, with Hermes' own words ([Maintenance](maintenance.md#hermes-own-doctor-once-a-day)). |
 | Skills unused, duplicated, alike, shared | Not used for 30 days (Hermes' own `curator.archive_after_days` default); the same text under two names; nearly the same description; the same file in 3 or more profiles. | Shows the archive command, or the curator's consolidation (`curator run --consolidate --dry-run`, which uses a model), or `skills.external_dirs` for one shared copy. |
 
-The catalog, the knowledge base and the playbook are kept in that profile's `evolution.sqlite3` (tables `catalog_plugin`, `catalog_removed`, `knowledge_plugin`, `playbook`), so `hermes evolution environment catalog` and any sqlite reader see them.
+The catalog, the knowledge base and the playbook are kept in that profile's `evolution.sqlite3` (tables `catalog_plugin`, `catalog_removed`, `knowledge_plugin`, `playbook`), so `hermes -p <profile> evolution environment catalog` and any sqlite reader see them.
 
 ## Hermes memory
 
@@ -860,7 +886,7 @@ Hermes keeps two memory files per profile, `memories/MEMORY.md` (the agent's not
 - **one entry says what another says**: 85% or more of the shorter one's words are in the longer one;
 - **very similar entries**: 60% or more of their words in common.
 
-You see both entries in full and choose which one stays. The other is taken out the way Hermes' memory tool writes: under the same exclusive lock (`<file>.lock`), after reading the file again, with an atomic replace, and only if the entry is still there as you saw it. A copy of the whole file is kept first in `<profile>/evolution/memory-backups/` (owner-only, the latest 100 copies), and the decision goes to the history with the entry's fingerprint, never its text. **Undo** puts it back at its place from that copy, while the file still holds the entry as the removal left it and it fits the limit. The plugin never rewrites an entry: to merge two entries into new words, ask the agent, which does it with its memory tool. Sessions already running keep the memory they started with; new sessions read the change.
+You see both entries in full and choose which one stays. The other is taken out the way Hermes' memory tool writes: under the same exclusive lock (`<file>.lock`; both files, always in the same order, when the copies are in different files), after reading the file again, with an atomic replace that keeps the file's mode and owner, and only if the entry is still there as you saw it and the one you keep is still there too. Each entry is compared once, so a full file is read in under a second; the word-by-word comparison looks at the first 300 distinct entries. A copy of the whole file is kept first in `<profile>/evolution/memory-backups/` (owner-only, the latest 100 copies), and the decision goes to the history with the entry's fingerprint, never its text. **Undo** puts it back at its place from that copy, while the file still holds the entry as the removal left it and it fits the limit. The plugin never rewrites an entry: to merge two entries into new words, ask the agent, which does it with its memory tool. Sessions already running keep the memory they started with; new sessions read the change.
 
 ## Settings and language
 
@@ -868,16 +894,17 @@ You see both entries in full and choose which one stays. The other is taken out 
 |---|---|---|---|
 | `lessons` | `off`, `suggest`, `auto` | `auto` | `off` measures only; `suggest` makes every lesson wait for approval; `auto` activates derived lessons at once and retires those measured as ineffective 14 days or more after activation. Reflector drafts and agent proposals wait in every mode. |
 | `language` | `auto`, `en`, `pt` | `auto` | `auto` follows `HERMES_LANGUAGE`, `display.language`, the locale, then English. |
-| `tool_hints` | boolean | `false` | Adds the matching lesson to a failing tool result. Off by default because Hermes keeps only the first plugin's change to a tool result. |
+| `tool_hints` | boolean | `false` | Adds the matching lesson to a failing tool result. Off by default because Hermes keeps only the first plugin's change to a tool result. Turning it on counts only from Hermes' configuration. |
 | `feedback_signals` | boolean | `true` | Counts owner corrections, repeated questions and thanks. |
 | `agent_tools` | boolean | `false` | Offers `hermes_atlas_evolution_lessons` to the agent, in the owner's own sessions only. Registered when the plugin loads: after turning it on, run `hermes gateway restart`; turning it off applies at once. |
 | `slow_turn_seconds` | integer, 5 to 3600 | `60` | A turn at least this long counts as slow. |
 | `owner_sender_ids` | up to 20 ids, text or whole numbers | `[]` | Gateway senders whose turns serve the owner (see [Who is served](#who-is-served)). Local sessions always do. |
 | `owner_platforms` | up to 20 platform names, such as `telegram` or `api_server` | `[]` | Platforms where every chat serves the owner, from the first message. |
-| `reflector` | boolean | `true` | Drafts lessons for untemplated failures through the auxiliary task `evolution_reflector`. Drafts always wait for approval. |
-| `reflector_daily_limit` | integer, 1 to 50 | `6` | Reflector model calls per UTC day. |
+| `reflector` | boolean | `true` | Drafts lessons for untemplated failures through the auxiliary task `evolution_reflector`. Drafts always wait for approval. Turned on while Hermes runs, it applies after `hermes gateway restart`; turned off, at the next learning pass. |
+| `reflector_daily_limit` | integer, 1 to 50 | `6` | Reflector model calls per UTC day. Above 6 counts only from Hermes' configuration. |
 | `autopilot_minutes` | `0`, or an integer from 15 to 1440 | `60` | Runs the pass in the background at most once per interval. `0` turns the background pass off: passes then run only from `learn`, the weekly recipe and the first `status`. |
 | `mode` | `auto`, `assist`, `manual` | `auto` | What the plugin does by itself at the end of each pass ([The mode and automatic actions](#the-mode-and-automatic-actions)). Only `manual` counts from `settings.json`. |
+| `fleet_managed` | boolean | `true` | Lets the profile that looks after the whole Hermes install, update and move things to the trash in this profile by itself. Off, it only shows what it finds here. `settings.json` can only turn it off. |
 | `runtime_guard` | boolean | `true` | Vetoes agent terminal commands that would stop the gateway or delete what the running Hermes needs. |
 
 The options can be set in two places (`cli.effective_settings`):
@@ -898,11 +925,11 @@ plugins:
 
 Values set through Hermes win over `settings.json` key by key.
 
-**Values only the Hermes configuration can set** (`cli.TRUSTED_ONLY`). The agent's own file tools can write `settings.json`: Hermes refuses their writes to `config.yaml` only. So a value in `settings.json` that would widen whom the plugin trusts or switch a protection off is ignored: `owner_sender_ids`, `owner_platforms`, `agent_advice` set to `true` (the agent tools) and `runtime_guard` set to `false` count only from the Hermes settings form or `config.yaml`, for example with `hermes config set plugins.entries.hermes-atlas-evolution.settings.agent_tools true` from your own terminal. `mode` set to anything but `manual` also counts only from the Hermes configuration. `status` lists the ignored keys under "Needs attention" by their name in `settings.json` (never their values), and the runtime guard vetoes the agent's own `hermes config set|unset` of this plugin's settings and of the plugins section.
+**Values only the Hermes configuration can set** (`cli.TRUSTED_ONLY`). The agent's own file tools can write `settings.json`: Hermes refuses their writes to `config.yaml` only. So a value in `settings.json` that would widen whom the plugin trusts or switch a protection off is ignored: `owner_sender_ids`, `owner_platforms`, `agent_advice` set to `true` (the agent tools), `tool_hints` set to `true`, `reflector_daily_limit` above 6 and `runtime_guard` set to `false` count only from the Hermes settings form or `config.yaml`, for example with `hermes -p <profile> config set plugins.entries.hermes-atlas-evolution.settings.agent_tools true` from your own terminal. `mode` set to anything but `manual` also counts only from the Hermes configuration, and `fleet_managed` there can only turn the lead's actions off. `status` lists the ignored keys under "Needs attention" by their name in `settings.json` (never their values), and the runtime guard vetoes the agent's own `hermes config set|unset` of this plugin's settings and of the plugins section.
 
-Values saved under the old name, `plugins.entries.hermes-evolution.settings`, still apply, and those under the current name win over them key by key; `hermes plugins remove hermes-evolution` deletes that old block from `config.yaml`. A change applies to the running gateway within a minute, without a restart: the hooks and the plugin's clock compare the modification times of `config.yaml` and `settings.json` at most every 30 seconds and read them again only when they changed. Three settings wait for `hermes gateway restart` (in the terminal: the next session): `runtime_guard` and `tool_hints`, which decide which hooks are registered, and `agent_tools` when it is turned on (turning it off applies at once). `status` and the dashboard panel list the first two while they wait (`settings_reload`). The prompt section of a profile that loaded with lessons off and the reflector's model access are also set when the plugin loads. Each autopilot pass and each command read the settings again.
+Values saved under the old name, `plugins.entries.hermes-evolution.settings`, still apply, and those under the current name win over them key by key; `hermes plugins remove hermes-evolution` deletes that old block from `config.yaml`. A change applies to the running gateway within a minute, without a restart: the hooks and the plugin's clock compare the modification times of `config.yaml` and `settings.json` at most every 30 seconds and read them again only when they changed. A few settings wait for `hermes gateway restart` (in the terminal: the next session): `runtime_guard` and `tool_hints`, which decide which hooks are registered, `agent_tools` when it is turned on (turning it off applies at once), and `reflector` when it is turned on after a load with it off. `status` and the dashboard panel list the waiting ones, `agent_tools` excepted, compared with what this load registered (`settings_reload`). The prompt section of a profile that loaded with lessons off and the reflector's model access are also set when the plugin loads. Each autopilot pass and each command read the settings again.
 
-Validation differs by caller (`evolve.options`). The commands reject an invalid `lessons`, `mode`, `slow_turn_seconds`, `owner_sender_ids`, `owner_platforms`, `reflector`, `reflector_daily_limit`, `autopilot_minutes` or `runtime_guard` with an error. Inside the gateway and in the autopilot each invalid value is replaced by a safe value on its own, and a warning is logged once when the plugin loads: an invalid `lessons` means `off`, an invalid `mode` means `manual`, an invalid `reflector` switches the reflector off, an invalid `autopilot_minutes` means 0 (passes only when you ask), an invalid `runtime_guard` keeps the guard on, and the others take their defaults. An unreadable `settings.json` turns lessons off until it is fixed; the values set in the Hermes form still apply to every other option. `tool_hints` is on only when set to `true`, and `feedback_signals` is on unless set to `false`; `reflector` and `runtime_guard` take `true` or `false`; `autopilot_minutes` takes 0 or an integer from 15 to 1440.
+Validation differs by caller (`evolve.options`). The commands reject an invalid `lessons`, `mode`, `slow_turn_seconds`, `owner_sender_ids`, `owner_platforms`, `reflector`, `reflector_daily_limit`, `autopilot_minutes` or `runtime_guard` with an error. Inside the gateway and in the autopilot each invalid value is replaced by a safe value on its own, and a warning is logged once when the plugin loads: an invalid `lessons` means `off`, an invalid `mode` means `manual`, an invalid `reflector` switches the reflector off, an invalid `autopilot_minutes` means 0 (passes only when you ask), an invalid `runtime_guard` keeps the guard on, and the others take their defaults. An unreadable `settings.json` turns lessons off until it is fixed; the values set in the Hermes form still apply to every other option. An unreadable `config.yaml` sets the mode to `manual`. `status` lists the settings it could not use, and an unread `config.yaml`, under Needs attention. `tool_hints` is on only when set to `true`, and `feedback_signals` is on unless set to `false`; `reflector` and `runtime_guard` take `true` or `false`; `autopilot_minutes` takes 0 or an integer from 15 to 1440.
 
 **Language** (`i18n`). Everything a person or the agent reads is in English or Brazilian Portuguese: lessons, the prompt section header, hints, the digest, `status`, the menu, proposals, the replies of the agent tools, error messages and the command help. The language is chosen in this order: `--lang en|pt` on the command line, the plugin's `language` option, the profile's `HERMES_LANGUAGE`, `display.language` of the profile configuration, the locale (`LC_ALL`, `LC_MESSAGES`, `LANG`), and finally English. The command help is built before the options are read, so it follows `HERMES_LANGUAGE`, `display.language` and the locale only. The dashboard panel follows the `language` setting too; with `auto`, it takes the language chosen for the profile in Hermes, then the dashboard's language, then the machine's locale ([The dashboard panel](hermes-integration.md#the-dashboard-panel)). Codes such as `pt`, `pt-BR` and `pt_br` all select Portuguese. Field names, codes and identifiers in JSON output stay in English. A gettext-style catalog of sentence pairs (`catalog`) translates the rest, and every sentence a person can read, error messages and help texts included, must have its pair there.
 
@@ -918,7 +945,7 @@ The skill `hermes-atlas-evolution:evolution-review` is registered with the plugi
 
 ## Storage
 
-The loop's tables live in `<HERMES_HOME>/evolution/evolution.sqlite3`, next to the tables of the usage observer ([Usage and cost](#usage-and-cost)). The database is at schema 8; older schemas are migrated automatically on first use, and the folder keeps its name, so everything learned stays. Tables and indexes added since (`failure_owner`, `failure_owner_daily`, `approval_daily`, `lesson_owner_wait` and indexes by signature on `failure_daily` and `failure_owner_daily`) are created when missing, without changing the schema number: a copy of the plugin that does not know a table ignores it, so an older copy still opens the database, and a database at a newer schema opens too, because the plugin only adds tables and columns. A very old copy refuses a database at schema 8. On macOS the database uses full syncs, as Hermes does for `state.db`.
+The loop's tables live in `<HERMES_HOME>/evolution/evolution.sqlite3`, next to the tables of the usage observer ([Usage and cost](#usage-and-cost)). The database is at schema 8; older schemas are migrated automatically on first use, and the folder keeps its name, so everything learned stays. Tables and indexes added since (`failure_owner`, `failure_owner_daily`, `approval_daily`, `lesson_owner_wait`, `lesson_measure` and indexes by signature on `failure_daily` and `failure_owner_daily`) are created when missing, without changing the schema number: a copy of the plugin that does not know a table ignores it, so an older copy still opens the database, and a database at a newer schema opens too, because the plugin only adds tables and columns. A very old copy refuses a database at schema 8. On macOS the database uses full syncs, as Hermes does for `state.db`.
 
 | Table | One row per | Holds |
 |---|---|---|
@@ -928,6 +955,7 @@ The loop's tables live in `<HERMES_HOME>/evolution/evolution.sqlite3`, next to t
 | `failure_owner_daily` | day and signature | how many of its failures happened in turns that served the owner |
 | `approval_daily` | day, session origin, tool and deciding setting | refused approvals; the setting is the Hermes setting that decided a refusal nobody could answer, empty when someone could have |
 | `lesson_owner_wait` | lesson | a derived lesson that `auto` mode left waiting only for the owner's own turns to hit its failure, with its signature |
+| `lesson_measure` | lesson | when the agent first read the lesson in its current activation (where its measurement starts), and the rate its latest verdict compared (per call or per day) |
 | `failure_owner` | signature | an older form of the owner totals; no longer written, kept so older copies still open the database |
 | `failure_sample` | signature | the scrubbed error excerpt kept for the reflector, and when it was updated; empty while the reflector is off; kept at most 14 days |
 | `turn_daily` | day and surface | turn counters and latency buckets |
@@ -943,6 +971,8 @@ The loop's tables live in `<HERMES_HOME>/evolution/evolution.sqlite3`, next to t
 
 Daily aggregates, changes and decided proposals are kept for 90 days (`experience.RETENTION_DAYS`). Lessons are kept, retired and withdrawn ones included, so a lesson id never points to another lesson and a sentence you turned down stays down; proposals that are open or approved are kept too. Retention is applied by each pass and by the first hook write of each UTC day in each process, before that write. It covers `guard_daily` too. It counts back from the system clock, but never from more than 2 days past the newest day stored (`RETENTION_STEP_DAYS`): a clock far ahead, such as a machine that booted before its time sync, cannot delete the history. A clock that stays ahead, as after a real pause, is believed once 3 days past the last prune have data (`RETENTION_CONFIRM_DAYS`). Reflector excerpts always expire by the clock itself. The delivery IDs that stop one event from being counted twice (`seen`) are kept 2 days.
 
-Hook writes share one connection per process and profile, which stays open while Hermes runs; on Windows this means `evolution.sqlite3` cannot be deleted while Hermes is running. While the database is busy an update waits in a queue of up to 512 entries; overflow is counted and reported as `dropped_events` by `hermes evolution usage`.
+The journal of gateway repairs, `<root>/evolution/gateway-repair.json`, is one file for the whole Hermes: the latest 40 repairs and undos, owner-only, never written through a link.
+
+Hook writes share one connection per process and profile, which stays open while Hermes runs; on Windows this means `evolution.sqlite3` cannot be deleted while Hermes is running. While the database is busy an update waits in a queue of up to 512 entries; overflow is counted and reported as `dropped_events` by `hermes -p <profile> evolution usage`.
 
 **Left by older versions.** A database that held the notes of version 0.1 keeps them in the table `evolution_memories`: nothing reads or writes them since 0.11.0, and the agent no longer gets them. While some remain, `status` lists how many under what needs attention, with a read-only command that prints them. To save them to `evolution/notes-0.1.json`, next to the database, and remove them from it, `status` gives a second command; once you run it, the item goes away. The database of the operations supervisor that 0.11.0 removed, `supervisor.sqlite3`, is no longer written or read; delete it if you want the room back.

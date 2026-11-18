@@ -2,7 +2,7 @@
 
 **English** | [Português (Brasil)](../pt-BR/maintenance.md)
 
-Where to look: the menu (`hermes evolution`) screens 12 (Hermes health), 13 (Operating system) and 14 (Environment), the **Health** and **Environment** tabs of the dashboard panel, and the commands `hermes evolution care` and `hermes evolution system`. None of them uses the agent, and none spends a token.
+Where to look: the menu (`hermes -p <profile> evolution`) screens 12 (Hermes health), 13 (Operating system) and 14 (Environment), the **Health** and **Environment** tabs of the dashboard panel, and the commands `hermes -p <profile> evolution care` and `hermes -p <profile> evolution system`. None of them uses the agent, and none spends a token.
 
 ## Hermes' health
 
@@ -12,15 +12,17 @@ The learning pass reads this at most every 6 hours, and screen 12 reads it again
 
 | Reading | From | Needs attention when |
 |---|---|---|
-| The gateway | `gateway_state.json`, `state/gateway.heartbeat` | it says it runs but its heartbeat is older than 3 minutes (stuck); with no fresh heartbeat, its process is gone or its pid now belongs to another program (crashed; checked on POSIX systems only; a fresh heartbeat counts as running, even from a gateway in another PID namespace); its memory is more than twice its median of the last week and above 512 MB |
+| The gateway | `gateway_state.json`, `state/gateway.heartbeat`, `gateway.pid`, the lock on `gateway.lock` (from `/proc/locks`), `host-gateway.json`, its service's unit | it says it runs but its heartbeat is older than 3 minutes (stuck); with no fresh heartbeat, its process is gone or its pid now belongs to another program (crashed; checked on POSIX systems only; a fresh heartbeat counts as running, even from a gateway in another PID namespace); it runs, but the program its service starts was deleted under it, so the next restart fails (`gateway_program_deleted`); its memory is more than twice its median of the last week and above 512 MB. A gateway that says `degraded` (no chat platform connected yet; scheduled tasks still run) or `starting` counts as running |
 | The session database | `state.db` (read-only), `state.db-wal` | it cannot be read; `PRAGMA quick_check` (once a week) fails; the write-ahead log passes 64 MB |
 | The disk Hermes writes to | `statvfs` of the profile's folder | less than 256 MB free (Hermes' own floor) or less than 1 GB; at the pace of the last week it fills within 14 days |
 | Each folder of the profile | `sessions`, `logs`, `checkpoints`, `cache`, `tools`, `backups`, `skills`, `memories`… (at most 8 seconds of scanning) | it grew by 1 GB and by half in about a week |
 | The machine | `/proc/meminfo`, the load average | less than 10% of memory free; swap more than 80% used; load above twice the CPUs over 15 minutes |
-| Hermes' tools | `tools/facts.json` at the Hermes root (one store for every profile) | versions of Hermes-managed tools that nothing references take 300 MB or more (only names Hermes manages count) |
+| Hermes' tools | `tools/facts.json` at the Hermes root (one store for every profile), the commands of Hermes' services, the programs running now (`/proc/*/exe`) | the folders `hermes pm gc` would delete (every folder `facts.json` does not name) take 300 MB or more; or one of them is still used by a service or a running program, and gc would break it (high: gc is held back until that service is moved); or `facts.json` is missing or unreadable, so gc would delete every tool (gc is held back). The plugin reads the store the way Hermes does, environment generations included, and for a profile that borrows another home's tools, the store it really uses |
 | After a reboot | systemd | the gateway runs as a user service without linger: it would not come back. Fix: `loginctl enable-linger <user>` |
 
-What needs attention shows on screen 12, in the panel's Health tab and in `hermes evolution status`, each item with the command that fixes it.
+A gateway runs when any of these says so: its process (its pid, with the start time Hermes recorded or a command line that is Hermes'), a fresh heartbeat, `gateway.pid`, the lock it holds on `gateway.lock` for its whole life, or the host record `host-gateway.json`. The plugin never repairs or starts a gateway while one of them says a gateway of this Hermes runs.
+
+What needs attention shows on screen 12, in the panel's Health tab and in `hermes -p <profile> evolution status`, each item with the command that fixes it.
 
 ### Hermes' own doctor, once a day
 
@@ -30,7 +32,7 @@ What needs attention shows on screen 12, in the panel's Health tab and in `herme
 - **How.** In a short-lived process of Hermes' own Python, in a process group of its own, with that profile's home and a clean environment (only `PATH`, `HOME`, the locale and a few system variables pass). Each check is called as `hermes doctor` calls it, without `--fix`; an error in one check, Hermes' own exits included, is caught there, so it never hides the others. Like `hermes doctor`, the run loads the profile's plugins to list their tools. Five checks are skipped: the provider API probes, `npm audit`, the dashboard import, the Skills Hub (they use the network or take minutes) and the terminal backend (it may open an SSH connection or start a container). One run takes about 7 seconds per profile on Hermes 0.23.1. At 120 seconds the whole process group is stopped, so nothing it started outlives it.
 - **What it changes.** No setting and no file of yours. Its footprint is the same as `hermes doctor`: Hermes' own logs and lock files.
 - **How long a result counts.** A result older than 3 days is no longer shown: the profile went idle, or the runs were skipped. When a change is found stale on disk, that profile's stored result is dropped and the checks run again at the next look.
-- **Look again now.** `v` on screen 14, or `hermes evolution environment scan`, runs it again for every profile in use.
+- **Look again now.** `v` on screen 14, or `hermes -p <profile> evolution environment scan`, runs it again for every profile in use.
 
 What the doctor reports becomes items of the Environment (screen 14 and the panel's Environment tab). Each item says what was seen, what to do, with `hermes -p <profile> ...` commands, and quotes Hermes' own words:
 
@@ -40,7 +42,7 @@ What the doctor reports becomes items of the Environment (screen 14 and the pane
 | A package cache Hermes never cleans | a folder under `cache/` that rebuilds itself when needed (`uv`, `pnpm`, `npm`, `pip`, `yarn`, `huggingface`, `piper-voices`) is large and outside every pruner (Hermes cleans only `cache/scratch` and `cache/terminal`) | Apply it: one key moves it to the plugin's trash (`evolution/trash/<profile>/` of the lead). One folder at a time, never in **Apply all**. **Undo** puts it back; if the folder exists again by then, undo says so and the copy stays in the trash until it is deleted. |
 | Any other large cache folder | another folder under `cache/`: `browser` (the browser tool's profile, with its logins and cookies), `documents` (files attached to conversations, which old sessions point to), `images`, `generated`, `audio`, `delegation`, `spillover`, `web`… | Yours: the plugin never moves it, because Hermes or the sessions still use it. The item says what the folder holds and gives the command to look inside, `du -sh <path>/* \| sort -h \| tail -20`; delete only what is no longer needed. |
 | Rollback snapshots above Hermes' cap | the `/rollback` snapshots take more than Hermes' size cap | See what takes the space with `hermes -p <profile> checkpoints status`. Hermes always keeps the latest snapshot of each project, so its cap is a floor. Then choose: keep fewer days (`hermes -p <profile> config set checkpoints.retention_days 3`, then `hermes -p <profile> checkpoints prune`) or, if you never use `/rollback`, turn it off (`hermes -p <profile> config set checkpoints.enabled false`, then `hermes -p <profile> checkpoints clear`). Deleted snapshots cannot be brought back. |
-| A problem the plugin knows | tools on without a key, a missing `.env`, no provider key, a session database to prune, repair or recover, linger, `config.yaml` to migrate or with settings in the wrong place, an old `HERMES_MAX_ITERATIONS`, the memory provider off, a plugin turned off by an update or in both lists, cron tasks being skipped or their disk almost full, one gateway per profile, two profiles with the same chat credential, `hermes` not on the `PATH` | The item says the fact and the action. Examples: a plugin an update turned off → `hermes -p <profile> plugins enable <name>` (or `plugins remove <name>` if you do not want it); tools without a key → `hermes -p <profile> setup`, or `hermes -p <profile> tools` to turn them off; linger → `sudo loginctl enable-linger $USER`. The next daily check closes the item once it is solved. |
+| A problem the plugin knows | tools on without a key, a missing `.env`, no provider key, a session database to prune, repair or recover, linger, `config.yaml` to migrate or with settings in the wrong place, an old `HERMES_MAX_ITERATIONS`, the memory provider off, a plugin turned off by an update or in both lists, cron tasks being skipped or their disk almost full, one gateway per profile, two profiles with the same chat credential, `hermes` not on the `PATH` | The item says the fact and the action. Examples: a plugin an update turned off → `hermes -p <profile> plugins enable <name>` (or `plugins remove <name>` if you do not want it); tools without a key → `hermes -p <profile> setup`, or `hermes -p <profile> tools` to turn them off; linger → `loginctl enable-linger $USER` (it asks for an administrator's password if it needs one). The next daily check closes the item once it is solved. |
 | Any other problem the doctor lists | a sentence the plugin does not know | Shown in Hermes' own words, with the command Hermes names. |
 
 A problem of the whole machine (a security advisory, linger, the `PATH`, one gateway per profile, two profiles with the same chat credential, the disk of the cron tasks) is listed once, on the first profile that saw it (the lead first), with the other profiles named.
@@ -53,7 +55,7 @@ Before the plugin moves a package cache, it runs the doctor check that found it 
 
 ### What you can run
 
-Each action runs Hermes' own command, from screen 12 or with `hermes evolution care <action> --yes`, in your own terminal (never in an agent's shell). Each has a limit of 900 seconds.
+Each action runs Hermes' own command, from screen 12 or with `hermes -p <profile> evolution care <action> --yes`, in your own terminal (never in an agent's shell). Each has a limit of 900 seconds.
 
 | Action | `care` | Command | What it does |
 |---|---|---|---|
@@ -61,7 +63,9 @@ Each action runs Hermes' own command, from screen 12 or with `hermes evolution c
 | Installation integrity | `pm-doctor` | `hermes pm doctor` | Offline. Checks every Hermes-managed file against its recorded digest. Runs before Hermes' own startup maintenance. |
 | Hermes' full check | `doctor` | `hermes doctor` | Calls every configured provider's API (an endpoint ending in `/anthropic` gets a one-token request), runs `npm audit` against the npm registry, asks `gh auth status` and imports the dashboard in a subprocess. It uses the network and can take minutes. It changes no setting. |
 | Repair with Hermes | `fix` | `hermes backup --quick --label atlas-evolution`, then `hermes doctor --fix` | The backup runs first. If it fails, nothing is repaired. |
-| Free old tool versions | `gc` | `hermes pm gc` | Removes tool versions nothing references. Nothing to undo: Hermes fetches a version again if something asks for it. |
+| Free old tool versions | `gc` | `hermes pm gc` | Removes every folder of the tool store that `tools/facts.json` does not name. Refused while one of them is used by a service or a running program, while `facts.json` is missing or unreadable, or while a systemd scope cannot be read (a service there could use one). Nothing to undo: Hermes fetches a version again if something asks for it. |
+| Repair the gateway's service | `fix-gateway` | none: the plugin edits the service's file and runs `systemctl` | Points the gateway's systemd service at the Python Hermes uses now, after Hermes replaced its bundled Python ([The gateway's service](#the-gateways-service)). |
+| Undo a gateway repair | `undo-gateway` | none: the plugin puts the file back and runs `systemctl daemon-reload` | Puts back the file of the latest repair not undone yet; run it again for the one before. |
 
 **Reading the doctor's answer.** `hermes doctor` ends with exit code 1 when it found problems. That is an answer, not a failure: the plugin shows how many problems, the lines marked ✗ and the doctor's own numbered list of what to do. Exit 0 means nothing to fix.
 
@@ -69,7 +73,24 @@ Each action runs Hermes' own command, from screen 12 or with `hermes evolution c
 
 **What the quick backup restores:** `config.yaml`, `.env`, the session database and the cron jobs. To go back, run `/snapshot restore <id>` in a Hermes chat.
 
-**`hermes pm gc` by itself.** In Auto mode, the lead profile runs `hermes pm gc` once for the whole Hermes (there is one tool store, at the root) when 300 MB or more of old tool versions are unused, at most once a week. It is recorded in the decision history.
+**`hermes pm gc` by itself.** In Auto mode, the lead profile runs `hermes pm gc` once for the whole Hermes (there is one tool store, at the root) when 300 MB or more of old tool versions are unused, at most once a week. Right before, it reads the tool store again: gc runs only if no folder it would delete is used by a service or a running program, only if `facts.json` can be read, and only if both systemd scopes could be read. It is recorded in the decision history.
+
+### The gateway's service
+
+When Hermes updates itself, it can replace its bundled Python. The gateway's systemd service still starts the old one: systemd fails with `status=203/EXEC` and loops, and `hermes gateway restart` only waits. Or the gateway still runs, but the program its service starts was deleted under it (`gateway_program_deleted`): the next restart fails. `status` says which, with the command.
+
+`hermes -p <profile> evolution care fix-gateway` repairs it, in your own terminal:
+
+1. It finds the service Hermes names for this home: `hermes-gateway.service` for the account's own `~/.hermes`, `hermes-gateway-<name>` for `profiles/<name>`, `hermes-gateway-<hash>` for any other home; for a profile the root's gateway serves, the root's service first. It checks that the service runs this `HERMES_HOME`.
+2. It refuses, and says why, when starting could run a second gateway or touch another Hermes. The gateway is repaired (by the Mode auto or `care fix-gateway`) only when no gateway of this Hermes runs, degraded and starting ones included, and no gateway service of either scope runs, starts or stops, and only the service Hermes names for this home and that runs this `HERMES_HOME`. When the service being repaired is the one running (its program was deleted under it), `care fix-gateway` fixes its file and starting it changes nothing.
+3. It shows the change and asks. Then, in the file that sets `ExecStart` (the unit file or a drop-in), it replaces the old program with the Python Hermes points at now, on every `Exec*=` line that names it (`ExecStop`, `ExecStopPost`…). A copy of the file is kept next to it as `<file>.atlas-<time>-<random>.bak`, a name systemd never loads.
+4. It runs `systemctl daemon-reload`, `reset-failed` and `start --no-block`, then waits up to 180 seconds for the gateway to run. "Still starting" means systemd is still starting it: check again in a minute.
+
+Every repair and every undo goes to a journal of the whole Hermes, `<root>/evolution/gateway-repair.json` (the latest 40). `care undo-gateway` works from any profile, undoes one repair at a time back to the original file, and an undone repair is never repeated automatically. It refuses when the file changed since the repair (Hermes reinstalled the service, or you edited it).
+
+**By itself.** In Auto mode, the lead profile makes the same repair, with the same checks, at most once a day: only a user service (never a system one), never a leftover service that is off and not failing, never one that runs, and never a profile's own legacy service when the root's gateway serves that profile. Each repair is in the decision history with its undo.
+
+`hermes pm gc` deletes every tools folder `facts.json` does not name; any folder a service or running program uses blocks it, and so does a systemd scope that cannot be read. So gc never deletes the Python a service still starts from: repair the service first.
 
 ## The operating system
 
@@ -96,7 +117,7 @@ It is ready to update when nothing is half-way, broken or busy and there is room
 1. The check must pass, and Hermes' profile and the plugin's own code must belong to root. If another user can change them, root would run what that user wrote: the plugin refuses and the plan shows what to do with apt yourself.
 2. A copy of every installed package with its version and of `/etc`, in a folder only root can read, outside every Hermes profile (so never inside a Hermes backup): `/var/lib/hermes-atlas-evolution/system/<time>-<random>/`. Its files are created new, never through a link; the latest 5 runs are kept.
 3. `apt-get -y --with-new-pkgs upgrade` in its own systemd unit (`hermes-evolution-os-upgrade-<run>`), so a closed terminal, a dropped SSH connection or a restarted gateway never leaves dpkg half-way. It keeps every configuration file you changed (`--force-confold`), restarts no service by itself (`NEEDRESTART_MODE=l`), and holds the packages you asked to leave out only for this run: they are written down before they are held, and released when the run ends, fails or is stopped (`systemctl stop`, Ctrl+C, a hang-up); a package leaves that list only once `apt-mark` really released it, waiting up to 3 minutes for a dpkg that is still finishing. A name apt would not accept is refused, never dropped in silence.
-4. After: dpkg and apt checked again, every service that was running checked again (all of them, not only Hermes'; one that failed counts against the update, one that ended without an error is listed apart, since most stop when idle), units that newly failed, `hermes --version`, and a report with what changed and the command that goes back to each old version (`apt-get install <package>=<version>`, while that version is still available). `hermes evolution system report` and the menu show the latest one, written when it is first asked for if the menu was closed.
+4. After: dpkg and apt checked again, every service that was running checked again (all of them, not only Hermes'; one that failed counts against the update, one that ended without an error is listed apart, since most stop when idle), units that newly failed, `hermes --version`, and a report with what changed and the command that goes back to each old version (`apt-get install <package>=<version>`, while that version is still available). `hermes -p <profile> evolution system report` and the menu show the latest one, written when it is first asked for if the menu was closed.
 
 The plugin never reboots. When the system waits for a reboot, plan it: Hermes' services come back by themselves when they are enabled (and, for a user unit, with linger).
 
@@ -114,8 +135,8 @@ In containers (Docker) with Ubuntu 26.04, 24.04 and 22.04 and Debian 13, apart f
 - a package left out written with its architecture (`zlib1g:amd64`) while the owner already held it: the owner's hold is left alone;
 - a real dpkg lock held by another program: the check says busy and names the lock, and is ready once it is released;
 - a Hermes owned by another user: root refuses to update through it;
-- an update of Ubuntu 26.04 with Hermes 0.23.1 installed, through `hermes evolution system upgrade`: libc6 2.43 updated, Hermes answers after, no service stopped.
+- an update of Ubuntu 26.04 with Hermes 0.23.1 installed, through `hermes -p <profile> evolution system upgrade`: libc6 2.43 updated, Hermes answers after, no service stopped.
 
 ## The weekly digest
 
-Decisions that wait need something to remind you of them (Hermes 0.23.1 drops end-of-session notices). The menu's suggestion, or `hermes evolution schedule-digest --deliver <local|channel>`, schedules the weekly digest (Mondays at 08:00) as a Hermes cron job that runs a script, not the agent (`--no-agent`): it spends no token. It is created once and undone from the decision history (`hermes cron remove`).
+Decisions that wait need something to remind you of them (Hermes 0.23.1 drops end-of-session notices). The menu's suggestion, or `hermes -p <profile> evolution schedule-digest --deliver <local|channel>`, schedules the weekly digest (Mondays at 08:00) as a Hermes cron job that runs a script, not the agent (`--no-agent`): it spends no token. It is created once and undone from the decision history (`hermes cron remove`).

@@ -42,7 +42,7 @@ def process_kind() -> str:
     words = [os.path.basename(str(item)) for item in sys.argv[:6]]
     if "gateway" in words and "run" in words:
         return "gateway"
-    if "dashboard" in words:
+    if "dashboard" in words or "serve" in words:   # `hermes serve`: the same server, for the Desktop and remote clients
         return "dashboard"
     return "cli"
 
@@ -321,6 +321,13 @@ def _is_this_plugin(folder: Path) -> bool:
     return re.search(rf"^name:\s*[\"']?{re.escape(PLUGIN_DIR)}[\"']?\s*$", manifest, re.M) is not None
 
 
+def _gateway_of(folder: Path, name: str) -> str:
+    """The profile whose gateway serves the profile `name` (cli.gateway_profile)."""
+    from .cli import gateway_profile
+
+    return gateway_profile(folder) if name != "default" else "default"
+
+
 def _profiles(home: Path, *, now: float) -> list[dict]:
     """Every profile of the same Hermes root: sessions in 7 days and the plugin's state there.
 
@@ -339,7 +346,7 @@ def _profiles(home: Path, *, now: float) -> list[dict]:
                      "last_pass": last, "lessons_active": active, "lessons_waiting": waiting,
                      "install": _command(name, f"plugins install {REPOSITORY} --enable"),
                      "migrate": f"{_command(name, 'plugins remove ' + LEGACY_DIRS[0])} && " + (
-                         "hermes gateway restart" if state == "both"
+                         _command(_gateway_of(folder, name), "gateway restart") if state == "both"
                          else _command(name, f"plugins install {REPOSITORY} --enable")),
                      "status": _command(name, "evolution status")})
     return rows
@@ -365,12 +372,13 @@ CARE_ATTENTION = ("hermes_gateway_crashed", "os_held_by_plugin", "hermes_gateway
                   "hermes_state_db_damaged", "hermes_state_db_wal_large", "hermes_disk_critical", "hermes_disk_low",
                   "hermes_disk_filling", "hermes_storage_growth", "hermes_memory_low", "hermes_swap_full",
                   "hermes_cpu_saturated", "hermes_unused_tools", "hermes_tools_in_use_unreferenced",
-                  "hermes_gateway_not_at_boot",
+                  "hermes_gateway_not_at_boot", "hermes_gateway_program_deleted",
                   "os_dpkg_interrupted", "os_package_manager_stuck", "os_apt_broken", "os_reboot_required", "os_security_updates", "os_unattended_off",
                   "os_lists_stale", "os_unit_not_enabled", "hermes_gateway_exec_missing", "hermes_gateway_restart_loop",
                   "os_unit_exec_missing", "os_unit_restart_loop")
 # The attention codes that come from the gateway's systemd unit: a look now (live_units) overrides what was stored.
-UNIT_CODES = ("hermes_gateway_exec_missing", "hermes_gateway_restart_loop", "hermes_gateway_crashed")
+UNIT_CODES = ("hermes_gateway_exec_missing", "hermes_gateway_restart_loop", "hermes_gateway_crashed",
+              "hermes_gateway_program_deleted")
 CARE_REFRESH_SECONDS, SYSTEM_REFRESH_SECONDS = 6 * 3600, 86_400   # hermes_care's and system_update's own pace
 
 
@@ -589,7 +597,8 @@ def _apply_live(attention: list, live: dict, care: dict | None = None, system: d
     troubled = [unit for unit in stored if _unit_trouble(unit)]
     if troubled and all(_key(unit) in now and not _unit_trouble(now[_key(unit)]) for unit in troubled):
         codes = [code for code in codes if code not in ("os_unit_exec_missing", "os_unit_restart_loop",
-                                                        "hermes_gateway_exec_missing", "hermes_gateway_restart_loop")]
+                                                        "hermes_gateway_exec_missing", "hermes_gateway_restart_loop",
+                                                        "hermes_gateway_program_deleted")]
     if gateway:
         running = gateway.get("active_state") == "active" and gateway.get("sub_state") == "running"
         # a leftover unit that is off, while the gateway runs from another one, is not the gateway failing to start
@@ -600,6 +609,8 @@ def _apply_live(attention: list, live: dict, care: dict | None = None, system: d
             codes.append("hermes_gateway_restart_loop")
         elif not running and "hermes_gateway_crashed" in attention:
             codes.append("hermes_gateway_crashed")
+        elif running and gateway.get("exec_missing"):   # it runs, but the next restart fails (hermes_care.check)
+            codes.append("hermes_gateway_program_deleted")
     others = [unit for unit in units if unit is not gateway]
     if any(unit.get("exec_missing") for unit in others) and "os_unit_exec_missing" not in codes:
         codes.append("os_unit_exec_missing")
@@ -609,15 +620,18 @@ def _apply_live(attention: list, live: dict, care: dict | None = None, system: d
 
 
 def build(home: Path, *, now: float | None = None, config=None, runtime_config=None, live: bool | None = None,
-          host=None) -> dict:
+          host=None, problems=None) -> dict:
     """The status of this profile. `live`: also ask systemd now about Hermes' services (one `systemctl show`, 4 s
     at most); by default when run from the command line, or when the stored health checks are old or the learning
-    pass stopped (a gateway that died stops the passes that would see it). `host` replaces the machine's commands and files."""
-    from .evolve import options
+    pass stopped (a gateway that died stops the passes that would see it). `host` replaces the machine's commands and files.
+    `problems`: what cli.safe_settings could not use (["settings.json"]); the settings evolve.options refuses here are
+    added, and both are listed under the attention heading instead of failing."""
+    from .evolve import CONFIG_UNREAD, options
     from .signals import guard_summary
 
     now = time.time() if now is None else now
-    opts = options(config or {}, runtime_config, strict=False)
+    refused: list = []
+    opts = options(config or {}, runtime_config, strict=False, problems=refused)
     today = utc_day(now)
     with experience(home) as conn:
         cursor = dict(conn.execute("SELECT key, value FROM cursor WHERE key IN "
@@ -716,6 +730,15 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
         report["settings_ignored"] = []
     if report["settings_ignored"]:
         attention.append("settings_ignored")
+    report["settings_problems"] = sorted({str(item) for item in [*(problems or ()), *refused] if item})
+    if report["settings_problems"]:
+        attention.append("settings_problems")
+    # config.yaml could not be read here (no YAML parser, or a damaged file): every value shown is a default. Also
+    # read from evolve.options, should it say so itself.
+    report["config_unread"] = bool(isinstance(runtime_config, dict) and runtime_config.get(CONFIG_UNREAD)
+                                   or opts.get("config_unread"))
+    if report["config_unread"]:
+        attention.insert(0, "config_unread")
     try:   # changes the running gateway applies only at the next load of the plugin (integration.RELOAD_KEYS)
         with experience(home) as conn:
             row = conn.execute("SELECT value FROM cursor WHERE key='settings_reload'").fetchone()
@@ -790,7 +813,7 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
     report["live"] = live_units(care, system, host=host, home=home) if live else None
     if report["live"] is not None:
         health = _apply_live(health, report["live"], care, system, home)
-    if {"hermes_gateway_exec_missing", "hermes_gateway_restart_loop"} & set(health):
+    if {"hermes_gateway_exec_missing", "hermes_gateway_restart_loop", "hermes_gateway_program_deleted"} & set(health):
         # the gateway's own line already says it, with its fix: the system's line only when another unit is concerned
         # (as known now: a unit the look now found fine is not one, whatever the stored checks said)
         problems = [unit for unit in _current_units(None, system, report["live"])
@@ -811,7 +834,7 @@ _TEXT = {
            "autopilot": "Learning pass", "every": "every {minutes} min",
            "off": "off", "pass_off": "off (run `hermes evolution learn` yourself)",
            "last": "last one", "ok": "ok", "failed": "failed",
-           "never": "it has not run in this profile yet; `hermes evolution learn` runs one now",
+           "never": "none yet in this profile",
            "backfill": "Hermes history", "reflector": "Reflector", "on": "on", "guard_on": "on", "guard_off": "off",
            "calls": "calls today",
            "drafts": ("{n} draft waiting", "{n} drafts waiting"), "lessons": "Lessons",
@@ -898,19 +921,17 @@ _TEXT = {
                                    "what uses them the most: `ps -eo pcpu,comm --sort=-pcpu | head`.",
            "hermes_unused_tools": "Old versions of Hermes' tools take {size} and nothing uses them: "
                                   "`hermes evolution care gc` removes them (it asks first).",
-           "hermes_tools_in_use_unreferenced": "Hermes no longer points at {in_use_en} in its tools (`tools/facts.json`), "
-                                               "but something still starts from there: `hermes pm gc` would delete it "
-                                               "and that service would fail at its next start (status 203/EXEC). "
-                                               "Old tool versions are not removed until then. First point the service "
-                                               "at the current Python (`hermes evolution care fix-gateway` does it for "
-                                               "the gateway's service) or, for the running Hermes process, restart it "
-                                               "(`hermes gateway restart`); then `hermes evolution care gc`.",
+           "hermes_tools_in_use_unreferenced": "{in_use_advice_en}",
            "hermes_gateway_not_at_boot": "The gateway runs as a user service without linger: after a reboot it does not start. Fix: `loginctl enable-linger {user}`.",
            "hermes_gateway_exec_missing": "The gateway's service `{unit}` cannot start: its ExecStart runs `{exec_path}`, "
                                           "which no longer exists (Hermes replaced its bundled Python{replacement_en}). "
                                           "systemd keeps failing (status 203/EXEC, {restarts} restarts) and "
                                           "`hermes gateway restart` only waits. {fix_en} Then run `{restart_cmd}` and "
                                           "check it with `{journal_cmd}`.",
+           "hermes_gateway_program_deleted": "The gateway runs, but the program its service `{unit}` starts "
+                                             "(`{exec_path}`) was deleted under it (Hermes replaced its Python): the "
+                                             "next restart fails. Fix the service now: "
+                                             "`hermes -p {profile} evolution care fix-gateway`.",
            "hermes_gateway_restart_loop": "systemd keeps restarting the gateway's service `{unit}` ({restarts} restarts, "
                                           "now {sub_state}): it fails right after it starts. See why with "
                                           "`{journal_cmd}` before starting it again.",
@@ -946,7 +967,7 @@ _TEXT = {
            "reboot": "reboot waiting",
            "stale_tick_job": "A scheduled job still runs the `tick` that 0.11.0 removed, so it fails at every run. "
                              "Nothing replaces it: the learning pass runs by itself. Remove it:",
-           "digest_unscheduled": "Decisions wait for you and nothing reminds you of them (Hermes 0.23.1 drops "
+           "digest_unscheduled": "Decisions wait for you and nothing reminds you of them (Hermes drops "
                                  "end-of-session notices). Schedule the weekly digest to your chat with "
                                  "`hermes evolution schedule-digest --deliver <channel>`: it becomes a Hermes scheduled "
                                  "task (cron), no agent.",
@@ -971,7 +992,9 @@ _TEXT = {
                             "them from the database, which closes this item: `{forget}`"),
            "settings_reload": "These settings changed and apply after `hermes gateway restart` (in the terminal, at the "
                               "next session): {keys}.",
-           "settings_ignored": "These values in `settings.json` are ignored: {keys}. They would widen whom the plugin trusts or turn a protection off, and the agent's own file tools can write that file. Set the ones you want in the Hermes settings form, with `hermes evolution owner` (sender ids and platforms), or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> <value>` in your own terminal.",
+           "settings_ignored": "These values in `settings.json` are ignored: {keys}. They would widen whom the plugin trusts or what it does by itself, or turn a protection off, and the agent's own file tools can write that file. Set the ones you want in the Hermes settings form, with `hermes evolution owner` (sender ids and platforms), or with `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> <value>` in your own terminal.",
+           "settings_problems": "These settings could not be used, so a safe value applies until they are fixed: {keys}. Correct them in the Hermes settings form, with `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key> <value>`, or in `evolution/settings.json`; a `settings.json` that cannot be read also keeps lessons off.",
+           "config_unread": "config.yaml was not read: install PyYAML or run with Hermes' Python; the values shown are defaults.",
            "sessions": ("{n} session", "{n} sessions"), "none": "Nothing needs attention.",
            "stale_runtime": "A running Hermes process still runs an older copy of the plugin than the one on disk (`hermes plugins update` does not reload a running gateway). Run `hermes gateway restart`; it waits for the running turns.",
            "stale_item": "pid {pid} ({kind}) loaded {version}",
@@ -991,7 +1014,7 @@ _TEXT = {
            "autopilot": "Rodada de aprendizado", "every": "a cada {minutes} min",
            "off": "desligado", "pass_off": "desligada (rode `hermes evolution learn` você mesmo)",
            "last": "última", "ok": "ok", "failed": "falhou",
-           "never": "ainda não rodou neste perfil; `hermes evolution learn` roda uma agora",
+           "never": "nenhuma ainda neste perfil",
            "backfill": "Histórico do Hermes", "reflector": "Refletor", "on": "ligado", "guard_on": "ligada",
            "guard_off": "desligada", "calls": "chamadas hoje",
            "drafts": ("{n} rascunho aguardando", "{n} rascunhos aguardando"), "lessons": "Lições",
@@ -1003,7 +1026,7 @@ _TEXT = {
            "lesson_modes": {"auto": "automáticas: padrões fixos valem sozinhos, o resto espera você",
                             "suggest": "com aprovação: toda lição espera você",
                             "off": "desligadas: só medem, nada é mostrado ao agente"},
-           "guard": "Proteção do Hermes", "vetoed": ("{n} comando barrado em 7 dias", "{n} comandos barrados em 7 dias"), "attention": "Precisa de atenção",
+           "guard": "Proteção do Hermes", "vetoed": ("{n} comando barrado em 7 dias", "{n} comandos barrados em 7 dias"), "attention": "Pede atenção",
            "auto_modes": {"auto": ("Modo Auto", "age sozinho em todos os perfis"),
                           "assist": ("Modo Assistido", "sozinho, só remove entradas repetidas da memória; o resto "
                                                        "espera você"),
@@ -1081,14 +1104,7 @@ _TEXT = {
                                    "minutos). Veja quem mais os usa: `ps -eo pcpu,comm --sort=-pcpu | head`.",
            "hermes_unused_tools": "Versões antigas das ferramentas do Hermes ocupam {size} e nada as usa: "
                                   "`hermes evolution care gc` as remove (pergunta antes).",
-           "hermes_tools_in_use_unreferenced": "O Hermes não aponta mais para {in_use_pt} nas ferramentas dele "
-                                               "(`tools/facts.json`), mas algo ainda sobe a partir dali: o "
-                                               "`hermes pm gc` apagaria isso e esse serviço falharia na próxima vez que "
-                                               "subisse (status 203/EXEC). Versões antigas de ferramentas não são "
-                                               "removidas até lá. Primeiro aponte o serviço para o Python atual (o "
-                                               "`hermes evolution care fix-gateway` faz isso no serviço do gateway) ou, "
-                                               "se for o processo do Hermes em execução, reinicie-o "
-                                               "(`hermes gateway restart`); depois, `hermes evolution care gc`.",
+           "hermes_tools_in_use_unreferenced": "{in_use_advice_pt}",
            "hermes_gateway_not_at_boot": "O gateway roda como serviço do usuário sem o `linger` ligado: depois de um "
                                          "reinício ele não sobe. Correção: `loginctl enable-linger {user}`.",
            "hermes_gateway_exec_missing": "O serviço do gateway `{unit}` não consegue subir: o ExecStart dele roda "
@@ -1096,6 +1112,10 @@ _TEXT = {
                                           "{replacement_pt}). O systemd segue falhando (status 203/EXEC, {restarts} "
                                           "reinícios) e o `hermes gateway restart` só fica esperando. {fix_pt} Depois "
                                           "rode `{restart_cmd}` e confira com `{journal_cmd}`.",
+           "hermes_gateway_program_deleted": "O gateway está rodando, mas o programa que o serviço `{unit}` inicia "
+                                             "(`{exec_path}`) foi apagado por baixo dele (o Hermes trocou o Python): o "
+                                             "próximo reinício falha. Corrija o serviço agora: "
+                                             "`hermes -p {profile} evolution care fix-gateway`.",
            "hermes_gateway_restart_loop": "O systemd segue reiniciando o serviço do gateway `{unit}` ({restarts} "
                                           "reinícios, agora {sub_state}): ele cai logo depois de subir. Veja o motivo com "
                                           "`{journal_cmd}` antes de subi-lo de novo.",
@@ -1131,7 +1151,7 @@ _TEXT = {
            "reboot": "reinício pendente",
            "stale_tick_job": "Uma tarefa agendada ainda roda o `tick` que a 0.11.0 removeu, então falha em toda "
                              "execução. Nada a substitui: a rodada de aprendizado roda sozinha. Remova-a:",
-           "digest_unscheduled": "Há decisões esperando por você e nada as lembra (o Hermes 0.23.1 descarta os avisos de "
+           "digest_unscheduled": "Há decisões esperando por você e nada as lembra (o Hermes descarta os avisos de "
                                  "fim de sessão). Agende o resumo semanal no seu chat com "
                                  "`hermes evolution schedule-digest --deliver <canal>`: ele vira uma tarefa agendada do "
                                  "Hermes (cron), sem agente.",
@@ -1157,8 +1177,10 @@ _TEXT = {
                             "tirá-las do banco, o que encerra este item: `{forget}`"),
            "settings_reload": "Estas configurações mudaram e valem depois de `hermes gateway restart` (no terminal, na "
                               "próxima sessão): {keys}.",
-           "settings_ignored": "Estes valores do `settings.json` são ignorados: {keys}. Eles ampliariam em quem o plugin confia ou desligariam uma proteção, e as ferramentas de arquivo do próprio agente conseguem gravar esse arquivo. Defina os que você quer no formulário de configurações do Hermes, com o `hermes evolution owner` (ids de remetente e plataformas) ou com `hermes config set plugins.entries.hermes-atlas-evolution.settings.<chave> <valor>` no seu próprio terminal.",
-           "sessions": ("{n} sessão", "{n} sessões"), "none": "Nada precisa de atenção.",
+           "settings_ignored": "Estes valores do `settings.json` são ignorados: {keys}. Eles ampliariam em quem o plugin confia ou o que ele faz sozinho, ou desligariam uma proteção, e as ferramentas de arquivo do próprio agente conseguem gravar esse arquivo. Defina os que você quer no formulário de configurações do Hermes, com o `hermes evolution owner` (ids de remetente e plataformas) ou com `hermes config set plugins.entries.hermes-atlas-evolution.settings.<chave> <valor>` no seu próprio terminal.",
+           "settings_problems": "Estas configurações não puderam ser usadas, então vale um valor seguro até serem corrigidas: {keys}. Corrija no formulário de configurações do Hermes, com `hermes config set plugins.entries.hermes-atlas-evolution.settings.<chave> <valor>` ou no `evolution/settings.json`; um `settings.json` que não pode ser lido também mantém as lições desligadas.",
+           "config_unread": "O config.yaml não foi lido: instale o PyYAML ou rode com o Python do Hermes; os valores mostrados são os padrões.",
+           "sessions": ("{n} sessão", "{n} sessões"), "none": "Nada pede atenção.",
            "stale_runtime": "Um processo do Hermes em execução ainda roda uma cópia do plugin mais antiga que a do disco (o `hermes plugins update` não recarrega um gateway em execução). Rode `hermes gateway restart`; ele espera os turnos em andamento.",
            "stale_item": "pid {pid} ({kind}) carregou a {version}",
            "legacy_install": "Estes perfis ainda têm o plugin com o nome antigo hermes-evolution, que continua rodando enquanto uma cópia nova ali fica inativa. Rode o comando de cada um; os dados aprendidos ficam:",
@@ -1177,11 +1199,16 @@ _TEXT = {
 # The words for the gateway, the session database and the memory, the same in `status` and `care`.
 _WORDS = {
     "en": {"running": "running", "stopped": "not running", "crashed": "stopped unexpectedly (its process is gone)",
+           "degraded": "running (degraded: no chat platform connected yet; scheduled tasks still run)",
+           "starting": "starting",
            "version": "version {v}", "rss": "{size} of memory", "beat": "last sign of life {s} s ago",
            "wal": "write-ahead log {size}", "no_wal": "no write-ahead log", "integrity_ok": "integrity ok",
            "integrity_bad": "integrity check failed ({value})", "db_missing": "not created yet",
            "db_error": "could not be read", "free": "{free} free of {total}", "swap": "swap: {used} of {total} in use"},
     "pt": {"running": "rodando", "stopped": "parado", "crashed": "caiu (o processo dele sumiu)",
+           "degraded": "rodando (degradado: nenhuma plataforma de chat conectada ainda; as tarefas agendadas seguem "
+                       "rodando)",
+           "starting": "subindo",
            "version": "versão {v}", "rss": "{size} de memória", "beat": "último sinal de vida há {s} s",
            "wal": "registro de escrita {size}", "no_wal": "sem registro de escrita", "integrity_ok": "integridade ok",
            "integrity_bad": "a checagem de integridade falhou ({value})", "db_missing": "ainda não criado",
@@ -1193,7 +1220,9 @@ def gateway_words(gate: dict, lang: str, *, beat: bool = False) -> str:
     """rodando · versão 0.23.1 · 0,6 GB de memória (· último sinal de vida há 12 s)."""
     w = _WORDS.get(lang, _WORDS["en"])
     gate = gate if isinstance(gate, dict) else {}
-    parts = [w["crashed"] if gate.get("crashed") else w["running"] if gate.get("running") else w["stopped"]]
+    # a degraded or starting gateway runs (hermes_care.gateway: running): said with its state
+    running = w.get(gate.get("state"), w["running"]) if gate.get("state") in ("degraded", "starting") else w["running"]
+    parts = [w["crashed"] if gate.get("crashed") else running if gate.get("running") else w["stopped"]]
     if gate.get("version"):
         parts.append(w["version"].format(v=gate["version"]))
     if gate.get("rss"):
@@ -1252,7 +1281,7 @@ def _care_values(report: dict) -> dict:
     days = care.get("days_to_full")
     days = round(days) if isinstance(days, (int, float)) and not isinstance(days, bool) else None
     busy = round((system.get("busy_seconds") or 0) / 3600, 1)
-    return {"age": gate.get("heartbeat_age") if gate.get("heartbeat_age") is not None else "?", "rss": _gb(gate.get("rss")), "wal": _gb((care.get("database") or {}).get("wal")),
+    return {"profile": report.get("profile") or "default", "age": gate.get("heartbeat_age") if gate.get("heartbeat_age") is not None else "?", "rss": _gb(gate.get("rss")), "wal": _gb((care.get("database") or {}).get("wal")),
             "free": _gb(care.get("free")), "days": care.get("days_to_full"), "grown": grown or "?",
             "days_en": "?" if days is None else plural(days, "{n} day", "{n} days"),
             "days_pt": "?" if days is None else plural(days, "{n} dia", "{n} dias"),
@@ -1281,7 +1310,30 @@ def _in_use_values(care: dict) -> dict:
                                           ("pt", "usada por", "o processo do Hermes em execução", " e ")):
             names = joined.join(process if item == "process" else f"`{item}`" for item in who)
             said[lang].append(f"`{folder}`" + (f" ({by} {names})" if names else ""))
-    return {"in_use_en": ", ".join(said["en"]) or "?", "in_use_pt": ", ".join(said["pt"]) or "?"}
+    values = {"in_use_en": ", ".join(said["en"]) or "?", "in_use_pt": ", ".join(said["pt"]) or "?"}
+    kinds = care.get("in_use_kind") if isinstance(care.get("in_use_kind"), dict) else {}
+    if any(kinds.get(folder) != "older" for folder in care.get("in_use_unreferenced") or ()) and kinds:
+        # a build the service may run on purpose: never presented as fixed by pointing it at Hermes' Python
+        from .hermes_care import gc_block_advice
+
+        for lang in ("en", "pt"):
+            values[f"in_use_advice_{lang}"] = " ".join(gc_block_advice(care, lang)) + (
+                " Old tool versions are not removed until then." if lang == "en" else
+                " Versões antigas de ferramentas não são removidas até lá.")
+        return values
+    values["in_use_advice_en"] = (
+        f"Hermes no longer points at {values['in_use_en']} in its tools (`tools/facts.json`), but something still "
+        "starts from there: `hermes pm gc` would delete it and that service would fail at its next start (status "
+        "203/EXEC). Old tool versions are not removed until then. First point the service at the current Python "
+        "(`hermes evolution care fix-gateway` does it for the gateway's service) or, for the running Hermes process, "
+        "restart it (`hermes gateway restart`); then `hermes evolution care gc`.")
+    values["in_use_advice_pt"] = (
+        f"O Hermes não aponta mais para {values['in_use_pt']} nas ferramentas dele (`tools/facts.json`), mas algo "
+        "ainda sobe a partir dali: o `hermes pm gc` apagaria isso e esse serviço falharia na próxima vez que subisse "
+        "(status 203/EXEC). Versões antigas de ferramentas não são removidas até lá. Primeiro aponte o serviço para o "
+        "Python atual (o `hermes evolution care fix-gateway` faz isso no serviço do gateway) ou, se for o processo do "
+        "Hermes em execução, reinicie-o (`hermes gateway restart`); depois, `hermes evolution care gc`.")
+    return values
 
 
 def _trouble(report: dict) -> tuple[dict, list[dict]]:
@@ -1469,8 +1521,8 @@ def markdown(report: dict, lang: str = "en") -> str:
             lines.append("- " + t[code].format(**{**report["busier_profile"], "profile": report["busier_profile"]["profile"],
                                                  "sessions": report["busier_profile"]["sessions_7d"]}))
             continue
-        if code == "settings_ignored":
-            lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report["settings_ignored"])))
+        if code in ("settings_ignored", "settings_problems"):
+            lines.append("- " + t[code].format(keys=", ".join(f"`{key}`" for key in report[code])))
             continue
         if code.startswith(("hermes_", "os_")):
             lines.append("- " + t[code].format(**_care_values(report)))
@@ -1548,7 +1600,14 @@ def markdown(report: dict, lang: str = "en") -> str:
             lines.append(f"| {name} | {row['sessions_7d']} | {t['states'][row['plugin']]} | {last} | {lessons} |")
         if len(rows) > 40:
             lines.append(f"| … +{len(rows) - 40} | | | | |")
-    return decimal_comma("\n".join(lines) + "\n", lang)
+    from .cli import profile_commands
+
+    # every command as the owner types it in this profile: `hermes -p <profile> evolution …` (cli._hermes_cmd), and
+    # Hermes' own commands for this profile, `gateway …` for the gateway that serves it (the root's, when it does)
+    served = bool(((report.get("care") or {}).get("gateway") or {}).get("served_by_root"))
+    profile = report.get("profile")
+    return decimal_comma(profile_commands("\n".join(lines) + "\n", profile,
+                                          gateway="default" if served else profile), lang)
 
 
 _NOTICE = {
@@ -1613,7 +1672,10 @@ def pending_notice(home: Path, *, now: float, lang: str = "en") -> dict | None:
         return None
     if not marked:
         return None
-    return {"message": f"{t['lead']}: {'; '.join(parts)}. {t['tail']}"}
+    from .admin import profile_name
+    from .cli import profile_commands
+
+    return {"message": profile_commands(f"{t['lead']}: {'; '.join(parts)}. {t['tail']}", profile_name(home))}
 
 
 
@@ -1664,10 +1726,14 @@ _ENV_TEXT = {
 def environment_markdown(home: Path, lang: str = "en", *, mode: str = "auto") -> str:
     """The Environment tab and screen: every profile, the catalog, and what to do, from the lead profile. Never
     raises: a damaged record shows as not looked at yet."""
+    from .admin import profile_name
+    from .cli import profile_commands
+
     try:
-        return decimal_comma(_environment_markdown(home, lang, mode=mode), lang)
+        return profile_commands(decimal_comma(_environment_markdown(home, lang, mode=mode), lang), profile_name(home))
     except Exception:
-        return _ENV_TEXT.get(lang, _ENV_TEXT["en"])["not_yet"].format(lead="?") + "\n"
+        return profile_commands(_ENV_TEXT.get(lang, _ENV_TEXT["en"])["not_yet"].format(lead="?") + "\n",
+                                profile_name(home))
 
 
 def _environment_markdown(home: Path, lang: str = "en", *, mode: str = "auto") -> str:
@@ -1703,7 +1769,11 @@ def _environment_markdown(home: Path, lang: str = "en", *, mode: str = "auto") -
     if not items:
         lines.append(t["clean"])
     for item in items[:40]:
-        told = explain.describe(item, lang)
+        # the lead profile wrote these commands for itself: they keep its `-p`, whatever profile reads them
+        from .cli import profile_commands
+
+        told = {key: profile_commands(value, name) for key, value in explain.describe(item, lang).items()}
+        item = {**item, "command": profile_commands(item.get("command"), name)}
         lines.append(f"- **{told['title']}** · {subject_words(item, lang)} · " + t["risk"].format(risk=told["risk"]))
         if told["what"]:
             lines.append(f"  - {t['seen']}: {told['what']}")

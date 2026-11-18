@@ -10,7 +10,7 @@ PAIRS = (
     ("Too many proposals this hour; the operator has not reviewed the earlier ones",
      "Propostas demais nesta hora; o operador ainda não revisou as anteriores"),
     ("Evolution storage is temporarily unavailable.", "O armazenamento do Evolution está indisponível no momento."),
-    ("Playbook access has not been enabled for this Hermes profile.", "O acesso ao playbook não foi liberado neste perfil do Hermes."),
+    ("Playbook access has not been enabled for this Hermes profile.", "O acesso às lições não foi liberado neste perfil do Hermes."),
     ("Atlas Evolution's tools answer only in the owner's own sessions (CLI, TUI, Desktop, automations, or a chat with a "
      "sender listed in owner_sender_ids).",
      "As ferramentas do Atlas Evolution só respondem nas sessões do próprio dono (CLI, TUI, Desktop, automações ou uma "
@@ -28,7 +28,7 @@ PAIRS = (
     ("Unsupported lesson origin", "Origem de lição não suportada"),
     ("Name the tool this lesson applies to, or use 'general'", "Informe a ferramenta a que a lição se aplica, ou use 'general'"),
     ("The playbook already holds 200 custom lessons; retire some first",
-     "O playbook já tem 200 lições próprias; aposente algumas antes"),
+     "Já há 200 lições próprias; aposente algumas antes"),
     ("evolution.lessons must be off, suggest or auto", "evolution.lessons deve ser off, suggest ou auto"),
     ("evolution.slow_turn_seconds must be an integer from 5 to 3600",
      "evolution.slow_turn_seconds deve ser um inteiro de 5 a 3600"),
@@ -47,7 +47,7 @@ PAIRS = (
      "Confirme com --yes depois de ler o texto em 'proposals list' ou 'lessons list'"),
     ("Cancelled; nothing changed", "Cancelado; nada mudou"),
     ("Another learning pass is running in this profile. Try again in a minute.",
-     "Outra passada de aprendizado está rodando neste perfil. Tente de novo em um minuto."),
+     "Outra rodada de aprendizado está rodando neste perfil. Tente de novo em um minuto."),
     # ── command-line help ────────────────────────────────────────────────────────────────────────
     ("Review Hermes health, learning and operations", "Saúde, aprendizado e operação do Hermes"),
     ("Show whether the plugin is observing, learning and protecting this profile",
@@ -56,12 +56,12 @@ PAIRS = (
      "Decida, uma a uma, cada lição que aguarda aprovação, no seu terminal"),
     ("Run lessons review in your own terminal", "Rode o lessons review no seu próprio terminal"),
     ("Only read; do not run the first pass when this profile never had one",
-     "Só lê; não roda a primeira passada quando este perfil nunca teve uma"),
+     "Só lê; não roda a primeira rodada quando este perfil nunca teve uma"),
     ("Summarize provider and tool measurements", "Resume as medições de provedores e ferramentas"),
     ("Run one evolution pass: derive lessons, measure changes, refresh proposals",
-     "Roda uma passada de evolução: deriva lições, mede mudanças e atualiza as propostas"),
+     "Faz uma rodada de aprendizado: tira lições das falhas, mede as mudanças e atualiza as propostas"),
     ("Print only new lessons, regressions and high-risk proposals", "Imprime só lições novas, regressões e propostas de risco alto"),
-    ("Review the playbook learned from recurring tool failures", "Revisa o playbook aprendido com falhas recorrentes de ferramentas"),
+    ("Review the playbook learned from recurring tool failures", "Revisa as lições aprendidas com falhas recorrentes de ferramentas"),
     ("Add an operator lesson", "Adiciona uma lição do operador"),
     ("Activate it now instead of leaving it for approval", "Ativa agora em vez de deixar para aprovação"),
     ("Confirm without the interactive question", "Confirma sem a pergunta interativa"),
@@ -115,8 +115,8 @@ PAIRS = (
      "Importa as lições de um pacote, ou de outro perfil deste Hermes, depois de mostrar cada uma"),
     ("A pack written by lessons export, or - for standard input",
      "Um pacote gravado por lessons export, ou - para a entrada padrão"),
-    ("Another profile of this Hermes (default for the root profile)",
-     "Outro perfil deste Hermes (default para o perfil raiz)"),
+    ("Another profile of this Hermes (`default` = the root profile)",
+     "Outro perfil deste Hermes (`default` = o perfil raiz)"),
     ("Show what would be imported and change nothing", "Mostra o que seria importado e não muda nada"),
     ("Activate them now instead of leaving them for approval", "Ativa agora em vez de deixá-las esperando aprovação"),
     ("That file already exists; choose another name or remove it first",
@@ -223,6 +223,14 @@ PAIRS = (
     ("Hermes did not answer in time; check the result before trying again",
      "O Hermes não respondeu a tempo; confira o resultado antes de tentar de novo"),
     ("Hermes refused the command", "O Hermes recusou o comando"),
+    # 0.12.0
+    ("This value cannot be passed to Hermes' hermes.cmd launcher; run the command by hand",
+     "Este valor não pode ser passado ao inicializador hermes.cmd do Hermes; rode o comando à mão"),
+    ("Name the entry to keep: {file, fingerprint}", "Informe a entrada a manter: {file, fingerprint}"),
+    ("evolution/settings.json is not valid JSON: correct it, or move it away to use the defaults and the values of "
+     "Hermes' settings form",
+     "O evolution/settings.json não é um JSON válido: corrija-o, ou tire-o do lugar para usar os padrões e os valores "
+     "do formulário de configurações do Hermes"),
 )
 
 # Sentences with variable parts. Each entry: (English regex, English format, Portuguese regex, Portuguese format).

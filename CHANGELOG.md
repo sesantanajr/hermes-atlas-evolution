@@ -2,6 +2,93 @@
 
 *Em português: [CHANGELOG.pt-BR.md](CHANGELOG.pt-BR.md).*
 
+## 0.12.0
+
+A full audit of 0.11.0 and its fixes: safer automatic actions, a stronger runtime guard, lessons judged on what the agent really read, and the test suite back in CI.
+
+### Fixed
+
+**Hermes 0.23.2**
+
+- **Your own commands work again under Hermes 0.23.2.** Its launcher runs `python3 -I -c '<launcher script>' evolution …`, which the plugin did not recognise as this command's own launcher: every command only the owner may run (`owner`, `care doctor`, `care pm-doctor`, approving or retiring lessons) was refused in the owner's own terminal, and `lessons list` hid the owner's lesson text. The launcher is now recognised; a command from an agent's shell under a gateway is still refused.
+
+**Automatic actions (Mode auto)**
+
+- **A second gateway is never started.** A gateway Hermes reports as `degraded` (no chat platform connected yet; scheduled tasks still run) or `starting` now counts as running. Before, the Mode auto could repair a leftover service and start a second gateway beside a live one. Whether a gateway runs is read from what it leaves behind: its process (pid with its start time or command line), a fresh heartbeat, `gateway.pid`, the lock it holds on `gateway.lock` (read from `/proc/locks`) and `host-gateway.json`. While any gateway of this Hermes runs, nothing is repaired by itself.
+- **One check before any start.** The Mode auto and `care fix-gateway` look at every `hermes-gateway*` service of both systemd scopes (user and system) and refuse when one is active, activating, reloading or deactivating, when a scope cannot be read, or when the service runs another `HERMES_HOME`. The Mode auto also never starts a legacy per-profile service.
+- **The right service, never production's.** Service names follow Hermes' own rule: the bare `hermes-gateway.service` only for the account's own `~/.hermes` (or the home the bare service pins), `hermes-gateway-<name>` for `profiles/<name>`, `hermes-gateway-<hash>` for any other home. Before, a staging or test home could rewrite and start the production gateway's service. The service's `HERMES_HOME` is checked before its file is written, and for a profile the root's gateway serves, the root's service comes first.
+- **The repair follows the whole service.** Paths with spaces in `ExecStart` are read as Hermes reads them, every `Exec*=` line that names the old program is rewritten (`ExecStop`, `ExecStopPost`…), and the service starts with `--no-block`: the plugin waits up to 180 seconds and says "still starting" instead of "failed".
+- **Every gateway repair can be undone, one at a time.** A journal of the latest 40 repairs and undos (`<root>/evolution/gateway-repair.json`) lets `care undo-gateway` work from any profile and go back one repair at a time to the original file; it refuses when the file changed since. A repair you undid is never repeated by the Mode auto.
+- **`hermes pm gc` read the way Hermes runs it.** Hermes deletes every folder of the tool store that `tools/facts.json` does not name, whatever its name. Any folder a service (any `Exec*=` line) or a running program (`/proc/*/exe`) uses now blocks it, a missing or unreadable `facts.json` blocks it (it would delete every tool), a systemd scope that cannot be read blocks it, and the check runs again right before gc. It follows Hermes' environment generations and the store a profile that borrows another's really uses. When the folder in use is a build Hermes does not manage (a Python of your own that a service runs on purpose), the advice says so and no longer offers switching the service to Hermes' Python as the fix.
+- **Only the code the lead runs is spread.** The plugin installs itself into a new profile only while the repository's latest commit is the one the lead runs (it waits otherwise, as the sync does), and the fallback reinstall never replaces a fork's copy with the published one.
+- **Memory repeats.** Assist and Auto take out only an entry repeated across `MEMORY.md` and `USER.md` (Hermes already drops a repeat inside one file), and only after checking, under Hermes' lock on both files, that the copy kept is still there: the last copy is never removed. Nothing is removed when `config.yaml` was not read, and the file keeps its mode and owner. The memory review is linear: 2,000 entries took 21 s and now take 0.2 s; a 512 KB file takes 0.4 s (it took hours).
+- **Safe reads everywhere.** A named pipe, or a link to `/dev/zero`, named `SKILL.md` no longer hangs or floods the learning pass: files are opened without following links and without blocking, only when they are regular files, up to a size limit.
+- **Undo.** An older decision can no longer be undone over a newer one on the same proposal (undoing an old rejection no longer reopens what you rejected later). Undo writes down that the change must not come back before it runs Hermes, so a crash in between cannot lose it. A decision whose trash entry was emptied or whose memory copy was pruned is no longer offered as undoable.
+- **Profiles as Hermes finds them.** A `~/.hermes` that is a link stays `default`; `profiles/default`, deleted profiles (`profiles/.deleted`) and folders without Hermes' identity files are not profiles, and a deleted one is refused.
+- **Windows.** `hermes.exe` is found beside the launcher, in `.hermes/bin` or in the virtual environment's `Scripts` (a `.cmd` only as a last resort, quoted); a timeout ends the whole process tree; read-only git pack files are deleted from the trash; the shared fleet state has a real lock. On POSIX systems each command runs in its own process group, and a timeout ends the group.
+- **An unread `config.yaml` means Manual.** When `config.yaml` cannot be read (no PyYAML, over 1 MiB, a YAML error), the mode is Manual and `status` says so first. Before, the standalone runner without PyYAML ran the Mode auto although `config.yaml` said manual.
+
+**Runtime guard**
+
+- **Whatever the verb.** Writing to, truncating or changing the attributes of anything inside the running Python, Hermes' code or this plugin is vetoed (`truncate`, `dd of=`, `tee`, a redirect, `chmod`, `chown`, `chgrp`, `ln -sf`, `rsync --delete`, and `cp`, `mv` or `install` into them). Above them, and at or above the profile's folder or Hermes' root, only `chmod`, `chown`, `chgrp`, `ln` and `rsync --delete` are vetoed. A `cd` earlier in the command and literal `VAR=` assignments are followed for these too. Plain copies into your home folder, into the Hermes root or into a shared folder such as `/usr/local/lib` stay allowed. Replacing a Hermes `config.yaml` (the profile's, the root's or another profile's) with `cp`, `mv` or `install` is vetoed; appending to it with `>>` counts only when the command names the plugin's settings.
+- **Fast on long commands.** A long command could take up to 41 s to check (a pipeline with many `| xargs`, for one), and Hermes blocks a tool after 30 s; any command up to 20,000 characters now takes under 0.7 s, and one budget bounds every nested check.
+- **Reads deeper.** Nesting up to 8 levels (it was 3); a literal `VAR=value` or `export VAR=value` before `$VAR`; `watch '…'`; `cat <<EOF` piped into a shell; `<<<'…'` glued to the shell; busybox and toybox applets; a command word with a glob (`sys*ctl`); relative paths after `cd /`.
+- **Padding no longer hides a command.** A trailing comment or a huge here-document body is cut before the 20,000-character limit, so it cannot push the command past the check.
+- An internal failure of the guard is now logged, once per process. The command still goes through: blocking every tool would be worse.
+
+**Learning**
+
+- **Failure classes read the way a person would.** In a traceback only the exception lines count; in command output only its last lines; an HTTP code only where it reads as one (`HTTP/1.1 429`, `status code: 401`); "timeout" only as a phrase. Before, `1 failed, 429 passed` became "rate limited" and a traceback with `line 403` became "auth", and both made wrong lessons.
+- **A lesson is judged from the first time the agent read it**, in its prompt or in a tool hint. A lesson never shown is not judged (the prompt shows at most 8 lessons and 1,200 characters). Before, lessons that were never shown were retired or promoted.
+- A per-day baseline divides by the days the failure was really observed, not always 14, and the retire text says whether it compared failures per call or per day.
+- The lessons part of the Evolution index also counts the lessons retired in the last 7 days, so retiring a lesson that did not help no longer lifts the score.
+- Usage and cost above 20,000 records give partial totals ("at least US$ X", the newest 20,000 records) instead of nothing.
+- The "restart needed" notice compares with what this load registered, and turning the reflector on while Hermes runs says "on after `hermes gateway restart`" instead of looking unavailable.
+- Only long-running processes claim the learning pass (the gateway, the dashboard, `hermes serve`, the TUI or Desktop, an ACP server, an interactive CLI): one-shot runs (`hermes -z`, scripts, Kanban workers) no longer cut passes short.
+- A new session no longer gets the lessons as they were before a pass changed them, and the digest recipe no longer swallows the day's notice of a failure that jumped.
+
+**Privacy and trust**
+
+- `settings.json`, which the agent's file tools can write, can no longer turn `tool_hints` on or raise `reflector_daily_limit` above 6. Those count only from Hermes' configuration, like the owner ids, a mode other than manual, the agent tools and switching the guard off: `settings.json` can only narrow.
+- A dashboard without a login hides the text of lessons written by you, the reflector or the agent (lessons, waiting lessons, proposals, the digest), as the terminal does in an agent's shell: "(text hidden: read it in your terminal)".
+- An unexpected error in the panel answers `unexpected` with a plain sentence; the details go only to the dashboard's log.
+
+**Commands, menu and panel**
+
+- Every command the plugin prints names its profile: `hermes -p <profile> evolution …`. The menu recognises every form.
+- A proposal's lesson is shown in the reader's language. `proposals reject` on a lesson says what happens: the lesson is turned down for good; for a proposal to retire a lesson, the lesson stays active.
+- A number out of range gets one short sentence (it listed 500 choices); argparse errors are in Portuguese with `--lang pt`; `--help` follows `--lang`; a missing `--home` is said in words.
+- `environment` honours the mode set in `config.yaml`; `owner` takes `--format md|json`; an empty `proposals list --all` says "No proposal yet."; `lessons review` names the origin (yours, the agent's, a reflector draft).
+- The menu shows no colour with `TERM=dumb`, with `NO_COLOR` or outside a terminal; the learning pass time comes from its real deadline (12 minutes, not 2); attention items name the letter of their suggestion. Portuguese says "rodada" and "Pede atenção".
+- Gateway states in words: "running (degraded: no chat platform connected yet; scheduled tasks still run)" and "starting".
+- `status` always renders, and lists invalid settings and an unread `config.yaml` under Needs attention.
+- The help line of `hermes evolution` no longer names the removed operations stack.
+
+**Documentation**
+
+- The quick start for every profile needs `--install-missing` on a first install.
+- "No network of its own" was wrong: the only network access is `git ls-remote` of this repository, for the Mode auto's sync and `update`. There is no telemetry.
+- The lists of what Auto mode does include the gateway repair and the plugin's sync; SECURITY.md says that the gateway repair edits a systemd unit file and runs `systemctl`.
+- The panel's Proposals tab has **Apply now**, **Apply all** and **Dismiss**. macOS and Windows: everything except the apt and systemd parts, tested in CI, not inside a gateway.
+- CONTRIBUTING rules 5 and 6 match what the plugin does, and the issue templates ask for the current version and name every area.
+
+### Added
+
+- **Your lessons in your direct chats.** In a direct chat (a DM) whose sender is you (`owner_sender_ids`), the lessons the chat's prompt leaves out (written by you, the reflector or the agent) come with your first message, once per chat, at most 5 lines and 900 characters. Never in a group, thread or topic, where the model's history could keep them for someone else later, and never for anyone else.
+- **Events for other plugins and dashboards** on Hermes' event bus (`ctx.emit`): `hermes-atlas-evolution:lesson_activated`, `hermes-atlas-evolution:lesson_retired` and `hermes-atlas-evolution:failure_spike`, with ids and numbers only.
+- **`on_session_reset` and `on_session_delete`.** What the plugin keeps in memory about a session goes as soon as the session is reset or deleted (16 hooks).
+- **The health finding `gateway_program_deleted`.** The gateway runs, but the program its service starts was deleted under it (Hermes replaced its Python), so the next restart fails. `care fix-gateway` fixes it now. It counts in the Evolution index.
+- **`fleet_managed`** (on by default). Off, the lead profile never installs, updates or moves anything to the trash in that profile by itself; it still shows what it finds. `settings.json` can only turn it off.
+
+### Changed
+
+- **The test suite runs in CI again**, on Linux with Python 3.11 to 3.14, on macOS and on Windows: over 700 tests. It lives on the `tests` branch, because Hermes clones the default branch into every profile, so installs stay small; a branch named `tests-<branch>` runs instead, with a pull request from that branch. CI also checks the panel's script.
+- **`install.sh`** runs from one function, so a download cut short runs nothing. It reads the latest commit once, reads Hermes' install record as JSON, takes the end of input at its question as "nothing" (it was "every profile") and follows Hermes' rules for what a profile is.
+
+### Upgrading
+
+Nothing to do by hand. [Updating to 0.12.0](docs/en-US/upgrading.md#updating-to-0120) lists the details: the database gains a table, `tool_hints: true` and a reflector limit above 6 move from `settings.json` to Hermes' configuration, and the new `fleet_managed` setting.
+
 ## 0.11.0
 
 An index that explains itself, an install Hermes' own scan calls safe, and the deprecated stack removed.

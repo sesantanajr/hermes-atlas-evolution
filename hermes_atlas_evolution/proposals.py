@@ -8,6 +8,7 @@ only applies changes to its own playbook (activate or retire a lesson). Anything
 from __future__ import annotations
 
 import json
+import shlex
 import sqlite3
 
 from . import lessons as playbook
@@ -25,21 +26,40 @@ _UNTEMPLATED = ("code_exception", "command_failed", "other", "auth", "network")
 def _upsert(conn, seen: set, code: str, kind: str, risk: str, subject: str, evidence: dict, command: str, now: float) -> None:
     seen.add(code)
     body = json.dumps(evidence, sort_keys=True)
-    row = conn.execute("SELECT id, status, updated FROM proposal WHERE code=?", (code,)).fetchone()
+    row = conn.execute("SELECT id, status, updated, note FROM proposal WHERE code=?", (code,)).fetchone()
+    # an applied change the owner is undoing (actions.undo_applied writes that first) counts as the owner's refusal,
+    # even when the record of the undo itself was lost
+    refused = row is not None and (row["status"] == "rejected" or row["status"] == "applied" and row["note"] == "undoing")
     if row is None:
         conn.execute("""INSERT INTO proposal(code, kind, risk, subject, evidence, command, status, created, updated)
             VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)""", (code, kind, risk, subject, body, command, now, now))
     elif row["status"] in ("open", "approved"):
         conn.execute("UPDATE proposal SET evidence=?, command=?, risk=? WHERE id=?", (body, command, risk, row["id"]))
-    elif row["status"] in ("expired",) or row["status"] == "rejected" and now - row["updated"] >= REOPEN_AFTER_SECONDS \
-            or row["status"] == "applied" and code.startswith("env:") and now - row["updated"] >= 86_400:
+    elif row["status"] in ("expired",) or refused and now - row["updated"] >= REOPEN_AFTER_SECONDS \
+            or not refused and row["status"] == "applied" and code.startswith("env:") and now - row["updated"] >= 86_400:
         # a change across profiles that is true again a day after it was applied (the owner put it back by hand) is
         # said again; one the owner undid is never applied by itself again (actions.automatic keeps the skip list)
         conn.execute("UPDATE proposal SET evidence=?, command=?, risk=?, status='open', updated=?, note=NULL WHERE id=?",
                      (body, command, risk, now, row["id"]))
 
 
-_INSTEAD = {"en": "<what to do instead>", "pt": "<o que fazer no lugar>"}
+# The placeholder of a stored `lessons add` command: one spelling, whatever the pass's language (the menu, the panel
+# and the digest write the command again in the reader's language).
+_INSTEAD = "<what to do instead>"
+
+
+def _command_for(conn: sqlite3.Connection, home=None):
+    """rest -> `hermes -p <profile> <rest>`, the explicit shape every printed command has (cli._hermes_cmd), for the
+    profile `home` (by default the one whose database this is; SQLite names it with links followed, so a linked
+    profile folder needs its home given; `default` when it cannot be told)."""
+    from .decisions import _home_of
+
+    home = home if home is not None else _home_of(conn)
+    if home is None:
+        return lambda rest: f"hermes -p default {rest}"
+    from .cli import _hermes_cmd
+
+    return lambda rest: _hermes_cmd(home, rest)
 
 
 def investigate_candidates(conn: sqlite3.Connection, *, now: float, days: int = 7) -> list[dict]:
@@ -63,22 +83,24 @@ def investigate_candidates(conn: sqlite3.Connection, *, now: float, days: int = 
 
 def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None, reviews: dict | None = None,
             failures: list | None = None, turns: dict | None = None, changes: list | None = None,
-            outcomes: dict | None = None, radar: list | None = None, lang: str = "en") -> list[dict]:
+            outcomes: dict | None = None, radar: list | None = None, lang: str = "en", home=None) -> list[dict]:
     """Rebuild open proposals from current evidence. Proposals whose evidence is gone expire.
 
     A lesson proposal carries the exact sentence the agent would read. Regressions come from the stored
     verdicts of the last 30 days, so a high-risk proposal stays open while its evidence stands."""
     seen: set[str] = set()
+    command = _command_for(conn, home)
     for row in conn.execute("SELECT l.*, COALESCE(f.total,0) AS total, COALESCE(f.sessions,0) AS sessions FROM lesson l "
                             "LEFT JOIN failure f ON f.signature=l.signature WHERE l.status IN ('candidate','quarantined')"):
         _upsert(conn, seen, f"lesson:{row['id']}", "lesson", LESSON_RISK.get(row["origin"], "high"), row["tool"],
                 {"lesson_id": row["id"], "origin": row["origin"], "class": row["klass"], "failures_seen": row["total"],
                  "sessions": row["sessions"], "lesson": playbook.render(row, lang)},
-                f"hermes evolution lessons approve {row['id']}", now)
+                command(f"evolution lessons approve {row['id']}"), now)
     for row in conn.execute("SELECT * FROM lesson WHERE status='active' AND verdict='ineffective'"):
         _upsert(conn, seen, f"lesson_retire:{row['id']}", "lesson_retire", "low", row["tool"],
-                {"lesson_id": row["id"], "rate_before": row["rate_before"], "rate_after": row["rate_after"]},
-                f"hermes evolution lessons retire {row['id']}", now)
+                {"lesson_id": row["id"], "rate_before": row["rate_before"], "rate_after": row["rate_after"],
+                 "basis": playbook.basis_of(conn, row["id"])},   # per call or per day: explain words the rates by it
+                command(f"evolution lessons retire {row['id']}"), now)
     for finding in (skills or {}).get("findings", ()):
         skill = finding["skill"]
         if finding["code"] == "skill_churn":
@@ -107,11 +129,11 @@ def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None,
                 and item["tool"] != "unknown"):
             _upsert(conn, seen, f"investigate:{item['signature']}", "investigate_failure", "low", item["tool"],
                     {"class": item["class"], "hint": item["hint"], "count": item["count"], "days": item["days"]},
-                    f"hermes evolution lessons add --tool {item['tool']} \"{_INSTEAD.get(lang, _INSTEAD['en'])}\"", now)
+                    command(f"evolution lessons add --tool {shlex.quote(str(item['tool']))} \"{_INSTEAD}\""), now)
     if turns and turns.get("turns", 0) >= 20 and (turns.get("slow_pct") or 0) >= 30:
         _upsert(conn, seen, "slow_turns", "investigate_latency", "medium", "turns",
                 {"turns": turns["turns"], "slow_pct": turns["slow_pct"], "p50_ms": turns["p50_ms"], "p95_ms": turns["p95_ms"]},
-                "hermes evolution report --days 7", now)
+                command("evolution report --days 7"), now)
     for finding in radar or ():   # read from Hermes' own records by radar.scan; each names its inspection command
         _upsert(conn, seen, finding["code"], finding["kind"], finding["risk"], finding["subject"], finding["evidence"],
                 finding["command"], now)

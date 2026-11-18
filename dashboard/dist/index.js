@@ -74,7 +74,7 @@
                  shared_token: "Read-only: this session uses the dashboard's shared token, not a login.",
                  other_profile: "This profile is decided from the dashboard's own profile, with a login.",
                  missing_header: "The request did not come from the panel; reload the page and try again.",
-                 managed: "Your administrator manages this, so it cannot be changed here.",
+                 unexpected: "Something unexpected stopped this here; nothing was changed by it. The dashboard's log has the details.",
                  invalid: "Invalid request.",
                  changed_since: "It changed since then, so it was left as it is.",
                  already_undone: "It was already undone.",
@@ -111,7 +111,8 @@
       maintenanceRan: "ran Hermes' own maintenance (nothing to undo):",
       pluginSynced: "brought Atlas Evolution in profile {profile} to the lead's code ({before} → {after})",
       pluginSyncFailed: "; Hermes refused it, tried again tomorrow",
-      gatewayRepaired: "pointed the gateway's service {unit} at the Python Hermes uses now ({before} → {after}); undo: hermes evolution care undo-gateway",
+      gatewayRepaired: "pointed the gateway's service {unit} at the Python Hermes uses now ({before} → {after}); undo: {undo}",
+      textHidden: "(text hidden: read it in your terminal)",
       gatewayRepairFailed: " (the gateway did not come up)",
       category: { change: "the plugin applies it", lesson: "lesson", manual: "you apply it", advice: "observation" },
       autoLine: "Mode", autoNames: { auto: "Auto", assist: "Assisted", manual: "Manual" },
@@ -129,6 +130,8 @@
         slow_turn_seconds: "A turn is slow after (seconds)", tool_hints: "Add the lesson to the failing tool result",
         agent_tools: "Let the agent read and propose lessons (proposals still wait for you)",
         runtime_guard: "Runtime guard (keeps the agent from taking Hermes down)",
+        fleet_managed: "Let the lead profile act here (install, update and move to the trash)",
+        fleetHint: "Off: the lead profile, which looks after every profile, still shows what it finds here but changes nothing in this profile by itself.",
         mode: "Mode (what the plugin does by itself)",
         autoModes: { auto: "Auto (recommended): thinks and acts for you in every profile, only what is safe and can be undone",
                      assist: "Assisted: on its own it only removes duplicate memory entries; everything else waits for you",
@@ -146,7 +149,7 @@
         short: { lessons: "Lessons", mode: "Mode", reflector: "Reflector", reflector_daily_limit: "Reflector calls per day",
                  autopilot_minutes: "Learning pass every (minutes)", language: "Language", feedback_signals: "Count corrections and thanks",
                  slow_turn_seconds: "Slow turn after (seconds)", agent_tools: "Agent reads and proposes lessons",
-                 tool_hints: "Lesson in the failing tool result", runtime_guard: "Runtime guard",
+                 tool_hints: "Lesson in the failing tool result", runtime_guard: "Runtime guard", fleet_managed: "Lead profile acts here",
                  owner_sender_ids: "Senders that count as you", owner_platforms: "Channels where every chat counts as you", auto_actions: "Automatic actions" },
         onOff: { default: ["on", "off"] },
         langNames: { auto: "automatic", en: "English", pt: "Português (Brasil)" }, emptyList: "none"
@@ -209,7 +212,7 @@
                  shared_token: "Só leitura: esta sessão usa o token compartilhado do dashboard, não um login.",
                  other_profile: "Este perfil se decide pelo perfil do próprio dashboard, com login.",
                  missing_header: "O pedido não veio do painel; recarregue a página e tente de novo.",
-                 managed: "O seu administrador gerencia isto, então não dá para mudar aqui.",
+                 unexpected: "Algo inesperado interrompeu isto aqui; nada foi mudado por causa disso. O log do dashboard tem os detalhes.",
                  invalid: "Pedido inválido.",
                  changed_since: "Mudou desde então, por isso ficou como está.",
                  already_undone: "Já tinha sido desfeita.",
@@ -246,7 +249,8 @@
       maintenanceRan: "rodou a manutenção do próprio Hermes (nada a desfazer):",
       pluginSynced: "levou o Atlas Evolution do perfil {profile} ao código do perfil que cuida de todos ({before} → {after})",
       pluginSyncFailed: "; o Hermes recusou, nova tentativa amanhã",
-      gatewayRepaired: "apontou o serviço do gateway {unit} para o Python que o Hermes usa agora ({before} → {after}); desfazer: hermes evolution care undo-gateway",
+      gatewayRepaired: "apontou o serviço do gateway {unit} para o Python que o Hermes usa agora ({before} → {after}); desfazer: {undo}",
+      textHidden: "(texto oculto: leia no seu terminal)",
       gatewayRepairFailed: " (o gateway não subiu)",
       category: { change: "o plugin aplica", lesson: "lição", manual: "você aplica", advice: "observação" },
       autoLine: "Modo", autoNames: { auto: "Auto", assist: "Assistido", manual: "Manual" },
@@ -264,6 +268,8 @@
         slow_turn_seconds: "Um turno é lento depois de (segundos)", tool_hints: "Juntar a lição ao resultado da ferramenta que falhou",
         agent_tools: "Deixar o agente ler e propor lições (as propostas continuam esperando você)",
         runtime_guard: "Proteção do Hermes (impede o agente de derrubar o Hermes)",
+        fleet_managed: "Deixar o perfil que cuida de todos agir aqui (instalar, atualizar e mover para a lixeira)",
+        fleetHint: "Desligado: o perfil que cuida de todos continua mostrando o que encontra aqui, mas não muda nada neste perfil sozinho.",
         mode: "Modo (o que o plugin faz sozinho)",
         autoModes: { auto: "Auto (recomendado): pensa e age por você em todos os perfis, só o que é seguro e pode ser desfeito",
                      assist: "Assistido: sozinho, só remove entradas repetidas da memória; o resto espera você",
@@ -281,7 +287,7 @@
         short: { lessons: "Lições", mode: "Modo", reflector: "Refletor", reflector_daily_limit: "Chamadas do refletor por dia",
                  autopilot_minutes: "Rodada de aprendizado a cada (minutos)", language: "Idioma", feedback_signals: "Contar correções e agradecimentos",
                  slow_turn_seconds: "Turno lento depois de (segundos)", agent_tools: "Agente lê e propõe lições",
-                 tool_hints: "Lição no resultado da ferramenta", runtime_guard: "Proteção do Hermes",
+                 tool_hints: "Lição no resultado da ferramenta", runtime_guard: "Proteção do Hermes", fleet_managed: "Perfil que cuida de todos age aqui",
                  owner_sender_ids: "Remetentes que contam como você", owner_platforms: "Canais em que todo chat conta como você", auto_actions: "Ações automáticas" },
         onOff: { default: ["ligado", "desligado"], runtime_guard: ["ligada", "desligada"], tool_hints: ["ligada", "desligada"],
                  auto_actions: ["ligadas", "desligadas"] },
@@ -500,6 +506,13 @@
     const label = t.verdict[row.verdict] || row.verdict;
     if (row.rate_before === null || row.rate_before === undefined) return label;
     return label + " (" + fmt(row.rate_before, 3, t.lang) + " → " + fmt(row.rate_after, 3, t.lang) + ")";
+  }
+
+  // A lesson's sentence, or, where the panel cannot show it (no login: the text the owner, the reflector or the
+  // agent wrote stays in the owner's terminal), the note that says so.
+  function lessonText(t, row, key) {
+    if (row.lesson) return inline(String(row.lesson), key + row.id);
+    return row.text_hidden ? h("span", { className: "hae-muted" }, t.textHidden) : "";
   }
 
   function statusTone(status) {
@@ -759,7 +772,7 @@
                   h("div", { className: "hae-waiting-meta" }, h(Pill, { tone: "warn" }, "#" + row.id),
                     h(Pill, null, t.origin[row.origin] || row.origin), h("code", { className: "hae-code" }, row.tool),
                     row.bulk ? null : h("span", { className: "hae-muted" }, t.agentSingle)),
-                  h("div", { className: "hae-lesson" }, inline(String(row.lesson || ""), "w" + row.id)),
+                  h("div", { className: "hae-lesson" }, lessonText(t, row, "w")),
                   h(LessonActions, { t: t, row: row, data: data, actions: act }));
               }),
               data.can_decide ? null : h(CopyCommand, { t: t, command: data.commands.review }))
@@ -786,7 +799,7 @@
           h("td", null, h(Pill, { tone: statusTone(row.status) }, t.status[row.status] || row.status)),
           h("td", null, t.origin[row.origin] || row.origin),
           h("td", null, h("code", { className: "hae-code" }, row.tool)),
-          h("td", { className: "hae-lesson" }, inline(String(row.lesson || ""), "l" + row.id)),
+          h("td", { className: "hae-lesson" }, lessonText(t, row, "l")),
           h("td", null, effect(t, row)),
           h("td", null, h(LessonActions, { t: t, row: full, data: props.data, actions: props.actions })));
       }))));
@@ -831,6 +844,7 @@
         const told = Object.assign({ title: row.kind, risk: row.risk, category: "manual" }, row.explain || {}, { category: kindOf(row) || "manual" });
         const title = told.title || row.kind || "#" + row.id;   // a kind this panel does not know still has a title
         const lesson = row.evidence && row.evidence.lesson;
+        const hidden = !lesson && row.text_hidden;   // written by the owner, the reflector or the agent: not here
         const send = function (body, done) { return function () { act.send(body, done); }; };
         // a command the owner runs stays on screen, with Copy, until dismissed
         const decided = function (result) { return result && result.run_this ? { text: t.runAfter, command: result.run_this } : t.done.proposal; };
@@ -857,7 +871,8 @@
                     h("code", { className: "hae-code" }, String(row.subject).split("/")[0]))
                 : h("code", { className: "hae-code" }, row.subject)) : null, h("span", { className: "hae-muted" }, "#" + row.id)),
             told.what && told.category !== "lesson" ? h("div", null, h("strong", null, t.seen + ": "), inline(String(told.what), "w" + row.id)) : null,
-            lesson ? h("div", { className: "hae-lesson" }, inline(String(lesson), "p" + row.id)) : null,
+            lesson ? h("div", { className: "hae-lesson" }, inline(String(lesson), "p" + row.id))
+              : hidden ? h("div", { className: "hae-lesson hae-muted" }, t.textHidden) : null,
             told.advice ? h("div", null, h("strong", null, t.advice + ": "), inline(String(told.advice), "a" + row.id)) : null,
             told.does ? h("div", { className: "hae-muted" }, inline(String(told.does), "d" + row.id)) : null,
             told.undo ? h("div", { className: "hae-muted" }, t.undoHow + ": ", h("code", { className: "hae-code" }, told.undo)) : null,
@@ -975,7 +990,8 @@
           field("slow_turn_seconds", number("slow_turn_seconds")),
           field("agent_tools", checkbox("agent_tools")),
           field("tool_hints", checkbox("tool_hints")),
-          field("runtime_guard", checkbox("runtime_guard"), form.runtime_guard === false ? s.guardWarn : null))),
+          field("runtime_guard", checkbox("runtime_guard"), form.runtime_guard === false ? s.guardWarn : null),
+          field("fleet_managed", checkbox("fleet_managed"), s.fleetHint))),
       h(Section, { title: s.owner },
         h("div", { className: "hae-stack" },
           h("p", { className: "hae-muted" }, s.ownerHint),
@@ -1038,7 +1054,8 @@
           : row.kind === "memory" ? t.memoryRemoved + " " + row.target
           : row.kind === "cron" ? fill(t.cronCreated, { name: row.target, schedule: after.schedule || "?" })
           : row.kind === "maintenance" && row.target === "gateway_repair"
-            ? fill(t.gatewayRepaired, { unit: before.unit || "?", before: before.path || "?", after: after.path || "?" })
+            ? fill(t.gatewayRepaired, { unit: before.unit || "?", before: before.path || "?", after: after.path || "?",
+                                        undo: (props.data.commands || {}).undo_gateway || "hermes evolution care undo-gateway" })
               + (after.ok ? "" : t.gatewayRepairFailed)
           : row.kind === "maintenance" && row.target === "plugin_sync"
             ? fill(t.pluginSynced, { profile: before.profile || "?", before: before.sha || "?", after: after.sha || "?" })
@@ -1052,7 +1069,7 @@
           h("td", null, what,
             command ? (applied || row.undone ? h("div", null, h("code", { className: "hae-code" }, command))
                                              : h(CopyCommand, { t: t, command: command })) : null),
-          h("td", { className: "hae-lesson" }, row.lesson ? inline(String(row.lesson), "h" + row.id) : ""),
+          h("td", { className: "hae-lesson" }, lessonText(t, row, "h")),
           h("td", null, row.undone ? t.undone : props.data.can_decide && row.undoable !== false
             ? h(Button, { disabled: !!act.working, onClick: function () {
                 act.send({ kind: "undo", id: row.id }, function (result) {

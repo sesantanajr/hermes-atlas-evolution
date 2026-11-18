@@ -27,7 +27,12 @@ TERMINAL_TOOLS = frozenset({"terminal", "shell", "bash", "run_command", "execute
 # Hermes' process_manage `write` and `submit` send text to a background process, often a shell (Hermes 0.23.1).
 PROCESS_TOOLS = frozenset({"process_manage", "process"})
 _PROCESS_INPUT = frozenset({"write", "submit"})
-_COMMAND_LIMIT = 20_000   # longer commands (big inline files) are let through unparsed
+_COMMAND_LIMIT = 20_000   # the real command is read up to here; trailing padding (comments, heredoc bodies) is cut first
+_SCAN_LIMIT = 100_000     # never strip/scan more than this much raw text, so a huge input cannot cost much
+_MAX_SUBCHECKS = 2_000    # how many commands-inside-commands (substitutions, nesting, piped-into shells) are looked at
+_MAX_HEREDOC_BODIES = 64  # here-document bodies kept for a shell reading them on stdin; the rest is padding
+_MAX_FED = 64             # paths carried along a pipeline for a later `xargs rm`; past this it is not a tidy removal
+_MAX_FINDS = 32           # pending `find` producers carried along a pipeline for a later `xargs rm`
 _WINDOWS = os.name == "nt"   # the Windows rules (drive letters, case-insensitive paths)
 # hermes-gateway, hermes-gateway-<profile>, hermes-gateway-<8 hex> (a HERMES_HOME of its own), templated @ units
 _UNIT = re.compile(r"hermes-gateway(?:[-@][\w.-]+)?(?:\.service)?\Z", re.I)
@@ -43,7 +48,7 @@ _STOP_WITH_NOW = frozenset({"disable", "mask"})   # with --now they stop the uni
 # Taking the machine (or the owner's user manager) down takes the gateway with it.
 _POWER = frozenset({"reboot", "shutdown", "poweroff", "halt", "restart-computer", "stop-computer"})
 _SYSTEMCTL_POWER = frozenset({"reboot", "poweroff", "halt", "kexec", "soft-reboot", "exit"})
-_MAX_DEPTH = 3   # commands inside commands (bash -c "bash -c '...'", $(...), find -exec) looked into this deep
+_MAX_DEPTH = 8   # commands inside commands (bash -c "bash -c '...'", $(...), find -exec) looked into this deep
 # systemctl options that take their value as the next word: that word is not the action or a unit.
 _SYSTEMCTL_VALUES = frozenset({"-s", "--signal", "-t", "--type", "-p", "--property", "-M", "--machine", "-H", "--host",
                                "--job-mode", "--kill-whom", "--kill-value", "--state", "-o", "--output", "-n", "--lines",
@@ -72,6 +77,7 @@ _WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"
                              "--path-property", "--socket-property", "--expand-environment"},
              "runuser": {"-u", "-g", "-G", "--user", "--group", "--supp-group"}, "watch": {"-n", "--interval"}, "flock": {"-w", "--timeout", "-E"},
              "xargs": {"-n", "-I", "-P", "-d", "-L", "-s", "-a", "-E"}, "uvx": {"--from", "--with", "-p", "--python"},
+             "busybox": set(), "toybox": set(),   # applet multiplexers: `busybox rm ...` runs the applet after them
              "taskset": set(), "unshare": set(), "nsenter": {"-t", "--target", "-S", "-G"}, "chroot": set(),
              "strace": {"-o", "-e", "-p", "-s", "-u"}, "ltrace": {"-o", "-e", "-p", "-s", "-u"}, "nocache": set(),
              "caffeinate": set(), "npx": {"-p", "--package"}}
@@ -93,6 +99,9 @@ _PLUGIN_WORDS = re.compile(r"plugins|hermes-atlas-evolution|hermes-evolution|run
 
 # Programs that run a command given as one string after -c (shells also accept it inside -lc, -ec, ...).
 _STRING_RUNNERS = frozenset({"su", "runuser", "script", "flock"})
+# Programs `_command_string` reads a command string from, and the wrappers among them (watch, env -S, flock -c).
+_STRING_VERBS = _SHELLS | _STRING_RUNNERS | {"powershell", "pwsh", "cmd", "env", "eval", "watch"}
+_STRING_WRAPPERS = frozenset({"watch", "env", "flock", "runuser"})
 _RTK_SUBCOMMANDS = frozenset({"run", "err", "summary", "test", "bypass", "proxy"})
 _SEPARATORS = frozenset({";", "&&", "||", "|", "&", "(", ")", "\n", ";;", "|&"})
 # Shell words that open a compound command or negate one: the command that follows them is the one that runs
@@ -139,20 +148,26 @@ MESSAGES = {
         "runtime_removal": ("Atlas Evolution runtime guard: this command would delete or move {path}, which the running "
                             "Hermes needs; Hermes would stop working until someone repairs it by hand. Leave it in place. "
                             "Removing it is for the owner to do from their own terminal, with Hermes stopped."),
+        "runtime_change": ("Atlas Evolution runtime guard: this command would change, overwrite or lock {path}, which the "
+                           "running Hermes runs on; Hermes would stop working until someone repairs it by hand. Leave it "
+                           "as it is. Changing it is for the owner to do from their own terminal, with Hermes stopped."),
         "plugin_settings": ("Atlas Evolution runtime guard: this command would change the settings of Atlas Evolution "
                             "(who counts as the owner, its protections) or switch the plugin off. Only the owner decides "
                             "that, from their own terminal. Do not retry it in another form; tell the owner what you "
                             "wanted to change and why."),
     },
     "pt": {
-        "gateway_stop": ("Guarda de runtime do Atlas Evolution: este comando pararia ou reiniciaria o gateway do Hermes em "
+        "gateway_stop": ("Proteção do Hermes (Atlas Evolution): este comando pararia ou reiniciaria o gateway do Hermes em "
                          "que esta conversa roda, cortando os turnos em andamento, inclusive este. Não tente de outra forma. "
                          "Diga ao dono que é preciso reiniciar e por quê; o dono roda `hermes gateway restart` no próprio "
                          "terminal, e esse comando mostra os turnos ainda em andamento e pergunta antes de interrompê-los."),
-        "runtime_removal": ("Guarda de runtime do Atlas Evolution: este comando apagaria ou moveria {path}, de que o Hermes "
+        "runtime_removal": ("Proteção do Hermes (Atlas Evolution): este comando apagaria ou moveria {path}, de que o Hermes "
                             "em execução precisa; o Hermes pararia de funcionar até alguém consertar à mão. Deixe como está. "
                             "Remover isso fica para o dono, no próprio terminal, com o Hermes parado."),
-        "plugin_settings": ("Guarda de runtime do Atlas Evolution: este comando mudaria as configurações do Atlas Evolution "
+        "runtime_change": ("Proteção do Hermes (Atlas Evolution): este comando mudaria, sobrescreveria ou travaria {path}, "
+                           "em que o Hermes em execução roda; o Hermes pararia de funcionar até alguém consertar à mão. "
+                           "Deixe como está. Mudar isso fica para o dono, no próprio terminal, com o Hermes parado."),
+        "plugin_settings": ("Proteção do Hermes (Atlas Evolution): este comando mudaria as configurações do Atlas Evolution "
                             "(quem conta como o dono, as proteções dele) ou desligaria o plugin. Só o dono decide isso, no "
                             "próprio terminal. Não tente de outra forma; diga ao dono o que você queria mudar e por quê."),
     },
@@ -278,6 +293,8 @@ def _heredocs(command: str) -> tuple[str, list[str]]:
     """(the command without its here-document bodies, the bodies of the unquoted ones): a body is data written
     somewhere (a script, a note), not a command run now, but the shell still expands $(...) in an unquoted one.
     A `<<` is read only outside quotes and comments; an unterminated heredoc's lines are kept as commands."""
+    if "<<" not in command:
+        return command, []   # no here-document: nothing to cut (the common case, and cheap)
     lines, kept, expanded, index = command.split("\n"), [], [], 0
     single = double = False
     while index < len(lines):
@@ -307,9 +324,11 @@ def _heredocs(command: str) -> tuple[str, list[str]]:
 def _heredoc_body_map(command: str) -> dict[str, list[str]]:
     """delimiter -> the bodies fed with `<<DELIM` (quoted ones too), so a shell reading its script on stdin can
     be inspected. A body that never reaches its delimiter is left out (its lines are ordinary commands)."""
-    lines, bodies, index = command.split("\n"), {}, 0
+    if "<<" not in command:
+        return {}
+    lines, bodies, index, total = command.split("\n"), {}, 0, 0
     single = double = False
-    while index < len(lines):
+    while index < len(lines) and total < _MAX_HEREDOC_BODIES:   # past the cap the rest is padding, not a script
         line = lines[index]
         index += 1
         openers, single, double = _heredoc_openers(line, single, double)
@@ -323,7 +342,11 @@ def _heredoc_body_map(command: str) -> dict[str, list[str]]:
                     break
                 body.append(stripped)
             if found:
-                bodies.setdefault(delimiter, []).append("\n".join(body))
+                kept = bodies.setdefault(delimiter, [])
+                text = "\n".join(body)
+                if text not in kept:   # identical bodies (padding that repeats one heredoc) are kept once
+                    kept.append(text)
+                    total += 1
             else:
                 index = len(lines)
                 break
@@ -334,6 +357,8 @@ def _strip_comments(command: str) -> str:
     """The command without its real shell comments: a `#` outside quotes that begins a word (at the start, or
     after whitespace or a separator) to its line's end. A `#` inside a word (`http://x/#/`, `$#`, `${#A[@]}`) is
     kept, so the lexer sees it as part of the word."""
+    if "#" not in command:
+        return command   # no `#` at all: no comment to cut
     out, index, single, double = [], 0, False, False
     while index < len(command):
         char = command[index]
@@ -364,6 +389,8 @@ def _strip_heredocs(command: str) -> str:
 def _without_single_quotes(command: str) -> str:
     """The command with its single-quoted spans ('...' and $'...') left out: the shell runs nothing inside them.
     Inside double quotes a single quote is an ordinary character."""
+    if "'" not in command:
+        return command   # no single quote: nothing to leave out
     out, index, double = [], 0, False
     while index < len(command):
         char = command[index]
@@ -397,14 +424,100 @@ def _substitutions(command: str) -> list[str]:
     return found
 
 
-def _segments_with_ops(command: str) -> list[tuple[str, list[str]]] | None:
-    """Each command segment with the separator token that preceded it ("" for the first): the `|` before a
-    segment marks it as part of the same pipeline as what came before."""
+def _prepare(command: str) -> str:
+    """The command as the lexer reads it: here-document bodies dropped, line continuations joined, comments cut."""
     command = _strip_heredocs(command)
     # A backslash-newline is a line continuation, not a separator; join it only after the heredoc step so a
     # quoted heredoc body ending in `\` cannot swallow its delimiter.
     command = re.sub(r"\\\r?\n", "", command)
     command = _strip_comments(command)   # a real `#` comment is not part of any command
+    return _noclobber(command) if ">|" in command else command
+
+
+def _noclobber(command: str) -> str:
+    """`>|` (a redirect that overrides noclobber) as the plain `>` it is: the lexer would read its `|` as a pipe and
+    lose the file it truncates. Only outside quotes; a quoted `>|` is text."""
+    out, index, single, double, length = [], 0, False, False, len(command)
+    while index < length:
+        char = command[index]
+        if char == "\\" and not single and index + 1 < length:
+            out.append(command[index:index + 2])
+            index += 2
+            continue
+        if char == "'" and not double:
+            single = not single
+        elif char == '"' and not single:
+            double = not double
+        elif char == ">" and not single and not double and command.startswith(">|", index):
+            out.append("> ")
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _segments_with_ops(command: str) -> list[tuple[str, list[str]]] | None:
+    """Each command segment with the separator token that preceded it ("" for the first): the `|` before a
+    segment marks it as part of the same pipeline as what came before."""
+    return _lex(_prepare(command))
+
+
+# Put before each unquoted `>` (the first of a run) so the lexer's tokens show which `>` the shell reads as a
+# redirect: a character no quoted text can carry through, and a word character, so token boundaries do not move.
+_MARK = "\x01"
+
+
+def _mark_redirects(prepared: str) -> str:
+    """The prepared command with _MARK before each `>` the shell reads as a redirect operator: outside single and
+    double quotes, not escaped, and not the second `>` of `>>`. A `>` inside quotes is text, never marked."""
+    out, index, single, double, length = [], 0, False, False, len(prepared)
+    while index < length:
+        char = prepared[index]
+        if char == "\\" and not single and index + 1 < length:
+            out.append(prepared[index:index + 2])
+            index += 2
+            continue
+        if char == "'" and not double:
+            single = not single
+        elif char == '"' and not single:
+            double = not double
+        elif char == ">" and not single and not double and (index == 0 or prepared[index - 1] != ">"):
+            out.append(_MARK)
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _segment_redirects(prepared: str, seg_ops) -> list[list[tuple[str, str]]] | None:
+    """For each segment of `seg_ops` (lexed from `prepared`), the files its redirects write, as (word, "redirect" or
+    "append"). None when the marked lexing does not line up with the plain one (then nothing is read per segment)."""
+    if ">" not in prepared:
+        return [[] for _ in seg_ops]
+    marked = _lex(_mark_redirects(prepared))
+    if marked is None or len(marked) != len(seg_ops) or \
+            any(len(tokens) != len(plain) for (_op, tokens), (_op2, plain) in zip(marked, seg_ops)):
+        return None
+    found = []
+    for _op, tokens in marked:
+        targets = []
+        for position, token in enumerate(tokens):
+            if _MARK not in token:
+                continue
+            tail = token.rpartition(_MARK)[2]   # the last redirect in the word: `>file`, `>>file`, `2>&1`
+            kind = "append" if tail.startswith(">>") else "redirect"
+            target = tail.lstrip(">").lstrip("|")
+            if not target and position + 1 < len(tokens):
+                target = tokens[position + 1]   # `> file`: the next word is the file
+            target = target.replace(_MARK, "")
+            if target and not target.startswith("&"):   # `2>&1` duplicates a descriptor, it names no file
+                targets.append((target, kind))
+        found.append(targets)
+    return found
+
+
+def _lex(command: str) -> list[tuple[str, list[str]]] | None:
+    """Split a prepared command into segments, each with the separator token that preceded it."""
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()\n")
     lexer.whitespace_split = True
     lexer.whitespace = " \t\r"
@@ -461,7 +574,9 @@ def _strip_prefix(tokens: list[str]) -> list[str]:
             if index < len(tokens) and tokens[index] == "--":
                 index += 1
             continue
-        if name not in _WRAPPERS or _command_string(name, tokens[index + 1:]) is not None:
+        # a switch that turns a wrapper into a string runner (`flock -c`, `env -S`, `watch '<cmd>'`) is read in
+        # place from `index + 1`, never by copying the tail per wrapper, which made long wrapper chains quadratic
+        if name not in _WRAPPERS or (name in _STRING_WRAPPERS and _command_string(name, tokens, index + 1) is not None):
             break
         xargs = xargs or name == "xargs"
         index += 1
@@ -482,40 +597,140 @@ def _program(token: str) -> str:
     return name[:-4] if name.endswith(".exe") else name
 
 
-def _command_string(verb: str, rest: list[str]) -> str | None:
+# The command words the guard reasons about. A glob command word (`sys*ctl`, `/usr/bin/sys?ctl`) is matched
+# against this small set, so a wildcard cannot hide a sensitive verb the shell would expand to.
+_SENSITIVE_VERBS = frozenset({
+    "systemctl", "service", "launchctl", "sc", "net", "schtasks", "taskkill", "stop-process", "loginctl",
+    "init", "telinit", "kill", "tkill", "busctl", "dbus-send", "gdbus", "qdbus", "hermes", "hermes-agent",
+    "find", "dd", "truncate", "tee", "chmod", "chown", "chgrp", "ln", "rsync", "cp", "install",
+    "pkill", "killall", "pgrep", "pidof",
+}) | _REMOVERS | _POWER | _SERVICE_CMDLETS
+
+
+def _resolve_glob_verb(verb: str) -> str:
+    """A command word with shell glob characters mapped to the sensitive verb it would expand to, if one matches
+    (`sys*ctl`, `sys?ctl` -> `systemctl`); `?` is read as `*` so a single missing character still matches, which
+    only ever widens the match within this small set. A word without a glob, or one that matches nothing, is left
+    as it is."""
+    if not any(char in verb for char in "*?["):
+        return verb
+    if len(re.sub(r"[*?\[\]]", "", verb)) < 2:
+        return verb   # a word that is all wildcards (`*`, `?`) would match everything: not evidence of a verb
+    pattern = verb.replace("?", "*")
+    for candidate in sorted(_SENSITIVE_VERBS):
+        if fnmatch.fnmatchcase(candidate, pattern):
+            return candidate
+    return verb
+
+
+_SIMPLE_ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=([^$`\s]*)\Z")   # VAR=value with a literal value (no $, no `, no space)
+_VARIABLE_REF = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+_ASSIGNMENT_KEYWORDS = frozenset({"export", "declare", "local", "typeset", "readonly"})
+
+
+def _collect_assignments(tokens: list[str], assigned: dict[str, str]) -> None:
+    """Record the simple literal assignments a segment begins with (`X=systemctl`, `export X=~/.hermes`), so a
+    later `$X` can be read. Only a value the shell does not compute (no expansion, no command, no spaces) is
+    recorded; anything else leaves the name unknown, and an unknown `$X` still lets the command through."""
+    index = 1 if tokens and tokens[0] in _ASSIGNMENT_KEYWORDS else 0
+    while index < len(tokens):
+        match = _SIMPLE_ASSIGNMENT.fullmatch(tokens[index])
+        if match is None:
+            break
+        assigned[match.group(1)] = match.group(2)
+        index += 1
+
+
+def _resolve_vars(tokens: list[str], assigned: dict[str, str]) -> list[str]:
+    """The tokens with `$VAR` and `${VAR}` replaced by a value assigned earlier in the same command; an unknown
+    variable is left as it is (still dynamic, so it lets the command through)."""
+    if not assigned:
+        return tokens
+    def replace(match):
+        name = match.group(1) or match.group(2)
+        return assigned[name] if name in assigned else match.group(0)
+    return [_VARIABLE_REF.sub(replace, token) for token in tokens]
+
+
+# Options that take the next word as their value, per program, so that value is not read as the command or a file.
+_STRING_VALUES = {
+    "shell": frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}),
+    "su": frozenset({"-s", "--shell", "-g", "--group", "-G", "--supp-group", "-w", "--whitelist-environment"}),
+    "runuser": frozenset({"-u", "--user", "-s", "--shell", "-g", "--group", "-G", "--supp-group", "-w",
+                          "--whitelist-environment"}),
+    "flock": frozenset({"-w", "--wait", "--timeout", "-E", "--conflict-exit-code"}),
+    "script": frozenset({"-T", "--log-timing", "-I", "--log-in", "-O", "--log-out", "-B", "--log-io", "-E", "--echo",
+                         "-m", "--logging-format", "-o", "--output-limit"}),
+    "powershell": frozenset({"-executionpolicy", "-ep", "-ex", "-workingdirectory", "-wd", "-outputformat", "-of",
+                             "-inputformat", "-if", "-windowstyle", "-w", "-configurationname", "-version", "-v",
+                             "-psconsolefile", "-settingsfile"}),
+    "env": frozenset({"-u", "--unset", "-C", "--chdir"}),
+    "watch": frozenset({"-n", "--interval"}),
+}
+
+
+def _command_string(verb: str, rest: list[str], start: int = 0) -> str | None:
     """The command a shell (-c, -lc, -ec, ...), su, runuser, script or flock (-c, --command), PowerShell
-    (-Command, -c) or cmd (/c) gets as one string."""
+    (-Command, -c), cmd (/c), env (-S), eval or watch gets as one string, from `rest[start:]`. The options are read
+    forward once, never past the first word that is not an option (su and runuser: the user name; flock: the lock
+    file), so however many options come first, each word is looked at once and nothing is copied until a command
+    string is found."""
+    if verb not in _STRING_VERBS:
+        return None
+    length, index = len(rest), start
     if verb in ("powershell", "pwsh", "cmd"):
         switches = ("/c", "//c", "/k", "//k") if verb == "cmd" else ("-command", "-c", "/command", "/c")
-        for position, token in enumerate(rest):
-            if token.lower() in switches:
-                inner = " ".join(rest[position + 1:]) or None   # everything after the switch is the command
+        while index < length:
+            token = rest[index].lower()
+            if token in switches:
+                inner = " ".join(rest[index + 1:]) or None   # everything after the switch is the command
                 if inner is not None and _WINDOWS:
                     inner = inner.replace("\\", "/")   # the POSIX shlex that re-lexes it would eat these path separators
                 return inner
+            if not token.startswith(("-", "/")):
+                return None
+            index += 2 if token in _STRING_VALUES["powershell"] else 1
         return None
     if verb == "env":   # env -S '<command>' splits one string into the command and its arguments
-        for position, token in enumerate(rest):
+        while index < length:
+            token = rest[index]
             if token in ("-S", "--split-string"):
-                return " ".join(rest[position + 1:]) or None
+                return " ".join(rest[index + 1:]) or None
             if token.startswith("--split-string="):
-                return " ".join([token.split("=", 1)[1], *rest[position + 1:]]) or None
+                return " ".join([token.split("=", 1)[1], *rest[index + 1:]]) or None
             if token.startswith("-S") and len(token) > 2:
-                return " ".join([token[2:], *rest[position + 1:]])
+                return " ".join([token[2:], *rest[index + 1:]])
             if not token.startswith("-") and not _ASSIGNMENT.match(token):
-                break
+                return None
+            index += 2 if token in _STRING_VALUES["env"] else 1
         return None
     if verb == "eval":   # eval '<command>': its words, joined, are the command
-        return " ".join(rest) or None
-    for position, token in enumerate(rest):
-        if verb in _STRING_RUNNERS and token.startswith("--command="):
-            return " ".join([token.split("=", 1)[1], *rest[position + 1:]]) or None
-        if verb in _SHELLS and re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", token):
-            return rest[position + 1] if position + 1 < len(rest) else None
-        if verb in _STRING_RUNNERS and token in ("-c", "--command"):
-            return rest[position + 1] if position + 1 < len(rest) else None
-        if verb in _STRING_RUNNERS and re.fullmatch(r"-[A-Za-z]*c", token) and verb == "script":
-            return rest[position + 1] if position + 1 < len(rest) else None   # script -qc '<command>'
+        return " ".join(rest[start:]) or None
+    if verb == "watch":   # watch [-n S] '<command>': it runs its operands, joined, as a shell string
+        while index < length and rest[index].startswith("-"):
+            index += 2 if rest[index] in _STRING_VALUES["watch"] else 1
+        return " ".join(rest[index:]) or None
+    shell, runner = verb in _SHELLS, verb in _STRING_RUNNERS
+    values = _STRING_VALUES["shell" if shell else verb]
+    positionals = 0
+    while index < length:
+        token = rest[index]
+        if token.startswith("-") or (shell and token.startswith("+") and len(token) > 1):
+            if runner and token.startswith("--command="):
+                return " ".join([token.split("=", 1)[1], *rest[index + 1:]]) or None
+            if shell and re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", token) or runner and token in ("-c", "--command") \
+                    or verb == "script" and re.fullmatch(r"-[A-Za-z]*c", token):
+                return rest[index + 1] if index + 1 < length else None   # script -qc '<command>' too
+            if token == "--":
+                return None   # what follows is a command and its words, not one string (runuser -u root -- cmd)
+            index += 2 if token in values else 1
+            continue
+        positionals += 1
+        # script reads its options anywhere; su and runuser take a user name, flock a lock file, before -c
+        if verb == "script" or (verb in ("su", "runuser", "flock") and positionals == 1):
+            index += 1
+            continue
+        return None   # a script file or a command: not a string handed over
     return None
 
 
@@ -588,7 +803,9 @@ def _expand(token: str, home: Path, profile: Path | None = None, cwd: PurePosixP
     found = _canonical(token)
     if found is None and cwd is not None and token and not _dynamic(token) and not token.startswith("~"):
         relative = token.replace("\\", "/") if _WINDOWS else token
-        found = PurePosixPath(posixpath.normpath(f"{cwd}/{relative.lower() if _WINDOWS else relative}"))
+        # posixpath.join avoids the `//usr` that `f"{cwd}/{relative}"` builds when cwd is `/` (normpath keeps `//`)
+        joined = posixpath.join(str(cwd), relative.lower() if _WINDOWS else relative)
+        found = PurePosixPath(posixpath.normpath(joined))
     return found
 
 
@@ -1053,37 +1270,150 @@ def _hermes_config(token: str, *, home: Path, profile: Path | None, cwd: PurePos
 _INTERPRETER_WRITE = re.compile(r"""open\([^)]*,\s*['"][wax]\+?b?['"]|write_text|\.write\(|dump\([^)]*,""")
 
 
-def _write_targets(command: str, *, home: Path, profile: Path | None, cwd: PurePosixPath | None) -> list[str]:
-    """The file paths a command writes to: a redirect (`>`, `>>`), an in-place editor (`sed -i`, `perl -i`, `yq -i`),
-    `tee`, `truncate`, `dd of=`, the destination of `cp`/`mv`/`install`/`ln`/`rsync` (its `-t` value or last operand),
-    and `chmod`/`chown`/`chgrp`. The source a command only reads is not one of these."""
-    targets = list(re.findall(r">{1,2}\s*([^\s;&|]+)", command))
-    for segment in _segments(command) or ():
-        tokens = _strip_prefix(segment)
-        if not tokens:
-            continue
-        verb, rest = _program(tokens[0]), tokens[1:]
-        family = re.sub(r"[\d.]+\Z", "", verb)
-        operands = [token for token in rest if not token.startswith("-")]
-        if family in ("sed", "perl", "yq", "ruby") and any(re.fullmatch(r"-[A-Za-z]*i\S*|--in-place\S*", token)
-                                                          for token in rest):
-            targets += operands   # in place: each file operand is rewritten
-        elif verb in ("tee", "truncate", "chmod", "chown", "chgrp"):
-            targets += operands
-        elif verb == "dd":
-            targets += [token.split("=", 1)[1] for token in rest if token.startswith("of=")]
-        elif verb in ("cp", "mv", "install", "ln", "rsync"):
-            destination = None
-            for index, token in enumerate(rest):
-                if token in ("-t", "--target-directory") and index + 1 < len(rest):
-                    destination = rest[index + 1]
-                elif token.startswith("--target-directory="):
-                    destination = token.split("=", 1)[1]
-            if destination is None and operands:
-                destination = operands[-1]   # the destination is the last operand
-            if destination is not None:
-                targets.append(destination)
+# How a path is changed: "replace" (cp/mv/install over it), "edit" (sed -i and other in-place editors), "append"
+# (`>>`, `tee -a`), "redirect" (`>`), "tee", "truncate", "dd" (of=), "attr" (chmod/chown/chgrp), "link" (ln), "rsync"
+# and "rsync_delete". Only an "above" change reaches what lies under the folder it names (chmod -R, a symlink
+# over a folder, rsync --delete); the rest change one file, so a plain copy into `~` or `/usr/local/lib` is fine.
+_ABOVE_KINDS = frozenset({"attr", "link", "rsync_delete"})
+_DESTRUCTIVE_KINDS = frozenset({"attr", "link", "truncate", "dd", "tee", "redirect", "rsync_delete"})
+_CLOBBER_KINDS = frozenset({"attr", "link", "truncate", "dd", "tee", "redirect", "replace"})   # a config.yaml's whole content
+_CHMOD_DASH_MODE = re.compile(r"-[rwxXst]+")   # `chmod -w file`: a mode the option scan would take for an option
+# An interpreter one-liner that writes a file, and the forms of it that replace the whole content.
+_INLINE_WRITE = re.compile(r"""open\([^)]*,\s*['"][wax]\+?b?['"]|write_text|write_bytes|\.write\(|dump\([^)]*,|writeFile""")
+_INLINE_REPLACE = re.compile(r"""open\([^)]*,\s*['"][wx]\+?b?['"]|write_text|write_bytes|writeFileSync\(|writeFile\(""")
+
+
+def _segment_mutations(tokens: list[str]) -> list[tuple[str, str]]:
+    """The paths one segment (after its prefix) writes to or changes, each with how (see the kinds above): an
+    in-place editor (`sed -i`, `perl -i`, `yq -i`), `tee`, `truncate`, `dd of=`, `chmod`/`chown`/`chgrp`, and the
+    destination of `cp`/`mv`/`install`/`ln`/`rsync` (its `-t` value or last operand). A source only read is not one."""
+    if not tokens:
+        return []
+    verb, rest = _program(tokens[0]), tokens[1:]
+    family = re.sub(r"[\d.]+\Z", "", verb)
+    operands = [token for token in rest if not token.startswith("-")]
+    if family in ("sed", "perl", "yq", "ruby") and any(re.fullmatch(r"-[A-Za-z]*i\S*|--in-place\S*", token)
+                                                      for token in rest):
+        return [(token, "edit") for token in operands]   # in place: each file operand is rewritten
+    if verb in ("chmod", "chown", "chgrp"):
+        whole = any(token.startswith("--reference") for token in rest) or \
+            (verb == "chmod" and any(_CHMOD_DASH_MODE.fullmatch(token) for token in rest))
+        return [(token, "attr") for token in (operands if whole else operands[1:])]   # else operand 0 is the mode/owner
+    if verb == "truncate":
+        return [(token, "truncate") for token in _without_values(rest, {"-s", "--size", "-r", "--reference"})]
+    if verb == "tee":
+        appends = any(token == "--append" or re.fullmatch(r"-[A-Za-z]*a[A-Za-z]*", token) for token in rest)
+        return [(token, "append" if appends else "tee") for token in operands]
+    if verb == "dd":
+        return [(token.split("=", 1)[1], "dd") for token in rest if token.startswith("of=")]
+    if family in ("python", "node", "ruby", "perl") and _INLINE_WRITE.search(" ".join(rest)):
+        # a one-liner that opens a config.yaml it names for writing: `open('~/.hermes/config.yaml', 'w')`
+        code = " ".join(rest)
+        kind = "replace" if _INLINE_REPLACE.search(code) else "edit"
+        return [(part, kind) for token in rest for part in re.split(r"[\s'\"=,;()\[\]]", token)
+                if part.lower().endswith(_CONFIG_FILES)]
+    if verb in ("cp", "mv", "install", "ln", "rsync"):
+        if verb == "ln":
+            kind = "link"
+        elif verb == "rsync":   # rsync --delete empties the destination of what the source lacks
+            kind = "rsync_delete" if any(token == "--del" or token.startswith("--delete") for token in rest) else "rsync"
+        else:
+            kind = "replace"
+        destination = None
+        for index, token in enumerate(rest):
+            if token in ("-t", "--target-directory") and index + 1 < len(rest):
+                destination = rest[index + 1]
+            elif token.startswith("--target-directory="):
+                destination = token.split("=", 1)[1]
+        if destination is None and len(operands) >= 2:
+            destination = operands[-1]   # the destination is the last operand
+        elif destination is None and verb == "ln" and operands:   # `ln -s TARGET`: a link named like it, right here
+            destination = re.split(r"[\\/]", operands[0].rstrip("/\\"))[-1] or None
+        return [(destination, kind)] if destination else []
+    return []
+
+
+def _mutating_targets(command: str, *, home: Path, profile: Path | None,
+                      cwd: PurePosixPath | None) -> list[tuple[str, str]]:
+    """Every file path a command writes to or changes, each with how, read from the start of the command (the
+    per-segment check in `_check_command` follows `cd` and variables): its redirects and `_segment_mutations`."""
+    prepared = _prepare(command)
+    seg_ops = _lex(prepared) or []
+    redirects = _segment_redirects(prepared, seg_ops)
+    targets = [] if redirects is not None else _visible_redirects(prepared)
+    for index, (_op, segment) in enumerate(seg_ops):
+        if redirects is not None:
+            targets += redirects[index]
+        targets += _segment_mutations(_strip_prefix(segment))
     return targets
+
+
+def _visible_redirects(prepared: str) -> list[tuple[str, str]]:
+    """Redirect targets read from the text when the marked lexing cannot be lined up: outside single quotes only."""
+    visible = _without_single_quotes(prepared)
+    return [(path.replace('"', ""), "append" if len(op) == 2 else "redirect")
+            for op, path in re.findall(r"(>>?)\s*([^\s;&|<>]+)", visible)]
+
+
+def _write_targets(command: str, *, home: Path, profile: Path | None, cwd: PurePosixPath | None) -> list[str]:
+    """The file paths a command writes to (just the paths; see `_mutating_targets` for how each is changed)."""
+    return [token for token, _kind in _mutating_targets(command, home=home, profile=profile, cwd=cwd)]
+
+
+def _at_or_inside(pattern: PurePosixPath, folder) -> bool:
+    """Whether `pattern` (a path or a shell glob) names `folder` itself or something inside it; never a folder above."""
+    base = _canonical(str(folder))
+    if base is None:
+        return False
+    if not any(char in str(pattern) for char in "*?["):
+        return pattern == base or base in pattern.parents
+    if _glob_match(base, pattern):
+        return True
+    parts = []
+    for part in pattern.parts:   # the part before the first glob is the folder the pattern reaches into
+        if any(char in part for char in "*?["):
+            break
+        parts.append(part)
+    prefix = PurePosixPath(*parts) if parts else None
+    return prefix is not None and (prefix == base or base in prefix.parents)
+
+
+def _is_hermes_config(target: PurePosixPath, *, home: Path, profile: Path | None, protected) -> bool:
+    """A config.yaml Hermes reads: the profile's, the root's (`~/.hermes` or a protected Hermes folder), or another
+    profile's under `<root>/profiles/<name>/`. A config.yaml anywhere else (a website, a project) is not one."""
+    if target.name.lower() not in _CONFIG_FILES:
+        return False
+    places = {_canonical(str(item)) for item in (profile, Path(home) / ".hermes", *protected) if item is not None}
+    parent = target.parent
+    return parent in places or (parent.parent.name == "profiles" and parent.parent.parent in places)
+
+
+def _mutation_verdict(targets, *, protected, trees, own, home: Path, profile: Path | None,
+                      cwd: PurePosixPath | None, plugin_words: bool) -> dict | None:
+    """Whether writing or changing `targets` ((word, kind) pairs, read from `cwd`) takes Hermes down, whatever the
+    verb. The protected **code trees** (the interpreter, the environment, Hermes' packages) are protected at their
+    root and inside, and against a chmod, a symlink or an `rsync --delete` from a folder above. This plugin's folder
+    is protected at its root and inside (`plugin_settings`). The profile home and the Hermes root themselves (and the
+    folders above them) are protected only against a destructive change; a plain write inside the profile home (a
+    skill, a memory, a workspace file) or a copy into `~` is the agent's to make. Replacing a Hermes config.yaml
+    wholesale wipes the plugin's settings; editing or appending to one counts when the command names them."""
+    for token, kind in targets:
+        target = _expand(token, home, profile, cwd)
+        if target is None:
+            continue
+        for tree in trees:
+            if _at_or_inside(target, tree) or (kind in _ABOVE_KINDS and _hits(target, tree)):
+                return {"kind": "runtime_removal", "path": str(tree), "text": "runtime_change"}
+        if any(_at_or_inside(target, folder) for folder in own):
+            return {"kind": "plugin_settings"}
+        if _is_hermes_config(target, home=home, profile=profile, protected=protected) and \
+                (kind in _CLOBBER_KINDS or plugin_words):
+            return {"kind": "plugin_settings"}
+        if kind in _DESTRUCTIVE_KINDS:
+            for item in protected:   # the profile home / Hermes root themselves, or a folder above them
+                if _hits(target, item):
+                    return {"kind": "runtime_removal", "path": str(item), "text": "runtime_change"}
+    return None
 
 
 def _writes_plugin_config(command: str, *, home: Path, profile: Path | None, cwd: PurePosixPath | None) -> bool:
@@ -1272,12 +1602,12 @@ def _looks_up_gateway(verb: str, rest: list[str], process) -> bool:
     return _matches(pattern, command_line, literal=literal)
 
 
-def _kills_by_lookup(command: str, process=None) -> bool:
+def _kills_by_lookup(command: str, process=None, segments=None) -> bool:
     """`kill $(pgrep -f hermes)`, `pgrep -f hermes_cli | xargs kill`, ``kill `pidof hermes` ``, `kill $(cat
     ~/.hermes/gateway.pid)`: a kill whose process ids the shell fills in, in a command that looks up Hermes or its
     pid file."""
     kills = False
-    for segment in _segments(command) or ():
+    for segment in (segments if segments is not None else _segments(command) or ()):
         tokens = _strip_prefix(segment)
         if tokens and _program(tokens[0]) in ("kill", "tkill") and any(_dynamic(token) for token in tokens[1:]):
             kills = True
@@ -1314,12 +1644,18 @@ def check(tool_name, args, *, protected, home: Path, profile: Path | None = None
         command = args.get("command")
     else:
         return None
-    if not isinstance(command, str) or not command.strip() or len(command) > _COMMAND_LIMIT:
+    if not isinstance(command, str) or not command.strip():
         return None
+    if len(command) > _COMMAND_LIMIT:
+        # The limit is on the real command, not on padding: a trailing comment or a huge here-document body cannot
+        # disable the guard. Cut both first, bound the work, and scan at most the first _COMMAND_LIMIT characters.
+        command = _strip_comments(_strip_heredocs(command[:_SCAN_LIMIT]))
+        if len(command) > _COMMAND_LIMIT:
+            command = command[:_COMMAND_LIMIT]
     workdir = args.get("workdir") if tool_name in TERMINAL_TOOLS else None
     cwd = _expand(workdir, home, profile) if isinstance(workdir, str) and workdir.strip() else None
     return _check_command(command, protected=protected, home=home, profile=profile, depth=0, trees=trees, own=own,
-                          process=process, cwd=cwd)
+                          process=process, cwd=cwd, budget=[_MAX_SUBCHECKS, {}])
 
 
 def _stdin_payloads(rest: list[str], seg_op: str, prior, body_map: dict) -> list[str]:
@@ -1333,62 +1669,89 @@ def _stdin_payloads(rest: list[str], seg_op: str, prior, body_map: dict) -> list
             if position + 1 < len(rest):
                 payloads.append(rest[position + 1])
             skip = True
-        elif token.startswith("<<") and not token.startswith("<<<"):
+        elif token.startswith("<<<"):   # `<<<word` with no space: the word after it is the stdin
+            payloads.append(token[3:])
+        elif token.startswith("<<"):
             payloads.extend(body_map.get(token[2:], []))   # quoted bodies too: the shell still runs them
     if seg_op in ("|", "|&") and prior is not None:
         prior_tokens = _strip_prefix(prior)
         if prior_tokens and _program(prior_tokens[0]) in ("echo", "printf"):
             payloads.append(" ".join(token for token in prior_tokens[1:] if not token.startswith("-")))
+        # a producer that reads a here-document and writes it out pipes it to the shell: `cat <<EOF | bash`
+        for token in prior_tokens:
+            if token.startswith("<<") and not token.startswith("<<<"):
+                payloads.extend(body_map.get(token[2:], []))
     return payloads
 
 
-def _xargs_fed(pipeline_before, own_paths, *, protected, trees, own, home: Path, profile, cwd) -> dict | None:
-    """`... | xargs rm`: the paths come only from the earlier commands of the same pipeline. A `cd`/`pushd`
-    argument is not fed; a producing `find` with a filter is read like `find ... -delete` (its starting point
-    survives, only the names it selects go)."""
-    fed = list(own_paths)
+def _pipeline_contribution(verb: str, rest: list[str], fed: list[str], finds: list) -> None:
+    """Add what a pipeline segment produces on stdout to the words a later `xargs rm` would delete: a `find` keeps
+    its selection for a filtered read, any other producer its plain operands. A `cd` produces nothing. The lists
+    are capped, since a pipeline longer than that is not a tidy removal the guard needs to follow word by word."""
+    if verb in ("cd", "pushd", "chdir", "set-location", "sl"):
+        return
+    if verb == "find":
+        starts, globs = _find_selection(rest)
+        if globs is None:
+            if len(fed) < _MAX_FED:
+                fed += [token for token in starts if not _dynamic(token)][:_MAX_FED - len(fed)]
+        elif len(finds) < _MAX_FINDS:
+            finds.append((starts, globs))
+        return
+    if len(fed) < _MAX_FED:   # a word the shell fills in cannot be resolved here, so it is not carried
+        fed += [token for token in rest if not token.startswith("-") and not _dynamic(token)][:_MAX_FED - len(fed)]
+
+
+def _xargs_check(fed, finds, own_paths, *, protected, trees, own, home: Path, profile, cwd) -> dict | None:
+    """`... | xargs rm`: the paths come only from what the earlier commands of the same pipeline produced, already
+    gathered once as `fed` (plain operands) and `finds` (filtered `find` producers, read like `find ... -delete`).
+    `own_paths` are the fixed paths the `xargs rm` itself carries before xargs appends its input."""
     where = {"home": home, "profile": profile, "cwd": cwd}
-    for raw in pipeline_before:
-        producer = _strip_prefix(raw)
-        if not producer:
-            continue
-        pverb, prest = _program(producer[0]), producer[1:]
-        if pverb in ("cd", "pushd", "chdir", "set-location", "sl"):
-            continue   # cd only moves the shell; its argument is not a word fed into xargs
-        if pverb == "find":
-            starts, globs = _find_selection(prest)
-            if globs is None:
-                fed += starts   # no filter (or a negation/alternation): whole starting points are produced
-                continue
-            hit = _find_hit(starts, globs, protected=protected, trees=trees, **where)
-            if hit:
-                return {"kind": "runtime_removal", "path": hit}
-            if own and _find_hit(starts, globs, protected=own, **where):
-                return {"kind": "plugin_settings"}
-        else:
-            fed += [token for token in prest if not token.startswith("-")]
-    path = _hit(fed, protected=protected, trees=trees, **where)
+    for starts, globs in finds:
+        hit = _find_hit(starts, globs, protected=protected, trees=trees, **where)
+        if hit:
+            return {"kind": "runtime_removal", "path": hit}
+        if own and _find_hit(starts, globs, protected=own, **where):
+            return {"kind": "plugin_settings"}
+    paths = [*own_paths, *fed]
+    path = _hit(paths, protected=protected, trees=trees, **where)
     if path:
         return {"kind": "runtime_removal", "path": path}
-    if own and _hit(fed, protected=(), trees=own, **where):
+    if own and _hit(paths, protected=(), trees=own, **where):
         return {"kind": "plugin_settings"}
     return None
 
 
 def _check_command(command: str, *, protected, home: Path, profile: Path | None = None, depth: int = 0, trees=(), own=(),
-                   process=None, cwd: PurePosixPath | None = None) -> dict | None:
-    options = {"protected": protected, "home": home, "profile": profile, "trees": trees, "own": own, "process": process}
-    if _kills_by_lookup(command, process):
+                   process=None, cwd: PurePosixPath | None = None, budget: list | None = None) -> dict | None:
+    if budget is None:
+        budget = [_MAX_SUBCHECKS, {}]   # the sub-checks left, and the (command, folder) already found harmless
+    seen = budget[1].get((command, cwd))
+    if seen is not None and seen <= depth:
+        return None   # the same text from the same folder, read at least this deep already: it vetoed nothing
+    if budget[0] <= 0:   # a command built to spawn countless sub-commands is let through once the work is bounded
+        return None
+    budget[0] -= 1
+    if len(budget[1]) < _MAX_SUBCHECKS:
+        budget[1][(command, cwd)] = depth   # recorded before the check; a veto ends the whole check anyway
+    options = {"protected": protected, "home": home, "profile": profile, "trees": trees, "own": own,
+               "process": process, "budget": budget}
+    prepared = _prepare(command)
+    seg_ops = _lex(prepared) or []
+    if _kills_by_lookup(command, process, [tokens for _op, tokens in seg_ops]):
         return {"kind": "gateway_stop"}
     if _writes_plugin_config(command, home=home, profile=profile, cwd=cwd) or _calls_panel_decisions(command):
         return {"kind": "plugin_settings"}
-    # a write into this plugin's own folder switches it off, which only the owner decides (removing it already does)
-    if own and _PLUGIN_WORDS.search(command) and \
-            _hit(_write_targets(command, home=home, profile=profile, cwd=cwd), protected=(), home=home,
-                 profile=profile, trees=own, cwd=cwd):
-        return {"kind": "plugin_settings"}
     mentions = "hermes" in command.lower()
-    seg_ops = _segments_with_ops(command) or []
+    # Any write, truncation or attribute change to what the running Hermes needs, whatever the verb, is judged per
+    # segment below with that segment's folder (`cd`) and variables; its redirects are read here, quote-aware.
+    judged = {"protected": protected, "trees": trees, "own": own, "home": home, "profile": profile,
+             "plugin_words": bool(_PLUGIN_WORDS.search(command))}
+    redirects = _segment_redirects(prepared, seg_ops) if seg_ops else []
+    if redirects is None:   # the marked lexing did not line up: read the redirects from the text, from here
+        found = _mutation_verdict(_visible_redirects(prepared), cwd=cwd, **judged)
+        if found:
+            return found
     deeper = depth < _MAX_DEPTH   # bash -c "bash -c '...'": commands inside commands, a few levels deep
     body_map = _heredoc_body_map(command) if deeper else {}
     if deeper:   # $(...) and `...` run too, also inside double quotes; never inside single quotes
@@ -1396,16 +1759,24 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
             found = _check_command(inner_command, depth=depth + 1, cwd=cwd, **options)
             if found:
                 return found
-    pipeline_before, accumulated = [], []   # the earlier commands of the current pipeline (for `| xargs`, `| sh`)
-    for seg_op, segment in seg_ops:
+    assigned: dict[str, str] = {}   # simple literal assignments earlier in the command, for `$X` after them
+    pipeline_fed, pipeline_finds, prior = [], [], None   # what earlier pipeline commands produce (for `| xargs`, `| sh`)
+    checked = [0, 0]   # how much of pipeline_fed / pipeline_finds an earlier `xargs rm` already found harmless
+    for position, (seg_op, segment) in enumerate(seg_ops):
         if seg_op not in ("|", "|&"):
-            accumulated = []   # a separator other than `|` starts a new pipeline
-        pipeline_before = accumulated
-        accumulated = accumulated + [segment]
+            pipeline_fed, pipeline_finds, checked = [], [], [0, 0]   # a separator other than `|` starts a new pipeline
+        _collect_assignments(segment, assigned)
+        segment = _resolve_vars(segment, assigned)
+        prior, prior_source = (prior if seg_op in ("|", "|&") else None), segment
         tokens = _strip_prefix(segment)
+        written = [(_resolve_vars([word], assigned)[0], kind) for word, kind in redirects[position]] if redirects else []
+        found = _mutation_verdict([*written, *_segment_mutations(tokens)], cwd=cwd, **judged)
+        if found:   # judged before a `cd` here moves the folder: its own redirect is opened from the current one
+            return found
         if not tokens:
+            prior = prior_source
             continue
-        verb, rest = _as_hermes(_program(tokens[0]), tokens[1:])
+        verb, rest = _as_hermes(_resolve_glob_verb(_program(tokens[0])), tokens[1:])
         nested_command = _nested_command(verb, rest) if deeper else None
         if nested_command is not None:   # find -exec ..., ssh localhost ..., the strings of python -c / perl -e
             for item in nested_command:
@@ -1415,12 +1786,14 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
         if verb in ("cd", "pushd", "chdir", "set-location", "sl"):   # later relative paths start there
             target = [token for token in rest if not token.startswith("-")]
             cwd = _expand(target[0], home, profile, cwd) if target else _canonical(str(home)) if not rest else None
+            prior = prior_source
             continue
         inner = _command_string(verb, rest)
-        if inner is not None:   # bash -lc '<command>', su -c '<command>', pwsh -c '<command>', cmd /c ...
+        if inner is not None:   # bash -lc '<command>', su -c '<command>', pwsh -c '<command>', cmd /c, watch '<cmd>'
             found = _check_command(inner, depth=depth + 1, cwd=cwd, **options) if deeper else None
             if found:
                 return found
+            prior = prior_source
             continue
         if deeper and verb in _SHELLS:   # a shell reading its script on stdin, not from -c or a script file
             real_operands, skip = [], False
@@ -1432,11 +1805,11 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
                 elif not token.startswith("-") and not token.startswith("<<"):
                     real_operands.append(token)
             if not real_operands:
-                prior = pipeline_before[-1] if seg_op in ("|", "|&") and pipeline_before else None
                 for payload in _stdin_payloads(rest, seg_op, prior, body_map):
                     found = _check_command(payload, depth=depth + 1, cwd=cwd, **options)
                     if found:
                         return found
+        prior = prior_source
         words = [token for token in rest if not token.startswith("-")]
         if _stops_gateway(verb, rest, words, mentions=mentions, process=process):
             return {"kind": "gateway_stop"}
@@ -1447,8 +1820,11 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
             return {"kind": "runtime_removal", "path": f"`{deleted}`"}
         removed = _removed_paths(verb, rest, words)
         if XARGS_WORDS in removed:   # `... | xargs rm`: the paths come from the earlier commands of the pipeline
-            found = _xargs_fed(pipeline_before, [item for item in removed if item != XARGS_WORDS],
-                               protected=protected, trees=trees, own=own, home=home, profile=profile, cwd=cwd)
+            # only what the pipeline produced since the last `xargs rm` is new: a long chain stays linear
+            found = _xargs_check(pipeline_fed[checked[0]:], pipeline_finds[checked[1]:],
+                                 [item for item in removed if item != XARGS_WORDS],
+                                 protected=protected, trees=trees, own=own, home=home, profile=profile, cwd=cwd)
+            checked = [len(pipeline_fed), len(pipeline_finds)]
             if found:
                 return found
         else:
@@ -1459,12 +1835,14 @@ def _check_command(command: str, *, protected, home: Path, profile: Path | None 
                 return {"kind": "plugin_settings"}
         filtered = _find_deletes(rest) if verb == "find" else None
         if filtered is not None and filtered[1] is not None:   # find <dir> -name X -delete: only what X selects goes
-            where = {"home": home, "profile": profile, "cwd": cwd}
-            path = _find_hit(filtered[0], filtered[1], protected=protected, trees=trees, **where)
+            find_where = {"home": home, "profile": profile, "cwd": cwd}   # never `judged`: that one has no cwd
+            path = _find_hit(filtered[0], filtered[1], protected=protected, trees=trees, **find_where)
             if path:
                 return {"kind": "runtime_removal", "path": path}
-            if own and _find_hit(filtered[0], filtered[1], protected=own, **where):
+            if own and _find_hit(filtered[0], filtered[1], protected=own, **find_where):
                 return {"kind": "plugin_settings"}
+        # what this segment produces on stdout, carried once for a later `| xargs rm` (gathered, never re-stripped)
+        _pipeline_contribution(verb, rest, pipeline_fed, pipeline_finds)
     return None
 
 
@@ -1472,13 +1850,15 @@ class RuntimeGuard:
     """The `pre_tool_call` callback. Returns Hermes' block directive or None, and never raises."""
 
     def __init__(self, *, protected, home: Path, lang: str = "en", on_block=None, profile: Path | None = None,
-                 trees=(), own=(), process=None):
+                 trees=(), own=(), process=None, on_error=None):
         self.protected = tuple(protected)
         self.trees, self.own, self.process = tuple(trees), tuple(own), process
         self.home = Path(home)
         self.profile = Path(profile) if profile is not None else None
         self.lang = lang if lang in MESSAGES else "en"
         self.on_block = on_block
+        self.on_error = on_error
+        self.errors = 0   # internal guard failures the caller can read; the guard still fails open on each
 
     def __call__(self, **payload):
         try:
@@ -1491,6 +1871,16 @@ class RuntimeGuard:
                     self.on_block(found["kind"])
                 except Exception:   # counting must never decide whether the command runs
                     pass
-            return {"action": "block", "message": MESSAGES[self.lang][found["kind"]].format(path=found.get("path", ""))}
-        except Exception:   # Hermes blocks a tool whose pre_tool_call raises: any doubt lets the command through
+            # the counted kind stays one of the three; a change to the runtime has a sentence of its own
+            text = MESSAGES[self.lang][found.get("text", found["kind"])]
+            return {"action": "block", "message": text.format(path=found.get("path", ""))}
+        except Exception as error:   # Hermes blocks a tool whose pre_tool_call raises: any doubt lets the command through
+            # Still fail open, but do not swallow the failure silently: record it so the caller can see the guard
+            # is erroring (a counter it reads, or an on_error callback), instead of a guard that quietly does nothing.
+            self.errors += 1
+            if self.on_error is not None:
+                try:
+                    self.on_error(error)
+                except Exception:   # recording must never decide whether the command runs, nor raise into the turn
+                    pass
             return None

@@ -228,7 +228,7 @@ _TEXT = {
            "do_first_note": "The points are an estimate of what each step could add to the Evolution index.",
            "lesson": "Decide on the lesson waiting for `{subject}`",
            "investigate_failure": "Write a lesson for the recurring failure of `{subject}`",
-           "health_item": "Fix `{subject}` (see Attention)",
+           "health_item": "Fix `{subject}` (see Needs attention)",
            "gain": "about +{gain} points"},
     "pt": {"parts": {"tools": "ferramentas", "turns": "turnos", "you": "você", "lessons": "lições", "health": "saúde"},
            "moved": "O que o moveu: {part} {old} → {new}",
@@ -245,7 +245,7 @@ _TEXT = {
            "do_first_note": "Os pontos são uma estimativa do que cada passo pode somar ao Índice de evolução.",
            "lesson": "Decida sobre a lição que aguarda para `{subject}`",
            "investigate_failure": "Escreva uma lição para a falha recorrente de `{subject}`",
-           "health_item": "Corrija `{subject}` (veja Atenção)",
+           "health_item": "Corrija `{subject}` (veja Pede atenção)",
            "gain": "cerca de +{gain} pontos"},
 }
 

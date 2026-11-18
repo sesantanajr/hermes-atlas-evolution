@@ -84,6 +84,11 @@ TEXT = {
         "care_title": "Hermes health (read from Hermes' own files: no agent, no network, no tokens)",
         "care_gateway": "Gateway: {state}",
         "gate_running": "running", "gate_stopped": "stopped", "gate_crashed": "stopped (it crashed)",
+        "gate_degraded": "running (degraded: no chat platform connected yet; scheduled tasks still run)",
+        "gate_starting": "starting",
+        "care_gc_unsafe": "Not now: {reasons}. Check the tool store with hermes pm doctor.",
+        "care_gc_recheck": "Not now: the last health check does not say what hermes pm gc would delete. Choose 0 to "
+                           "check again first.",
         "gate_version": "version {version}", "gate_rss": "memory {rss}", "gate_beat": "heartbeat {age} ago",
         "no_data": "no data", "not_checked": "not checked yet",
         "care_db": "Session database: {journal} · WAL {wal} · integrity {quick}",
@@ -156,7 +161,7 @@ TEXT = {
         "os_lost": "The update stopped without finishing (it was killed, or the machine went down): repair it with this screen's repair option.",
         "yes_word": "yes", "no_word": "no", "unknown": "unknown",
         "auto_line": ("Mode: {mode} · {n} automatic action in 7 days", "Mode: {mode} · {n} automatic actions in 7 days"),
-        "attention_title": "Needs attention:", "suggest_title": "Suggestions:",
+        "attention_title": "Needs attention:", "suggest_title": "Suggestions:", "letter_hint": " (letter {letter} below)",
         "suggest_waiting": ("Decide 1 lesson waiting for you", "Decide {n} lessons waiting for you"),
         "suggest_apply": ("Apply 1 recommended change: {what}", "Apply {n} recommended changes: {what}"),
         "suggest_full": "Turn on Auto mode (the plugin thinks and acts for you, in every profile)",
@@ -265,7 +270,7 @@ TEXT = {
         "memory_removed": "Removed. A copy of the file is in evolution/memory-backups; to undo it: option 4 of this menu (history). New sessions read the change.",
         "memory_changed": "The entry changed since you saw it: nothing was removed.",
         "memory_note": "Merging two entries into new words is the agent's job: ask it to rewrite them with its memory tool.",
-        "learn_running": "Running a learning pass (up to two minutes)…",
+        "learn_running": "Running a learning pass (up to {minutes} minutes)…",
         "learn_done": "Done: read {sessions} and {calls} · {new} · {open}.",
         "n_calls": ("{n} tool call", "{n} tool calls"), "n_new_lessons": ("{n} new lesson", "{n} new lessons"),
         "learn_next": "To decide: option 1 (lessons waiting for you) and option 2 (open proposals).",
@@ -332,6 +337,12 @@ TEXT = {
         "care_title": "Saúde do Hermes (lida dos próprios arquivos do Hermes: sem agente, sem rede, sem tokens)",
         "care_gateway": "Gateway: {state}",
         "gate_running": "rodando", "gate_stopped": "parado", "gate_crashed": "parado (caiu)",
+        "gate_degraded": "rodando (degradado: nenhuma plataforma de chat conectada ainda; as tarefas agendadas seguem "
+                         "rodando)",
+        "gate_starting": "subindo",
+        "care_gc_unsafe": "Agora não: {reasons}. Confira o depósito de ferramentas com hermes pm doctor.",
+        "care_gc_recheck": "Agora não: a última checagem de saúde não diz o que o hermes pm gc apagaria. Escolha 0 para "
+                           "checar de novo antes.",
         "gate_version": "versão {version}", "gate_rss": "memória {rss}", "gate_beat": "sinal de vida há {age}",
         "no_data": "sem dados", "not_checked": "ainda não verificada",
         "care_db": "Banco de sessões: {journal} · WAL {wal} · integridade {quick}",
@@ -408,7 +419,7 @@ TEXT = {
         "os_lost": "A atualização parou sem terminar (foi morta, ou a máquina caiu): repare-a pela opção de reparo desta tela.",
         "yes_word": "sim", "no_word": "não", "unknown": "desconhecido",
         "auto_line": ("Modo: {mode} · {n} ação automática em 7 dias", "Modo: {mode} · {n} ações automáticas em 7 dias"),
-        "attention_title": "Pede atenção:", "suggest_title": "Sugestões:",
+        "attention_title": "Pede atenção:", "suggest_title": "Sugestões:", "letter_hint": " (letra {letter} abaixo)",
         "suggest_waiting": ("Decidir 1 lição esperando você", "Decidir {n} lições esperando você"),
         "suggest_apply": ("Aplicar 1 mudança recomendada: {what}", "Aplicar {n} mudanças recomendadas: {what}"),
         "suggest_full": "Ligar o Modo Auto (o plugin pensa e age por você, em todos os perfis)",
@@ -517,7 +528,7 @@ TEXT = {
         "memory_removed": "Removida. Uma cópia do arquivo está em evolution/memory-backups; para desfazer: opção 4 deste menu (histórico). As novas sessões já leem a mudança.",
         "memory_changed": "A entrada mudou desde que você a viu: nada foi removido.",
         "memory_note": "Juntar duas entradas em palavras novas é tarefa do agente: peça que ele as reescreva com a ferramenta de memória.",
-        "learn_running": "Fazendo uma rodada de aprendizado (até dois minutos)…",
+        "learn_running": "Fazendo uma rodada de aprendizado (até {minutes} minutos)…",
         "learn_done": "Pronto: {sessions} e {calls} lidas · {new} · {open}.",
         "n_calls": ("{n} chamada de ferramenta", "{n} chamadas de ferramenta"),
         "n_new_lessons": ("{n} lição nova", "{n} lições novas"),
@@ -545,6 +556,8 @@ FIELDS = (
      "Proteção do Hermes (impede o agente de derrubar o Hermes)"),
     ("mode", "Mode: Auto, Assisted or Manual (what the plugin does by itself)",
      "Modo: Auto, Assistido ou Manual (o que o plugin faz sozinho)"),
+    ("fleet_managed", "Let the lead profile act here (install, update and move to the trash)",
+     "Deixar o perfil que cuida de todos agir aqui (instalar, atualizar e mover para a lixeira)"),
     ("owner_platforms", "Channels where every chat counts as you", "Canais em que todo chat conta como você"),
     ("owner_sender_ids", "Senders that count as you", "Remetentes que contam como você"),
 )
@@ -571,8 +584,9 @@ class Console:
         self._write = write or self._stdout
         columns = width or shutil.get_terminal_size((100, 24)).columns
         self.width = max(50, min(110, columns))
-        if color is None:
-            color = os.name != "nt" and sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+        if color is None:   # only on a terminal that shows it: never with NO_COLOR (no-color.org) or TERM=dumb
+            color = (os.name != "nt" and sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+                     and os.environ.get("TERM", "").strip().lower() != "dumb")
         self.color = color
 
     @staticmethod
@@ -622,6 +636,26 @@ def _ago(seconds, lang: str) -> str | None:
             return f"{round(seconds / size)} {unit}"
     days = round(seconds / 86_400)
     return f"{days} {'dias' if lang == 'pt' else 'days'}"
+
+
+def _commands_in(texts, profile: str, gateway: str):
+    """The menu's own sentences with Hermes' commands as the owner types them in this profile (cli.profile_commands)."""
+    from .cli import profile_commands
+
+    if isinstance(texts, str):
+        return profile_commands(texts, profile, gateway=gateway)
+    if isinstance(texts, dict):
+        return {key: _commands_in(value, profile, gateway) for key, value in texts.items()}
+    if isinstance(texts, (list, tuple)):
+        return type(texts)(_commands_in(value, profile, gateway) for value in texts)
+    return texts
+
+
+def _profile(home) -> str:
+    """The profile's name as its commands take it (`hermes -p <name> …`)."""
+    from .admin import profile_name
+
+    return profile_name(Path(home))
 
 
 def _plural(forms, n) -> str:
@@ -733,24 +767,34 @@ def plain(markdown: str, width: int = 100) -> str:
     return "\n".join(out)
 
 
+# `hermes evolution`, also as the plugin prints it since 0.12.0 with the profile: `hermes -p work evolution`,
+# `hermes --profile work evolution`.
+_EVOLUTION = r"hermes (?:(?:-p|--profile)[ =][\w.-]+ )?evolution"
+
+
+def _command_re(pattern: str):
+    """A pattern written with `hermes evolution` that also matches the command with its profile."""
+    return re.compile(pattern.replace("hermes evolution", _EVOLUTION))
+
+
 # Words of `status` and the digest that read better inside the menu (in Portuguese, the names the menu uses), and
 # sentences that send the owner to the menu they are already in.
 _IN_MENU = {
-    "en": ((re.compile(r"decide in the menu \(`?hermes evolution`?\) or with `?hermes evolution lessons review`?,"
-                       r" in your own terminal\."), "option 1 of this menu."),
-           (re.compile(r"in your (?:own )?terminal with `hermes evolution proposals approve <id>` or "
-                       r"`hermes evolution proposals reject <id>`"), "in option 2 of this menu"),
-           (re.compile(r",? or in the menu \(`?hermes evolution`?\)"), ""),
-           (re.compile(r"in the menu \(`?hermes evolution`?\)"), "in this menu"),
-           (re.compile(r"\b(?:with )?`hermes evolution schedule-digest --deliver <channel>`"),
+    "en": ((_command_re(r"decide in the menu \(`?hermes evolution`?\) or with `?hermes evolution lessons review`?,"
+                        r" in your own terminal\."), "option 1 of this menu."),
+           (_command_re(r"in your (?:own )?terminal with `hermes evolution proposals approve <id>` or "
+                        r"`hermes evolution proposals reject <id>`"), "in option 2 of this menu"),
+           (_command_re(r",? or in the menu \(`?hermes evolution`?\)"), ""),
+           (_command_re(r"in the menu \(`?hermes evolution`?\)"), "in this menu"),
+           (_command_re(r"\b(?:with )?`hermes evolution schedule-digest --deliver <channel>`"),
             "with the “Schedule the weekly digest” suggestion on this menu's first screen")),
-    "pt": ((re.compile(r"decida pelo menu \(`?hermes evolution`?\) ou com `?hermes evolution lessons review`?,"
-                       r" no seu próprio terminal\."), "opção 1 deste menu."),
-           (re.compile(r"no seu (?:próprio )?terminal com `hermes evolution proposals approve <id>` ou "
-                       r"`hermes evolution proposals reject <id>`"), "na opção 2 deste menu"),
-           (re.compile(r",? ou pelo menu \(`?hermes evolution`?\)"), ""),
-           (re.compile(r"(?:pelo|no) menu \(`?hermes evolution`?\)"), "neste menu"),
-           (re.compile(r"\b(?:com )?`hermes evolution schedule-digest --deliver <canal>`"),
+    "pt": ((_command_re(r"decida pelo menu \(`?hermes evolution`?\) ou com `?hermes evolution lessons review`?,"
+                        r" no seu próprio terminal\."), "opção 1 deste menu."),
+           (_command_re(r"no seu (?:próprio )?terminal com `hermes evolution proposals approve <id>` ou "
+                        r"`hermes evolution proposals reject <id>`"), "na opção 2 deste menu"),
+           (_command_re(r",? ou pelo menu \(`?hermes evolution`?\)"), ""),
+           (_command_re(r"(?:pelo|no) menu \(`?hermes evolution`?\)"), "neste menu"),
+           (_command_re(r"\b(?:com )?`hermes evolution schedule-digest --deliver <canal>`"),
             "com a sugestão “Agendar o resumo semanal” na tela inicial deste menu"),
            (re.compile(r"\bPlaybook\b"), "Manual de lições"),
            (re.compile(r"\bpassadas\b"), "rodadas"), (re.compile(r"\bpassada\b"), "rodada"),
@@ -788,7 +832,7 @@ _PLACES = (
 _LEAD = {"en": r"(?P<lead>\bin your (?:own )?terminal,? with |\b(?i:with|run|use|call|open|see)\s+)?",
          "pt": r"(?P<lead>\bno seu (?:próprio )?terminal,? com (?:o\s+)?|\b(?i:com|rode|use|chame|chama|abra|veja)\s+(?:o\s+)?)?"}
 _TAIL = {"en": r"(?P<tail>,? in your (?:own )?terminal\b)?", "pt": r"(?P<tail>,? no seu (?:próprio )?terminal\b)?"}
-_PLACES_RE = {lang: tuple((re.compile(_LEAD[lang] + "(?:" + pattern + ")" + _TAIL[lang]), main, inner, command)
+_PLACES_RE = {lang: tuple((_command_re(_LEAD[lang] + "(?:" + pattern + ")" + _TAIL[lang]), main, inner, command)
                           for pattern, main, inner, command in _PLACES) for lang in ("en", "pt")}
 
 
@@ -864,9 +908,16 @@ class Menu:
                  writer=None, clock=time.time, reflect=None):
         self.home, self.runtime = Path(home), runtime_config if isinstance(runtime_config, dict) else {}
         self.lang = lang if lang in TEXT else "en"
-        self.t = TEXT[self.lang]
         self.io = console or Console()
         self.writer, self.clock, self.reflect = writer, clock, reflect
+        # every command the menu prints names this profile, as the terminal's commands do (cli.profile_commands): its
+        # own words also name the gateway that serves it; what it prints of other profiles keeps their `-p`
+        from .admin import profile_name
+        from .cli import gateway_profile, profile_commands
+
+        write, profile = self.io._write, profile_name(self.home)
+        self.t = _commands_in(TEXT[self.lang], profile, gateway_profile(self.home))
+        self.io._write = lambda text: write(profile_commands(text, profile))
 
     # ── helpers ────────────────────────────────────────────────────────────────────────────────────
     def _(self, sentence: str) -> str:
@@ -957,26 +1008,31 @@ class Menu:
         from . import status
         from .cli import safe_settings
 
-        config, _problems = safe_settings(self.home, self.runtime)
-        return status.build(self.home, now=self.clock(), config=config, runtime_config=self.runtime)
+        config, problems = safe_settings(self.home, self.runtime)
+        return status.build(self.home, now=self.clock(), config=config, runtime_config=self.runtime, problems=problems)
 
     def open_proposals(self, home=None) -> list[dict]:
         from . import explain, proposals
         from .experience import experience
 
+        from .admin import profile_name
+        from .cli import profile_commands
+
         with experience(home or self.home) as conn:
             items = proposals.listing(conn, status="open")
+        owner = profile_name(Path(home or self.home))   # the profile that wrote them: the lead's keep the lead's `-p`
         found = []
         for item in items:
-            told = explain.describe(item, self.lang)
+            told = {key: profile_commands(value, owner) for key, value in explain.describe(item, self.lang).items()}
             if told.get("category") == "change" and told.get("can_apply") is False:
                 told = {**told, "category": "manual"}   # nothing the plugin can apply here: it is the owner's to run
-            found.append({**item, "explain": told})
+            found.append({**item, "command": profile_commands(item.get("command"), owner), "explain": told})
         return found
 
-    def attention_lines(self, state: dict) -> list[str]:
+    def attention_lines(self, state: dict, letters: dict | None = None) -> list[str]:
         """The "Needs attention" items as `status` writes them (values and lists filled in), in plain text and with
-        the menu's own words where `status` sends the owner to this menu."""
+        the menu's own words where `status` sends the owner to this menu. `letters`: {attention code: the letter of
+        the suggestion below that does it}, named at the end of its item."""
         from .status import _TEXT, markdown
 
         heading = "## " + _TEXT.get(self.lang, _TEXT["en"])["attention"]
@@ -993,7 +1049,27 @@ class Menu:
         if len(codes) == len(lines):   # one line per code: the ones the menu says itself
             lines = [self.t["waiting_attention"] if code == "lessons_waiting" else line for code, line in zip(codes, lines)]
         lines = ["\n".join(inline(in_menu(part, self.lang)) for part in line.split("\n")) for line in lines]
+        if letters and len(codes) == len(lines):
+            lines = [self.lettered(line, letters[code]) if code in letters else line for code, line in zip(codes, lines)]
         return lines[:5] if codes else []
+
+    def lettered(self, item: str, letter: str) -> str:
+        """An attention item that ends naming the suggestion letter that does it: "…: option 1 of this menu (letter a
+        below)."."""
+        first, newline, rest = item.partition("\n")
+        said = self.t["letter_hint"].format(letter=letter)
+        first = first[:-1] + said + first[-1] if first[-1:] in (".", ":") else first + said
+        return first + newline + rest
+
+    def letters(self, ideas: list) -> dict:
+        """{attention code: the letter of the suggestion that does it}, for the suggestions shown on the main screen."""
+        shown: dict = {}
+        for letter, (_text, action) in zip("abcdef", ideas):
+            shown.setdefault(action, letter)
+        does = {"lessons_waiting": self.waiting, "digest_unscheduled": self.schedule_digest,
+                "hermes_unused_tools": self.care, "os_security_updates": self.operating_system,
+                "os_dpkg_interrupted": self.operating_system, "os_held_by_plugin": self.operating_system}
+        return {code: shown[action] for code, action in does.items() if action in shown}
 
     def suggestions(self, state: dict, items: list[dict]) -> list[tuple[str, object]]:
         """(text, action) for what is worth doing now, most useful first."""
@@ -1059,7 +1135,8 @@ class Menu:
                                                   guard=self.t["guard_on" if state["runtime_guard"]["enabled"] else "guard_off"],
                                                   reflector=self.t["on" if state["reflector"]["enabled"] else "off"]))
                 self.io.say(self.n("auto_line", automatic.get("last_7d", 0), mode=counts["auto"]))
-                attention = self.attention_lines(state)
+                ideas = self.suggestions(state, items)
+                attention = self.attention_lines(state, self.letters(ideas))
                 if attention:
                     self.io.say()
                     self.io.say(self.io.bold(self.t["attention_title"]))
@@ -1068,7 +1145,6 @@ class Menu:
                         self.io.para("• " + first, indent=2)
                         for sub in rest[:6]:
                             self.io.say(sub)
-                ideas = self.suggestions(state, items)
                 if ideas:
                     self.io.say()
                     self.io.say(self.io.bold(self.t["suggest_title"]))
@@ -1767,11 +1843,13 @@ class Menu:
             keep = self.io.ask(self.t["keep_prompt"])
             if keep not in ("1", "2"):
                 continue
-            drop = second if keep == "1" else first
+            drop, kept = (second, first) if keep == "1" else (first, second)
 
-            def take_out(entry=drop):
+            def take_out(entry=drop, kept=kept):
                 result = admin.decide(self.home, self.runtime, {"kind": "memory", "action": "remove",
-                                                                "file": entry["file"], "fingerprint": entry["fingerprint"]},
+                                                                "file": entry["file"], "fingerprint": entry["fingerprint"],
+                                                                "keep": {"file": kept["file"],
+                                                                         "fingerprint": kept["fingerprint"]}},
                                       now=self.clock(), lang=self.lang, writer=self.writer, actor="terminal")
                 self.io.say(self.t["memory_removed"] if result.get("removed") else self.t["memory_changed"])
 
@@ -1789,6 +1867,7 @@ class Menu:
     # ── Hermes health ──────────────────────────────────────────────────────────────────────────────
     def care(self) -> None:
         from . import hermes_care
+        from .cli import gateway_profile, profile_commands
         from .experience import experience
         from .status import _TEXT, _care_values, decimal_comma
 
@@ -1823,13 +1902,14 @@ class Menu:
                 self.io.para(self.t["care_unused"].format(size=size(found.get("reclaimable")), list=", ".join(
                     f"{item['folder']} ({size(item['bytes'])})" for item in found["unused_tools"])), indent=0)
             texts = _TEXT.get(self.lang, _TEXT["en"])
-            values = _care_values({"care": found, "system": {}})
+            values = _care_values({"care": found, "system": {}, "profile": _profile(self.home)})
             codes = [f"hermes_{code}" for code in found.get("findings") or () if f"hermes_{code}" in texts]
             self.io.say()
             if codes:
                 self.io.say(self.io.bold(self.t["attention_title"]))
                 for code in codes:   # this screen's own options, said as such ("option 5 below")
-                    text = decimal_comma(texts[code].format(**values), self.lang)
+                    text = decimal_comma(profile_commands(texts[code].format(**values), values["profile"],
+                                                          gateway=gateway_profile(self.home)), self.lang)
                     self.io.para("• " + inline(in_menu(text, self.lang, screen=12)), indent=2)
             else:
                 self.io.say(self.t["care_none"])
@@ -1844,9 +1924,18 @@ class Menu:
                 continue
             key = ("pm_doctor", "doctor", "doctor_fix", "pm_gc")[chosen - 1]
             if key == "pm_gc" and hermes_care.gc_blocked(found):
-                # it would delete a Python a Hermes service still starts from (hermes_care.gc_blocked)
-                self.io.para(self.t["care_gc_blocked"].format(
-                    folders=", ".join(str(item) for item in found.get("in_use_unreferenced") or ()) or "?"), indent=2)
+                # it would delete a Python a Hermes service still starts from, or every tool of a store without a
+                # facts.json it can read (hermes_care.gc_blocked): said as cli.py says it
+                folders = [str(item) for item in found.get("in_use_unreferenced") or ()]
+                reasons = hermes_care.gc_unsafe_words(found.get("gc_unsafe"), self.lang)
+                if folders:   # honest about the remedy (hermes_care.gc_block_advice): a build run on purpose stays
+                    for line in hermes_care.gc_block_advice(found, self.lang):
+                        self.io.para(("Agora não: " if self.lang == "pt" else "Not now: ") + line.replace("`", ""),
+                                     indent=2)
+                elif reasons:
+                    self.io.para(self.t["care_gc_unsafe"].format(reasons="; ".join(reasons[:3])), indent=2)
+                else:   # no check yet, or one stored by an older version: it proves nothing either way
+                    self.io.para(self.t["care_gc_recheck"], indent=2)
                 self.pause()
                 continue
             command = "hermes " + " ".join(hermes_care.ACTIONS[key][0])
@@ -1866,7 +1955,9 @@ class Menu:
 
     def gateway_state(self, gate: dict) -> str:
         """“running · version 0.23.1 · memory 412 MB · heartbeat 20 s ago”, or “stopped · no data”."""
-        state = self.t["gate_running"] if gate.get("running") else \
+        # a degraded or starting gateway runs (hermes_care.gateway: running): said with its state
+        running = self.t["gate_" + gate["state"]] if gate.get("state") in ("degraded", "starting") else self.t["gate_running"]
+        state = running if gate.get("running") else \
             self.t["gate_crashed"] if gate.get("crashed") else self.t["gate_stopped"]
         parts = []
         if gate.get("version"):
@@ -1906,8 +1997,10 @@ class Menu:
                 self.io.para(line, indent=4)
             return
         doctor = result.get("doctor") if isinstance(result.get("doctor"), dict) else None
-        if doctor is None:
-            tail = list(last.get("tail") or ())
+        if doctor is None:   # what did not pass (✗) first: the last lines alone may be all ✓ (cli.step_lines)
+            from .cli import step_lines
+
+            tail = step_lines(last)
             self.io.say(self.t["care_ok"].format(code=last.get("exit")) if result.get("ok")
                         else self.t["care_failed"].format(code=last.get("exit"), note=note(tail)))
             for line in tail:
@@ -2104,10 +2197,12 @@ class Menu:
         from .evolve import cycle
 
         config = effective_settings(self.home, self.runtime)
-        self.io.say(self.t["learn_running"])
         import time
 
         from .autopilot import LEASE_SECONDS
+
+        # the pass stops by itself before its lease ends, as the autopilot's: the time said is that limit
+        self.io.say(self.t["learn_running"].format(minutes=(LEASE_SECONDS - 180) // 60))
 
         result = run_exclusive(self.home, lambda: cycle(self.home, now=self.clock(), runtime_config=self.runtime,
                                                         config=config, lang=self.lang, reflect=self.reflect,
