@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import stat
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -28,26 +27,11 @@ DEAD_AFTER_DAYS = 21
 
 
 def _read_bounded(path: Path, limit: int, *, tail: bool = False) -> bytes | None:
-    try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    except OSError:
-        return None
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            return None
-        with os.fdopen(fd, "rb", closefd=False) as stream:
-            if tail and info.st_size > limit:
-                stream.seek(info.st_size - limit)
-                data = stream.read(limit)
-                return data.split(b"\n", 1)[1] if b"\n" in data else b""
-            if info.st_size > limit:
-                return None
-            return stream.read(limit)
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
+    """The plugin's one safe reader (environment.read_bytes): never through a link, never a pipe or a device; a larger
+    file is refused, or, with `tail`, read from its last `limit` bytes on (from the first whole line)."""
+    from .environment import read_bytes
+
+    return read_bytes(Path(path), limit, part="tail" if tail else "")
 
 
 def _timestamp(value) -> float | None:

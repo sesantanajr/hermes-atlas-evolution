@@ -166,21 +166,65 @@ def decide_proposal(conn: sqlite3.Connection, proposal_id: int, action: str, *, 
     return {**result, "decided": True, "decision": decision}
 
 
+def _home_of(conn: sqlite3.Connection):
+    """The profile's home, from this connection's own database file (<home>/evolution/evolution.sqlite3), or None."""
+    from pathlib import Path
+
+    try:
+        found = conn.execute("PRAGMA database_list").fetchone()
+    except sqlite3.Error:
+        return None
+    return Path(found[2]).parent.parent if found and found[2] else None
+
+
 def _share_skip(conn: sqlite3.Connection, code: str, *, add: bool) -> None:
     """Add or lift a change across profiles in the skip list every profile of this Hermes reads (environment.state).
     The profile's home is found from this connection's own database file. Never fails the decision."""
     try:
-        from pathlib import Path
-
         from .environment import forget_skip, remember, root_of
 
-        found = conn.execute("PRAGMA database_list").fetchone()
-        if not found or not found[2]:
+        home = _home_of(conn)
+        if home is None:
             return
-        root = root_of(Path(found[2]).parent.parent)   # <home>/evolution/evolution.sqlite3
+        root = root_of(home)
         remember(root, skip=[code]) if add else forget_skip(root, code)
     except Exception:
         pass
+
+
+def _later_decision(conn: sqlite3.Connection, row) -> int | None:
+    """A later decision on the same proposal that still stands: only the newest one may be undone, so undoing an
+    older "no" never reopens what the owner refused again since."""
+    if row["kind"] != "proposal":
+        return None
+    later = conn.execute("SELECT id FROM decision_log WHERE kind='proposal' AND target=? AND id > ? AND undone IS NULL "
+                         "ORDER BY id DESC LIMIT 1", (row["target"], row["id"])).fetchone()
+    return later[0] if later else None
+
+
+def _gone(conn: sqlite3.Connection, row, before: dict, after: dict) -> bool:
+    """Whether what an undo needs is gone for good: the copy of a memory file a removal kept (the newest 100 are
+    kept), or a folder the plugin moved to the trash (deleted 30 days after it entered)."""
+    home = _home_of(conn)
+    if home is None:
+        return False
+    try:
+        if row["kind"] == "memory":
+            from .memory_care import backup_exists
+
+            return not backup_exists(home, before.get("backup"))
+        applied = after.get("applied") if row["kind"] == "proposal" else None
+        if isinstance(applied, list) and len(applied) == 3 and applied[1] == "__trash__" \
+                and str(applied[0]).startswith("@"):
+            import os
+
+            from .actions import _trash_places
+
+            _parents, _live, kept = _trash_places(str(applied[2]))
+            return not os.path.lexists(home / "evolution" / "trash" / str(applied[0])[1:] / kept)
+    except (OSError, ValueError, TypeError):
+        return False
+    return False
 
 
 def record_setting(conn: sqlite3.Connection, key: str, before, after, *, now: float, actor: str = "dashboard") -> int:
@@ -232,12 +276,12 @@ def record_cron(conn: sqlite3.Connection, job: str, *, name: str, schedule: str,
 
 
 def record_memory(conn: sqlite3.Connection, name: str, mark: str, *, position: int, backup: str, before: int,
-                  after: int, copies: int = 1, now: float, actor: str = "terminal") -> int:
-    """Log an entry taken out of a memory file: its fingerprint, where it was, how many copies the file held and the
-    copy of the file kept, never its text."""
+                  after: int, copies: int = 1, now: float, actor: str = "terminal", keep: dict | None = None) -> int:
+    """Log an entry taken out of a memory file: its fingerprint, where it was, how many copies the file held, the
+    copy kept (file and fingerprint) and the copy of the file kept, never its text."""
     return _log(conn, now=now, actor=actor, kind="memory", target=name, action="remove",
                 before={"entries": before, "fingerprint": mark, "position": position, "backup": backup,
-                        "copies": copies},
+                        "copies": copies, **({"keep": keep} if isinstance(keep, dict) else {})},
                 after={"entries": after})
 
 
@@ -262,6 +306,9 @@ def history(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 50) -> l
         # this version no longer has (0.8.3's auto_actions, now `mode`)
         item["undoable"] = row["undone"] is None and row["kind"] != "maintenance" and not (
             row["kind"] == "setting" and row["target"] not in SETTINGS)
+        if item["undoable"] and row["kind"] in ("memory", "proposal"):
+            # only the newest decision on a proposal, and only while the copy an undo puts back is still kept
+            item["undoable"] = _later_decision(conn, row) is None and not _gone(conn, row, item["before"], item["after"])
         if row["kind"] == "lesson":
             lesson = conn.execute("SELECT * FROM lesson WHERE id=?", (int(row["target"]),)).fetchone()
             item["lesson"] = playbook.render(lesson, lang) if lesson is not None else None
@@ -312,6 +359,11 @@ def undo(conn: sqlite3.Connection, decision_id: int, *, now: float, actor: str =
     if row["undone"] is not None:
         return {"id": decision_id, "undone": False, "reason": "already_undone"}
     before, after = json.loads(row["before"]), json.loads(row["after"])
+    later = _later_decision(conn, row)
+    if later is not None:   # the menus say: "it changed since (a later decision or a pass); nothing changed"
+        return {"id": decision_id, "undone": False, "reason": "changed_since", "later_decision": later}
+    if row["kind"] in ("memory", "proposal") and _gone(conn, row, before, after):
+        return {"id": decision_id, "undone": False, "reason": "changed_since", "purged": True}
     if row["kind"] == "setting":
         if current is ... or current != after.get("value"):
             return {"id": decision_id, "undone": False, "kind": "setting", "key": row["target"],

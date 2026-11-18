@@ -13,7 +13,7 @@ body:
     attributes:
       label: Plugin version
       description: The `version` field of `plugin.yaml`.
-      placeholder: "0.4.0"
+      placeholder: "0.12.0"
     validations:
       required: true
   - type: input
@@ -35,8 +35,11 @@ body:
     attributes:
       label: How was the command run?
       options:
-        - hermes evolution (plugin loaded in process)
+        - hermes -p <profile> evolution (plugin loaded in process)
+        - The terminal menu (hermes -p <profile> evolution with no command)
+        - The dashboard panel (the Evolution tab)
         - python -m hermes_atlas_evolution (standalone runner)
+        - It happened by itself (a learning pass, Mode auto)
         - It happened in a hook, tool or prompt section while the agent was working
     validations:
       required: true
@@ -47,6 +50,10 @@ body:
       options:
         - Evolution loop (signals, lessons, skills by outcome, measurement, proposals, digest)
         - Reflector
+        - Mode auto (automatic actions, the gateway repair, the plugin's sync across profiles)
+        - Runtime guard (a command vetoed, or one that should have been)
+        - Dashboard panel
+        - Terminal menu
         - Language (English or Portuguese text)
         - Maintenance and usage (Hermes health, the environment, the operating system, usage and cost)
         - Installation or Hermes integration

@@ -13,9 +13,23 @@ from . import experiments, lessons, logwatch, proposals, signals
 from .experience import day_offset, experience, utc_day
 from .skill_health import skill_health, skill_outcomes
 
+def _profile(home: Path) -> str:
+    from .admin import profile_name
+
+    return profile_name(home)
+
+
+def _lesson_texts(conn, rows: list, lang: str) -> list:
+    from .cli import lesson_texts
+
+    return lesson_texts(conn, rows, lang)
+
+
 def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dict | None = None,
           own_transform: bool = True) -> dict:
-    """Collect the digest for the last `days` days and the same span before it."""
+    """Collect the digest for the last `days` days and the same span before it. Its `profile` is the one whose
+    commands the digest prints (`hermes -p <profile> evolution …`); a lesson proposal's sentence is rendered in
+    `lang` as it reads now."""
     from .billing import native_billing
     from .operations import database, summarize
 
@@ -26,6 +40,7 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
         previous_start, previous_end = day_offset(now, 2 * days - 1), day_offset(now, days)
         interactive = signals.turn_summary(conn, now=now, days=days, surfaces=("local", "gateway"))
         report = {
+            "profile": _profile(home),
             "window": {"days": days, "from_utc": start, "to_utc": end},
             "turns": {"interactive": interactive,
                       "cron": signals.turn_summary(conn, now=now, days=days, surfaces=("cron",)),
@@ -38,7 +53,7 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
                 conn, **dict(zip(("start_day", "end_day"), logwatch.local_days(now, days))))},
             "lessons": lessons.listing(conn, lang=lang),
             "changes": experiments.listing(conn, limit=20),
-            "proposals": proposals.listing(conn, status="open"),
+            "proposals": _lesson_texts(conn, proposals.listing(conn, status="open"), lang),
             "skill_outcomes": skill_outcomes(conn, start_day=start, end_day=end, limit=10),
             "guard": signals.guard_summary(conn, now=now, days=days),
         }
@@ -95,11 +110,17 @@ def build(home: Path, *, now: float, days: int = 7, lang: str = "en", rates: dic
         native = native_billing(home, days=days, now=now)
         totals = native.get("totals") if isinstance(native, dict) else None
         if isinstance(totals, dict):
-            crossing = (native.get("coverage") or {}).get("rows_crossing_window_start")
+            coverage = native.get("coverage") if isinstance(native.get("coverage"), dict) else {}
+            crossing = coverage.get("rows_crossing_window_start")
             report["native_cost"] = {"estimated_cost_usd": totals.get("estimated_cost_usd"),
                                      "api_call_count": totals.get("api_call_count"), "basis": "hermes_session_accounting",
                                      # Hermes counts a session's cost whole: one that began earlier brings it along
-                                     "sessions_started_before": crossing if type(crossing) is int else 0}
+                                     "sessions_started_before": crossing if type(crossing) is int else 0,
+                                     # more records than billing reads: the totals are the newest ones, a floor
+                                     "partial": coverage.get("partial") is True,
+                                     "row_limit": coverage.get("row_limit") if type(coverage.get("row_limit")) is int
+                                     else None,
+                                     "covered_from_epoch": coverage.get("covered_from_epoch")}
     except (sqlite3.Error, ValueError, OSError):
         pass
     return report
@@ -111,6 +132,7 @@ _TEXT = {
         "summary": "Summary", "turns": "Interactive turns", "of": "of", "failed": ("{n} failed", "{n} failed"),
         "interrupted": ("{n} interrupted", "{n} interrupted"), "slow": ("{n} slow", "{n} slow"), "turn_time": "Turn time", "typical": "half within", "p95": "1 in 20 takes more than",
         "tools": "Tool calls", "errors": ("{n} error", "{n} errors"), "cost": "Estimated cost (Hermes accounting)",
+        "cost_partial": "the newest {limit} records", "at_least": "at least ",
         "cost_earlier": ("includes {n} session that began before this period, counted whole",
                          "includes {n} sessions that began before this period, counted whole"),
         "feedback": "Owner signals", "corrections": "corrections", "reasks": "repeated questions", "thanks": "thanks",
@@ -166,6 +188,7 @@ _TEXT = {
         "summary": "Resumo", "turns": "Turnos interativos", "of": "de", "failed": ("{n} falhou", "{n} falharam"),
         "interrupted": ("{n} interrompido", "{n} interrompidos"), "slow": ("{n} lento", "{n} lentos"), "turn_time": "Duração dos turnos", "typical": "metade até", "p95": "1 em cada 20 passa de",
         "tools": "Chamadas de ferramentas", "errors": ("{n} erro", "{n} erros"), "cost": "Custo estimado (contabilidade do Hermes)",
+        "cost_partial": "os {limit} registros mais recentes", "at_least": "pelo menos ",
         "cost_earlier": ("inclui {n} sessão que começou antes deste período, contada inteira",
                          "inclui {n} sessões que começaram antes deste período, contadas inteiras"),
         "feedback": "Sinais do dono", "corrections": "correções", "reasks": "perguntas repetidas", "thanks": "agradecimentos",
@@ -532,9 +555,12 @@ def markdown(report: dict, lang: str = "en") -> str:
             lines.append(f"  - {story}")
     cost = report.get("native_cost", {}).get("estimated_cost_usd")
     if cost is not None:
-        earlier = report.get("native_cost", {}).get("sessions_started_before") or 0
-        lines.append(f"- **{t['cost']}:** US$ {_number(cost, lang, 2)}"
-                     + (" (" + _plural(t["cost_earlier"], earlier, lang) + ")" if earlier else ""))
+        native = report.get("native_cost", {})
+        earlier = native.get("sessions_started_before") or 0
+        notes = ([t["cost_partial"].format(limit=_number(native.get("row_limit") or 20_000, lang))]
+                 if native.get("partial") else []) + ([_plural(t["cost_earlier"], earlier, lang)] if earlier else [])
+        lines.append(f"- **{t['cost']}:** " + (t["at_least"] if native.get("partial") else "")
+                     + f"US$ {_number(cost, lang, 2)}" + (" (" + "; ".join(notes) + ")" if notes else ""))
     lines.append(f"- **{t['feedback']}:** {t['corrections']} {feedback['correction']} · {t['reasks']} {feedback['reask']}"
                  f" · {t['thanks']} {feedback['positive']}")
     comparison = report["comparison"]
@@ -627,4 +653,7 @@ def markdown(report: dict, lang: str = "en") -> str:
     lines += _health(report, lang)
     lines += _proposal_lines(report, lang)
     lines += ["", "_" + t["footer"] + "_"]
-    return "\n".join(lines) + "\n"
+    from .cli import profile_commands
+
+    # every command as the owner types it in this profile: `hermes -p <profile> evolution …` (cli._hermes_cmd)
+    return profile_commands("\n".join(lines) + "\n", report.get("profile"))

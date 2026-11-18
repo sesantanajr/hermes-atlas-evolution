@@ -127,14 +127,20 @@ _MESSAGES = {
            "shared_token": "Read-only: this session uses the dashboard's shared token, not a login.",
            "other_profile": "This profile is decided from the dashboard's own profile, with a login.",
            "missing_header": "The request did not come from the panel; reload the page and try again.",
-           "managed": "Your administrator manages this, so it cannot be changed here.",
+           "unexpected": "Something unexpected stopped this here; nothing was changed by it. The dashboard's log has "
+                         "the details.",
+           "unexpected_read": "This profile's data could not be read right now. The dashboard's log has the details; "
+                              "`{command}` in your terminal shows the same state.",
            "refused": "It was not done"},
     "pt": {"busy": "O banco do Evolution está ocupado agora. Tente de novo em instantes.",
            "open_dashboard": "Só leitura: este dashboard não tem login, então as decisões ficam no terminal.",
            "shared_token": "Só leitura: esta sessão usa o token compartilhado do dashboard, não um login.",
            "other_profile": "Este perfil se decide pelo perfil do próprio dashboard, com login.",
            "missing_header": "O pedido não veio do painel; recarregue a página e tente de novo.",
-           "managed": "O seu administrador gerencia isto, então não dá para mudar aqui.",
+           "unexpected": "Algo inesperado interrompeu isto aqui; nada foi mudado por causa disso. O log do dashboard "
+                         "tem os detalhes.",
+           "unexpected_read": "Não deu para ler os dados deste perfil agora. O log do dashboard tem os detalhes; "
+                              "`{command}` no seu terminal mostra a mesma situação.",
            "refused": "Não foi feito"},
 }
 
@@ -200,7 +206,7 @@ def decide_reply(home: Path, runtime_config: dict, body, *, now: float, hint=Non
     lang = profile_language(home, runtime_config, hint)
     try:
         return 200, localized_result(decide(home, runtime_config, body, now=now, lang=lang, writer=writer), lang)
-    except PermissionError as error:   # the operating system refused a file: said as it is, never as "managed"
+    except PermissionError as error:   # the operating system refused a file: said as it is
         detail = " ".join(str(error).split())[:200]
         return 403, {"error": "denied", "message": message("refused", lang) + (f": {detail}" if detail else "")}
     except OverflowError:   # a number SQLite cannot hold: not a decision
@@ -216,6 +222,15 @@ def decide_reply(home: Path, runtime_config: dict, body, *, now: float, hint=Non
         return 400, {"error": "invalid", "message": text}
     except (OSError, sqlite3.Error):
         return 503, {"error": "busy", "message": message("busy", lang)}
+    except Exception:   # never a bare HTTP 500 with Python's words: a code, a sentence, and the details in the log
+        _log().warning("Atlas Evolution: a decision from the panel stopped unexpectedly", exc_info=True)
+        return 500, {"error": "unexpected", "message": message("unexpected", lang)}
+
+
+def _log():
+    import logging
+
+    return logging.getLogger("hermes_atlas_evolution.panel")
 
 
 def environment_extra(home: Path) -> dict:
@@ -235,7 +250,9 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
              days: int = 7, can_decide: bool = False, decide_reason: str = "open_dashboard",
              ui_lang: str | None = None) -> dict:
     """Everything the panel shows, for one profile. Raises OSError or sqlite3.Error when the store is busy.
-    The sender ids of the chat channels are included only for a request that may decide (the owner's login).
+    The sender ids of the chat channels, and the text of lessons written by the owner, the reflector or the agent, are
+    included only for a request that may decide (the owner's login), as the terminal leaves them out of an agent's
+    shell (cli._hidden_from_agent). A lesson's sentence is rendered in the panel's language when it is read.
     `lang` forces a language; otherwise the profile's own setting decides and, with `auto`, `ui_lang` (the
     dashboard's language), then the profile's (panel_language)."""
     cli, evolve, status, report = _module("cli"), _module("evolve"), _module("status"), _module("report")
@@ -247,13 +264,23 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
     opts = evolve.options(config, runtime_config, strict=False, problems=settings_problems)
     values = current_settings(home, runtime_config)
     lang = lang if lang in ("en", "pt") else profile_language(home, runtime_config, ui_lang)
-    state = status.build(home, now=now, config=config, runtime_config=runtime_config)
+    state = status.build(home, now=now, config=config, runtime_config=runtime_config, problems=settings_problems)
     digest = report.build(home, now=now, days=days, lang=lang, rates=config.get("rates_usd_per_million", {}),
                           own_transform=opts["tool_hints"] and opts["lessons"] != "off")
+    profile = state["profile"]
+
+    def commands_of(value):   # every command as the owner types it in this profile: `hermes -p <profile> …`
+        return cli.profile_commands(value, profile)
+
     with experience.experience(home) as conn:
         playbook = lessons.listing(conn, lang=lang)
         explain = _module("explain")
-        queue = [{**item, "explain": explain.describe(item, lang)} for item in proposals.listing(conn, status="open")]
+        queue = cli.lesson_texts(conn, proposals.listing(conn, status="open"), lang)
+        if not can_decide:   # before describe: what a lesson proposal "saw" is its text
+            queue = cli._hidden_from_agent(queue, "evidence")
+        queue = [{**item, "command": commands_of(item.get("command")),
+                  "explain": {key: commands_of(value) for key, value in explain.describe(item, lang).items()}}
+                 for item in queue]
         recent = _module("actions").recent(conn, now=now)
         pending = decisions.waiting(conn, lang=lang)
         history = decisions.history(conn, lang=lang, limit=40)
@@ -268,16 +295,26 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
         suggestions = [item for item in suggestions if item["kind"] == "platform"]
         history = decisions.masked(history)
         values = {**values, "owner_sender_ids": [], "owner_sender_count": len(values.get("owner_sender_ids") or ())}
+        # text written by the owner, the reflector or the agent: read in the owner's terminal, or here with a login
+        playbook = cli._hidden_from_agent(playbook, "lesson")
+        pending = [{key: value for key, value in row.items() if not (key == "fingerprint" and row.get("text_hidden"))}
+                   for row in cli._hidden_from_agent(pending, "lesson")]   # nor the hash of the hidden sentence
+        digest = {**digest, "lessons": cli._hidden_from_agent(digest.get("lessons") or [], "lesson"),
+                  "proposals": cli._hidden_from_agent(digest.get("proposals") or [], "evidence")}
+    history = [{**row, **({"command": commands_of(row["command"])} if isinstance(row.get("command"), str) else {}),
+                **({"after": {**row["after"], "command": commands_of(row["after"]["command"])}}
+                   if isinstance(row.get("after"), dict) and isinstance(row["after"].get("command"), str) else {})}
+               for row in history]
     try:
         import json
 
         reload_keys = [key for key in json.loads(reload_row[0]) if key in SETTINGS] if reload_row else []
     except (TypeError, ValueError):
         reload_keys = []
-    hermes = _prefix(state["profile"])
+    hermes = _prefix(profile)
     texts, care_values = status._TEXT.get(lang, status._TEXT["en"]), status._care_values(state)
-    health_md = "\n".join("- " + texts[code].format(**care_values) for code in state.get("attention") or ()
-                           if code.startswith(("hermes_", "os_")) and code in texts)
+    health_md = commands_of("\n".join("- " + texts[code].format(**care_values) for code in state.get("attention") or ()
+                                       if code.startswith(("hermes_", "os_")) and code in texts))
     return {
         "lang": lang, "days": days, "generated": now, "profile": state["profile"], "version": state["plugin_version"],
         "mode": opts["lessons"], "status": state, "report": digest, "lessons": playbook, "proposals": queue,
@@ -287,7 +324,7 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
                      "reload_keys": ["runtime_guard", "tool_hints"], "problems": sorted(set(settings_problems))},
         "owner": {"channels": channels, "suggestions": suggestions},
         "status_md": status.markdown(state, lang), "report_md": report.markdown(digest, lang), "health_md": health_md,
-        "insights_md": _module("insights").panel_markdown(state.get("insights"), lang),
+        "insights_md": commands_of(_module("insights").panel_markdown(state.get("insights"), lang)),
         "environment_md": status.environment_markdown(home, lang, mode=opts["mode"]),
         "environment": environment_extra(home),
         "commands": {"menu": f"{hermes} evolution", "review": f"{hermes} evolution lessons review",
@@ -297,7 +334,8 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
                      "approve_proposal": f"{hermes} evolution proposals approve {{id}}",
                      "reject_proposal": f"{hermes} evolution proposals reject {{id}}",
                      "export": f"{hermes} evolution lessons export --out lessons.json",
-                     "import": f"{hermes} evolution lessons import --from <profile> --dry-run"},
+                     "import": f"{hermes} evolution lessons import --from <profile> --dry-run",
+                     "undo_gateway": f"{hermes} evolution care undo-gateway"},
     }
 
 
@@ -399,9 +437,12 @@ def _router():
         except (OSError, sqlite3.Error):
             told = profile_language(home, config, lang)
             return JSONResponse({"error": "busy", "message": message("busy", told)}, status_code=503)
-        except Exception:   # 0.9.1: odd stored data never becomes a bare HTTP 500 in the panel
+        except Exception:   # odd stored data never becomes a bare HTTP 500: a code, a sentence, details in the log
+            _log().warning("Atlas Evolution: the panel could not read profile %s", home.name, exc_info=True)
             told = profile_language(home, config, lang)
-            return JSONResponse({"error": "invalid", "message": message("busy", told)}, status_code=500)
+            command = f"{_prefix(_module('admin').profile_name(home))} evolution status"
+            return JSONResponse({"error": "unexpected", "message": message("unexpected_read", told).format(
+                command=command)}, status_code=500)
 
     @router.post("/decide")
     def post_decide(request: Request, body: dict = Body(...), lang: str = Query("", max_length=8)):

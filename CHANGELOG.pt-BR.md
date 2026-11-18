@@ -2,6 +2,93 @@
 
 *In English: [CHANGELOG.md](CHANGELOG.md), with every version.*
 
+## 0.12.0
+
+Uma auditoria completa da 0.11.0 e as correções que ela pediu: ações automáticas mais seguras, uma Proteção do Hermes mais forte, lições julgadas pelo que o agente leu de fato e a suíte de testes de volta ao CI.
+
+### Correções
+
+**Hermes 0.23.2**
+
+- **Os seus próprios comandos voltam a funcionar no Hermes 0.23.2.** O lançador dele roda `python3 -I -c '<script do lançador>' evolution …`, que o plugin não reconhecia como o lançador deste comando: todo comando que só o dono pode rodar (`owner`, `care doctor`, `care pm-doctor`, `update`, aprovar ou aposentar lições) era recusado no terminal do próprio dono, e o `lessons list` escondia o texto das lições do dono. Agora o lançador é reconhecido; um comando do shell de um agente sob um gateway continua recusado.
+
+**Ações automáticas (Modo Auto)**
+
+- **Nunca sobe um segundo gateway.** Um gateway que o Hermes informa como `degraded` (nenhuma plataforma de chat conectada ainda; as tarefas agendadas seguem rodando) ou `starting` agora conta como rodando. Antes, o Modo Auto podia reparar um serviço que sobrou e subir um segundo gateway ao lado de um que estava no ar. Se um gateway roda é lido pelo que ele deixa: o processo (pid com a hora de início ou a linha de comando), um batimento recente, o `gateway.pid`, a trava que ele segura no `gateway.lock` (lida em `/proc/locks`) e o `host-gateway.json`. Enquanto qualquer gateway deste Hermes roda, nada é reparado sozinho.
+- **Uma checagem só antes de subir.** O Modo Auto e o `care fix-gateway` olham todo serviço `hermes-gateway*` dos dois escopos do systemd (usuário e sistema) e recusam quando um está ativo, subindo, recarregando ou parando, quando um escopo não pode ser lido ou quando o serviço roda outro `HERMES_HOME`. O Modo Auto também nunca sobe um serviço antigo por perfil.
+- **O serviço certo, nunca o da produção.** Os nomes de serviço seguem a regra do próprio Hermes: o `hermes-gateway.service` sem sufixo só para o `~/.hermes` da própria conta (ou a pasta que o serviço sem sufixo fixa), `hermes-gateway-<nome>` para `profiles/<nome>`, `hermes-gateway-<hash>` para qualquer outra pasta. Antes, uma pasta de homologação ou de teste podia reescrever e subir o serviço do gateway de produção. O `HERMES_HOME` do serviço é conferido antes de gravar o arquivo, e para um perfil que o gateway da raiz atende, o serviço da raiz vem primeiro.
+- **O reparo segue o serviço inteiro.** Caminhos com espaço no `ExecStart` são lidos como o Hermes os lê, toda linha `Exec*=` que cita o programa antigo é reescrita (`ExecStop`, `ExecStopPost`…) e o serviço sobe com `--no-block`: o plugin espera até 180 segundos e diz "ainda subindo" em vez de "falhou".
+- **Todo reparo do gateway tem desfazer, um por vez.** Um registro dos últimos 40 reparos e desfazeres (`<raiz>/evolution/gateway-repair.json`) deixa o `care undo-gateway` funcionar de qualquer perfil e voltar um reparo por vez até o arquivo original; ele recusa quando o arquivo mudou depois. Um reparo que você desfez nunca é repetido pelo Modo Auto.
+- **O `hermes pm gc` lido do jeito que o Hermes o roda.** O Hermes apaga toda pasta do depósito de ferramentas que o `tools/facts.json` não cita, seja qual for o nome. Qualquer pasta usada por um serviço (qualquer linha `Exec*=`) ou por um programa em execução (`/proc/*/exe`) agora o bloqueia, um `facts.json` ausente ou ilegível o bloqueia (ele apagaria todas as ferramentas), um escopo do systemd que não pode ser lido o bloqueia, e a checagem roda de novo logo antes do gc. Ela segue as gerações de ambiente do Hermes e o depósito que um perfil que usa o de outro de fato usa. Quando a pasta em uso é um build que o Hermes não gerencia (um Python seu que um serviço roda de propósito), o conselho diz isso e não oferece mais trocar o serviço para o Python do Hermes como a solução.
+- **Só se espalha o código que o líder roda.** O plugin só se instala num perfil novo enquanto o último commit do repositório for o que o líder roda (senão espera, como a sincronização), e a reinstalação de reserva nunca troca a cópia de um fork pela publicada.
+- **Repetições na memória.** O Assistido e o Auto só tiram uma entrada repetida entre o `MEMORY.md` e o `USER.md` (o próprio Hermes já descarta uma repetição dentro de um arquivo), e só depois de conferir, com a trava do Hermes nos dois arquivos, que a cópia que fica continua lá: a última cópia nunca sai. Nada sai quando o `config.yaml` não foi lido, e o arquivo mantém permissões e dono. A revisão da memória ficou linear: 2.000 entradas levavam 21 s e agora levam 0,2 s; um arquivo de 512 KB leva 0,4 s (levava horas).
+- **Leituras seguras em todo lugar.** Um pipe nomeado, ou um link para `/dev/zero`, chamado `SKILL.md` não trava nem inunda mais a rodada de aprendizado: os arquivos são abertos sem seguir links e sem bloquear, só quando são arquivos comuns, até um limite de tamanho.
+- **Desfazer.** Uma decisão mais antiga não pode mais ser desfeita por cima de uma mais nova na mesma proposta (desfazer uma recusa antiga não reabre mais o que você recusou depois). O desfazer anota que a mudança não deve voltar antes de rodar o Hermes, então uma queda no meio não perde isso. Uma decisão cuja entrada na lixeira foi apagada ou cuja cópia da memória foi descartada não aparece mais como desfazível.
+- **Perfis como o Hermes os encontra.** Um `~/.hermes` que é link continua sendo o `default`; `profiles/default`, perfis apagados (`profiles/.deleted`) e pastas sem os arquivos de identidade do Hermes não são perfis, e um perfil apagado é recusado.
+- **Windows.** O `hermes.exe` é encontrado ao lado do inicializador, em `.hermes/bin` ou no `Scripts` do ambiente virtual (um `.cmd` só em último caso, entre aspas); um tempo esgotado encerra a árvore inteira de processos; arquivos de pacote do git somente leitura são apagados da lixeira; o estado compartilhado dos perfis tem uma trava de verdade. Em sistemas POSIX cada comando roda no próprio grupo de processos, e um tempo esgotado encerra o grupo.
+- **Um `config.yaml` não lido vale Manual.** Quando o `config.yaml` não pode ser lido (sem PyYAML, acima de 1 MiB, um erro de YAML), o modo é Manual e o `status` diz isso primeiro. Antes, o executor avulso sem PyYAML rodava o Modo Auto mesmo com o `config.yaml` dizendo manual.
+
+**Proteção do Hermes**
+
+- **Seja qual for o verbo.** Gravar, truncar ou mudar os atributos de qualquer coisa dentro do Python em execução, do código do Hermes ou deste plugin é barrado (`truncate`, `dd of=`, `tee`, um redirecionamento, `chmod`, `chown`, `chgrp`, `ln -sf`, `rsync --delete`, e `cp`, `mv` ou `install` para dentro deles). Acima deles, e na pasta do perfil, na raiz do Hermes ou acima delas, só `chmod`, `chown`, `chgrp`, `ln` e `rsync --delete` são barrados. Um `cd` anterior no comando e atribuições literais `VAR=` também são seguidos aqui. Cópias comuns para a sua pasta pessoal, para a raiz do Hermes ou para uma pasta compartilhada como `/usr/local/lib` continuam permitidas. Substituir um `config.yaml` do Hermes (o do perfil, o da raiz ou o de outro perfil) com `cp`, `mv` ou `install` é barrado; acrescentar ao fim dele com `>>` só conta quando o comando cita as configurações do plugin.
+- **Rápida em comandos longos.** Um comando longo podia levar até 41 s para ser conferido (um pipeline com muitos `| xargs`, por exemplo), e o Hermes bloqueia uma ferramenta depois de 30 s; qualquer comando de até 20.000 caracteres agora leva menos de 0,7 s, e um orçamento só limita todas as checagens aninhadas.
+- **Lê mais fundo.** Aninhamento até 8 níveis (eram 3); um `VAR=valor` ou `export VAR=valor` literal antes de `$VAR`; `watch '…'`; um `cat <<EOF` passado para um shell por pipe; `<<<'…'` colado ao shell; os applets do busybox e do toybox; uma palavra de comando com curinga (`sys*ctl`); caminhos relativos depois de `cd /`.
+- **Enchimento não esconde mais um comando.** Um comentário no fim ou um corpo de here-doc enorme é cortado antes do limite de 20.000 caracteres, então não empurra o comando para fora da checagem.
+- Uma falha interna da Proteção agora fica no log, uma vez por processo. O comando continua passando: bloquear todas as ferramentas seria pior.
+
+**Aprendizado**
+
+- **Classes de falha lidas como uma pessoa leria.** Num traceback só contam as linhas da exceção; na saída de um comando, só as últimas linhas; um código HTTP só onde ele aparece como tal (`HTTP/1.1 429`, `status code: 401`); "timeout" só como frase. Antes, `1 failed, 429 passed` virava "limite de requisições" e um traceback com `line 403` virava "autenticação", e as duas viravam lições erradas.
+- **Uma lição é julgada a partir da primeira vez que o agente a leu**, no prompt ou numa dica de ferramenta. Uma lição nunca mostrada não é julgada (o prompt mostra no máximo 8 lições e 1.200 caracteres). Antes, lições que nunca apareceram eram aposentadas ou promovidas.
+- Uma base por dia divide pelos dias em que a falha foi de fato observada, não sempre por 14, e o texto de aposentar diz se comparou falhas por chamada ou por dia.
+- A parte de lições do Índice de evolução também conta as lições aposentadas nos últimos 7 dias, então aposentar uma lição que não ajudou não sobe mais a nota.
+- Uso e custo acima de 20.000 registros dão totais parciais ("pelo menos US$ X", os 20.000 registros mais recentes) em vez de nada.
+- O aviso de "precisa reiniciar" compara com o que este carregamento registrou, e ligar o refletor com o Hermes rodando diz "liga depois de `hermes gateway restart`" em vez de parecer indisponível.
+- Só processos que ficam no ar assumem a rodada de aprendizado (o gateway, o dashboard, o `hermes serve`, a TUI ou o Desktop, um servidor ACP, uma CLI interativa): execuções únicas (`hermes -z`, scripts, workers do Kanban) não cortam mais rodadas no meio.
+- Uma sessão nova não recebe mais as lições como estavam antes de uma rodada mudá-las, e a receita do resumo não engole mais o aviso do dia sobre uma falha que disparou.
+
+**Privacidade e confiança**
+
+- O `settings.json`, que as ferramentas de arquivo do agente podem gravar, não liga mais o `tool_hints` nem sobe o `reflector_daily_limit` acima de 6. Esses só valem pela configuração do Hermes, como os ids do dono, um modo diferente de manual, as ferramentas do agente e desligar a Proteção: o `settings.json` só pode restringir.
+- Um dashboard sem login esconde o texto das lições escritas por você, pelo refletor ou pelo agente (lições, lições que esperam, propostas, o resumo), como o terminal faz no shell de um agente: "(texto oculto: leia no seu terminal)".
+- Um erro inesperado no painel responde `unexpected` com uma frase simples; os detalhes vão só para o log do dashboard.
+
+**Comandos, menu e painel**
+
+- Todo comando que o plugin mostra cita o perfil: `hermes -p <perfil> evolution …`. O menu reconhece todas as formas.
+- A lição de uma proposta aparece no idioma de quem lê. O `proposals reject` numa lição diz o que acontece: a lição é recusada para sempre; numa proposta de aposentar uma lição, a lição continua ativa.
+- Um número fora da faixa recebe uma frase curta (listava 500 opções); os erros do argparse saem em português com `--lang pt`; o `--help` segue o `--lang`; um `--home` que não existe é dito em palavras.
+- O `environment` respeita o modo definido no `config.yaml`; o `owner` aceita `--format md|json`; um `proposals list --all` vazio diz "Nenhuma proposta ainda."; o `lessons review` diz a origem (sua, do agente, rascunho do refletor).
+- O menu não usa cor com `TERM=dumb`, com `NO_COLOR` ou fora de um terminal; o tempo da rodada de aprendizado vem do prazo real (12 minutos, não 2); os itens que pedem atenção dizem a letra da sugestão. Em português: "rodada" e "Pede atenção".
+- Estados do gateway em palavras: "rodando (degradado: nenhuma plataforma de chat conectada ainda; as tarefas agendadas seguem rodando)" e "subindo".
+- O `status` sempre aparece, e lista configurações inválidas e um `config.yaml` não lido em Pede atenção.
+- A linha de ajuda do `hermes evolution` não cita mais a pilha de operações removida.
+
+**Documentação**
+
+- O começo rápido para todos os perfis precisa de `--install-missing` numa primeira instalação.
+- "Sem rede própria" estava errado: o único acesso à rede é o `git ls-remote` deste repositório, para a sincronização do Modo Auto e o `update`. Não há telemetria.
+- As listas do que o Modo Auto faz incluem o reparo do gateway e a sincronização do plugin; o SECURITY.md diz que o reparo do gateway edita um arquivo de serviço do systemd e roda o `systemctl`.
+- A aba Propostas do painel tem **Aplicar agora**, **Aplicar todas** e **Dispensar**. macOS e Windows: tudo menos as partes de apt e systemd, testado no CI, não dentro de um gateway.
+- As regras 5 e 6 do CONTRIBUTING batem com o que o plugin faz, e os modelos de issue pedem a versão atual e citam todas as áreas.
+
+### Novidades
+
+- **As suas lições nas suas conversas diretas.** Numa conversa direta (DM) em que quem escreve é você (`owner_sender_ids`), as lições que o prompt do chat deixa de fora (escritas por você, pelo refletor ou pelo agente) chegam com a sua primeira mensagem, uma vez por conversa, no máximo 5 linhas e 900 caracteres. Nunca num grupo, fio ou tópico, onde o histórico do modelo poderia guardá-las para outra pessoa depois, e nunca para outra pessoa.
+- **Eventos para outros plugins e painéis** no barramento de eventos do Hermes (`ctx.emit`): `hermes-atlas-evolution:lesson_activated`, `hermes-atlas-evolution:lesson_retired` e `hermes-atlas-evolution:failure_spike`, só com ids e números.
+- **`on_session_reset` e `on_session_delete`.** O que o plugin guarda na memória sobre uma sessão sai assim que ela é reiniciada ou apagada (16 hooks).
+- **O achado de saúde `gateway_program_deleted`.** O gateway está rodando, mas o programa que o serviço dele inicia foi apagado por baixo (o Hermes trocou o Python), então o próximo reinício falha. O `care fix-gateway` resolve agora. Ele conta no Índice de evolução.
+- **`fleet_managed`** (ligado por padrão). Desligado, o perfil que cuida de todos nunca instala, atualiza nem move nada para a lixeira naquele perfil sozinho; continua mostrando o que encontra. O `settings.json` só pode desligá-lo.
+
+### Mudanças
+
+- **A suíte de testes volta a rodar no CI**, no Linux com Python 3.11 a 3.14, no macOS e no Windows: mais de 700 testes. Ela fica no ramo `tests`, porque o Hermes clona o ramo padrão em cada perfil, e assim as instalações continuam pequenas; um ramo chamado `tests-<ramo>` roda no lugar dela, com um pull request desse ramo. O CI também confere o script do painel.
+- **`install.sh`** roda a partir de uma função só, então um download cortado no meio não roda nada. Ele lê o último commit uma vez, lê o registro de instalação do Hermes como JSON, entende o fim da entrada na pergunta como "nada" (era "todos os perfis") e segue as regras do Hermes para o que é um perfil.
+
+### Atualizar
+
+Nada a fazer à mão. [Atualizar para a 0.12.0](docs/pt-BR/upgrading.md#atualizar-para-a-0120) traz os detalhes: o banco ganha uma tabela, `tool_hints: true` e um limite do refletor acima de 6 saem do `settings.json` e vão para a configuração do Hermes, e a nova configuração `fleet_managed`.
+
 ## 0.11.0
 
 Um índice que se explica, uma instalação que a própria varredura do Hermes considera segura e a pilha obsoleta removida.

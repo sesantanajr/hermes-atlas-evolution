@@ -2,7 +2,7 @@
 
 [English](../en-US/maintenance.md) | **Português (Brasil)**
 
-Onde olhar: as telas 12 (Saúde do Hermes), 13 (Sistema operacional) e 14 (Ambiente) do menu (`hermes evolution`), as abas **Saúde** e **Ambiente** do painel no dashboard, e os comandos `hermes evolution care` e `hermes evolution system`. Nenhum deles usa o agente, e nenhum gasta token.
+Onde olhar: as telas 12 (Saúde do Hermes), 13 (Sistema operacional) e 14 (Ambiente) do menu (`hermes -p <perfil> evolution`), as abas **Saúde** e **Ambiente** do painel no dashboard, e os comandos `hermes -p <perfil> evolution care` e `hermes -p <perfil> evolution system`. Nenhum deles usa o agente, e nenhum gasta token.
 
 ## A saúde do Hermes
 
@@ -12,15 +12,17 @@ A rodada de aprendizado lê isto no máximo a cada 6 horas, e a tela 12 lê de n
 
 | Leitura | De onde | Pede atenção quando |
 |---|---|---|
-| O gateway | `gateway_state.json`, `state/gateway.heartbeat` | diz que está rodando, mas o sinal de vida tem mais de 3 minutos (travado); sem sinal de vida recente, o processo sumiu ou o pid agora é de outro programa (caiu; checado só em sistemas POSIX; um sinal de vida recente conta como rodando, mesmo de um gateway em outro namespace de PID); a memória dele passa do dobro da mediana da última semana e de 512 MB |
+| O gateway | `gateway_state.json`, `state/gateway.heartbeat`, `gateway.pid`, a trava no `gateway.lock` (lida em `/proc/locks`), `host-gateway.json`, a unidade do serviço dele | diz que está rodando, mas o sinal de vida tem mais de 3 minutos (travado); sem sinal de vida recente, o processo sumiu ou o pid agora é de outro programa (caiu; checado só em sistemas POSIX; um sinal de vida recente conta como rodando, mesmo de um gateway em outro namespace de PID); ele roda, mas o programa que o serviço dele inicia foi apagado por baixo, então o próximo reinício falha (`gateway_program_deleted`); a memória dele passa do dobro da mediana da última semana e de 512 MB. Um gateway que diz `degraded` (nenhuma plataforma de chat conectada ainda; as tarefas agendadas seguem rodando) ou `starting` conta como rodando |
 | O banco de sessões | `state.db` (só leitura), `state.db-wal` | não pode ser lido; o `PRAGMA quick_check` (uma vez por semana) falha; o log de escrita passa de 64 MB |
 | O disco onde o Hermes grava | `statvfs` da pasta do perfil | menos de 256 MB livres (o mínimo do próprio Hermes) ou menos de 1 GB; no ritmo da última semana ele enche em menos de 14 dias |
 | Cada pasta do perfil | `sessions`, `logs`, `checkpoints`, `cache`, `tools`, `backups`, `skills`, `memories`… (no máximo 8 segundos de varredura) | cresceu 1 GB e metade em cerca de uma semana |
 | A máquina | `/proc/meminfo`, a carga média | menos de 10% da memória livre; swap mais de 80% usado; carga acima do dobro de CPUs nos últimos 15 minutos |
-| As ferramentas do Hermes | `tools/facts.json` na raiz do Hermes (um repositório só para todos os perfis) | versões de ferramentas gerenciadas pelo Hermes que nada referencia ocupam 300 MB ou mais (só contam nomes que o Hermes gerencia) |
+| As ferramentas do Hermes | `tools/facts.json` na raiz do Hermes (um depósito só para todos os perfis), os comandos dos serviços do Hermes, os programas rodando agora (`/proc/*/exe`) | as pastas que o `hermes pm gc` apagaria (toda pasta que o `facts.json` não cita) ocupam 300 MB ou mais; ou uma delas ainda é usada por um serviço ou um programa rodando, e o gc o quebraria (alto: o gc fica segurado até esse serviço ser movido); ou o `facts.json` falta ou não pode ser lido, então o gc apagaria todas as ferramentas (o gc fica segurado). O plugin lê o depósito como o Hermes lê, inclusive as gerações de ambiente, e, para um perfil que usa as ferramentas de outra pasta, o depósito que ele de fato usa |
 | Depois de um reinício | systemd | o gateway roda como serviço do usuário sem linger: ele não voltaria. Correção: `loginctl enable-linger <usuário>` |
 
-O que pede atenção aparece na tela 12, na aba Saúde do painel e no `hermes evolution status`, cada item com o comando que resolve.
+Um gateway está rodando quando qualquer um destes diz que sim: o processo dele (o pid, com a hora de início que o Hermes registrou ou uma linha de comando do Hermes), um sinal de vida recente, o `gateway.pid`, a trava que ele segura no `gateway.lock` a vida inteira, ou o registro `host-gateway.json`. O plugin nunca repara nem sobe um gateway enquanto um deles diz que um gateway deste Hermes está rodando.
+
+O que pede atenção aparece na tela 12, na aba Saúde do painel e no `hermes -p <perfil> evolution status`, cada item com o comando que resolve.
 
 ### O doctor do próprio Hermes, uma vez por dia
 
@@ -30,7 +32,7 @@ O `hermes doctor` é a checagem completa de uma instalação do Hermes. O plugin
 - **Como.** Num processo curto do próprio Python do Hermes, num grupo de processos só dele, com a pasta daquele perfil e um ambiente limpo (só passam `PATH`, `HOME`, o idioma do sistema e algumas variáveis do sistema). Cada checagem é chamada como o `hermes doctor` a chama, sem `--fix`; um erro numa checagem, inclusive as saídas do próprio Hermes, é contido ali, então nunca esconde as outras. Como o `hermes doctor`, a checagem carrega os plugins do perfil para listar as ferramentas deles. Cinco checagens ficam de fora: os testes das APIs dos provedores, o `npm audit`, a importação do dashboard, o Skills Hub (usam a rede ou levam minutos) e o backend do terminal (pode abrir uma conexão SSH ou subir um container). Uma checagem leva cerca de 7 segundos por perfil no Hermes 0.23.1. Aos 120 segundos, o grupo de processos inteiro é parado, então nada que ela tenha iniciado fica para trás.
 - **O que muda.** Nenhuma configuração e nenhum arquivo seu. A marca que deixa é a mesma do `hermes doctor`: os logs e os arquivos de trava do próprio Hermes.
 - **Por quanto tempo um resultado vale.** Um resultado com mais de 3 dias deixa de aparecer: o perfil ficou parado, ou as checagens foram puladas. Quando uma mudança se mostra desatualizada no disco, o resultado guardado daquele perfil é descartado e as checagens rodam de novo na próxima olhada.
-- **Olhar de novo agora.** `v` na tela 14, ou `hermes evolution environment scan`, roda de novo para todos os perfis em uso.
+- **Olhar de novo agora.** `v` na tela 14, ou `hermes -p <perfil> evolution environment scan`, roda de novo para todos os perfis em uso.
 
 O que o doctor aponta vira itens do Ambiente (tela 14 e a aba Ambiente do painel). Cada item diz o que foi visto, o que fazer, com comandos `hermes -p <perfil> ...`, e cita as palavras do próprio Hermes:
 
@@ -40,7 +42,7 @@ O que o doctor aponta vira itens do Ambiente (tela 14 e a aba Ambiente do painel
 | Um cache de pacotes que o Hermes nunca limpa | uma pasta em `cache/` que se refaz sozinha quando precisa (`uv`, `pnpm`, `npm`, `pip`, `yarn`, `huggingface`, `piper-voices`) está grande e fora de toda limpeza (o Hermes só limpa `cache/scratch` e `cache/terminal`) | Aplique: uma tecla a move para a lixeira do plugin (`evolution/trash/<perfil>/` do líder). Uma pasta por vez, nunca no **Aplicar tudo**. **Desfazer** a devolve; se a pasta já existir de novo, o desfazer avisa e a cópia fica na lixeira até ser apagada. |
 | Qualquer outra pasta de cache grande | outra pasta em `cache/`: `browser` (o perfil do navegador do agente, com logins e cookies), `documents` (arquivos anexados às conversas, que sessões antigas usam), `images`, `generated`, `audio`, `delegation`, `spillover`, `web`… | É sua: o plugin nunca a move, porque o Hermes ou as sessões ainda a usam. O item diz o que a pasta guarda e dá o comando para olhar dentro, `du -sh <caminho>/* \| sort -h \| tail -20`; apague só o que não precisa mais. |
 | Pontos de restauração acima do limite do Hermes | os pontos de restauração do `/rollback` passam do limite de tamanho do Hermes | Veja o que ocupa espaço com `hermes -p <perfil> checkpoints status`. O Hermes sempre guarda o ponto mais recente de cada projeto, então o limite dele é um piso. Depois escolha: guardar menos dias (`hermes -p <perfil> config set checkpoints.retention_days 3` e depois `hermes -p <perfil> checkpoints prune`) ou, se você nunca usa o `/rollback`, desligar (`hermes -p <perfil> config set checkpoints.enabled false` e depois `hermes -p <perfil> checkpoints clear`). Pontos apagados não voltam. |
-| Um problema que o plugin conhece | ferramentas ligadas sem chave, falta do `.env`, nenhuma chave de provedor, um banco de sessões para enxugar, reparar ou recuperar, linger, `config.yaml` para migrar ou com ajustes no lugar errado, um `HERMES_MAX_ITERATIONS` antigo, o provedor de memória desligado, um plugin desligado por uma atualização ou nas duas listas, tarefas agendadas sendo puladas ou com o disco quase cheio, um gateway por perfil, dois perfis com a mesma credencial de chat, `hermes` fora do `PATH` | O item diz o fato e a ação. Exemplos: um plugin que uma atualização desligou → `hermes -p <perfil> plugins enable <nome>` (ou `plugins remove <nome>`, se você não o quer); ferramentas sem chave → `hermes -p <perfil> setup`, ou `hermes -p <perfil> tools` para desligá-las; linger → `sudo loginctl enable-linger $USER`. A próxima checagem diária fecha o item quando ele estiver resolvido. |
+| Um problema que o plugin conhece | ferramentas ligadas sem chave, falta do `.env`, nenhuma chave de provedor, um banco de sessões para enxugar, reparar ou recuperar, linger, `config.yaml` para migrar ou com ajustes no lugar errado, um `HERMES_MAX_ITERATIONS` antigo, o provedor de memória desligado, um plugin desligado por uma atualização ou nas duas listas, tarefas agendadas sendo puladas ou com o disco quase cheio, um gateway por perfil, dois perfis com a mesma credencial de chat, `hermes` fora do `PATH` | O item diz o fato e a ação. Exemplos: um plugin que uma atualização desligou → `hermes -p <perfil> plugins enable <nome>` (ou `plugins remove <nome>`, se você não o quer); ferramentas sem chave → `hermes -p <perfil> setup`, ou `hermes -p <perfil> tools` para desligá-las; linger → `loginctl enable-linger $USER` (ele pede a senha de um administrador se precisar). A próxima checagem diária fecha o item quando ele estiver resolvido. |
 | Qualquer outro problema que o doctor liste | uma frase que o plugin não conhece | Aparece nas palavras do próprio Hermes, com o comando que o Hermes cita. |
 
 Um problema da máquina inteira (um alerta de segurança, linger, o `PATH`, um gateway por perfil, dois perfis com a mesma credencial de chat, o disco das tarefas agendadas) aparece uma vez só, no primeiro perfil que o viu (o líder primeiro), com os outros perfis citados.
@@ -53,7 +55,7 @@ Antes de mover um cache de pacotes, o plugin roda de novo, para aquele perfil, a
 
 ### O que você pode rodar
 
-Cada ação roda o próprio comando do Hermes, pela tela 12 ou com `hermes evolution care <ação> --yes`, no seu próprio terminal (nunca no shell de um agente). Cada uma tem limite de 900 segundos.
+Cada ação roda o próprio comando do Hermes, pela tela 12 ou com `hermes -p <perfil> evolution care <ação> --yes`, no seu próprio terminal (nunca no shell de um agente). Cada uma tem limite de 900 segundos.
 
 | Ação | `care` | Comando | O que faz |
 |---|---|---|---|
@@ -61,7 +63,9 @@ Cada ação roda o próprio comando do Hermes, pela tela 12 ou com `hermes evolu
 | Integridade da instalação | `pm-doctor` | `hermes pm doctor` | Sem rede. Confere cada arquivo gerenciado pelo Hermes contra a impressão digital registrada. Roda antes da manutenção de partida do próprio Hermes. |
 | Checagem completa do Hermes | `doctor` | `hermes doctor` | Chama a API de cada provedor configurado (um endpoint que termina em `/anthropic` recebe um pedido de 1 token), roda o `npm audit` contra o registro do npm, consulta o `gh auth status` e importa o dashboard num subprocesso. Usa a rede e pode levar minutos. Não muda nenhuma configuração. |
 | Reparar com o Hermes | `fix` | `hermes backup --quick --label atlas-evolution` e depois `hermes doctor --fix` | A cópia de segurança roda antes. Se ela falhar, nada é reparado. |
-| Liberar versões antigas de ferramentas | `gc` | `hermes pm gc` | Remove as versões de ferramentas que nada referencia. Não há o que desfazer: o Hermes baixa uma versão de novo se algo pedir. |
+| Liberar versões antigas de ferramentas | `gc` | `hermes pm gc` | Remove toda pasta do depósito de ferramentas que o `tools/facts.json` não cita. Recusado enquanto uma delas é usada por um serviço ou um programa rodando, enquanto o `facts.json` falta ou não pode ser lido, ou enquanto um escopo do systemd não pode ser lido (um serviço ali poderia usar uma delas). Não há o que desfazer: o Hermes baixa uma versão de novo se algo pedir. |
+| Reparar o serviço do gateway | `fix-gateway` | nenhum: o plugin edita o arquivo do serviço e roda o `systemctl` | Aponta o serviço do gateway no systemd para o Python que o Hermes usa agora, depois que o Hermes trocou o Python embutido ([O serviço do gateway](#o-serviço-do-gateway)). |
+| Desfazer um reparo do gateway | `undo-gateway` | nenhum: o plugin põe o arquivo de volta e roda `systemctl daemon-reload` | Põe de volta o arquivo do último reparo ainda não desfeito; rode de novo para o anterior. |
 
 **Como ler a resposta do doctor.** O `hermes doctor` termina com código de saída 1 quando encontrou problemas. Isso é uma resposta, não uma falha: o plugin mostra quantos problemas, as linhas marcadas com ✗ e a própria lista numerada do doctor com o que fazer. Saída 0 quer dizer nada a arrumar.
 
@@ -69,7 +73,24 @@ Cada ação roda o próprio comando do Hermes, pela tela 12 ou com `hermes evolu
 
 **O que a cópia rápida devolve:** o `config.yaml`, o `.env`, o banco de sessões e as tarefas do cron. Para voltar, rode `/snapshot restore <id>` num chat do Hermes.
 
-**O `hermes pm gc` sozinho.** No Modo Auto, o perfil líder roda o `hermes pm gc` uma vez para o Hermes inteiro (há um único repositório de ferramentas, na raiz) quando 300 MB ou mais de versões antigas estão sem uso, no máximo uma vez por semana. Fica registrado no histórico de decisões.
+**O `hermes pm gc` sozinho.** No Modo Auto, o perfil líder roda o `hermes pm gc` uma vez para o Hermes inteiro (há um único depósito de ferramentas, na raiz) quando 300 MB ou mais de versões antigas estão sem uso, no máximo uma vez por semana. Logo antes, ele lê o depósito de ferramentas de novo: o gc só roda se nenhuma pasta que ele apagaria é usada por um serviço ou um programa rodando, só se o `facts.json` pode ser lido, e só se os dois escopos do systemd puderam ser lidos. Fica registrado no histórico de decisões.
+
+### O serviço do gateway
+
+Quando o Hermes se atualiza, ele pode trocar o Python embutido. O serviço do gateway no systemd continua iniciando o antigo: o systemd falha com `status=203/EXEC` e entra em loop, e o `hermes gateway restart` só espera. Ou o gateway continua rodando, mas o programa que o serviço dele inicia foi apagado por baixo (`gateway_program_deleted`): o próximo reinício falha. O `status` diz qual dos dois, com o comando.
+
+O `hermes -p <perfil> evolution care fix-gateway` repara isso, no seu próprio terminal:
+
+1. Ele encontra o serviço que o Hermes dá a esta pasta: `hermes-gateway.service` para o `~/.hermes` da própria conta, `hermes-gateway-<nome>` para `profiles/<nome>`, `hermes-gateway-<hash>` para qualquer outra pasta; para um perfil que o gateway da raiz atende, o serviço da raiz primeiro. Ele confere que o serviço roda este `HERMES_HOME`.
+2. Ele recusa, e diz por quê, quando subir poderia rodar um segundo gateway ou mexer em outro Hermes. O gateway só é reparado (pelo Modo Auto ou por `care fix-gateway`) quando nenhum gateway deste Hermes está rodando, inclusive os degradados e os que estão subindo, e nenhum serviço de gateway de qualquer escopo roda, sobe ou para, e só o serviço que o Hermes dá a esta pasta e que roda este `HERMES_HOME`. Quando o serviço reparado é o que está rodando (o programa dele foi apagado por baixo), o `care fix-gateway` corrige o arquivo e iniciá-lo não muda nada.
+3. Ele mostra a mudança e pergunta. Depois, no arquivo que define o `ExecStart` (o arquivo da unidade ou um drop-in), troca o programa antigo pelo Python para o qual o Hermes aponta agora, em toda linha `Exec*=` que o cita (`ExecStop`, `ExecStopPost`…). Uma cópia do arquivo fica ao lado dele como `<arquivo>.atlas-<hora>-<aleatório>.bak`, um nome que o systemd nunca carrega.
+4. Ele roda `systemctl daemon-reload`, `reset-failed` e `start --no-block`, e espera até 180 segundos o gateway rodar. "Ainda subindo" quer dizer que o systemd ainda está iniciando o gateway: confira de novo em um minuto.
+
+Todo reparo e todo desfazer vão para um registro do Hermes inteiro, `<raiz>/evolution/gateway-repair.json` (os últimos 40). O `care undo-gateway` funciona de qualquer perfil, desfaz um reparo por vez até o arquivo original, e um reparo desfeito nunca é repetido sozinho. Ele recusa quando o arquivo mudou depois do reparo (o Hermes reinstalou o serviço, ou você o editou).
+
+**Sozinho.** No Modo Auto, o perfil líder faz o mesmo reparo, com as mesmas checagens, no máximo uma vez por dia: só um serviço de usuário (nunca um do sistema), nunca um serviço que sobrou desligado e sem falhar, nunca um que está rodando, e nunca o serviço antigo de um perfil quando o gateway da raiz atende esse perfil. Cada reparo fica no histórico de decisões com o seu desfazer.
+
+O `hermes pm gc` apaga toda pasta de ferramentas que o `facts.json` não cita; qualquer pasta usada por um serviço ou programa em execução o bloqueia, e um escopo do systemd que não pode ser lido também. Assim o gc nunca apaga o Python de onde um serviço ainda inicia: repare o serviço primeiro.
 
 ## O sistema operacional
 
@@ -96,7 +117,7 @@ Fica pronto para atualizar quando nada está pela metade, quebrado ou ocupado e 
 1. A checagem precisa passar, e o perfil do Hermes e o código do próprio plugin precisam ser do root. Se outro usuário pode mudá-los, o root rodaria o que esse usuário escreveu: o plugin recusa e o plano mostra o que fazer com o apt você mesmo.
 2. Uma cópia de todos os pacotes instalados com as versões e do `/etc`, numa pasta que só o root lê, fora de todo perfil do Hermes (portanto nunca dentro de um backup do Hermes): `/var/lib/hermes-atlas-evolution/system/<hora>-<aleatório>/`. Os arquivos são criados novos, nunca através de um link; as 5 últimas execuções são guardadas.
 3. `apt-get -y --with-new-pkgs upgrade` numa unidade systemd própria (`hermes-evolution-os-upgrade-<execução>`), para que um terminal fechado, uma conexão SSH caída ou um gateway reiniciado nunca deixem o dpkg pela metade. Mantém cada arquivo de configuração que você mudou (`--force-confold`), não reinicia serviço nenhum sozinho (`NEEDRESTART_MODE=l`) e retém os pacotes que você pediu para deixar de fora só nesta vez: eles são anotados antes de serem retidos e liberados quando a execução termina, falha ou é parada (`systemctl stop`, Ctrl+C, conexão caída); um pacote só sai dessa lista quando o `apt-mark` realmente o liberou, esperando até 3 minutos por um dpkg que ainda termina o trabalho. Um nome que o apt não aceitaria é recusado, nunca descartado em silêncio.
-4. Depois: dpkg e apt checados de novo, cada serviço que rodava checado de novo (todos, não só os do Hermes; um que falhou conta contra a atualização, um que terminou sem erro aparece à parte, já que a maioria para quando fica ociosa), unidades que passaram a falhar, `hermes --version`, e um relatório com o que mudou e o comando que volta cada um à versão antiga (`apt-get install <pacote>=<versão>`, enquanto essa versão estiver disponível). `hermes evolution system report` e o menu mostram o último, escrito na primeira vez em que é pedido se o menu foi fechado.
+4. Depois: dpkg e apt checados de novo, cada serviço que rodava checado de novo (todos, não só os do Hermes; um que falhou conta contra a atualização, um que terminou sem erro aparece à parte, já que a maioria para quando fica ociosa), unidades que passaram a falhar, `hermes --version`, e um relatório com o que mudou e o comando que volta cada um à versão antiga (`apt-get install <pacote>=<versão>`, enquanto essa versão estiver disponível). `hermes -p <perfil> evolution system report` e o menu mostram o último, escrito na primeira vez em que é pedido se o menu foi fechado.
 
 O plugin nunca reinicia a máquina. Quando o sistema espera um reinício, planeje-o: os serviços do Hermes voltam sozinhos quando estão habilitados (e, para uma unidade de usuário, com linger).
 
@@ -114,8 +135,8 @@ Em containers (Docker) com Ubuntu 26.04, 24.04 e 22.04 e Debian 13, separados de
 - um pacote deixado de fora escrito com a arquitetura (`zlib1g:amd64`) quando o dono já o retinha: a retenção do dono fica intacta;
 - uma trava real do dpkg segurada por outro programa: a checagem diz ocupado e nomeia a trava, e fica pronta quando ela é solta;
 - um Hermes de outro usuário: o root recusa atualizar por meio dele;
-- uma atualização do Ubuntu 26.04 com o Hermes 0.23.1 instalado, pelo `hermes evolution system upgrade`: libc6 2.43 atualizado, o Hermes responde depois, nenhum serviço parou.
+- uma atualização do Ubuntu 26.04 com o Hermes 0.23.1 instalado, pelo `hermes -p <perfil> evolution system upgrade`: libc6 2.43 atualizado, o Hermes responde depois, nenhum serviço parou.
 
 ## O resumo semanal
 
-Decisões que esperam precisam de algo que as lembre (o Hermes 0.23.1 descarta os avisos de fim de sessão). A sugestão do menu, ou `hermes evolution schedule-digest --deliver <local|canal>`, agenda o resumo semanal (segundas às 08:00) como uma tarefa agendada do Hermes (cron) que roda um script, não o agente (`--no-agent`): não gasta token. Ele é criado uma vez só e desfeito pelo histórico de decisões (`hermes cron remove`).
+Decisões que esperam precisam de algo que as lembre (o Hermes 0.23.1 descarta os avisos de fim de sessão). A sugestão do menu, ou `hermes -p <perfil> evolution schedule-digest --deliver <local|canal>`, agenda o resumo semanal (segundas às 08:00) como uma tarefa agendada do Hermes (cron) que roda um script, não o agente (`--no-agent`): não gasta token. Ele é criado uma vez só e desfeito pelo histórico de decisões (`hermes cron remove`).

@@ -22,7 +22,7 @@ CONFIG_UNREAD = "_atlas_evolution_config_unread"
 
 DEFAULTS = {"lessons": "auto", "tool_hints": False, "feedback_signals": True, "language": "auto",
             "slow_turn_seconds": 60, "owner_sender_ids": (), "owner_platforms": (), "reflector": True, "reflector_daily_limit": 6,
-            "autopilot_minutes": 60, "runtime_guard": True, "mode": "auto"}
+            "autopilot_minutes": 60, "runtime_guard": True, "mode": "auto", "fleet_managed": True}
 # The 0.8.3 setting `auto_actions` maps on the mode when `mode` is not set (an owner who chose it keeps it).
 LEGACY_ACTIONS = {"off": "manual", "safe": "assist", "full": "auto"}
 MODE_ACTIONS = {"auto": "full", "assist": "safe", "manual": "off"}
@@ -35,12 +35,14 @@ def _whole(value):
     return value
 
 
-def options(config, runtime_config=None, *, strict: bool = True, problems: list | None = None) -> dict:
+def options(config, runtime_config=None, *, strict: bool = True, problems: list | None = None,
+            home: Path | None = None) -> dict:
     """Validated evolution settings.
 
     strict (the CLI): an invalid value is an error the operator sees. Lenient (inside the gateway): each
     invalid value falls back on its own, and an invalid `lessons` value means `off`, so a typo can never
-    switch on what the operator switched off."""
+    switch on what the operator switched off. `home`, when given, lets `fleet_managed` be read exactly as the lead
+    profile reads it (environment.fleet_managed: an opt-out in settings.json counts even over config.yaml)."""
     raw = config.get("evolution") if isinstance(config, dict) and isinstance(config.get("evolution"), dict) else {}
     problems = [] if problems is None else problems
 
@@ -93,6 +95,11 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
         chosen = DEFAULTS["mode"]
     operating = checked("mode", chosen, lambda value: value in MODE_ACTIONS,
                         "evolution.mode must be auto, assist or manual", "manual")
+    # config.yaml could not be read (a Python without PyYAML, a file too large, a YAML error): the mode the owner
+    # chose there is unknown, so nothing runs by itself. `config_unread` lets status say why.
+    unread = isinstance(runtime_config, dict) and bool(runtime_config.get(CONFIG_UNREAD))
+    if unread:
+        operating = "manual"
     automatic = MODE_ACTIONS[operating]
     # A protection: an invalid value keeps it on.
     guard = checked("runtime_guard", raw.get("runtime_guard", True), lambda value: type(value) is bool,
@@ -103,14 +110,35 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
             "feedback_signals": raw.get("feedback_signals", True) is not False,
             "language": resolve(raw.get("language"), runtime_config), "slow_turn_seconds": slow,
             "owner_sender_ids": tuple(str(item) for item in owners),
-            "owner_platforms": tuple(dict.fromkeys(item.strip().lower() for item in platforms))}
+            "owner_platforms": tuple(dict.fromkeys(item.strip().lower() for item in platforms)),
+            "fleet_managed": _fleet_managed(raw, runtime_config, home, unread),
+            "config_unread": unread}
+
+
+def _fleet_managed(raw: dict, runtime_config, home, unread: bool) -> bool:
+    """Whether the lead profile may act here, read as the lead reads it (environment.fleet_managed): an opt-out is
+    false, "false", "off", "no", "0" or 0, in config.yaml or in settings.json (which can only narrow it), and a
+    config.yaml that was not read (CONFIG_UNREAD) counts as an opt-out it may hold, with or without `home`. Without
+    `home`, from the merged settings only."""
+    value = raw.get("fleet_managed", True)
+    if home is None and not isinstance(value, str):   # the common case, without importing environment on a hook path
+        return not (unread or value is False or type(value) is int and value == 0)
+    from .environment import _OFF_WORDS, fleet_managed
+
+    if home is not None:   # an unread config.yaml reads as None there: an opt-out it may hold, so not managed
+        config = runtime_config if isinstance(runtime_config, dict) and not unread else None
+        return fleet_managed(Path(home), read_config=lambda _home: config)
+    return not (unread or value.strip().lower() in _OFF_WORDS)
 
 
 def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str | None = None, reflect=None,
-          strict: bool = True, backfill_budget_s: float = 20.0, deadline: float | None = None, cancelled=None) -> dict:
+          strict: bool = True, backfill_budget_s: float = 20.0, deadline: float | None = None, cancelled=None,
+          reflector_reload: bool = False) -> dict:
     """Run one evolution pass and return what changed. `lang` overrides the configured language of the output.
 
     `reflect(instructions, text)` asks a model for a lesson draft; it is used only when the reflector is on.
+    `reflector_reload`: inside Hermes, the plugin loaded with the reflector off, so its model access exists only
+    after the next load (the reflector's status says so instead of "not available outside Hermes").
     `strict=False` (the autopilot) lets each invalid setting fall back safely instead of failing the pass.
     Until it is done, each pass first replays up to `backfill_budget_s` seconds of Hermes' own history."""
     from . import backfill
@@ -152,10 +180,10 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             reflector.prune_samples(conn, now=now)   # measure-only mode spends nothing on drafts; excerpts still expire
             reflection = {"status": "lessons_off"}
         elif not callable(reflect):
-            # Run outside Hermes (python -m): no model access here. Excerpts wait for a run inside Hermes and
-            # expire after 14 days.
+            # Run outside Hermes (python -m): no model access here; or inside a Hermes that loaded the plugin with the
+            # reflector off, until its next load. Excerpts wait for a run that has it and expire after 14 days.
             reflector.prune_samples(conn, now=now)
-            reflection = {"status": "unavailable_without_hermes_llm"}
+            reflection = {"status": "needs_restart" if reflector_reload else "unavailable_without_hermes_llm"}
         else:
             reflection = reflector.reflect(conn, reflect, now=now, lang=opts["language"],
                                            daily_limit=opts["reflector_daily_limit"], deadline=deadline)
@@ -198,7 +226,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         pending = proposals.refresh(conn, now=now, skills=skills, reviews=reviews, failures=failures, turns=turns,
                                     changes=verdicts, outcomes=outcomes,
                                     radar=reading["findings"] + list((fleet or {}).get("findings") or ()),
-                                    lang=opts["language"])
+                                    lang=opts["language"], home=home)
         fresh = set(created) | set(promoted)
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in fresh]
     from . import actions
@@ -318,8 +346,9 @@ import subprocess
 launcher = shutil.which("hermes")
 if not launcher:
     raise SystemExit({text("Hermes CLI is not on the scheduler PATH.", lang)!r})
-try:   # a fresh pass first, best effort: the digest is delivered even when it fails or runs out of time
-    subprocess.run([launcher, *{arguments[:-6] + ["evolution", "learn", "--notify-only"]!r}],
+try:   # a fresh pass first, best effort: the digest is delivered even when it fails or runs out of time. A plain
+    # pass: nobody reads its output here, so it must not mark today's failure spikes as told
+    subprocess.run([launcher, *{arguments[:-6] + ["evolution", "learn"]!r}],
                    capture_output=True, text=True, env=dict(os.environ, HERMES_HOME={str(profile)!r}),
                    encoding="utf-8", errors="replace", timeout=300, check=False)
 except (OSError, subprocess.TimeoutExpired):

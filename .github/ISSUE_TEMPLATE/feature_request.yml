@@ -6,7 +6,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        Atlas Evolution observes by default, stores no conversation content and changes nothing in Hermes without the operator.
+        Atlas Evolution stores no conversation content, sends no telemetry, lets only the operator decide what reaches the agent,
+        and changes Hermes only in reversible steps, each recorded with its undo, that the operator can narrow with the mode.
         Proposals that keep these properties are the easiest to accept. See CONTRIBUTING.md.
   - type: textarea
     id: problem
@@ -32,6 +33,10 @@ body:
         - Skills by outcome
         - Measurement and verdicts
         - Proposals and digest
+        - Mode auto (automatic actions across profiles)
+        - Runtime guard
+        - Dashboard panel
+        - Terminal menu
         - Maintenance and usage (Hermes health, the environment, the operating system, usage and cost)
         - Hermes integration or packaging
         - Language (English or Portuguese text)

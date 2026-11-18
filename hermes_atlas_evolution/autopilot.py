@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -30,6 +31,56 @@ RETRY_SECONDS = 10 * 60     # a failed pass is tried again after this, not after
 SKEW_SECONDS = 5 * 60       # a last pass up to this far "in the future" finished after the caller read its clock
 
 logger = logging.getLogger(__name__)
+
+
+# Hermes' top-level flags that take a value (hermes_cli/_parser.py _VALUE_FLAGS_FALLBACK, and -p/--profile, which
+# main strips before argparse): the word after one is that value, not the subcommand.
+_VALUE_FLAGS = frozenset({"-z", "--oneshot", "-m", "--model", "--provider", "--reasoning", "-t", "--toolsets", "-r",
+                          "--resume", "-s", "--skills", "--usage-file", "--in", "--cpu-profile", "-p", "--profile"})
+# A run that answers and exits: `hermes -z PROMPT`, `hermes chat -q ... --oneshot`, `-Q`, `--query-file`.
+_ONE_SHOT = frozenset({"-z", "--oneshot", "-Q", "--quiet", "--query-file"})
+# Subcommands that serve sessions until they are stopped: an editor's agent server, the backend of the Desktop app and
+# of remote clients (`hermes serve`, which runs their chats in this process).
+_SERVING = frozenset({"acp", "serve"})
+
+
+def _terminal() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdout is not None and sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError, OSError):   # a closed or replaced stream
+        return False
+
+
+def runs_passes(argv=None, *, terminal: bool | None = None) -> bool:
+    """Whether this process may claim the learning pass: one that stays up (a gateway, the dashboard, the backend of
+    the TUI or the Desktop, an editor's ACP server, an interactive CLI in a terminal). A run that ends in seconds
+    (`hermes -z`, a scripted or piped `hermes chat -q`, a kanban worker, any other subcommand) would claim the pass,
+    exit in its middle and push the next attempt RETRY_SECONDS away, again and again: it only reads the settings."""
+    from .status import process_kind
+
+    if process_kind() != "cli":
+        return True
+    argv = [str(item) for item in (sys.argv if argv is None else argv)[:64]]
+    if argv and "tui_gateway" in argv[0].replace("\\", "/"):
+        return True   # python -m tui_gateway.entry: the TUI's and the Desktop's backend, up while they are open
+    subcommand, value, previous = None, False, ""
+    for word in argv[1:]:
+        if word in _ONE_SHOT or word.startswith(("--oneshot=", "--query-file=")) or \
+                word.startswith("-z") and not word.startswith("--") or word == "--format=stream-json" or \
+                previous == "--format" and word == "stream-json":   # stream-json implies --quiet: it answers and exits
+            return False
+        previous = word
+        if value:
+            value = False
+        elif word.startswith("-"):
+            value = word in _VALUE_FLAGS   # `--flag=value` carries its own
+        elif subcommand is None:
+            subcommand = word
+    if subcommand in _SERVING:
+        return True
+    if subcommand not in (None, "chat"):
+        return False
+    return _terminal() if terminal is None else terminal
 
 
 def _number(value) -> float:
@@ -158,6 +209,7 @@ class Autopilot:
         self._clock: threading.Thread | None = None
         self._exit_hooked = False
         self.on_tick = None   # called by the clock before each nudge (the plugin's settings refresh)
+        self.claims = True    # False in a short-lived process (runs_passes): it never claims the pass
 
     def start_clock(self, *, first: float = CLOCK_FIRST_SECONDS, period: float = CLOCK_PERIOD_SECONDS) -> bool:
         """A daemon timer that nudges the pass while the process is idle.
@@ -219,7 +271,7 @@ class Autopilot:
 
     def poke(self) -> bool:
         """Start a background check when one is due. Never blocks and never raises."""
-        if not self.interval_s or self._stop.is_set():
+        if not self.interval_s or not self.claims or self._stop.is_set():
             return False
         moment = self.clock()
         if moment < self._due or not self._lock.acquire(blocking=False):
@@ -256,7 +308,7 @@ class Autopilot:
         with self._lock:
             hook = not self._exit_hooked and not self._stop.is_set()
             self._exit_hooked = self._exit_hooked or hook
-        if hook:   # a short-lived process (hermes -z) may exit in the middle of the pass
+        if hook:   # a process may still end in the middle of the pass (its user quits): the lease is freed at exit
             atexit.register(self._at_exit)
         try:
             with pinned_profile(self.home):

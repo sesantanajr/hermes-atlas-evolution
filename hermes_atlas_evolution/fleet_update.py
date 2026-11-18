@@ -9,13 +9,15 @@ installed again without `--ref` (Hermes reinstalls the pinned commit), and `plug
 way to move it is `plugins install <source> --force --ref <40-character commit>`. So, with Hermes' own commands only:
 
 * installed, not pinned  -> `plugins update hermes-atlas-evolution --force`
-                            (a refusal falls back to a forced reinstall; a pin Hermes reports moves as below);
+                            (a refusal falls back to a forced reinstall, only for a copy of this repository: a
+                            fork's checkout is never replaced; a pin Hermes reports moves as below);
 * pinned to a commit     -> `plugins install <url> --force --ref <commit>`: the pin moves to the commit this plugin
                             should run (the latest one of the repository for `hermes evolution update`, the lead
                             profile's own commit for the automatic sync);
 * folder without a manifest (an interrupted install or update) -> `plugins install <url> --force`;
 * missing (only on request) -> `plugins install <url> --enable`;
-* a linked development checkout is never touched.
+* a linked development checkout is never touched, nor a pinned or half-installed copy of a fork;
+* a profile with `fleet_managed: false` is left out of the automatic sync (environment.fleet_managed).
 
 `--enable` is added only where the plugin is on already (a no-op there): updating a profile never switches the plugin
 on where its owner switched it off. `--force` only skips Hermes' interactive scan prompt for this plugin, the
@@ -50,13 +52,29 @@ _PINNED = re.compile(r"\bis pinned\b|\bpinned to\b", re.I)
 
 
 def _read(path: Path, limit: int = 64 * 1024) -> str | None:
-    try:
-        if path.is_symlink() or not path.is_file():
-            return None
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            return handle.read(limit)
-    except OSError:
-        return None
+    """The first `limit` bytes of a regular file, with the plugin's one safe reader (environment.read_text): never
+    through a link, never a named pipe or a device."""
+    from .environment import read_text
+
+    return read_text(path, limit, part="head")
+
+
+def _origin(home: Path) -> str:
+    """Where this plugin's copy in a profile comes from: "self" (a checkout of this repository, or Hermes' install
+    record naming it), "other" (a fork or another repository), "" when nothing says."""
+    from .ecosystem import normalize_repo
+    from .environment import REPOSITORY, git_origin, install_record
+
+    ours = normalize_repo(f"https://github.com/{REPOSITORY}")
+    repo, _sha = git_origin(Path(home) / "plugins" / PLUGIN)
+    if not repo:
+        record = install_record(Path(home), PLUGIN, PLUGIN)
+        repo = next((str(record[key]) for key in ("source", "url", "repo", "origin")
+                     if isinstance(record.get(key), str) and record[key]), "")
+    if not repo:
+        return ""
+    found = normalize_repo(repo)
+    return "self" if found in (ours, normalize_repo(REPOSITORY)) else "other"
 
 
 def _git_sha(folder: Path) -> str | None:
@@ -99,7 +117,8 @@ def inspect(name: str, home: Path) -> dict:
     return {"profile": name, "home": str(home), "installed": installed, "version": version,
             "sha": _git_sha(folder) if installed else None, "pinned": _pin(home),
             "broken": present and not installed and not linked, "linked": linked,
-            "enabled": _enabled(home) if present else None, "is_profile": (Path(home) / "config.yaml").is_file()}
+            "enabled": _enabled(home) if present else None, "is_profile": (Path(home) / "config.yaml").is_file(),
+            "origin": _origin(home) if present and not linked else ""}
 
 
 def plan(root: Path) -> list[dict]:
@@ -157,6 +176,8 @@ def step(row: dict, *, install_missing: bool, target: str | None = None) -> list
     """The first Hermes command for one profile, or None when there is nothing to do (or nothing safe to do)."""
     if row.get("linked"):
         return None   # a development checkout: its owner updates it
+    if row.get("origin") == "other" and (row.get("pinned") or row.get("broken")):
+        return None   # a fork: installing this repository over it would replace the owner's code
     if not row["installed"] and not row.get("broken"):
         if not install_missing:
             return None
@@ -174,6 +195,8 @@ def step(row: dict, *, install_missing: bool, target: str | None = None) -> list
 def _skip_reason(row: dict, target: str | None) -> str:
     if row.get("linked"):
         return "linked"
+    if row.get("origin") == "other" and (row.get("pinned") or row.get("broken")):
+        return "fork"
     if not row["installed"] and not row.get("broken"):
         return "missing"
     if row.get("pinned") and not target:
@@ -214,10 +237,13 @@ def run(rows: list[dict], *, install_missing: bool = False, target: str | None =
         outcome["commands"].append({"args": command, "code": code})
         if code not in (0, 124, 126, 127) and command[1] == "update":
             # A pin the record did not show, an older Hermes without `update --force`, or a checkout that is not a
-            # git one: a pin moves with --ref; anything else is installed again over the copy.
+            # git one: a pin moves with --ref; anything else is installed again over the copy. Only a copy of this
+            # very repository: installing it over a fork (or a copy nothing names) would replace someone's code.
             pinned = bool(_PINNED.search(text))
             aim = wanted() if pinned else None
-            if pinned and not aim:
+            if (row.get("origin") or _origin(Path(row["home"]))) != "self":
+                outcome["commands"][-1]["after"] = "not_ours"
+            elif pinned and not aim:
                 outcome["commands"][-1]["after"] = "pinned"
             else:
                 fallback = ["plugins", "install", URL, "--force", *_enable(row), *(["--ref", aim] if pinned else [])]
@@ -251,13 +277,15 @@ def due(rows: list[dict], lead: dict, lead_sha: str, memo: dict, *, now: float, 
     """(row, reason) for each other profile whose copy should be brought to the lead's commit by itself: broken,
     pinned elsewhere, older, or the same version on other code. Never a linked copy, a profile where the plugin is
     off, one whose own mode is not auto, or a newer copy; once per situation (a refusal is tried again a day later)."""
-    from .environment import profile_mode
+    from .environment import fleet_managed, profile_mode
 
     mode_of = mode_of or profile_mode
     found = []
     for row in rows:
         if row["profile"] == lead["profile"] or not row.get("is_profile") or row.get("linked"):
             continue
+        if not fleet_managed(Path(row["home"])):
+            continue   # that profile opted out of the fleet (`fleet_managed: false`)
         if not (row.get("installed") or row.get("broken")) or row.get("enabled") is not True:
             continue   # missing: the self_missing proposal decides; off: its owner turned it off there
         if row.get("broken"):
@@ -390,6 +418,8 @@ def markdown(result: dict, lang: str) -> str:
                "linked": "link de desenvolvimento (não mexido)" if pt else "development link (left as it is)",
                "pinned_no_target": "fixado; o último commit do repositório não pôde ser lido (rede ou git)" if pt else
                "pinned; the repository's latest commit could not be read (network or git)",
+               "fork": "cópia de um fork ou de outro repositório (não mexida)" if pt else
+               "a copy from a fork or another repository (left as it is)",
                "current": "já atualizado" if pt else "already current"}
     for item in result.get("results") or ():
         moved = ""

@@ -23,6 +23,8 @@ from .telemetry import ResearchTracker
 NATIVE_HOOKS = ("subagent_start", "post_compaction")
 
 
+# The one line Hermes shows for `hermes evolution` (its help and command list), in both languages.
+CLI_HELP = "Atlas Evolution: lessons, health and care of every profile · Lições, saúde e cuidado de todos os perfis"
 SETTINGS_CHECK_SECONDS = 30   # how often a hook or the clock may look for a change of the settings
 RELOAD_KEYS = ("runtime_guard", "tool_hints")   # these decide which hooks are registered: next load of the plugin
 PLAYBOOK_TTL_SECONDS = 30   # the playbook as rendered is reused this long
@@ -84,6 +86,28 @@ def _read_hermes_config(home: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _chat_type() -> str:
+    """The chat type Hermes' gateway bound to this turn ("dm", "group", "channel", "thread"), or "" when unknown or
+    outside a gateway. Read from the module the gateway already loaded, never imported here."""
+    module = sys.modules.get("gateway.session_context")
+    reader = getattr(module, "get_session_env", None) if module is not None else None
+    if not callable(reader):
+        return ""
+    try:
+        value = reader("HERMES_SESSION_CHAT_TYPE", "")
+    except Exception:
+        return ""
+    return value.strip().lower() if isinstance(value, str) else ""
+
+
+def _keep(kept: OrderedDict, key: str, value=None, limit: int = 2048) -> None:
+    """Remember `key` as the most recent entry of a bounded memory (the caller holds the lock)."""
+    kept[key] = value
+    kept.move_to_end(key)
+    while len(kept) > limit:
+        kept.popitem(last=False)
+
+
 def _warn_once(seen: set, event: str) -> None:
     if event not in seen:
         seen.add(event)
@@ -92,14 +116,12 @@ def _warn_once(seen: set, event: str) -> None:
         getLogger(__name__).warning("Atlas Evolution could not record %s; the turn continues unaffected", event)
 
 
-def autopilot_pass(home: Path, reflect, cancelled=None) -> dict:
+def autopilot_pass(home: Path, reflect, cancelled=None, *, reflector_reload: bool = False, events=None) -> dict:
     """One evolution pass from the autopilot thread. Settings are read again, so a change made in Hermes'
-    settings form applies to the next pass, and an invalid value falls back instead of failing the pass."""
-    import time
-
-    from .evolve import cycle
-
-    from .evolve import CONFIG_UNREAD
+    settings form applies to the next pass, and an invalid value falls back instead of failing the pass.
+    `events(result)`, when given, hears what the pass changed (the plugin's events on Hermes' bus); it never fails it."""
+    from .autopilot import LEASE_SECONDS
+    from .evolve import CONFIG_UNREAD, cycle
 
     try:
         from hermes_cli.config import load_config_readonly
@@ -108,11 +130,15 @@ def autopilot_pass(home: Path, reflect, cancelled=None) -> dict:
     except Exception:   # the pass still runs with the plugin's own settings; who the owner is stays unknown
         runtime = {CONFIG_UNREAD: True}
     current, _problems = safe_settings(home, runtime)
-    from .autopilot import LEASE_SECONDS
-
     # within the pass's lease, with room to spare: past it another process could start a second pass
     result = cycle(home, now=time.time(), runtime_config=runtime, config=current, reflect=reflect, strict=False,
-                   cancelled=cancelled, deadline=time.monotonic() + LEASE_SECONDS - 180)
+                   cancelled=cancelled, deadline=time.monotonic() + LEASE_SECONDS - 180,
+                   reflector_reload=reflector_reload)
+    if events is not None:
+        try:
+            events(result)
+        except Exception:   # an event nobody may be listening to never costs the pass
+            pass
     reflection = result["reflector"]
     return {"new_lessons": len(result["new_lessons"]), "open_proposals": len(result["open_proposals"]),
             "reflector_status": reflection.get("status", "ran"), "reflector_drafts": len(reflection.get("drafted") or []),
@@ -165,7 +191,7 @@ class _Plugin:
         self.hints = HintIndex(home, lang=evolution["language"])
         self.recent: dict[str, dict] = {}   # tool_call_id -> failure, for the transform that follows the tool
         self.commands: dict[str, str] = {}  # tool_call_id -> hash of the command the agent wrote (memory only)
-        self.counted: dict[str, None] = {}  # sessions whose playbook render was already counted
+        self.counted: OrderedDict[str, None] = OrderedDict()   # sessions whose playbook render was already counted
         # session id -> (whether its latest turn served the owner, its origin label); memory only
         self.sessions: OrderedDict[str, tuple[bool, str]] = OrderedDict()
         # delegated child session id -> its parent's session id, from subagent_start: a child serves whoever
@@ -173,6 +199,18 @@ class _Plugin:
         self.children: OrderedDict[str, str] = OrderedDict()
         self.owners = frozenset(str(item) for item in evolution["owner_sender_ids"] if item not in (None, ""))
         self.owner_platforms = frozenset(evolution["owner_platforms"])
+        # The RELOAD_KEYS settings this load registered its hooks with: a change of these waits for the next load
+        # (apply_settings). Their values, not the hooks: switching lessons off silences the tool hint at once.
+        self.loaded = {key: evolution[key] for key in RELOAD_KEYS}
+        self.reflector_possible = False   # the reflector, off at load, would get its model access at the next load
+        # chat session id -> True when this process built its prompt with template lessons only (a stranger may be on
+        # the other side); then, once its sender turns out to be the owner, the turn's context brings the rest
+        self.prompted: OrderedDict[str, bool] = OrderedDict()
+        self.given: OrderedDict[str, None] = OrderedDict()       # chat sessions that got the owner's lessons
+        self.strangers: OrderedDict[str, None] = OrderedDict()   # chat sessions where someone else wrote
+        self.last_local: OrderedDict[str, str] = OrderedDict()   # local surface (cli, tui...) -> its latest session
+        self.emit = None   # Hermes' event bus for this plugin (ctx.emit), when the host has one
+        self._spikes_told: tuple[str, frozenset] = ("", frozenset())   # (UTC day, signatures) emitted today
         self.guard = None
         self.recent_lock = threading.Lock()
         self.failed: set[str] = set()
@@ -188,14 +226,17 @@ class _Plugin:
         self._settings_lock = threading.Lock()
         # (lang, templates only) -> (monotonic time, text, lesson ids shown): the playbook as last rendered
         self._playbook: dict[tuple, tuple] = {}
+        self._playbook_generation = 0   # bumped by forget_playbook: a render that started before is not cached
         from .selfcost import Meter
 
         self.meter = Meter()   # what each hook costs the turn, measured where it runs (selfcost)
 
     def forget_playbook(self) -> None:
-        """Render the playbook again at the next prompt (lessons or settings changed in this process)."""
+        """Render the playbook again at the next prompt (lessons or settings changed in this process). A render
+        already under way finishes with what it read, but is not kept: it may hold the lessons as they were."""
         with self.recent_lock:
             self._playbook.clear()
+            self._playbook_generation += 1
 
     @property
     def lang(self) -> str:
@@ -250,6 +291,55 @@ class _Plugin:
                 self.children[new] = self.children[old]
                 while len(self.children) > 2048:
                     self.children.popitem(last=False)
+            if old in self.strangers:   # the same conversation: someone else still wrote in it
+                _keep(self.strangers, new)
+
+    def session_reset(self, **payload):
+        """on_session_reset: /new or /reset ended a session. Its session_id is the new one; the gateway names the one
+        that ended (old_session_id), whose memory goes. The classic CLI names only the new one (reason "new_session"):
+        there the session that ended is the latest one this process saw a turn of on that surface. The TUI and the
+        Desktop fire it, with no reason, whenever a window starts or resumes a session, while another may still be
+        open: nothing is forgotten then."""
+        old = payload.get("old_session_id")
+        if not (isinstance(old, str) and old):
+            if payload.get("reason") != "new_session":
+                return None
+            platform, new = payload.get("platform"), payload.get("session_id")
+            with self.recent_lock:
+                old = self.last_local.get(platform[:64]) if isinstance(platform, str) else None
+            old = old if old != new else None
+        return self._forget_sessions([old])
+
+    def session_deleted(self, **payload):
+        """on_session_delete: a session deleted or archived (session_id; deleted_ids when several went)."""
+        deleted = payload.get("deleted_ids")
+        return self._forget_sessions([payload.get("session_id"), *(deleted[:1000] if isinstance(deleted, list) else ())])
+
+    def _forget_sessions(self, gone: list):
+        """Forget what this process kept in memory about these sessions: who they served, their delegated children,
+        whether their prompt was counted, the owner's lessons given, the tool hints given, the last turn's skills and
+        words. Memory only; never raises."""
+        try:
+            gone = [item for item in gone if isinstance(item, str) and 0 < len(item) <= 400]
+            if not gone:
+                return None
+            with self.recent_lock:
+                for session in gone:
+                    for kept in (self.sessions, self.children, self.counted, self.prompted, self.given, self.strangers):
+                        kept.pop(session, None)
+            self.turns.forget_sessions(gone)
+            sensor = self.sensor
+            if sensor is not None:
+                sensor.forget_sessions(gone)
+            given = getattr(self.hints, "_given", None)   # the tool hints already given in each session
+            lock = getattr(self.hints, "_lock", None)
+            if isinstance(given, dict) and lock is not None:
+                with lock:
+                    for session in gone:
+                        given.pop(session, None)
+        except Exception:
+            pass
+        return None
 
     def parent_of(self, session) -> str | None:
         with self.recent_lock:
@@ -264,8 +354,23 @@ class _Plugin:
             pass
         try:
             return self.guard(**payload) if self.guard is not None else None
-        except Exception:
+        except Exception as error:   # fails open, but never silently
+            self.guard_failed(error)
             return None
+
+    def guard_failed(self, error) -> None:
+        """The runtime guard failed and let the command through (it fails open; RuntimeGuard.errors counts each).
+        Logged with its traceback the first time in this process, so a guard that quietly does nothing is seen
+        without flooding the log on every tool call."""
+        if "runtime_guard" in self.failed:
+            return
+        self.failed.add("runtime_guard")
+        try:
+            from logging import getLogger
+
+            getLogger(__name__).warning("Atlas Evolution runtime guard failed internally; failing open", exc_info=error)
+        except Exception:   # logging must never reach the tool call
+            pass
 
     def _remember_command(self, payload: dict) -> None:
         from .guard import TERMINAL_TOOLS
@@ -354,15 +459,20 @@ class _Plugin:
     def before_turn(self, **payload):
         from .signals import origin_label, owner_turn, record_skill_correction, turn_surface
 
+        owner = None
         try:
             surface = turn_surface(payload)
             origin = origin_label(payload)
             payload = {**payload, "surface": surface, "origin": origin}
             parent = payload.get("parent_session_id") or self.parent_of(payload.get("session_id"))
-            self._remember_owner(payload.get("session_id"),
-                                 owner_turn(surface, payload.get("sender_id"), self.owners, origin=origin,
-                                            owner_platforms=self.owner_platforms,
-                                            parent_owner=surface == "subagent" and self.served_owner(parent)), origin)
+            owner = owner_turn(surface, payload.get("sender_id"), self.owners, origin=origin,
+                               owner_platforms=self.owner_platforms,
+                               parent_owner=surface == "subagent" and self.served_owner(parent))
+            self._remember_owner(payload.get("session_id"), owner, origin)
+            platform, session = payload.get("platform"), payload.get("session_id")
+            if surface == "local" and isinstance(platform, str) and isinstance(session, str) and 0 < len(session) <= 400:
+                with self.recent_lock:   # the session a /new of this surface ends (session_reset)
+                    _keep(self.last_local, platform[:64], session, limit=16)
         except Exception:
             pass
         sensor = self.sensor   # apply_settings may set it to None on another thread meanwhile
@@ -377,7 +487,53 @@ class _Plugin:
                 tracker.start(payload)
             except Exception:
                 pass
-        return None
+        return self._owner_context(payload.get("session_id"), owner)
+
+    def _owner_context(self, session, owner):
+        """The lessons a chat's prompt left out, once per chat session, as this turn's context, when its sender
+        turned out to be the owner (owner_sender_ids).
+
+        Hermes builds a chat's prompt before its first message says who is writing, so it gets template lessons only.
+        A context returned by pre_llm_call is added to this turn's user message (never the system prompt), stored with
+        it and sent again on every later turn, so once per session is enough, and only in a direct message: a group, a
+        channel or a thread may be one session for every participant (Hermes' thread_sessions_per_user is off by
+        default), and someone who joins later would find the lessons in the history. The chat type is the one Hermes
+        bound to this turn (gateway.session_context); unknown means no. Never in a session someone else wrote in, never
+        where this process did not build the prompt itself (it cannot tell what that prompt had), bounded
+        (lessons.owner_lessons). A turn another plugin vetoes still counts as given: that is not told apart cheaply."""
+        try:
+            if not isinstance(session, str) or not session:
+                return None
+            with self.recent_lock:
+                if session not in self.prompted:
+                    return None   # not a chat this process built the prompt of
+                if owner is not True:
+                    _keep(self.strangers, session)   # from now on this chat never gets them
+                    return None
+                if not self.prompted[session] or session in self.strangers or session in self.given:
+                    return None
+            if _chat_type() != "dm":
+                return None
+            with self.recent_lock:
+                if session in self.given:
+                    return None
+                _keep(self.given, session)
+            if self.evolution["lessons"] == "off":
+                return None
+            from . import lessons as playbook
+            from .experience import record
+            from .operations import database
+
+            chosen: list = []
+            with database(self.home, timeout=PLAYBOOK_BUSY_SECONDS) as conn:
+                text = playbook.owner_lessons(conn, lang=self.lang, chosen=chosen)
+            if not text:
+                return None
+            stamp = time.time()
+            record(self.home, lambda conn: playbook.shown(conn, chosen, now=stamp))
+            return {"context": text}
+        except Exception:   # a turn never waits for, or fails on, its lessons
+            return None
 
     def after_turn(self, **payload):
         try:
@@ -425,12 +581,12 @@ class _Plugin:
         compares the modification times of config.yaml and settings.json (two stat calls); only a change reads
         them again. Returns True when new settings were applied.
 
-        Who counts as the owner, the lessons mode, the reflector and its limit, the language, owner signals, the
-        slow-turn threshold and the autopilot interval apply at once. The runtime guard and tool hints decide
-        which hooks Hermes calls, so a change of those waits for the next load of the plugin: it is recorded
-        (`settings_reload`) for `status` and the panel to say so."""
-        import time
-
+        Who counts as the owner, the lessons mode, the reflector's limit, switching the reflector off, the language,
+        owner signals, the slow-turn threshold and the autopilot interval apply at once. The runtime guard and tool
+        hints decide which hooks Hermes calls, and the reflector's model access (its auxiliary task) exists only when
+        the plugin loaded with it on, so a change of those (the reflector: switched on after a load with it off)
+        waits for the next load of the plugin: it is recorded (`settings_reload`) for `status` and the panel to say
+        so, against what this load registered."""
         clock = time.monotonic()
         if not force and clock - self._settings_checked < SETTINGS_CHECK_SECONDS:
             return False
@@ -462,8 +618,6 @@ class _Plugin:
         autopilot = getattr(self, "autopilot", None)
         if autopilot is None or autopilot.interval_s:
             return
-        import time
-
         now = time.time()
         if getattr(self, "_retained_day", None) == int(now // 86_400):
             return
@@ -492,7 +646,6 @@ class _Plugin:
 
         self.forget_playbook()   # the language, the lessons mode or who the owner is may have changed
 
-        previous = self.evolution
         with self.recent_lock:
             self.config, self.evolution = config, evolution
             self.advice = config.get("agent_advice") is True
@@ -514,7 +667,11 @@ class _Plugin:
             self.autopilot.interval_s = evolution["autopilot_minutes"] * 60
             if self.autopilot.interval_s and self.clock_allowed:
                 self.autopilot.start_clock()   # turned on while running: a no-op when the clock already runs
-        waiting = sorted(key for key in RELOAD_KEYS if previous.get(key) != evolution.get(key))
+        # Against what this load registered, not the previous settings: a change of another setting meanwhile must not
+        # hide one that still waits, and a value put back as it was loaded waits for nothing.
+        waiting = sorted(key for key in RELOAD_KEYS if self.loaded.get(key) != evolution.get(key))
+        if evolution["reflector"] and self.reflect is None and self.reflector_possible:
+            waiting.append("reflector")   # loaded with it off: its auxiliary task is registered at the next load
         if evolution["lessons"] != "off" and not self.section_registered:
             waiting.append("lessons")   # loaded with lessons off: their prompt section appears at the next load
         if self.advice and not getattr(self, "tools_registered", True):
@@ -589,6 +746,7 @@ class _Plugin:
             key = (self.lang, bool(others))
             with self.recent_lock:
                 cached = self._playbook.get(key)
+                generation = self._playbook_generation
             if cached is not None and 0 <= time.monotonic() - cached[0] < PLAYBOOK_TTL_SECONDS:
                 text, shown = cached[1], list(cached[2])
             else:
@@ -597,19 +755,20 @@ class _Plugin:
                 with database(self.home, timeout=PLAYBOOK_BUSY_SECONDS) as conn:
                     text = playbook.playbook(conn, lang=self.lang, chosen=shown, templates_only=others)
                 with self.recent_lock:
-                    self._playbook[key] = (time.monotonic(), text, tuple(shown))
+                    if generation == self._playbook_generation:   # nothing changed the lessons meanwhile
+                        self._playbook[key] = (time.monotonic(), text, tuple(shown))
             session = info.get("session_id")
             if isinstance(session, str) and session:
                 with self.recent_lock:
                     seen = session in self.counted
-                    self.counted[session] = None
-                    while len(self.counted) > 2048:
-                        self.counted.pop(next(iter(self.counted)))
+                    _keep(self.counted, session)
+                    if surface == "gateway" and len(session) <= 400:
+                        _keep(self.prompted, session, bool(others))   # what this chat's prompt holds (_owner_context)
                 if seen:
                     shown = []
             if shown:
-                record(self.home, lambda conn: conn.executemany("UPDATE lesson SET shown=shown+1 WHERE id=?",
-                                                                [(item,) for item in shown]))
+                stamp = time.time()
+                record(self.home, lambda conn: playbook.shown(conn, shown, now=stamp))
             return text
         except Exception:
             return ""
@@ -617,8 +776,6 @@ class _Plugin:
     def session_finalized(self, **payload):
         """A short notice about decisions waiting for the owner: once a day, and only on the owner's own
         surfaces (CLI, TUI, Desktop). Never in a gateway chat, where the other side may be someone else."""
-        import time
-
         from .signals import surface_of
         from .status import pending_notice
 
@@ -641,6 +798,41 @@ class _Plugin:
             return json.dumps(localize(json.loads(payload), self.lang), ensure_ascii=False)
         except (TypeError, ValueError):
             return payload
+
+    # ── events on Hermes' bus (ctx.emit): ids and numbers only, never text ─────────────────────────────
+
+    def pass_events(self, result: dict) -> None:
+        """After a learning pass: `hermes-atlas-evolution:lesson_activated`, `:lesson_retired` and `:failure_spike`
+        (a failure far above its usual day, once per UTC day per failure in this process). Fail-silent."""
+        emit = self.emit
+        if emit is None or not isinstance(result, dict):
+            return
+        events = [("lesson_activated", {"lesson_id": item["id"], "class": item.get("class")})
+                  for item in result.get("new_lessons") or () if isinstance(item, dict) and item.get("status") == "active"
+                  and type(item.get("id")) is int]
+        events += [("lesson_retired", {"lesson_id": item["id"], "verdict": item.get("verdict"), "basis": item.get("basis")})
+                   for item in result.get("lesson_effects") or () if isinstance(item, dict) and item.get("retired")
+                   and type(item.get("id")) is int]
+        try:
+            from .experience import experience, utc_day
+            from .insights import spikes
+
+            now = result.get("now") if isinstance(result.get("now"), (int, float)) else time.time()
+            with experience(self.home) as conn:
+                found = spikes(conn, now=now)
+            day, told = self._spikes_told
+            told = told if day == utc_day(now) else frozenset()
+            fresh = [item for item in found if item["signature"] not in told]
+            self._spikes_told = (utc_day(now), told | {item["signature"] for item in fresh})
+            events += [("failure_spike", {"signature": item["signature"], "class": item["class"], "today": item["today"],
+                                          "usual_per_day": item["usual_per_day"]}) for item in fresh]
+        except Exception:   # the spikes are a reading of the database: busy now, they wait for the next pass
+            pass
+        for name, payload in events[:50]:
+            try:
+                emit(name, payload)
+            except Exception:   # an older bus, a full queue: the event is simply not sent
+                pass
 
     def playbook_tool(self, args, **context):
         if not self.advice:
@@ -682,7 +874,11 @@ def _repair_settings(ctx, runtime_config) -> None:
 
 
 def _reflector(ctx, evolution: dict):
-    """The model access of the reflector through Hermes, or None (reflector off, or an older host)."""
+    """The model access of the reflector through Hermes, or None (reflector off, or an older host).
+
+    Only with the reflector on at load: its auxiliary task shows in `hermes model` and the dashboard's model list
+    as a task to configure, which it should not while the reflector is off. Switched on later, it waits for the next
+    load (apply_settings records it), and each pass reads the setting again, so switching it off applies at once."""
     if not evolution["reflector"] or not callable(getattr(ctx, "register_auxiliary_task", None)):
         return None
     from logging import getLogger
@@ -712,8 +908,6 @@ def _operator_cli(home: Path, reflect):
 def _start(plugin: _Plugin) -> None:
     """Mark when observation starts (the backfill reads Hermes' history only before it) and, in a gateway,
     which plugin version this process loaded."""
-    import time
-
     from .backfill import mark_observed
     from .status import record_runtime
 
@@ -781,7 +975,7 @@ def _register_guard(ctx, plugin: _Plugin) -> None:
     plugin.guard = RuntimeGuard(protected=protected_paths(hermes_root=get_default_hermes_root(home=home), profile_home=home),
                                 trees=protected_trees(), own=(Path(__file__).resolve().parent.parent,),
                                 process=own_process(), home=Path.home(), profile=home, lang=plugin.lang,
-                                on_block=lambda kind: record_guard(home, kind))
+                                on_block=lambda kind: record_guard(home, kind), on_error=plugin.guard_failed)
     ctx.register_hook("pre_tool_call", plugin.meter.wrap("pre_tool_call", plugin.pre_tool))
 
 
@@ -805,7 +999,7 @@ def register(ctx):
     from hermes_constants import get_hermes_home
 
     from .agent_tools import LESSONS_TOOL
-    from .autopilot import Autopilot
+    from .autopilot import Autopilot, runs_passes
     from .cli import legacy_install
     from .evolve import options
 
@@ -827,13 +1021,22 @@ def register(ctx):
                                     ", ".join(problems), evolution["lessons"])
     plugin = _Plugin(home, config, evolution)
     plugin.reflect = _reflector(ctx, evolution)
+    # Loaded with the reflector off where the host has auxiliary tasks: switched on, it works after the next load.
+    plugin.reflector_possible = not evolution["reflector"] and callable(getattr(ctx, "register_auxiliary_task", None))
+    emit = getattr(ctx, "emit", None)
+    plugin.emit = emit if callable(emit) else None
+
     def learning_pass():
         try:
-            return autopilot_pass(home, plugin.reflect, cancelled=lambda: plugin.autopilot.stopped)
+            return autopilot_pass(home, plugin.reflect, cancelled=lambda: plugin.autopilot.stopped,
+                                  reflector_reload=plugin.reflector_possible,
+                                  events=plugin.pass_events if plugin.emit is not None else None)
         finally:
             plugin.forget_playbook()   # lessons may have been activated or retired: new prompts show them now
 
     plugin.autopilot = Autopilot(home, learning_pass, interval_minutes=evolution["autopilot_minutes"])
+    # Only a process that stays up claims the pass: a one-shot run would end in its middle (runs_passes).
+    plugin.autopilot.claims = runs_passes()
     _start(plugin)
     _preload()
 
@@ -850,6 +1053,9 @@ def register(ctx):
     ctx.register_hook("post_llm_call", measured("post_llm_call", plugin.after_turn))
     ctx.register_hook("on_session_end", measured("on_session_end", plugin.turn_ended))
     ctx.register_hook("on_skill_lifecycle", measured("on_skill_lifecycle", plugin.skill_event))
+    # /new, /reset and a deleted session: what the plugin keeps in memory about a session that ended goes with it
+    ctx.register_hook("on_session_reset", measured("on_session_reset", plugin.session_reset))
+    ctx.register_hook("on_session_delete", measured("on_session_delete", plugin.session_deleted))
     lessons_on = evolution["lessons"] != "off"
     if lessons_on and evolution["tool_hints"]:
         # Only with tool_hints on: while any plugin listens, Hermes reads every tool result for this hook and runs
@@ -883,5 +1089,5 @@ def register(ctx):
     # A plugin host (plugins.isolation: host) skips CLI commands and warns on every load: the `evolution` command is
     # registered where the terminal runs Hermes in process, and the standalone runner (python -m) serves the rest.
     if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") != "1":
-        ctx.register_cli_command("evolution", "Review Hermes health, learning and operations", setup,
+        ctx.register_cli_command("evolution", CLI_HELP, setup,
                                  _operator_cli(home, plugin.reflect))

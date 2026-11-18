@@ -31,11 +31,13 @@ jobs:
         run: python -m compileall -q hermes_atlas_evolution dashboard __init__.py
       - name: Installer syntax
         run: sh -n install.sh
+      - name: Panel syntax
+        run: node --check dashboard/dist/index.js
 
-  smoke:
-    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+  tests:
+    name: Tests · Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -51,8 +53,29 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      # The test suite lives on the `tests` branch, so Hermes' clone of the default branch into every profile
+      # stays small. A branch named tests-<this branch, with / as -> runs instead when it exists, so a change
+      # and the tests it needs are reviewed together.
+      - name: Fetch the test suite
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          candidate="tests-${BRANCH//\//-}"
+          ref=tests
+          if git ls-remote --exit-code --heads origin "$candidate" > /dev/null 2>&1; then ref="$candidate"; fi
+          echo "Test suite from branch $ref"
+          git fetch --depth 1 origin "refs/heads/$ref"
+          mkdir -p tests
+          git archive FETCH_HEAD | tar -x -C tests
+      - name: Unit tests
+        shell: bash
+        run: |
+          home="$RUNNER_TEMP/home"
+          mkdir -p "$home/.hermes"
+          HOME="$home" USERPROFILE="$home" HERMES_HOME="$home/.hermes" python -m unittest discover -s tests
       # The plugin imports and its standalone runner answers on a throwaway profile (no Hermes needed).
-      - name: Import and run the standalone CLI
+      - name: Standalone CLI smoke test
         shell: bash
         run: |
           python -c "import hermes_atlas_evolution.integration, hermes_atlas_evolution.fleet_update"

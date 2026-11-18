@@ -22,13 +22,21 @@ _COST_FIELDS = ("estimated_cost_usd", "actual_cost_usd")
 _COST_STATUSES = frozenset(("actual", "estimated", "included", "unknown"))
 _LABEL = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._:+/-]{0,127}\Z")
 _SENSITIVE_LABEL = re.compile(r"(?:^|/)(?:sk-[a-zA-Z0-9_-]{8,}|gh[pousr]_[a-zA-Z0-9_]{8,}|xox[baprs]-[a-zA-Z0-9-]{8,})")
+# The window as one range on last_seen (an index on it, where Hermes has one, serves it), newest first: past
+# _ROW_LIMIT rows the totals still cover the most recent part of the window, and say from when (coverage).
 _USAGE_SQL = """
     SELECT substr(task, 1, 129), substr(billing_provider, 1, 129), substr(model, 1, 129),
            api_call_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
            estimated_cost_usd, actual_cost_usd, substr(cost_status, 1, 16), first_seen, last_seen
     FROM session_model_usage
-    WHERE last_seen BETWEEN ? AND ? OR typeof(last_seen) NOT IN ('integer', 'real') OR last_seen < 0
+    WHERE last_seen BETWEEN ? AND ?
+    ORDER BY last_seen DESC
     LIMIT ?
+"""
+# Rows whose last_seen is no time at all: never in a window, only counted for the coverage.
+_UNDATED_SQL = """
+    SELECT COUNT(*) FROM session_model_usage WHERE last_seen IS NULL OR typeof(last_seen) NOT IN ('integer', 'real')
+      OR last_seen < 0
 """
 
 
@@ -89,24 +97,28 @@ def _group_rows(groups: dict, fields: tuple) -> list[dict]:
     return [{**dict(zip(fields, key)), **_with_cache(rollup)} for key, rollup in leading]
 
 
-def _summarize(rows, *, start: float, deadline: float) -> dict:
+def _summarize(rows, *, start: float, deadline: float, undated: int = 0) -> dict:
     totals = _totals()
     inside = _totals()
     fields = (("task",), ("provider",), ("model",), _ROUTE_FIELDS)
     group_names = ("by_task", "by_provider", "by_model", "by_route")
     buckets = [defaultdict(_totals) for _ in fields]
     timing = Counter()
+    timing["rows_without_last_seen_excluded"] = undated
     statuses = Counter()
+    covered_from, partial = None, False
 
     for index, row in enumerate(rows):
         if index >= _ROW_LIMIT:
-            return {"status": "row_limit"}
+            partial = True   # rows come newest first: what was read is the newest part of the window
+            break
         if time.monotonic() >= deadline:
             return {"status": "query_timed_out"}
         first_seen, last_seen = row[-2:]
         if not _timestamp(last_seen):
             timing["rows_without_last_seen_excluded"] += 1
             continue
+        covered_from = last_seen
         task = "main" if row[0] == "" else _route_label(row[0], "unknown")
         provider = _route_label(row[1], "unknown")
         model = _route_label(row[2], "unknown")
@@ -126,7 +138,7 @@ def _summarize(rows, *, start: float, deadline: float) -> dict:
             _accumulate(group[key], counts, costs)
 
     return {
-        "status": "ok" if totals["rows"] else "empty",
+        "status": "partial" if partial else "ok" if totals["rows"] else "empty",
         "totals": _with_cache(totals),
         "fully_in_window_totals": _with_cache(inside),
         **{name: _group_rows(group, keys) for name, group, keys in zip(group_names, buckets, fields)},
@@ -137,6 +149,10 @@ def _summarize(rows, *, start: float, deadline: float) -> dict:
             "rows_without_last_seen_excluded": timing["rows_without_last_seen_excluded"],
             "latest_cost_status_rows": dict(statuses),
             "groups_omitted": {name: max(len(group) - _GROUP_LIMIT, 0) for name, group in zip(group_names, buckets)},
+            # partial: more than _ROW_LIMIT rows in the window; the totals hold the newest ones (every row last seen
+            # after covered_from_epoch is in them, the older part of the window is not)
+            "partial": partial, "row_limit": _ROW_LIMIT,
+            "covered_from_epoch": covered_from if partial else None,
         },
     }
 
@@ -155,8 +171,9 @@ def _read_usage(db: sqlite3.Connection, *, start: float, now: float, deadline: f
     required = {*_COUNTERS, *_COST_FIELDS, "task", "billing_provider", "model", "cost_status", "first_seen", "last_seen"}
     if not required.issubset(columns):
         return {"status": "unexpected_schema"}
+    undated = db.execute(_UNDATED_SQL).fetchone()[0]
     rows = db.execute(_USAGE_SQL, (start, now, _ROW_LIMIT + 1))
-    return _summarize(rows, start=start, deadline=deadline)
+    return _summarize(rows, start=start, deadline=deadline, undated=int(undated or 0))
 
 
 def _regular_stat(path: Path) -> os.stat_result | None:

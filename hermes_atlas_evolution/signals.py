@@ -32,6 +32,12 @@ _HINT = re.compile(r"[A-Za-z_][A-Za-z0-9_.+-]{0,47}\Z")
 _SKILL_ACTIONS = frozenset({"loaded", "patched", "edited", "created", "installed", "archived", "stale", "restored"})
 
 # Ordered: the first matching rule names the class. Each rule may capture an identifier-like hint.
+# A status code counts only where it reads as one (`HTTP/1.1 429`, `HTTP Error 403`, `status code: 401`): a bare
+# number is anyone's (`429 passed`, `line 403`). `timeout` is a phrase that says something timed out, never the word
+# alone (`timeout=30` in a source line).
+_HTTP = (r"\bHTTP(?:/[\d.]+)?(?: ?Error)?:? {code}\b|\bstatus(?:[ _]?code)?\s*[=:]?\s*{code}\b|\b{code} Client Error\b"
+         # SDKs' `Error code: 401 - {...}`; curl's `returned error: 401`, never `returned 401 rows`
+         r"|\berror[ _]?code:?\s*{code}\b|\breturned (?:error|status|HTTP|code)\W{{0,3}}{code}\b")
 _RULES = (
     ("missing_argument", re.compile(
         r"missing required argument(?:\(s\)|s)?:[ \t]*`?'?(?P<hint>[A-Za-z_][\w.-]{0,47})"
@@ -50,18 +56,22 @@ _RULES = (
     ("edit_mismatch", re.compile(
         r"Could not find a match for old_string|Found \d+ matches for old_string|No edit was applied", re.I)),
     ("blocked_by_policy", re.compile(r"\bBLOCKED:|flagged as dangerous|blocked by (?:policy|security)|not permitted by policy", re.I)),
-    ("rate_limited", re.compile(r"rate.?limit|too many requests|\b429\b|quota exceeded", re.I)),
-    ("timeout", re.compile(r"timed out|\btimeout\b|deadline exceeded", re.I)),
+    ("rate_limited", re.compile(r"rate.?limit|too many requests|quota exceeded|" + _HTTP.format(code="429"), re.I)),
+    ("timeout", re.compile(
+        r"timed out|\bTimeoutError\b|deadline exceeded|\b(?:read|connect|connection|request|operation|gateway) ?timeout\b"
+        r"|\btimeout (?:exceeded|expired|reached)\b|\btimeout \d+ ?ms exceeded\b", re.I)),   # Playwright's
     ("missing_dependency", re.compile(
         r"(?P<hint>[A-Za-z_][\w.+-]{0,40}): command not found"
         r"|No module named '?(?P<hint2>[A-Za-z_][\w.]{0,47})"
         r"|Unable to locate package (?P<hint3>[A-Za-z_0-9][\w.+-]{0,47})"
         r"|is not recognized as an internal or external command", re.I)),
     ("permission_denied", re.compile(r"permission denied|\bEACCES\b|operation not permitted", re.I)),
-    ("auth", re.compile(r"\b401\b|\bunauthorized\b|invalid api key|authentication failed|\b403\b|\bforbidden\b", re.I)),
+    ("auth", re.compile(r"\bunauthorized\b|invalid api key|authentication failed|\bforbidden\b|"
+                        + _HTTP.format(code="40[13]"), re.I)),
     ("backend_unavailable", re.compile(
         r"not initialized|backend\b.{0,40}\bunavailable|connection refused|\bECONNREFUSED\b|is not running|not reachable", re.I)),
-    ("not_found", re.compile(r"\bnot found\b|no such file|does not exist|\bENOENT\b|unknown (?:tool|skill|command)", re.I)),
+    ("not_found", re.compile(r"\bnot found\b|no such file|does not exist|\bENOENT\b|unknown (?:tool|skill|command)|"
+                             + _HTTP.format(code="404"), re.I)),
     ("limit_exceeded", re.compile(r"\bis \d+ chars\b|\bexceeds\b|too (?:long|large)|limit of \d+|\bmaximum\b.{0,30}\b(?:size|length|chars)", re.I)),
     ("invalid_argument", re.compile(
         r"^usage: |unrecognized arguments|Unsupported\b.{0,40}\boptions|invalid choice|unexpected keyword"
@@ -69,6 +79,25 @@ _RULES = (
     ("code_exception", re.compile(r"Traceback \(most recent call last\)|\bSyntaxError\b", re.I)),
     ("network", re.compile(r"connection reset|network is unreachable|name or service not known|\bSSL\b.{0,20}\berror", re.I)),
 )
+# Command output is anyone's text: "not found" there is as often a line of progress (`target 'docs' not found,
+# skipping`) as the cause. Only the forms that name a missing file or resource count.
+_OUTPUT_RULES = tuple(
+    (name, re.compile(r"no such file|does not exist|\bENOENT\b|unknown (?:tool|skill|command)|\b404 Not Found\b|"
+                      + _HTTP.format(code="404"), re.I) if name == "not_found" else pattern)
+    for name, pattern in _RULES)
+# Phrases that only ever name the cause, wherever they are in a command's output (read there as before 0.12.0).
+_SPECIFIC_RULES = tuple((name, pattern) for name, pattern in _RULES if name in (
+    "missing_argument", "approval_refused", "locked_resource", "review_precondition", "edit_precondition",
+    "edit_mismatch", "missing_dependency"))
+# A word each of those phrases holds (lower case): without one, none of them can match.
+_SPECIFIC_WORDS = ("argument", "requires a", "denied", "consent", "without user response", "approv", "locked",
+                   "refusing", "in this review", "has not seen", "must", "old_string", "no edit was applied",
+                   "command not found", "no module named", "unable to locate package", "not recognized")
+# The last line of a command's output says why it failed: there a plain "not found" is the cause
+# (`fatal: repository 'x' not found`).
+_LAST_LINE_RULES = tuple((name, pattern) for name, pattern in _RULES if name == "not_found")
+_TRACEBACK = "Traceback (most recent call last):"
+OUTPUT_TAIL_LINES, OUTPUT_TAIL_CHARS = 5, 600   # where a command's output says why it failed: its last lines
 _EXCEPTION = re.compile(r"^(?P<hint>[A-Za-z_][A-Za-z0-9_.]{2,47}(?:Error|Exception))\b", re.M)
 _TARGET_TOOL = re.compile(r"tool_call to '(?P<tool>[A-Za-z0-9_][\w.:-]{0,95})'")
 # plugin_fault: Hermes blocked the call because another plugin's pre_tool_call hung or raised (fail-closed).
@@ -132,7 +161,13 @@ def _clean_hint(value) -> str:
 
 def _error_parts(error_message, result) -> tuple[str, str, int | None]:
     """(text Hermes or the tool wrote about the error, command output, exit code)."""
-    errors, output, exit_code = [], "", None
+    return _parts(error_message, result)[:3]
+
+
+def _parts(error_message, result) -> tuple[str, str, int | None, bool]:
+    """As _error_parts, and whether the output is a command's own (the `output` of a terminal-like result) rather
+    than a tool result in plain text."""
+    errors, output, exit_code, command = [], "", None, False
     if isinstance(error_message, str):
         errors.append(error_message[:2000])
     if isinstance(result, str) and len(result) <= _RESULT_LIMIT and result.lstrip()[:1] == "{":
@@ -147,13 +182,27 @@ def _error_parts(error_message, result) -> tuple[str, str, int | None]:
                     errors.append(value[:2000])
             value = data.get("output")
             if isinstance(value, str):
-                output = value[-1500:]
+                output, command = value[-1500:], True
             code = data.get("exit_code")
             if type(code) is int and -255 <= code <= 255:
                 exit_code = code
     elif isinstance(result, str):
         output = result[:1500]
-    return "\n".join(errors), output, exit_code
+    return "\n".join(errors), output, exit_code, command
+
+
+def _exception_lines(text: str) -> str | None:
+    """What a Python traceback ends with (the exception and its message), without its frames and source lines,
+    where a line number (`line 403`) or an argument (`timeout=30`) would read as a cause. None without a traceback."""
+    at = text.rfind(_TRACEBACK)
+    if at < 0:
+        return None
+    lines = [line for line in text[at + len(_TRACEBACK):].splitlines() if line.strip() and not line[:1].isspace()]
+    return "\n".join(lines)[-OUTPUT_TAIL_CHARS:]
+
+
+def _tail(text: str) -> str:
+    return "\n".join([line for line in text.splitlines() if line.strip()][-OUTPUT_TAIL_LINES:])[-OUTPUT_TAIL_CHARS:]
 
 
 def _error_text(error_message, result) -> tuple[str, int | None]:
@@ -220,7 +269,7 @@ def classify(tool_name, status, error_message=None, result=None, args=None) -> d
     if status not in ("error", "blocked"):
         return None
     tool = effective_tool(tool_name, args)
-    errors, output, exit_code = _error_parts(error_message, result)
+    errors, output, exit_code, command = _parts(error_message, result)
     text = "\n".join(part for part in (errors, output) if part)
     if tool == "tool_call":   # the wrapper did not say which tool; Hermes names it in its own error text
         target = _TARGET_TOOL.search(errors)
@@ -231,18 +280,39 @@ def classify(tool_name, status, error_message=None, result=None, args=None) -> d
     if _PLUGIN_FAULT.search(errors):   # Hermes' own fail-closed veto after another plugin's guard hung or raised
         signature = hashlib.sha256("\0".join((tool, "plugin_fault", "")).encode()).hexdigest()[:20]
         return {"tool": tool, "klass": "plugin_fault", "hint": "", "signature": signature}
+    # A traceback is read at its end (the exception line): a frame's line number or argument never names the class,
+    # and a traceback nothing more specific explains is a code exception. Command output is read in its last lines.
     for source, from_output in ((errors, False), (output, True)):
-        for name, pattern in _RULES:
-            match = pattern.search(source) if source else None
-            if match:
-                klass = name
-                groups = match.groupdict()
-                key = next((key for key in ("hint", "hint2", "hint3") if groups.get(key)), None)
-                if key and from_output:
-                    hint = _output_hint(groups[key], module=name == "missing_dependency" and key == "hint2")
-                elif key:
-                    hint = _clean_hint(groups[key])
+        if not source:
+            continue
+        traced = _exception_lines(source)
+        tail = _tail(source) if traced is None and from_output and command else None
+        scans = [(traced if traced is not None else tail if tail is not None else source,
+                  _OUTPUT_RULES if from_output and command else _RULES)]
+        if tail is not None:
+            # Nothing in the last lines: a phrase that only ever says the cause (`command not found`, a missing
+            # argument) still counts anywhere in the output, as before 0.12.0, and a plain "not found" on the last line.
+            # The words gate the whole-output scan: most output holds none of them, and the scan is the costly part.
+            lower = source.lower()
+            if any(word in lower for word in _SPECIFIC_WORDS):
+                scans.append((source, _SPECIFIC_RULES))
+            scans.append((tail.rpartition("\n")[2][-300:], _LAST_LINE_RULES))
+        for scan, rules in scans:
+            for name, pattern in rules:
+                match = pattern.search(scan)
+                if match:
+                    klass = name
+                    groups = match.groupdict()
+                    key = next((key for key in ("hint", "hint2", "hint3") if groups.get(key)), None)
+                    if key and from_output:
+                        hint = _output_hint(groups[key], module=name == "missing_dependency" and key == "hint2")
+                    elif key:
+                        hint = _clean_hint(groups[key])
+                    break
+            if klass:
                 break
+        if not klass and traced is not None:
+            klass = "code_exception"
         if klass:
             break
     if klass == "code_exception":
@@ -552,6 +622,13 @@ class TurnTracker:
                         turn.skills.add(skill)
                     return
 
+    def forget_sessions(self, session_ids) -> None:
+        """The sessions ended (reset or deleted): their last finished turn's skills go."""
+        keys = [key for key in map(_key, session_ids) if key]
+        with self._lock:
+            for key in keys:
+                self._last.pop(key, None)
+
     def recent_skills(self, session_id, *, clock: float | None = None) -> tuple[str, ...]:
         """Skills of the session's last finished turn, when it ended within the correction window."""
         session = _key(session_id)
@@ -640,6 +717,13 @@ class FeedbackSensor:
         self.reask_seconds = reask_seconds
         self._last: OrderedDict[bytes, tuple[float, frozenset]] = OrderedDict()
         self._lock = threading.Lock()
+
+    def forget_sessions(self, session_ids) -> None:
+        """The sessions ended (reset or deleted): their previous message's hashed words go."""
+        keys = [key for key in map(_key, session_ids) if key]
+        with self._lock:
+            for key in keys:
+                self._last.pop(key, None)
 
     def _from_owner(self, payload: dict) -> bool:
         """A message the owner wrote: on their own surfaces, or in a chat from a listed sender. Automations,
