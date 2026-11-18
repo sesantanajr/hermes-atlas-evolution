@@ -193,8 +193,7 @@ class UndoOrderTest(Base):
             self.assertIsNotNone(conn.execute("SELECT 1 FROM cursor WHERE key='auto_skip:skill_lock:hermes-admin'").fetchone())
             self.assertTrue(decisions.undo(conn, second, now=later + 2)["undone"])   # the newest one is undone
             self.assertEqual(conn.execute("SELECT status FROM proposal WHERE id=?", (proposal,)).fetchone()[0], "open")
-        done = actions.automatic(self.home, now=later + 3, mode="full", runner=Hermes(), usage={},
-                                 remote=lambda: None)
+        done = actions.automatic(self.home, now=later + 3, mode="full", runner=Hermes(), usage={})
         self.assertEqual(len(done["applied"]), 1)   # the owner took the newest "no" back: auto may apply it now
 
 
@@ -218,8 +217,7 @@ class UndoIntentTest(Base):
         with experience(self.home) as conn:
             self.assertIsNotNone(conn.execute("SELECT 1 FROM cursor WHERE key='auto_skip:skill_lock:hermes-admin'").fetchone())
             conn.execute("UPDATE proposal SET status='open' WHERE id=?", (proposal,))   # reopened, however it happens
-        done = actions.automatic(self.home, now=NOW + 2 * 86_400, mode="full", runner=hermes, usage={},
-                                 remote=lambda: None)
+        done = actions.automatic(self.home, now=NOW + 2 * 86_400, mode="full", runner=hermes, usage={})
         self.assertEqual(done["applied"], [])
 
     def test_hermes_refusing_the_undo_leaves_the_change_and_its_record(self):
@@ -390,25 +388,35 @@ class ForkTest(Fleet):
             (home / "plugins" / ".install-metadata.json").write_text(json.dumps(
                 {"hermes-atlas-evolution": {"pinned": True, "revision": "c" * 40}}), encoding="utf-8")
 
-    def test_a_failed_update_is_installed_again_only_over_this_repository(self):
+    def test_a_copy_moves_only_to_the_code_of_the_profile_that_runs_the_command(self):
+        # 0.13.0 (catalog rule 3): no network read and no commit the plugin picks. A failed update is never followed
+        # by a reinstall; a pinned copy of this repository moves to the commit of the profile running the command.
         ours = self.profile("ours", enabled=["hermes-atlas-evolution"])
+        pinned = self.profile("pinned", enabled=["hermes-atlas-evolution"])
         fork = self.profile("fork", enabled=["hermes-atlas-evolution"])
         self.checkout(ours, "https://github.com/sesantanajr/hermes-atlas-evolution.git")
+        self.checkout(pinned, "https://github.com/sesantanajr/hermes-atlas-evolution", pinned=True)
         self.checkout(fork, "git@github.com:someone/hermes-atlas-evolution.git")
         rows = {row["profile"]: row for row in fleet_update.plan(self.root)}
         self.assertEqual((rows["ours"]["origin"], rows["fork"]["origin"]), ("self", "other"))
         hermes = Hermes(fail_on="update")
-        done = fleet_update.run([rows["ours"], rows["fork"]], runner=hermes, executable="/x/hermes", remote=lambda: None)
-        commands = [call[2:4] for call in hermes.calls]
-        self.assertEqual(commands, [["plugins", "update"], ["plugins", "install"], ["plugins", "update"]])
-        self.assertEqual(done[1]["commands"][-1]["after"], "not_ours")
+        with patch("subprocess.run", side_effect=AssertionError("no git, no network")):
+            done = fleet_update.run([rows["fork"], rows["pinned"], rows["ours"]], here=ours, runner=hermes,
+                                    executable="/x/hermes")
+        self.assertEqual([item["profile"] for item in done], ["ours", "fork", "pinned"])   # its own copy first
+        self.assertEqual([call[2:] for call in hermes.calls],
+                         [["plugins", "update", "hermes-atlas-evolution"], ["plugins", "update", "hermes-atlas-evolution"],
+                          ["plugins", "install", "sesantanajr/hermes-atlas-evolution", "--force", "--enable", "--ref",
+                           "a" * 40]])
+        self.assertEqual([item["status"] for item in done], ["failed", "failed", "done"])
 
     def test_a_pinned_fork_is_left_as_it_is(self):
         fork = self.profile("fork", enabled=["hermes-atlas-evolution"])
         self.checkout(fork, "https://github.com/someone/hermes-atlas-evolution", pinned=True)
         row = fleet_update.inspect("fork", fork)
-        self.assertIsNone(fleet_update.step(row, install_missing=False, target="d" * 40))
-        done = fleet_update.run([row], runner=Hermes(), executable="/x/hermes", target="d" * 40)
+        lead = ["sesantanajr/hermes-atlas-evolution", "--ref", "d" * 40]
+        self.assertIsNone(fleet_update.step(row, install_missing=False, lead=lead))
+        done = fleet_update.run([row], runner=Hermes(), executable="/x/hermes")
         self.assertEqual((done[0]["status"], done[0]["reason"]), ("skipped", "fork"))
 
     def test_a_profile_that_opted_out_is_never_changed_by_itself(self):
@@ -426,17 +434,9 @@ class ForkTest(Fleet):
                 self.propose(item)
         calls = []
         with patch.object(admin, "hermes_executable", return_value="/x/hermes"), \
-                patch("hermes_atlas_evolution.admin.run_command", lambda argv, **k: calls.append(argv)), \
-                patch("hermes_atlas_evolution.fleet_update.auto_sync", lambda *a, **k: None):
-            done = actions.automatic(self.root, now=NOW, mode="full", usage={}, remote=lambda: "a" * 40)
+                patch("hermes_atlas_evolution.admin.run_command", lambda argv, **k: calls.append(argv)):
+            done = actions.automatic(self.root, now=NOW, mode="full", usage={})
         self.assertEqual((done["applied"], calls), ([], []))
-        lead = fleet_update.inspect("default", self.root)
-        synced = self.profile("synced", enabled=["hermes-atlas-evolution"],
-                              entries={"hermes-atlas-evolution": {"settings": {"fleet_managed": "false"}}})
-        self.checkout(synced, "https://github.com/sesantanajr/hermes-atlas-evolution", pinned=True)
-        due = fleet_update.due([fleet_update.inspect("synced", synced)], lead, "a" * 40, {}, now=NOW,
-                               mode_of=lambda home: "auto")
-        self.assertEqual(due, [])
 
 
     def test_a_profile_whose_configuration_cannot_be_read_is_left_alone_this_pass(self):
@@ -453,8 +453,7 @@ class ForkTest(Fleet):
         self.configs[str(work.resolve())] = None   # config.yaml cannot be read right now
         self.assertFalse(environment.fleet_managed(work))
         self.assertFalse(actions._target_allows(self.root, item["subject"]))
-        with patch("hermes_atlas_evolution.fleet_update.auto_sync", lambda *a, **k: None):
-            done = actions.automatic(self.root, now=NOW, mode="full", usage={}, remote=lambda: None)
+        done = actions.automatic(self.root, now=NOW, mode="full", usage={})
         self.assertEqual(done["applied"], [])
         self.assertTrue(leftover.is_dir())   # nothing moved to the trash
         self.configs[str(work.resolve())] = {"plugins": {"enabled": ["hermes-atlas-evolution"]}}   # readable, no opt-out
@@ -526,22 +525,46 @@ class InstallScriptTest(unittest.TestCase):
     def calls(self) -> list[str]:
         return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
 
-    def test_the_latest_commit_is_read_once_and_never_passed_empty(self):
-        pin = {"hermes-atlas-evolution": {"pinned": True, "revision": "c" * 40}}
-        for name in ("work", "lab"):
-            self.profile(self.root / "profiles" / name, record=pin)
+    def test_it_never_picks_a_commit_and_never_reads_the_network(self):
+        # 0.13.0 (catalog rule 3): only Hermes' own commands decide what code comes; git is never run by the script
+        self.profile(self.root / "profiles" / "work", record={"hermes-atlas-evolution": {"pinned": True,
+                                                                                         "revision": "c" * 40}})
+        self.profile(self.root / "profiles" / "shop", record={"hermes-atlas-evolution": {
+            "pinned": True, "revision": "b" * 40, "source": "https://github.com/sesantanajr/hermes-atlas-evolution",
+            "catalog": {"name": "hermes-atlas-evolution", "tier": "community", "sha": "b" * 40, "pin": "b" * 40}}})
+        self.profile(self.root / "profiles" / "fresh", installed=False)
         for shell in self.SHELLS:
             for path in (self.log, self.git_log):
                 path.unlink(missing_ok=True)
-            done = self.run_script("--all", "--yes", shell=shell)
+            done = self.run_script("--all", "--yes", "--install-missing", shell=shell)
             self.assertEqual(done.returncode, 0, done.stderr)
-            self.assertEqual(len(self.git_log.read_text().splitlines()), 1, shell)   # once for every profile
-            refs = [line.rsplit("--ref ", 1)[1] for line in self.calls() if "--ref" in line]
-            self.assertEqual(refs, ["e" * 40, "e" * 40], shell)
-            self.log.unlink(missing_ok=True)
-            down = self.run_script("--all", "--yes", shell=shell, env={"GIT_DOWN": "1"})
-            self.assertNotEqual(down.returncode, 0)
-            self.assertFalse([line for line in self.calls() if "--ref" in line], shell)   # never `--ref ""`
+            self.assertFalse(self.git_log.exists(), shell)
+            by_home = {line.split("|", 1)[0]: line.split("|", 1)[1] for line in self.calls()}
+            self.assertNotIn(str(self.root / "profiles" / "work"), by_home)   # pinned: left as it is
+            self.assertIn("pinned to cccccccccccc by Hermes", done.stdout)
+            self.assertIn("plugins install https://github.com/sesantanajr/hermes-atlas-evolution.git --force --ref",
+                          done.stdout)
+            self.assertEqual(by_home[str(self.root / "profiles" / "shop")],
+                             "--profile shop plugins update hermes-atlas-evolution")   # Hermes moves a catalog pin
+            self.assertEqual(by_home[str(self.root)], "--profile default plugins update hermes-atlas-evolution")
+            self.assertEqual(by_home[str(self.root / "profiles" / "fresh")],
+                             "--profile fresh plugins install https://github.com/sesantanajr/hermes-atlas-evolution.git"
+                             " --enable")
+            self.assertFalse([line for line in self.calls() if "--force" in line and "update" in line], shell)
+        self.log.unlink(missing_ok=True)
+        done = self.run_script("--profiles", "fresh", "--yes", "--install-missing", "--catalog")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.calls(), [f"{self.root / 'profiles' / 'fresh'}|--profile fresh plugins install "
+                                        "hermes-atlas-evolution --enable"])
+
+    def test_hermes_never_runs_with_an_approval_bypass(self):
+        # catalog rule 12: the commands the installer runs never inherit YOLO or auto-approve from the shell
+        names = ("HERMES_YOLO_MODE", "HERMES_YOLO", "HERMES_ACP_AUTO_APPROVE", "HERMES_ACCEPT_HOOKS",
+                 "HERMES_TUI_NO_CONFIRM", "CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS")
+        self.fake("hermes", f'env | grep -E "^({"|".join(names)})=" >> "{self.log}"\nexit 0\n')
+        done = self.run_script("--all", "--yes", env={name: "1" for name in names})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.calls(), [])
 
     def test_profiles_are_the_ones_hermes_lists_and_a_name_is_never_a_file_pattern(self):
         self.profile(self.root / "profiles" / "work")
@@ -599,10 +622,9 @@ class InstallScriptTest(unittest.TestCase):
         work = [line.split("|", 1)[1] for line in lines if line.startswith(str(self.root / "profiles" / "work") + "|")]
         fork = [line.split("|", 1)[1] for line in lines if line.startswith(str(self.root / "profiles" / "fork") + "|")]
         self.assertIn("(installed)", done.stdout)   # another plugin's pin is not this one's
-        self.assertEqual(len(work), 2)
-        self.assertIn("plugins install https://github.com/sesantanajr/hermes-atlas-evolution.git --force", work[1])
-        self.assertEqual(len(fork), 1)   # the update only: never the upstream installed over a fork
-        self.assertIn("does not come from", done.stderr)
+        self.assertEqual(work, ["--profile work plugins update hermes-atlas-evolution"])   # a failure is reported
+        self.assertEqual(fork, ["--profile fork plugins update hermes-atlas-evolution"])   # never a reinstall
+        self.assertIn("Failed: default fork work", done.stdout)
 
     def test_a_download_cut_short_runs_nothing(self):
         text = INSTALL.read_text(encoding="utf-8")

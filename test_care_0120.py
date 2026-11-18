@@ -633,6 +633,7 @@ class ToolStore(unittest.TestCase):
         machine = Systemd()
         machine.add("user", "hermes-gateway-x.service", ActiveState="active", SubState="running",
                     ExecStart=exec_value(str(self.tools / "big" / "bin" / "python3")))
+        (self.home.parent / "proc").mkdir()   # its running programs can be read (none): gc may go once nothing uses big
         host = system_update.Host(root=self.home.parent, runner=machine)
         stale = {**hermes_care.tool_store(self.home, processes=()), "at": NOW, "findings": ["unused_tools"]}
         with experience(self.home) as conn:

@@ -141,8 +141,9 @@ class PanelRouteTest(Base):
         # 0.8.1 review: Hermes also takes the open dashboard's token as `Authorization: Bearer`
         self.assertEqual(self.api.decision_policy({**login, "authorization": "Bearer t"}, {}), (False, "open_dashboard"))
         self.assertEqual(self.api.decision_policy({}, {}), (False, "open_dashboard"))   # no login cookie
-        self.assertEqual(self.api.decision_policy(login, {}), (True, "login"))
-        self.assertEqual(self.api.decision_policy({"cookie": "hermes_session_at_gw1=abc"}, {}), (True, "login"))
+        # 0.13.0: without Hermes' verdict (auth_required unset) a cookie name is no login
+        self.assertEqual(self.api.decision_policy(login, {}), (False, "open_dashboard"))
+        self.assertEqual(self.api.decision_policy({"cookie": "hermes_session_at_gw1=abc"}, {}), (False, "open_dashboard"))
         self.assertEqual(self.api.decision_policy({"cookie": "hermes_session_at="}, {}), (False, "open_dashboard"))
         self.assertEqual(self.api.decision_policy(login, {}, app_state=SimpleNamespace(auth_required=False)),
                          (False, "open_dashboard"))   # the dashboard process itself says there is no login
@@ -251,6 +252,14 @@ class PanelRouteTest(Base):
         except ImportError:
             self.skipTest("FastAPI is installed with Hermes' dashboard only")
         app = FastAPI()
+        app.state.auth_required = True   # 0.13.0: only the session Hermes' login gate verified decides
+
+        @app.middleware("http")
+        async def hermes_gate(request, call_next):   # Hermes' gate: the login cookie it verified becomes the session
+            if "hermes_session_at=abc" in request.headers.get("cookie", ""):
+                request.state.session = SimpleNamespace(provider="basic")
+            return await call_next(request)
+
         app.include_router(self.api.router, prefix="/p")
         self.api._current = lambda target=None: (self.home, {})
         client = TestClient(app)

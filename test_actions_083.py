@@ -213,8 +213,9 @@ class AutomaticTest(Base):
         self.assertTrue(any("list-unit-files" in call for call in machine.calls))   # it asked the machine given
         self.assertFalse([call for call in machine.calls if "start" in call or "daemon-reload" in call])
 
-    def test_the_mode_defaults_to_auto_and_the_agent_cannot_widen_it(self):
-        self.assertEqual((options({}, {})["mode"], options({}, {})["auto_actions"]), ("auto", "full"))
+    def test_the_mode_defaults_to_assist_and_the_agent_cannot_widen_it(self):
+        # 0.13.0 (catalog rule 12): nothing that runs Hermes' commands happens by itself until the owner chooses Auto
+        self.assertEqual((options({}, {})["mode"], options({}, {})["auto_actions"]), ("assist", "safe"))
         # an owner who chose the 0.8.3 setting keeps that choice
         self.assertEqual(options({"evolution": {"auto_actions": False}}, {})["mode"], "manual")
         self.assertEqual(options({"evolution": {"auto_actions": "safe"}}, {})["mode"], "assist")
@@ -287,12 +288,12 @@ class MenuActionsTest(Base):
             written.append(values)
             return list(values)
 
-        script = Script("5", "1", "y", "m", "2", "", "0")
+        script = Script("5", "1", "y", "m", "3", "", "0")
         Menu(self.home, {}, lang="en", console=Console(read=script.read, write=script.write, width=110, color=False),
              clock=lambda: NOW, writer=writer).run()
         self.assertIn("removed a duplicate entry from MEMORY.md", script.text)
         self.assertIn("Undone.", script.text)
-        self.assertEqual(written, [{"mode": "assist"}])
+        self.assertEqual(written, [{"mode": "manual"}])
         self.assertEqual(memory_care.parse((self.home / "memories" / "MEMORY.md").read_text(encoding="utf-8")),
                          ["Same."])
         self.assertEqual(actions.automatic(self.home, now=NOW, mode="safe")["memory"], [])   # put back: never again
@@ -309,10 +310,10 @@ class PanelTest(Base):
         told = snap["proposals"][0]["explain"]
         self.assertEqual((told["title"], told["category"], told["can_apply"]),
                          ("Travar skill reescrita em excesso", "change", True))
-        self.assertEqual(snap["automatic"]["mode"], "auto")
+        self.assertEqual(snap["automatic"]["mode"], "assist")   # the default since 0.13.0
         self.assertEqual(snap["automatic"]["recent"][0]["kind"], "memory")
-        self.assertEqual(snap["settings"]["values"]["mode"], "auto")
-        self.assertNotIn("mode", snap["settings"]["recommended"])   # already auto by default
+        self.assertEqual(snap["settings"]["values"]["mode"], "assist")
+        self.assertEqual(snap["settings"]["recommended"]["mode"], "auto")   # Auto stays the owner's explicit choice
         with experience(self.home) as conn:
             self.assertEqual(decisions.history(conn)[0]["actor"], "automatic")
 

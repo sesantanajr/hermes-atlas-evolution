@@ -73,7 +73,7 @@ class ObserverTests(unittest.TestCase):
         with database(self.home) as conn:
             operations._prune(conn, NOW)
             days = [row[0] for row in conn.execute("SELECT day FROM metric ORDER BY day")]
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0], 1)   # delivery ids: 2 days
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0], 0)   # 0.13.0: kept in memory
         self.assertEqual(days, ["2026-10-12", "2026-11-15"])
 
     @unittest.skipIf(os.name == "nt", "Windows cannot delete a database that is still open")

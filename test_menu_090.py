@@ -119,7 +119,7 @@ class MainScreenTest(MenuBase):
             decisions.decide_lesson(conn, derived, "approve", now=NOW, actor="dashboard")
         shown = self.menu("0", lang="pt")
         self.assertIn("Lições: automáticas · 1 ativa · 2 esperando você · ", shown)
-        self.assertIn("Modo: Auto", shown)
+        self.assertIn("Modo: Assistido", shown)
         self.assertNotIn("modo auto", shown)
         self.assertIn("Lessons: automatic · 1 active", self.menu("0"))
         self.assertIn("(ainda não verificado)", shown)
@@ -421,9 +421,10 @@ class Polish090Test(MenuBase):
             self.assertNotIn(gone, english)
         self.assertIn("remove entradas repetidas da memória (guarda uma cópia do arquivo antes)", portuguese)
         self.assertIn("removes duplicate memory entries (keeps a copy of the file first)", english)
-        self.assertIn("Assistido: sozinho, só remove entradas repetidas da memória; o resto espera você.", portuguese)
-        self.assertIn("Assisted: on its own it only removes duplicate memory entries; everything else waits for you.",
-                      english)
+        self.assertIn("Assistido (padrão): sozinho, só remove entradas repetidas da memória; o resto espera você.",
+                      portuguese)
+        self.assertIn("Assisted (default): on its own it only removes duplicate memory entries; everything else waits"
+                      " for you.", english)
         shown = self.menu("5", "", "0", lang="pt")
         self.assertIn("Nenhuma ação automática nos últimos 7 dias.", shown)
         self.assertIn("No automatic action in the last 7 days.", self.menu("5", "", "0"))

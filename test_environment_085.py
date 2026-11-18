@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hermes_atlas_evolution import actions, admin, ecosystem, environment, explain, status
+from hermes_atlas_evolution import actions, admin, ecosystem, environment, explain, fleet_update, status
 from hermes_atlas_evolution.experience import experience
 from hermes_atlas_evolution.menu import Console, Menu
 
@@ -370,8 +370,9 @@ class FindingsTest(Fleet):
         self.assertIn("hermes -p work plugins remove forgotten-plugin", found["plugin_unused"]["evidence"]["commands"])
         self.assertEqual(found["plugin_leftover"]["subject"], "work/.install-abc123")
         self.assertEqual(found["self_missing"]["subject"], "work/hermes-atlas-evolution")
-        self.assertEqual(explain.plan(found["self_missing"])[0],
-                         ["@work", "plugins", "install", "sesantanajr/hermes-atlas-evolution", "--enable"])
+        # 0.13.0: nothing to install from without the profile that applies it (its catalog name or its commit)
+        self.assertIsNone(explain.plan(found["self_missing"]))
+        self.assertEqual(found["self_missing"]["command"], "hermes -p work plugins install hermes-atlas-evolution --enable")
         quiet = {item["kind"] for item in self.findings(sessions=lambda home, since: 0)}
         self.assertNotIn("self_missing", quiet)   # never used: nothing to learn there
         self.assertIn("profile_idle", quiet)
@@ -389,17 +390,19 @@ class FindingsTest(Fleet):
         forged = {"kind": "self_missing", "subject": "fresh/some-other-plugin", "evidence": {}}
         self.assertIsNone(explain.plan(forged))   # only this plugin installs itself
 
-    def test_the_install_uses_the_commit_the_lead_runs(self):
-        # 0.12.0 (F6): never `--ref` (a pin breaks every later `plugins update` there), so the Mode auto installs the
-        # plugin in a profile only while the repository's default branch is on the very commit the lead runs
+    def test_the_install_gives_the_code_the_lead_runs(self):
+        # 0.13.0 (catalog rule 3): the plugin never picks a commit and never reads the network. A profile gets the
+        # lead's own commit of this repository (`--ref`), with Hermes' own command.
         plugin(self.root, "hermes-atlas-evolution", repo="https://github.com/sesantanajr/hermes-atlas-evolution")
         self.profile("fresh")
         found = environment.findings(self.scan(), {"entries": {}, "removed": []}, ecosystem.knowledge(), now=NOW,
-                                     self_sha=environment.self_sha(self.root))
+                                     self_sha=environment.self_sha(self.root),
+                                     self_source=fleet_update.source(self.root))
         item = next(entry for entry in found if entry["kind"] == "self_missing")
-        self.assertEqual(explain.plan(item)[0], ["@fresh", "plugins", "install", "sesantanajr/hermes-atlas-evolution",
-                                                 "--enable"])
-        self.assertEqual(explain.undo_for(explain.plan(item)[0]), ["@fresh", "plugins", "remove", "hermes-atlas-evolution"])
+        forward = ["@fresh", "plugins", "install", "sesantanajr/hermes-atlas-evolution", "--enable", "--ref", "a" * 40]
+        self.assertEqual(explain.plan(item, home=self.root)[0], forward)
+        self.assertEqual(item["command"], "hermes -p fresh " + " ".join(forward[1:]))
+        self.assertEqual(explain.undo_for(forward), ["@fresh", "plugins", "remove", "hermes-atlas-evolution"])
         self.propose(item)
         calls = []
 
@@ -407,20 +410,39 @@ class FindingsTest(Fleet):
             calls.append(argv[1:])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        reads = []
-        moved_on = lambda: reads.append(1) or "b" * 40   # noqa: E731  the repository moved past the lead's commit
         with patch.object(admin, "hermes_executable", return_value="/usr/bin/hermes"), \
                 patch("hermes_atlas_evolution.admin.run_command", run), \
-                patch("hermes_atlas_evolution.fleet_update.auto_sync", lambda *a, **k: None):
-            waiting = actions.automatic(self.root, now=NOW, mode="full", usage={}, remote=moved_on)
+                patch("subprocess.run", side_effect=AssertionError("no git, no network")):
+            waiting = actions.automatic(self.root, now=NOW, mode="full", usage={})
+            # by itself only from the catalog: an install from the repository waits for the owner's key
             self.assertEqual((calls, waiting["applied"]), ([], []))
-            self.assertEqual([item["reason"] for item in waiting["waiting"]], ["lead_commit"])
-            self.assertEqual(len(reads), 1)   # read once per pass
-            unknown = actions.automatic(self.root, now=NOW, mode="full", usage={}, remote=lambda: None)
-            self.assertEqual((calls, unknown["applied"]), ([], []))   # not read (network): it waits too
-            done = actions.automatic(self.root, now=NOW, mode="full", usage={}, remote=lambda: "a" * 40)
-        self.assertEqual(calls, [["--profile", "fresh", "plugins", "install", "sesantanajr/hermes-atlas-evolution",
-                                  "--enable"]])
+            self.assertEqual([entry["reason"] for entry in waiting["waiting"]], ["not_catalog"])
+            proposal = actions.apply_proposal(self.root, waiting["waiting"][0]["proposal"], now=NOW)
+        self.assertEqual(calls, [["--profile", "fresh", *forward[1:]]])
+        self.assertTrue(proposal["applied"])
+
+    def test_a_catalog_lead_installs_the_reviewed_pin_by_name(self):
+        plugin(self.root, "hermes-atlas-evolution")
+        (self.root / "plugins" / ".install-metadata.json").write_text(json.dumps({"hermes-atlas-evolution": {
+            "source": "https://github.com/sesantanajr/hermes-atlas-evolution", "pinned": True, "revision": "b" * 40,
+            "catalog": {"name": "hermes-atlas-evolution", "tier": "community", "sha": "b" * 40, "pin": "b" * 40}}}),
+            encoding="utf-8")
+        self.assertEqual(fleet_update.source(self.root), ["hermes-atlas-evolution"])
+        lead = fleet_update.inspect("default", self.root)
+        self.assertEqual((lead["catalog"], lead["pinned"]), ("hermes-atlas-evolution", ""))   # Hermes moves it
+        self.assertEqual(fleet_update.step(lead, install_missing=False), ["plugins", "update", "hermes-atlas-evolution"])
+        self.profile("fresh")
+        item = next(entry for entry in self.findings() if entry["kind"] == "self_missing")
+        forward = ["@fresh", "plugins", "install", "hermes-atlas-evolution", "--enable"]
+        self.assertEqual(explain.plan(item, home=self.root), (forward, ["@fresh", "plugins", "remove",
+                                                                        "hermes-atlas-evolution"]))
+        self.propose(item)
+        calls = []
+        with patch.object(admin, "hermes_executable", return_value="/usr/bin/hermes"), \
+                patch("hermes_atlas_evolution.admin.run_command",
+                      lambda argv, **k: calls.append(argv[1:]) or SimpleNamespace(returncode=0, stdout="", stderr="")):
+            done = actions.automatic(self.root, now=NOW, mode="full", usage={})
+        self.assertEqual(calls, [["--profile", "fresh", *forward[1:]]])   # the reviewed pin, by name, by itself
         self.assertEqual(len(done["applied"]), 1)
 
     def test_a_fork_lead_never_installs_itself_elsewhere(self):
@@ -429,10 +451,10 @@ class FindingsTest(Fleet):
         item = next(entry for entry in self.findings() if entry["kind"] == "self_missing")
         self.propose(item)
         calls = []
+        self.assertIsNone(fleet_update.source(self.root))
         with patch.object(admin, "hermes_executable", return_value="/usr/bin/hermes"), \
-                patch("hermes_atlas_evolution.admin.run_command", lambda argv, **k: calls.append(argv)), \
-                patch("hermes_atlas_evolution.fleet_update.auto_sync", lambda *a, **k: None):
-            done = actions.automatic(self.root, now=NOW, mode="full", usage={}, remote=lambda: "a" * 40)
+                patch("hermes_atlas_evolution.admin.run_command", lambda argv, **k: calls.append(argv)):
+            done = actions.automatic(self.root, now=NOW, mode="full", usage={})
         self.assertEqual((done["applied"], calls), ([], []))   # a fork's commit is not on GitHub: nothing to spread
 
     def test_obsolete_plugins_and_updates(self):
@@ -620,6 +642,7 @@ class FleetActionsTest(Fleet):
         self.assertIn(item["code"], environment.state(self.root)["skip"])   # kept for any future lead
 
     def test_a_forged_proposal_or_cached_scan_runs_nothing(self):
+        plugin(self.root, "hermes-atlas-evolution", repo="https://github.com/sesantanajr/hermes-atlas-evolution")
         home = self.profile("work", enabled=["guard-plugin", "other"], disabled=["hermes-atlas-evolution"])
         plugin(home, "guard-plugin", code=WEB_ONLY)
         plugin(home, "other", code=TERMINAL_ONLY)
@@ -698,14 +721,12 @@ class FleetActionsTest(Fleet):
         calls = []
         with patch.object(admin, "hermes_executable", return_value="/usr/bin/hermes"), \
                 patch("hermes_atlas_evolution.admin.run_command", self.runner(calls)):
-            on_lead = lambda: "a" * 40   # noqa: E731  the repository's default branch is on the lead's commit
-            short = actions.automatic(self.root, now=NOW, mode="full", usage={}, deadline=time.monotonic() + 60,
-                                      remote=on_lead)
+            short = actions.automatic(self.root, now=NOW, mode="full", usage={}, deadline=time.monotonic() + 60)
             self.assertEqual((short["applied"], calls), ([], []))   # an install needs more than a minute left
-            done = actions.automatic(self.root, now=NOW, mode="full", usage={}, remote=on_lead)
-        self.assertEqual([" ".join(call[0][2:]) for call in calls],
-                         ["plugins install sesantanajr/hermes-atlas-evolution --enable"])
-        self.assertEqual(len(done["applied"]), 1)   # the duplicate waits for the owner
+            done = actions.automatic(self.root, now=NOW, mode="full", usage={})
+        # the duplicate waits for the owner, and so does an install from the repository (not the catalog)
+        self.assertEqual((calls, done["applied"]), ([], []))
+        self.assertEqual([entry["reason"] for entry in done["waiting"]], ["not_catalog"])
 
     def test_the_weekly_reclaim_runs_hermes_pm_gc_once_a_week(self):
         from hermes_atlas_evolution import hermes_care
@@ -760,7 +781,7 @@ class ScreensTest(Fleet):
             self.assertIn(expected, text)
         self.assertIn("| work | 3 |", markdown)
         self.assertIn("Dois plugins fazem o mesmo trabalho", markdown)
-        self.assertIn("modo dele: Auto", markdown)
+        self.assertIn("modo dele: Assistido", markdown)
 
 
 if __name__ == "__main__":

@@ -62,7 +62,8 @@ class StatusTest(unittest.TestCase):
         self.assertRegex(report["plugin_version"], r"^\d+\.\d+\.\d+$")
         text = status.markdown(report, "pt")
         self.assertIn("cron-box", text)
-        self.assertIn("hermes -p cron-box plugins install sesantanajr/hermes-atlas-evolution --enable", text)
+        # 0.13.0: Hermes' own command with the plugin's catalog name, never the GitHub repository
+        self.assertIn("hermes -p cron-box plugins install hermes-atlas-evolution --enable", text)
 
     @unittest.skipIf(os.name == "nt", "the liveness probe is POSIX only, by design")
     def test_a_long_running_process_that_still_runs_older_code_is_flagged(self):

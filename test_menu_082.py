@@ -31,11 +31,11 @@ class LoginRuleTest(unittest.TestCase):
     def setUp(self):
         self.api = load_api()
 
-    def test_https_cookie_names_count_as_a_login_where_hermes_publishes_no_session(self):
-        policy = self.api.decision_policy
+    def test_a_cookie_name_is_never_a_login_where_hermes_publishes_no_session(self):
+        policy = self.api.decision_policy   # 0.13.0: an unverified cookie name no longer decides (read-only)
         for cookie in ("__Host-hermes_session_at=abc", "__Secure-hermes_session_at=abc",
                        "theme=dark; __Host-hermes_session_at_gw1=abc", "hermes_session_at=abc"):
-            self.assertEqual(policy({"cookie": cookie}, {}), (True, "login"), cookie)
+            self.assertEqual(policy({"cookie": cookie}, {}), (False, "open_dashboard"), cookie)
         for cookie in ("__Host-hermes_session_at=", "x__Host-hermes_session_at=abc", "hermes_session_rt=abc"):
             self.assertEqual(policy({"cookie": cookie}, {}), (False, "open_dashboard"), cookie)
 
@@ -207,7 +207,8 @@ class ReviewFixesTest(Base):
         script = Script("²", "１", "0")
         Menu(self.home, {}, lang="en", console=Console(read=script.read, write=script.write, width=100, color=False),
              clock=lambda: NOW).run()
-        self.assertEqual(script.text.count("Type one of the numbers shown."), 2)
+        # the main screen suggests turning Auto on (assist is the default), so it also takes letters
+        self.assertEqual(script.text.count("Type a number or a letter from the list."), 2)
         self.assertIn("Bye.", script.text)
 
 
@@ -498,15 +499,15 @@ class MenuTest(Base):
         self.assertIn("Applies after hermes -p default gateway restart (in the terminal, at the next session): “Add the lesson to"
                       " the failing tool result”", shown)
         # the recommended setup, after the change above, one setting at a time
-        self.assertEqual(written[3:], [{"lessons": "auto"}])   # the mode is already auto by default
+        self.assertEqual(written[3:], [{"lessons": "auto"}, {"mode": "auto"}])   # the owner's choice: Auto
         with experience(self.home) as conn:
             logged = [row[0] for row in conn.execute("SELECT target FROM decision_log ORDER BY id")]
-        self.assertEqual(logged, ["lessons", "language", "tool_hints", "lessons"])
+        self.assertEqual(logged, ["lessons", "language", "tool_hints", "lessons", "mode"])
         refused = self.menu("6", "4", "abc", "", "0", runtime=runtime, writer=writer)
         self.assertIn("Not done: “Learning pass every” takes a whole number, such as 10.", refused)
         out_of_range = self.menu("6", "3", "500", "", "0", runtime=runtime, writer=writer)
         self.assertIn("Not done:", out_of_range)
-        self.assertEqual(len(written), 4)   # nothing written for a refused value
+        self.assertEqual(len(written), 5)   # nothing written for a refused value
 
     def test_memory_screen_takes_out_the_copy_the_owner_chooses(self):
         path = write_memory(self.home, "MEMORY.md", [MemoryCareTest.FACT, "Other.", MemoryCareTest.SIMILAR])
@@ -520,7 +521,7 @@ class MenuTest(Base):
     def test_portuguese_and_leaving_with_end_of_input(self):
         shown = self.menu("10", "", "42", lang="pt")
         self.assertIn("Lições esperando você (0)", shown)
-        self.assertIn("Digite um dos números mostrados.", shown)
+        self.assertIn("Digite um número ou uma letra da lista.", shown)
         self.assertIn("Até logo.", shown)
 
 

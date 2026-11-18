@@ -86,7 +86,7 @@ class ReadableByDefaultTest(Base):
             learned = self.run_cli(["learn", "--lang", "pt"])
         self.assertTrue(learned.startswith("# Rodada de aprendizado"), learned)
         self.assertIn("Lições novas", learned)
-        self.assertIn("Modo Auto", learned)
+        self.assertIn("Modo Assistido", learned)
         with experience(self.home) as conn:
             conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('care_check', ?)", (json.dumps(CARE),))
         with patch("hermes_atlas_evolution.hermes_care.cached", return_value=CARE), \
@@ -300,8 +300,8 @@ class DigestAndStatusTest(Base):
             self.assertNotIn(wrong, portuguese)
         self.assertNotIn("Autopilot", english)
         self.assertIn("0 ativas · 0 aguardando aprovação · 0 aposentadas", portuguese)
-        self.assertIn("**Modo Auto:**", portuguese)
-        self.assertIn("**Auto mode:**", english)
+        self.assertIn("**Modo Assistido:**", portuguese)
+        self.assertIn("**Assisted:**", english)
         self.assertRegex(portuguese, r"\*\*Desde 00:00 UTC")
         self.assertRegex(english, r"\*\*Since 00:00 UTC")
         self.assertNotIn("passada", portuguese)
