@@ -100,7 +100,7 @@ class AutopilotFleetTest(Scratch):
     def test_one_pass_at_a_time_per_process(self):
         ran = []
         pilot = autopilot.Autopilot(self.home, lambda: ran.append(1), interval_minutes=60)
-        with autopilot._PASS_SLOT:   # another profile's pass runs now
+        with patch.object(autopilot, "SLOT_WAIT_SECONDS", 0.05), autopilot._PASS_SLOT:   # another profile's pass runs
             pilot._work()
         self.assertEqual(ran, [])
         pilot._work()
@@ -352,6 +352,85 @@ class DriftTest(Scratch):
         (self.home / "profiles" / "work" / "config.yaml").write_text("_config_version: 55\n")
         latest = drift.latest_config_version(install)
         self.assertEqual(drift.config_versions(self.home, latest), [{"profile": "default", "stamp": 54, "latest": 55}])
+
+    def builder(self, install: Path, pin: str) -> Path:
+        folder = self.base / "deploy" / "mcp-overlay"
+        folder.mkdir(parents=True, exist_ok=True)
+        script = folder / "build_overlay.py"
+        script.write_text(
+            '"""Build the pinned handler overlay."""\nimport hashlib\nfrom pathlib import Path\n\n'
+            f"SOURCE = Path('{install}/tools/mcp_tool_handlers.py')\n"
+            f"EXPECTED = '{pin}'  # was 35054a28... before\n"
+            "OUT = Path('/opt/elsewhere')\n")
+        return script
+
+    def test_a_builder_pin_that_still_matches_and_one_an_update_broke(self):
+        import hashlib
+
+        install = self.base / "agent"
+        (install / "tools").mkdir(parents=True)
+        handler = install / "tools" / "mcp_tool_handlers.py"
+        handler.write_bytes(b"def handle():\n    return 1\n")
+        good = hashlib.sha256(handler.read_bytes()).hexdigest()
+        script = self.builder(install, good)
+        result = drift.pin_check(script, install=install)
+        self.assertEqual((result["state"], result["files"][0]["pinned"]), ("ok", True))
+        handler.write_bytes(b"def handle():\n    return 2  # the new Hermes\n")   # the update replaced it
+        stale = drift.pin_check(script, install=install, guide="deploy/hermes-1174/mcp-overlay/README.md")
+        self.assertEqual(stale["state"], "stale")
+        reading = {"pins": [stale], "update": {}}
+        self.assertEqual(drift.findings(reading), ["drift_pin_stale"])
+        text = "\n".join(drift.lines(reading, "pt"))
+        self.assertIn("Pino desatualizado", text)
+        self.assertIn("deploy/hermes-1174/mcp-overlay/README.md", text)
+        self.assertIn("nada é refeito sozinho", text)
+        self.assertEqual(drift.pin_check(script, install=None)["state"], "no_hermes")
+        self.assertEqual(drift.pin_check(self.base / "nothing.py", install=install)["state"], "unreadable")
+
+    def test_the_pins_come_from_the_setting_and_a_new_list_reads_again(self):
+        import hashlib
+
+        from hermes_atlas_evolution.evolve import options
+
+        install = self.base / "agent"
+        (install / "tools").mkdir(parents=True)
+        handler = install / "tools" / "mcp_tool_handlers.py"
+        handler.write_bytes(b"x = 1\n")
+        script = self.builder(install, hashlib.sha256(b"x = 0\n").hexdigest())
+        entry = f"{script}|deploy/hermes-1174/mcp-overlay/README.md"
+        chosen = options({"evolution": {"overlay_pins": [entry]}}, {}, strict=False)["overlay_pins"]
+        self.assertEqual(chosen, (entry,))
+        self.assertEqual(options({"evolution": {"overlay_pins": ["relative.py"]}}, {}, strict=False)["overlay_pins"], ())
+        (self.home / "config.yaml").write_text("x: 1\n")
+        with experience(self.home) as conn:
+            first = drift.cached(conn, self.home, now=NOW, install=install)
+            self.assertEqual(first["pins"], [])
+            again = drift.cached(conn, self.home, now=NOW + 60, install=install, pins=chosen)
+        self.assertEqual((again["pins"][0]["state"], again["pins"][0]["guide"]),
+                         ("stale", "deploy/hermes-1174/mcp-overlay/README.md"))
+        self.assertIn("drift_pin_stale", again["findings"])
+
+    @POSIX
+    def test_the_sealed_folder_as_the_gateway_found_it(self):
+        folder = self.base / "sealed" / "tools"
+        folder.mkdir(parents=True)
+        for name in ("mcp_tool_handlers.py", "atlas_mcp_native.py", "atlas_mcp_authority.py"):
+            (folder / name).write_text("x = 1\n")
+            os.chmod(folder / name, 0o644)
+        snapshot = {"uid": os.geteuid(), "overlays": [{"overlay": str(folder / "mcp_tool_handlers.py")}]}
+        snapshot["folders"] = drift.folder_listing(snapshot)
+        self.assertEqual(drift.folders_now(snapshot), [])   # today: the three names, private, one link each
+        (folder / "extra.py").write_text("y = 2\n")
+        os.chmod(folder / "extra.py", 0o644)
+        os.chmod(folder / "atlas_mcp_native.py", 0o666)
+        os.link(folder / "atlas_mcp_authority.py", self.base / "second-name.py")
+        [item] = drift.folders_now(snapshot)
+        self.assertEqual(item["added"], ["extra.py"])
+        reasons = {entry["name"]: entry["reasons"] for entry in item["unsafe"]}
+        self.assertEqual((reasons["atlas_mcp_native.py"], reasons["atlas_mcp_authority.py"]), (["writable"], ["hardlink"]))
+        reading = {"folders": [item], "update": {}}
+        self.assertEqual(drift.findings(reading), ["drift_overlay_folder", "drift_overlay_unsafe"])
+        self.assertIn("pode recusar a próxima partida", "\n".join(drift.lines(reading, "pt")))
 
     def test_a_reading_is_kept_until_a_new_receipt(self):
         (self.home / "config.yaml").write_text("x: 1\n")
