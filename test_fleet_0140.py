@@ -106,6 +106,21 @@ class AutopilotFleetTest(Scratch):
         pilot._work()
         self.assertEqual(ran, [1])
 
+    def test_every_copy_of_the_plugin_shares_the_slot(self):
+        import importlib.util
+
+        folder = Path(autopilot.__file__).parent
+        spec = importlib.util.spec_from_file_location("hermes_plugins.other_profile_copy", folder / "__init__.py",
+                                                      submodule_search_locations=[str(folder)])
+        package = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = package
+        self.addCleanup(lambda: [sys.modules.pop(name) for name in list(sys.modules)
+                                 if name.startswith("hermes_plugins.other_profile_copy")])
+        spec.loader.exec_module(package)
+        other = __import__("hermes_plugins.other_profile_copy.autopilot", fromlist=["_PASS_SLOT"])
+        self.assertIsNot(other, autopilot)
+        self.assertIs(other._PASS_SLOT, autopilot._PASS_SLOT)
+
     def test_the_clocks_of_a_gateways_profiles_start_spread_out(self):
         delays = {autopilot.stagger(self.home / "profiles" / f"p{index}") for index in range(12)}
         self.assertTrue(all(0 <= delay <= autopilot.STAGGER_SECONDS for delay in delays))
