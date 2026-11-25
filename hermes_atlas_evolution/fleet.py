@@ -237,13 +237,13 @@ def attention(view: dict) -> list[str]:
     health = view.get("health") or {}
     found += [code for code in (health.get("drift") or {}).get("findings") or ()]
     found += [code for code in health.get("signals_findings") or ()]
-    if (health.get("memory") or {}).get("suggestion"):
-        found.append("fleet_memory_budget")
+    if (health.get("memory") or {}).get("suggestion"):   # said once, with what to change
+        found = [code for code in found if code != "log_memory_pressure"] + ["fleet_memory_budget"]
     return list(dict.fromkeys(found))
 
 
 # ── the lead's pass: what the whole Hermes needs once ───────────────────────────────────────────────────────────
-def refresh(home: Path, conn, *, now: float, host=None, force: bool = False) -> dict | None:
+def refresh(home: Path, conn, *, now: float, host=None, force: bool = False, pins=()) -> dict | None:
     """In the lead profile's learning pass: read Hermes' warnings (logsignals), what the last update left behind
     (drift, every 6 hours or after an update) and the gateway's memory, and keep them for the fleet view, `status` and
     the panel. None in any other profile. Never raises."""
@@ -265,7 +265,7 @@ def refresh(home: Path, conn, *, now: float, host=None, force: bool = False) -> 
         health["signals_error"] = type(error).__name__
         signals = {}
     try:
-        health["drift"] = drift.cached(conn, Path(home), now=now, host=host, force=force)
+        health["drift"] = drift.cached(conn, Path(home), now=now, host=host, force=force, pins=pins)
         conn.commit()
     except Exception as error:
         health["drift_error"] = type(error).__name__
@@ -665,11 +665,16 @@ def markdown(view: dict, lang: str = "en") -> str:
                    f"- **Auto for all:** on since {_when(auto.get('at'), lang)} (`hermes evolution fleet auto off` undoes it)")
     gateway = view.get("gateway") or {}
     if gateway:
-        out.append(f"- **Gateway:** {gateway.get('state') or '?'} · Hermes {gateway.get('version') or '?'} · pid "
-                   f"{gateway.get('pid') or '?'}" if pt else
-                   f"- **Gateway:** {gateway.get('state') or '?'} · Hermes {gateway.get('version') or '?'} · pid "
-                   f"{gateway.get('pid') or '?'}")
-    texts = [_ATTENTION[code][1 if pt else 0] for code in view.get("attention") or () if code in _ATTENTION]
+        states = {"running": "rodando", "starting": "subindo", "draining": "esvaziando", "stopped": "parado",
+                  "degraded": "degradado"}
+        state = gateway.get("state") or "?"
+        out.append(f"- **Gateway:** {states.get(state, state) if pt else state} · Hermes {gateway.get('version') or '?'}"
+                   f" · pid {gateway.get('pid') or '?'}")
+    from .status import _TEXT as status_text
+
+    said = status_text.get(lang, status_text["en"])
+    texts = [_ATTENTION[code][1 if pt else 0] if code in _ATTENTION else said[code]
+             for code in view.get("attention") or () if code in _ATTENTION or code in said]
     if texts:
         out += ["", "## " + ("Pede atenção" if pt else "Needs attention"), ""] + [f"- {item}" for item in texts]
     header = ("| perfil | plugin | modo | última rodada | lições ativas / esperando | falhas 7 d | turnos 7 d (lentos) "

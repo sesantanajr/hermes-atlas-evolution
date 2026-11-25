@@ -38,6 +38,8 @@ PAIRS = (
     ("Use 1 to 35 days and the language en or pt", "Use de 1 a 35 dias e o idioma en ou pt"),
     ("Use an hour from 0 to 23", "Use uma hora de 0 a 23"),
     ("Say on or off", "Diga on ou off"),
+    ("evolution.overlay_pins must list up to 8 absolute paths",
+     "evolution.overlay_pins deve listar até 8 caminhos absolutos"),
     ("Use the language en or pt", "Use o idioma en ou pt"),
     ("Atlas Evolution fleet report failed. Run `hermes evolution fleet report` to inspect.",
      "O relatório da frota do Atlas Evolution falhou. Rode `hermes evolution fleet report` para ver."),

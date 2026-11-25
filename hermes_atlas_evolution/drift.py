@@ -184,6 +184,11 @@ def write_snapshot(root: Path, *, now: float | None = None, force: bool = False)
     taken = runtime_overlays(now=now)
     if taken is None:
         return None
+    taken["uid"] = os.geteuid() if hasattr(os, "geteuid") else None
+    if previous and previous.get("pid") == os.getpid() and isinstance(previous.get("folders"), dict):
+        taken["folders"] = previous["folders"]   # as the gateway found them at its start, not as they are now
+    else:
+        taken["folders"] = folder_listing(taken)
     earlier = {item.get("module"): item for item in (previous or {}).get("overlays") or () if isinstance(item, dict)}
     for item in taken["overlays"]:   # what Hermes' file was when this overlay was first seen as it is now
         before = earlier.get(item["module"])
@@ -202,6 +207,143 @@ def write_snapshot(root: Path, *, now: float | None = None, force: bool = False)
     except OSError:
         return taken
     return taken
+
+
+def folder_listing(snapshot: dict) -> dict:
+    """{folder: [file names]} of the folders the overlays of a snapshot live in (at most 8 folders, 200 names each)."""
+    folders: dict = {}
+    for item in snapshot.get("overlays") or ():
+        folder = str(Path(str(item.get("overlay") or "")).parent)
+        if folder in folders or len(folders) >= 8 or not folder or folder == ".":
+            continue
+        try:
+            folders[folder] = sorted(entry.name for entry in os.scandir(folder) if entry.name != "__pycache__")[:200]
+        except OSError:
+            continue
+    return folders
+
+
+def folders_now(snapshot: dict | None) -> list[dict]:
+    """Each overlay folder of a gateway's snapshot as it is now: names that came or went since the gateway loaded it
+    (a launcher that checks the folder's contents may refuse the next start), and files that someone else could change
+    (written by group or others, owned by another user, a link, or with another name: the gateway runs that code)."""
+    import stat
+
+    if not isinstance(snapshot, dict):
+        return []
+    uid = snapshot.get("uid")
+    found = []
+    for folder, names in sorted((snapshot.get("folders") or {}).items()):
+        try:
+            entries = {entry.name: entry for entry in os.scandir(folder) if entry.name != "__pycache__"}
+        except OSError:
+            found.append({"folder": folder, "missing": True})
+            continue
+        unsafe = []
+        for name, entry in sorted(entries.items())[:200]:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            reasons = []
+            if stat.S_ISLNK(info.st_mode):
+                reasons.append("link")
+            elif not stat.S_ISREG(info.st_mode):
+                reasons.append("not_file")
+            if info.st_mode & 0o022:
+                reasons.append("writable")
+            if type(uid) is int and info.st_uid != uid:
+                reasons.append("owner")
+            if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                reasons.append("hardlink")
+            if reasons:
+                unsafe.append({"name": name, "reasons": reasons})
+        added = sorted(set(entries) - set(names or ()))
+        removed = sorted(set(names or ()) - set(entries))
+        if added or removed or unsafe:
+            found.append({"folder": folder, "added": added[:20], "removed": removed[:20], "unsafe": unsafe[:20]})
+    return found
+
+
+# ── a builder's pin of Hermes' file (0.14.0) ────────────────────────────────────────────────────────────────────
+# An overlay is often built from Hermes' own file by a script that pins that file's sha256 and refuses another one
+# (`EXPECTED = '…'`). After an update, Hermes' file changes, the pin no longer matches, and the overlay the script built
+# keeps running the old code until someone rebuilds it. `overlay_pins` names such scripts; each is read (never run):
+# its 64-hex constants are the pins, and the existing files inside Hermes' folder it names are what they pin.
+_HEX = re.compile(r"\b[0-9a-f]{64}\b")
+_ABSOLUTE = re.compile(r"(?<![\w.])(/[A-Za-z0-9_.+@-]+(?:/[A-Za-z0-9_.+@-]+)+)")
+PINS_KEPT = 8
+
+
+def _full_digest(path: Path) -> str | None:
+    try:
+        with open(path, "rb") as stream:
+            data = stream.read(FILE_READ_LIMIT + 1)
+    except OSError:
+        return None
+    return hashlib.sha256(data).hexdigest() if len(data) <= FILE_READ_LIMIT else None
+
+
+def _builder_constants(text: str, python: bool) -> tuple[set, list]:
+    """(64-hex pins, absolute paths) a builder names. In Python, only string constants (a comment with an older hash is
+    not a pin); elsewhere, every line that is not a comment."""
+    strings: list[str] = []
+    if python:
+        import ast
+
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            tree = None
+        if tree is not None:
+            strings = [node.value for node in ast.walk(tree)
+                       if isinstance(node, ast.Constant) and isinstance(node.value, str)][:5000]
+    if not strings:
+        strings = [line for line in text.splitlines()[:20_000] if not line.lstrip().startswith(("#", "//"))]
+    pins = {match for value in strings for match in _HEX.findall(value) if len(value.strip()) == 64 or not python}
+    paths = list(dict.fromkeys(match for value in strings for match in _ABSOLUTE.findall(value)))[:200]
+    return pins, paths
+
+
+def pin_check(builder: Path, *, install: Path | None, guide: str | None = None) -> dict:
+    """Whether the files of Hermes a builder pins still have the pinned sha256: `ok`, `stale` (Hermes' file changed:
+    rebuild the overlay, and the pin), `unpinned` (no pin or no Hermes file found in it), `unreadable`, or `no_hermes`
+    (Hermes' folder is not known here). A guide next to the builder (README.md) is named for the rebuild."""
+    from .environment import credential_file, read_text
+
+    builder = Path(builder)
+    result = {"builder": str(builder), "files": [], "state": "unreadable"}
+    if guide:   # named by the owner (`builder|guide`): said as it is, never read
+        result["guide"] = guide
+    elif (builder.parent / "README.md").is_file():
+        result["guide"] = str(builder.parent / "README.md")
+    if credential_file(builder.name):
+        return result
+    text = read_text(builder, 1_000_000)
+    if text is None:
+        return result
+    if install is None:
+        result["state"] = "no_hermes"
+        return result
+    pins, paths = _builder_constants(text, builder.suffix == ".py")
+    root = Path(install).resolve()
+    for value in paths:
+        try:
+            path = Path(value).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if not _inside(path, root) or credential_file(path.name) or not path.is_file():
+            continue
+        digest = _full_digest(path)
+        result["files"].append({"path": str(path), "sha256": digest, "pinned": digest in pins})
+        if len(result["files"]) >= 8:
+            break
+    if not pins or not result["files"]:
+        result["state"] = "unpinned"
+    else:
+        result["state"] = "ok" if all(item["pinned"] for item in result["files"]) else "stale"
+    result["pins"] = sorted(pin[:12] for pin in pins)[:8]
+    return result
 
 
 def assess(snapshot: dict | None, *, now: float | None = None) -> list[dict]:
@@ -480,8 +622,9 @@ def plugins_still_off(root: Path, update: dict | None) -> list[dict]:
 
 
 # ── the whole reading ───────────────────────────────────────────────────────────────────────────────────────────
-def check(home: Path, *, now: float | None = None, host=None, install: Path | None = None) -> dict:
-    """Everything above for the Hermes `home` belongs to. Never raises: a part that cannot be read is left out."""
+def check(home: Path, *, now: float | None = None, host=None, install: Path | None = None, pins=()) -> dict:
+    """Everything above for the Hermes `home` belongs to; `pins`, the builders whose pin of Hermes' files to watch
+    (the `overlay_pins` setting). Never raises: a part that cannot be read is left out."""
     from .environment import root_of
 
     now = time.time() if now is None else now
@@ -502,6 +645,15 @@ def check(home: Path, *, now: float | None = None, host=None, install: Path | No
     reading["snapshot_at"] = (snapshot or {}).get("at")
     reading["overlays"] = assess(snapshot, now=now)
     reading["paths"] = list((snapshot or {}).get("paths") or ())[:16]
+    reading["folders"] = folders_now(snapshot)
+    reading["pins_config"] = [str(item) for item in list(pins or ())[:PINS_KEPT]]
+    reading["pins"] = []
+    for item in reading["pins_config"]:
+        builder, _, guide = item.partition("|")   # "<builder>|<guide to rebuild it>"
+        try:
+            reading["pins"].append(pin_check(Path(builder.strip()), install=install, guide=guide.strip() or None))
+        except Exception:
+            reading["pins"].append({"builder": builder.strip(), "files": [], "state": "unreadable"})
     for key, reader in (("local", lambda: local_changes(install, host) if install else None),
                         ("stashes", lambda: stashes(install, host, now=now) if install else None),
                         ("config", lambda: config_versions(root, latest_config_version(install))),
@@ -520,8 +672,15 @@ def findings(reading: dict) -> list[str]:
     overlays = reading.get("overlays") or ()
     if any(item.get("state") == "stale" for item in overlays):
         found.append("drift_overlay_stale")
+    if any(item.get("state") == "stale" for item in reading.get("pins") or ()):
+        found.append("drift_pin_stale")
     if any(item.get("state") == "reload" for item in overlays):
         found.append("drift_overlay_reload")
+    folders = reading.get("folders") or ()
+    if any(item.get("added") or item.get("removed") or item.get("missing") for item in folders):
+        found.append("drift_overlay_folder")
+    if any(item.get("unsafe") for item in folders):
+        found.append("drift_overlay_unsafe")
     update = reading.get("update") or {}
     stashes_ = [item for item in reading.get("stashes") or () if item.get("update") and "files" in item]
     if update.get("local_changes") == "parked":
@@ -539,7 +698,8 @@ def findings(reading: dict) -> list[str]:
     return found
 
 
-def cached(conn, home: Path, *, now: float, force: bool = False, host=None, install: Path | None = None) -> dict | None:
+def cached(conn, home: Path, *, now: float, force: bool = False, host=None, install: Path | None = None,
+           pins=()) -> dict | None:
     """The reading kept in the lead's database ('drift_check'), taken again every CHECK_EVERY_SECONDS, when a newer
     update receipt exists than the one it read, or with `force`."""
     row = conn.execute("SELECT value FROM cursor WHERE key='drift_check'").fetchone()
@@ -548,11 +708,13 @@ def cached(conn, home: Path, *, now: float, force: bool = False, host=None, inst
     except ValueError:
         stored = None
     stored = stored if isinstance(stored, dict) else None
+    wanted = [str(item) for item in list(pins or ())[:PINS_KEPT]]
     if stored and not force:
         age = now - float(stored.get("at") or 0)
-        if 0 <= age < CHECK_EVERY_SECONDS and _latest_receipt_name(home) == stored.get("receipt"):
+        if 0 <= age < CHECK_EVERY_SECONDS and _latest_receipt_name(home) == stored.get("receipt") \
+                and stored.get("pins_config", []) == wanted:
             return stored
-    reading = check(home, now=now, host=host, install=install)
+    reading = check(home, now=now, host=host, install=install, pins=wanted)
     reading["receipt"] = _latest_receipt_name(home)
     conn.execute("INSERT OR REPLACE INTO cursor(key, value) VALUES ('drift_check', ?)", (json.dumps(reading),))
     return reading
@@ -628,6 +790,49 @@ def lines(reading: dict | None, lang: str = "en") -> list[str]:
                        f"gateway subiu; ele continua rodando a cópia anterior de `{module}` até reiniciar." if pt else
                        f"- **Overlay rebuilt, not loaded yet:** `{item.get('overlay')}` changed after the gateway "
                        f"started; it keeps running the previous copy of `{module}` until it restarts.")
+    for item in reading.get("pins") or ():
+        builder, guide = item.get("builder"), item.get("guide")
+        if item.get("state") == "stale":
+            changed = [entry for entry in item.get("files") or () if not entry.get("pinned")]
+            names = ", ".join(f"`{entry['path']}` (sha256 {str(entry.get('sha256') or '?')[:12]}…)" for entry in changed[:3])
+            pinned = ", ".join(f"{pin}…" for pin in item.get("pins") or ()) or "?"
+            out.append(f"- ⚠️ **Pino desatualizado:** {names} não bate mais com o pino de `{builder}` ({pinned}): a "
+                       "sobreposição gerada a partir dele roda o código de antes da atualização. Refaça a sobreposição "
+                       "e o pino" + (f" pelo passo a passo em `{guide}`" if guide else "") + "; nada é refeito sozinho." if pt else
+                       f"- ⚠️ **Stale pin:** {names} no longer matches the pin in `{builder}` ({pinned}): the overlay built "
+                       "from it runs the code from before the update. Rebuild the overlay and the pin"
+                       + (f" following `{guide}`" if guide else "") + "; nothing is rebuilt by itself.")
+        elif item.get("state") == "ok":
+            files = ", ".join(f"`{Path(entry['path']).name}`" for entry in item.get("files") or ())
+            out.append(f"- O pino de `{builder}` bate com {files} ({', '.join(item.get('pins') or ())[:40]}…)." if pt else
+                       f"- The pin in `{builder}` matches {files} ({', '.join(item.get('pins') or ())[:40]}…).")
+        elif item.get("state") in ("unreadable", "unpinned"):
+            out.append(f"- O pino de `{builder}` não pôde ser conferido (arquivo ilegível, ou sem um sha256 e um arquivo do "
+                       "Hermes nele)." if pt else
+                       f"- The pin in `{builder}` could not be checked (unreadable, or no sha256 and Hermes file in it).")
+    words = {"link": ("é um link", "is a link"), "not_file": ("não é um arquivo comum", "is not a regular file"),
+             "writable": ("pode ser alterado por grupo ou outros", "can be changed by group or others"),
+             "owner": ("é de outro usuário", "belongs to another user"),
+             "hardlink": ("tem outro nome no disco (nlink > 1)", "has another name on disk (nlink > 1)")}
+    for item in reading.get("folders") or ():
+        folder = item.get("folder")
+        if item.get("missing"):
+            out.append(f"- ⚠️ A pasta de sobreposição `{folder}` sumiu desde que o gateway subiu: a próxima partida pode "
+                       "falhar." if pt else
+                       f"- ⚠️ The overlay folder `{folder}` is gone since the gateway started: its next start may fail.")
+            continue
+        if item.get("added") or item.get("removed"):
+            change = ", ".join([*(f"+`{name}`" for name in item.get("added") or ()),
+                                *(f"-`{name}`" for name in item.get("removed") or ())])
+            out.append(f"- ⚠️ A pasta de sobreposição `{folder}` mudou desde que o gateway subiu ({change}): um lançador "
+                       "que confere o conteúdo dela pode recusar a próxima partida do gateway. Confira antes de "
+                       "reiniciar." if pt else
+                       f"- ⚠️ The overlay folder `{folder}` changed since the gateway started ({change}): a launcher that "
+                       "checks its contents may refuse the gateway's next start. Check it before a restart.")
+        for entry in item.get("unsafe") or ():
+            reasons = "; ".join(words.get(reason, (reason, reason))[0 if pt else 1] for reason in entry.get("reasons") or ())
+            out.append(f"- ⚠️ `{folder}/{entry['name']}` {reasons}: o gateway roda esse código." if pt else
+                       f"- ⚠️ `{folder}/{entry['name']}` {reasons}: the gateway runs that code.")
     overlays = [item for item in reading.get("overlays") or () if item.get("state") == "ok"]
     if overlays:
         names = ", ".join(f"`{item.get('module')}`" for item in overlays[:4])

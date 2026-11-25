@@ -30,6 +30,9 @@ memory against its budget.
 - **Old "effective" verdicts are dropped.** A lesson judged before 0.12.0's classifier change kept its verdict for ever;
   an "effective" from then is dropped, and a lesson whose failure keeps happening at the same rate while the agent reads
   it (3 or more in 14 days, counted the new way) is ineffective, and retired in Auto mode.
+- **Hermes' doctor checks count the room under the gateway's memory limit.** Run from a gateway, the daily check's
+  child counts against the gateway's service (MemoryHigh): it now waits when that cgroup has less than 600 MB left,
+  not only when the machine does.
 - **Status said "the gateway may be down" when it was running.** When no pass ran although the gateway runs, status now
   says that no long-running process claimed the passes, with the gateway's pid. The gateway's line shows the Hermes
   version it runs now (Hermes' own record), not the one the last health check stored.
@@ -56,6 +59,12 @@ memory against its budget.
   overlay changed after the gateway loaded it (a restart is needed); files that differ from the official version; every
   stash an update left, with how much of what it holds is back in place now; each profile's configuration schema
   against the one this Hermes writes.
+- **The pin of an overlay's builder (`overlay_pins`).** Name the script that builds a file loaded in place of one of
+  Hermes' own and pins its sha256 (`EXPECTED = '…'`), optionally with the guide to rebuild it (`<script>|<guide>`):
+  after every update and every 6 hours the plugin reads it (never runs it) and says when Hermes' file no longer
+  matches the pin. It also watches the overlay's folder as the gateway found it at its start: a file added or removed
+  there (a launcher that checks the folder may refuse the next start), or one that is a link, has a second name or can
+  be written by someone else. Nothing is rebuilt or installed by itself.
 - **Hermes' warnings in its log, in plain words.** Counted per day with numbers only (never a line of the log): memory
   over the agent cache's budget, the browser tools' browser not answering, the session database's restart race, a
   replaced `state.db`, an incomplete pre-update backup, event loop stalls, the root warning, sessions of profiles that
@@ -81,7 +90,7 @@ an overlay, a stash or a service: drift, warnings and memory are read and explai
 ### Upgrading
 
 `hermes -p <profile> plugins update hermes-atlas-evolution` in every profile (or `hermes evolution update --all`),
-then restart the gateway once, so it loads the new code and starts claiming the passes. The test suite has 833 tests,
+then restart the gateway once, so it loads the new code and starts claiming the passes. The test suite has 837 tests,
 on the `tests` branch.
 
 ## 0.13.0

@@ -52,6 +52,31 @@ Se um perfil ainda tem o plugin com o nome antigo `hermes-evolution`, rode `herm
 
 O que mudou em cada versão: [Mudanças](../../CHANGELOG.pt-BR.md).
 
+## Atualizar para a 0.14.0
+
+Atualize todos os perfis como acima e **reinicie o gateway uma vez**: um gateway iniciado por um lançador próprio (que
+roda o `gateway.run` como módulo principal) passa a ser reconhecido nesta versão e começa a assumir as rodadas de
+aprendizado de todos os perfis que atende. Nada para migrar à mão.
+
+- **As primeiras rodadas depois do reinício** repassam até 14 dias de histórico nos perfis que nunca tiveram uma, um
+  perfil por vez, com prioridade de CPU menor, começando de 2 a 7 minutos depois que o gateway sobe.
+- **Os veredictos das lições são julgados de novo.** Um "eficaz" agora precisa de evidência; o que foi julgado com
+  poucas chamadas é retirado, e uma lição cuja falha continua enquanto o agente a lê passa a ineficaz (aposentada no
+  Modo Auto).
+- **Todos os perfis de uma vez**: `hermes evolution fleet` mostra todos; `hermes evolution fleet auto on` liga o Modo
+  Auto em todos pelo `hermes config set` e guarda os valores de antes de cada perfil para o `fleet auto off`;
+  `hermes evolution fleet schedule` agenda o relatório diário como tarefa sem agente.
+- **Vigiar o pino do gerador de uma sobreposição** (opcional): se um script gera um arquivo carregado no lugar de um do
+  Hermes e fixa o sha256 dele, nomeie-o uma vez no perfil que cuida dos outros:
+
+  ```sh
+  hermes -p default config set plugins.entries.hermes-atlas-evolution.settings.overlay_pins \
+    '["/caminho/build_overlay.py|docs/como-refazer.md"]'
+  ```
+
+  Depois de cada atualização do Hermes o plugin avisa quando o arquivo do Hermes não bate mais com o pino. Ele nunca o
+  refaz.
+
 ## Atualizar para a 0.13.0
 
 Atualize como acima e reinicie o gateway uma vez. Não há nada para migrar à mão; veja o primeiro ponto se você contava com o Modo Auto.

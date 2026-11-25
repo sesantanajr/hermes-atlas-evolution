@@ -34,8 +34,10 @@ CLAIMS_RECHECK_SECONDS = 300   # a process that did not claim passes at load ask
 STAGGER_SECONDS = 300       # the profiles one gateway serves start their clocks spread over this much (0.14.0)
 PASS_NICE = 10              # the pass thread's CPU priority on Linux: below the turns of the same process (0.14.0)
 # One pass at a time per process (0.14.0): a gateway serving a dozen profiles ran a dozen passes at once on the first
-# clock tick, each replaying history and reading files while the turns wait for the same interpreter.
+# clock tick, each replaying history and reading files while the turns wait for the same interpreter. A pass waits for
+# the slot (in its own thread, before it claims anything) at most SLOT_WAIT_SECONDS.
 _PASS_SLOT = threading.Lock()
+SLOT_WAIT_SECONDS = LEASE_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -413,9 +415,12 @@ class Autopilot:
         return True
 
     def _work(self) -> None:
-        # one pass at a time in this process: another profile's pass running now means this one waits for the next
-        # check (CHECK_SECONDS), before it claims anything
-        if not _PASS_SLOT.acquire(blocking=False):
+        # one pass at a time in this process: another profile's pass running now means this one waits its turn, before
+        # it claims anything (a pass that waited too long is tried again at the next check)
+        if not _PASS_SLOT.acquire(timeout=SLOT_WAIT_SECONDS):
+            return
+        if self._stop.is_set():
+            _PASS_SLOT.release()
             return
         try:
             _lower_priority()

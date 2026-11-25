@@ -44,7 +44,7 @@ _LOCK = threading.Lock()
 # Settings the panel may change: those of the plugin's settings form (plugin.yaml config_schema); admin.SETTINGS.
 SETTINGS = ("lessons", "language", "tool_hints", "feedback_signals", "agent_tools", "slow_turn_seconds",
             "owner_sender_ids", "owner_platforms", "reflector", "reflector_daily_limit", "autopilot_minutes",
-            "runtime_guard", "mode")
+            "runtime_guard", "mode", "overlay_pins")
 
 
 def _module(name: str):

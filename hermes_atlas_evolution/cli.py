@@ -48,7 +48,8 @@ NATIVE_KEYS = {"lessons": ("evolution", "lessons"), "language": ("evolution", "l
                "owner_platforms": ("evolution", "owner_platforms"),
                "reflector": ("evolution", "reflector"), "reflector_daily_limit": ("evolution", "reflector_daily_limit"),
                "autopilot_minutes": ("evolution", "autopilot_minutes"), "runtime_guard": ("evolution", "runtime_guard"),
-               "mode": ("evolution", "mode"), "fleet_managed": ("evolution", "fleet_managed")}
+               "mode": ("evolution", "mode"), "fleet_managed": ("evolution", "fleet_managed"),
+               "overlay_pins": ("evolution", "overlay_pins")}
 # Keys the form does not show but `hermes config set plugins.entries.hermes-atlas-evolution.settings.<key>` can set.
 # The keys of features removed in 0.11.0 (the 0.1 notes, the 0.3 supervisor) are no longer read, here or in
 # settings.json: a value left there is ignored, without an error or a warning.
@@ -121,6 +122,8 @@ TRUSTED_ONLY = {
     "tool_hints": (("evolution", "tool_hints"), lambda value: value is True),
     "reflector_daily_limit": (("evolution", "reflector_daily_limit"),
                               lambda value: _above_default("reflector_daily_limit", value)),
+    # 0.14.0: files the plugin reads (builders of overlays, and the Hermes files they pin)
+    "overlay_pins": (("evolution", "overlay_pins"), lambda value: value not in (None, [], ())),
 }
 
 
@@ -1231,6 +1234,7 @@ def setting_values(home: Path, runtime_config: dict) -> dict:
     values["agent_tools"] = config.get("agent_advice") is True
     values["owner_sender_ids"] = list(opts["owner_sender_ids"])
     values["owner_platforms"] = list(opts["owner_platforms"])
+    values["overlay_pins"] = list(opts["overlay_pins"])
     values["language"] = raw.get("language") if raw.get("language") in ("auto", "en", "pt") else "auto"
     return values
 
@@ -1573,13 +1577,18 @@ def _fleet_command(args, home: Path, *, now: float, lang: str):
         return fleet.overview(home, now=now)
     if task == "check":
         lead = lead_home(home) or home
+        from .environment import _read_config
+        from .evolve import options
         from .experience import experience
         from .system_update import Host
 
+        config = _read_config(lead)
+        settings_lead, _problems = safe_settings(lead, config if isinstance(config, dict) else {})
+        pins = options(settings_lead, config if isinstance(config, dict) else {}, strict=False)["overlay_pins"]
         host = Host()
         host.deadline = time.monotonic() + 90
         with experience(lead) as conn:
-            fleet.refresh(lead, conn, now=now, host=host, force=True)
+            fleet.refresh(lead, conn, now=now, host=host, force=True, pins=pins)
         return fleet.overview(home, now=now)
     if task == "report":
         return fleet.report_markdown(home, now=now, lang=lang, hours=args.hours)

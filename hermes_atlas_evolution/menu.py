@@ -577,6 +577,8 @@ FIELDS = (
      "Deixar o perfil que cuida de todos agir aqui (instalar, atualizar e mover para a lixeira)"),
     ("owner_platforms", "Channels where every chat counts as you", "Canais em que todo chat conta como você"),
     ("owner_sender_ids", "Senders that count as you", "Remetentes que contam como você"),
+    ("overlay_pins", "Overlay builders to watch (their pin of Hermes' files; `<script>|<guide>`)",
+     "Geradores de sobreposição a vigiar (o pino dos arquivos do Hermes; `<script>|<guia>`)"),
 )
 # The lesson mode (`lessons`), named as the panel names it; the code (auto, suggest, off) never shows.
 MODES = {"en": {"auto": "automatic (recommended): lessons from a built-in template apply by themselves",

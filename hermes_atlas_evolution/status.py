@@ -1329,6 +1329,12 @@ _FLEET_TEXT = {
                                "off. See **After the Hermes update**.",
         "drift_overlay_reload": "An overlay was rebuilt, but the gateway still runs the copy from before: restart the "
                                 "gateway.",
+        "drift_pin_stale": "Hermes' file no longer matches the pin of an overlay's builder: the overlay runs the code "
+                           "from before the update. See **After the Hermes update**.",
+        "drift_overlay_folder": "An overlay folder changed since the gateway started: its next start may be refused. "
+                                "See **After the Hermes update**.",
+        "drift_overlay_unsafe": "A file the gateway loads in place of Hermes' own can be changed by someone else: see "
+                                "**After the Hermes update**.",
         "drift_update_parked": "The last Hermes update parked your local changes in a stash without putting them back: "
                                "see **After the Hermes update**.",
         "drift_stash_missing": "Stashes of earlier Hermes updates hold changes that are not in Hermes now: see **After "
@@ -1360,6 +1366,12 @@ _FLEET_TEXT = {
                                "Hermes**.",
         "drift_overlay_reload": "Uma sobreposição foi refeita, mas o gateway ainda roda a cópia anterior: reinicie o "
                                 "gateway.",
+        "drift_pin_stale": "O arquivo do Hermes não bate mais com o pino do gerador de uma sobreposição: ela roda o código "
+                           "de antes da atualização. Veja **Depois da atualização do Hermes**.",
+        "drift_overlay_folder": "Uma pasta de sobreposição mudou desde que o gateway subiu: a próxima partida pode ser "
+                                "recusada. Veja **Depois da atualização do Hermes**.",
+        "drift_overlay_unsafe": "Um arquivo que o gateway carrega no lugar de um do Hermes pode ser alterado por outra "
+                                "pessoa: veja **Depois da atualização do Hermes**.",
         "drift_update_parked": "A última atualização do Hermes guardou as suas mudanças locais num stash sem devolvê-las: "
                                "veja **Depois da atualização do Hermes**.",
         "drift_stash_missing": "Stashes de atualizações antigas do Hermes guardam mudanças que não estão no Hermes hoje: "

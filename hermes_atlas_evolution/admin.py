@@ -26,7 +26,7 @@ from pathlib import Path
 PLUGIN_ID = "hermes-atlas-evolution"
 SETTINGS = ("lessons", "language", "tool_hints", "feedback_signals", "agent_tools", "slow_turn_seconds",
             "owner_sender_ids", "owner_platforms", "reflector", "reflector_daily_limit", "autopilot_minutes",
-            "runtime_guard", "mode", "fleet_managed")
+            "runtime_guard", "mode", "fleet_managed", "overlay_pins")
 BOOLEANS = ("tool_hints", "feedback_signals", "agent_tools", "reflector", "runtime_guard", "fleet_managed")
 CHOICES = {"lessons": ("auto", "suggest", "off"), "language": ("auto", "en", "pt"), "mode": ("auto", "assist", "manual")}
 NUMBERS = ("slow_turn_seconds", "reflector_daily_limit", "autopilot_minutes")

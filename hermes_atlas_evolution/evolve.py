@@ -22,7 +22,7 @@ CONFIG_UNREAD = "_atlas_evolution_config_unread"
 
 DEFAULTS = {"lessons": "auto", "tool_hints": False, "feedback_signals": True, "language": "auto",
             "slow_turn_seconds": 60, "owner_sender_ids": (), "owner_platforms": (), "reflector": True, "reflector_daily_limit": 6,
-            "autopilot_minutes": 60, "runtime_guard": True, "mode": "assist", "fleet_managed": True}
+            "autopilot_minutes": 60, "runtime_guard": True, "mode": "assist", "fleet_managed": True, "overlay_pins": ()}
 # The 0.8.3 setting `auto_actions` maps on the mode when `mode` is not set (an owner who chose it keeps it).
 LEGACY_ACTIONS = {"off": "manual", "safe": "assist", "full": "auto"}
 MODE_ACTIONS = {"auto": "full", "assist": "safe", "manual": "off"}
@@ -105,6 +105,13 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
     # A protection: an invalid value keeps it on.
     guard = checked("runtime_guard", raw.get("runtime_guard", True), lambda value: type(value) is bool,
                     "evolution.runtime_guard must be true or false", True)
+    # 0.14.0: builders of overlays whose pin of Hermes' files the drift check watches (read, never run)
+    # each "<builder>" or "<builder>|<guide to rebuild the overlay>" (the guide is only said, never read)
+    pins = checked("overlay_pins", raw.get("overlay_pins", ()),
+                   lambda value: isinstance(value, (list, tuple)) and len(value) <= 8 and all(
+                       isinstance(item, str) and item.startswith(("/", "~")) and 1 < len(item) <= 600
+                       and not any(char in item for char in "\x00\n\r`") for item in value),
+                   "evolution.overlay_pins must list up to 8 absolute paths", ())
     return {"lessons": mode, "tool_hints": raw.get("tool_hints", False) is True, "runtime_guard": guard,
             "mode": operating, "auto_actions": automatic,
             "reflector": reflect, "reflector_daily_limit": daily, "autopilot_minutes": autopilot,
@@ -113,7 +120,12 @@ def options(config, runtime_config=None, *, strict: bool = True, problems: list 
             "owner_sender_ids": tuple(str(item) for item in owners),
             "owner_platforms": tuple(dict.fromkeys(item.strip().lower() for item in platforms)),
             "fleet_managed": _fleet_managed(raw, runtime_config, home, unread),
-            "config_unread": unread}
+            "overlay_pins": tuple(_pin_entry(item) for item in pins), "config_unread": unread}
+
+
+def _pin_entry(item: str) -> str:
+    builder, bar, guide = item.partition("|")
+    return str(Path(builder.strip()).expanduser()) + (f"|{guide.strip()}" if bar and guide.strip() else "")
 
 
 def _fleet_managed(raw: dict, runtime_config, home, unread: bool) -> bool:
@@ -272,7 +284,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     care = _daily_checks(home, now=now, deadline=deadline)
     timed("care")
     _stop_if(cancelled)
-    health = _fleet(home, now=now, deadline=deadline)
+    health = _fleet(home, now=now, deadline=deadline, pins=opts["overlay_pins"])
     shared = _share(home, now=now) if opts["auto_actions"] == "full" else []
     timed("fleet")
     index = None
@@ -303,7 +315,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
 FLEET_SECONDS = 90   # what a pass must have left to read the whole Hermes' health (fleet.refresh)
 
 
-def _fleet(home: Path, *, now: float, deadline: float | None) -> dict | None:
+def _fleet(home: Path, *, now: float, deadline: float | None, pins=()) -> dict | None:
     """In the lead profile: Hermes' warnings in its log, what the last update left behind and the gateway's memory
     (fleet.refresh), within the pass's deadline. None elsewhere, or when it cannot be read now; never fails the pass."""
     import time as _time
@@ -319,7 +331,7 @@ def _fleet(home: Path, *, now: float, deadline: float | None) -> dict | None:
     host.deadline = _time.monotonic() + 60 if deadline is None else min(deadline - 30, _time.monotonic() + 60)
     try:
         with experience(home) as conn:
-            return fleet.refresh(home, conn, now=now, host=host)
+            return fleet.refresh(home, conn, now=now, host=host, pins=pins)
     except Exception as error:   # the pass never fails for this
         from logging import getLogger
 

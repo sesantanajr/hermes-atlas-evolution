@@ -31,6 +31,9 @@ Hermes explicados e a memória do gateway comparada com o orçamento dele.
 - **Os "eficazes" antigos saem.** Uma lição julgada antes da troca de classificador da 0.12.0 guardava o veredicto para
   sempre; um "eficaz" daquela época sai, e uma lição cuja falha continua no mesmo ritmo enquanto o agente a lê (3 ou mais
   em 14 dias, contadas do jeito novo) é ineficaz, e no Modo Auto é aposentada.
+- **As checagens do `hermes doctor` contam a folga sob o limite de memória do gateway.** Rodado a partir de um
+  gateway, o processo filho da checagem diária conta contra o serviço do gateway (MemoryHigh): agora ele espera quando
+  esse cgroup tem menos de 600 MB livres, não só quando a máquina tem.
 - **O status dizia "o gateway pode estar parado" com ele rodando.** Quando nenhuma rodada roda embora o gateway rode, o
   status agora diz que nenhum processo de longa duração assumiu as rodadas, com o pid do gateway. A linha do gateway
   mostra a versão do Hermes que ele roda agora (pelo registro do próprio Hermes), não a que a última checagem guardou.
@@ -57,6 +60,12 @@ Hermes explicados e a memória do gateway comparada com o orçamento dele.
   foi escrita (aí ela esconde as correções novas) ou se a sobreposição mudou depois que o gateway a carregou (aí falta
   reiniciar); arquivos que diferem da versão oficial; cada stash que uma atualização deixou, com quanto do que ele guarda
   está de volta no lugar; o esquema de configuração de cada perfil comparado com o que este Hermes escreve.
+- **O pino do gerador de uma sobreposição (`overlay_pins`).** Nomeie o script que gera um arquivo carregado no lugar
+  de um do Hermes e fixa o sha256 dele (`EXPECTED = '…'`), se quiser com o passo a passo para refazê-lo
+  (`<script>|<guia>`): depois de cada atualização e a cada 6 horas o plugin o lê (nunca o roda) e avisa quando o
+  arquivo do Hermes não bate mais com o pino. Ele também vigia a pasta da sobreposição como o gateway a encontrou ao
+  subir: um arquivo que entrou ou saiu dela (um lançador que confere a pasta pode recusar a próxima partida), ou um que
+  é link, tem um segundo nome ou pode ser alterado por outra pessoa. Nada é refeito nem instalado sozinho.
 - **Os avisos do Hermes nos logs, em palavras simples.** Contados por dia, só com números (nunca uma linha do log):
   memória acima do orçamento do cache de agentes, o navegador das ferramentas de browser sem responder, a corrida do
   banco de sessões nos reinícios, um `state.db` trocado, um backup antes da atualização incompleto, travadas do laço de
@@ -83,7 +92,7 @@ sobreposição, um stash ou um serviço: deriva, avisos e memória são lidos e 
 ### Atualizando
 
 `hermes -p <perfil> plugins update hermes-atlas-evolution` em cada perfil (ou `hermes evolution update --all`), depois
-reinicie o gateway uma vez, para ele carregar o código novo e começar a assumir as rodadas. A suíte de testes tem 833
+reinicie o gateway uma vez, para ele carregar o código novo e começar a assumir as rodadas. A suíte de testes tem 837
 testes, no ramo `tests`.
 
 ## 0.13.0

@@ -52,6 +52,29 @@ If a profile still has the plugin under its old name `hermes-evolution`, run `he
 
 Version notes: [CHANGELOG](../../CHANGELOG.md).
 
+## Updating to 0.14.0
+
+Update every profile as above and **restart the gateway once**: a gateway started by a launcher of its own (one that
+runs `gateway.run` as its main module) is recognized from this version on and starts claiming the learning passes of
+every profile it serves. Nothing to migrate by hand.
+
+- **The first passes after the restart** replay up to 14 days of history in profiles that never had one, one profile at
+  a time, at a lower CPU priority, starting 2 to 7 minutes after the gateway starts.
+- **Lesson verdicts are judged again.** An "effective" verdict needs evidence now; one judged on too few calls is taken
+  back, and a lesson whose failure keeps happening while the agent reads it becomes ineffective (retired in Auto mode).
+- **Every profile at once**: `hermes evolution fleet` shows them all; `hermes evolution fleet auto on` turns Auto mode
+  on in every profile through `hermes config set` and keeps each profile's previous values for `fleet auto off`;
+  `hermes evolution fleet schedule` adds the daily report as a scheduled task with no agent.
+- **Watch the pin of an overlay's builder** (optional): if a script builds a file loaded in place of one of Hermes' own
+  and pins its sha256, name it once in the profile that looks after the others:
+
+  ```sh
+  hermes -p default config set plugins.entries.hermes-atlas-evolution.settings.overlay_pins \
+    '["/path/to/build_overlay.py|docs/how-to-rebuild.md"]'
+  ```
+
+  After every Hermes update the plugin then says when Hermes' file no longer matches the pin. It never rebuilds it.
+
 ## Updating to 0.13.0
 
 Update as above and restart the gateway once. There is nothing to migrate by hand; check the first point if you relied on Auto mode.

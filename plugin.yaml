@@ -188,6 +188,20 @@ config_schema:
       off.
       — Desligado = o perfil que cuida de todos os perfis deste Hermes nunca instala nada nem move nada para a
       lixeira neste perfil sozinho; continua mostrando o que encontra. O settings.json só pode desligar.
+  overlay_pins:
+    type: list
+    default: []
+    label: "Overlay builders to watch · Geradores de sobreposição a vigiar"
+    description: >-
+      Scripts that build a file loaded in place of one of Hermes' own from Hermes' file, pinning its sha256 (such as
+      `EXPECTED = '…'`). After each Hermes update and every 6 hours the plugin reads each one (never runs it) and says
+      when Hermes' file no longer matches the pin: the overlay then runs old code. It never rebuilds anything. Write
+      `<script>|<guide>` to name the guide to rebuild it. Counts only from Hermes' configuration; at most 8 paths.
+      — Scripts que geram, a partir de um arquivo do Hermes, outro que é carregado no lugar dele, fixando o sha256 do
+      original (como `EXPECTED = '…'`). Depois de cada atualização do Hermes e a cada 6 horas o plugin lê cada um (nunca
+      roda) e avisa quando o arquivo do Hermes não bate mais com o pino: a sobreposição está rodando código velho. Nada é
+      refeito sozinho. Escreva `<script>|<guia>` para nomear o passo a passo de refazê-la. Só vale pela configuração
+      do Hermes; no máximo 8 caminhos.
   runtime_guard:
     type: bool
     default: true
