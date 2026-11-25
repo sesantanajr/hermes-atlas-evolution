@@ -2,6 +2,88 @@
 
 *Em português: [CHANGELOG.pt-BR.md](CHANGELOG.pt-BR.md).*
 
+## 0.14.0
+
+An audit of ten days of a real fleet (one gateway, 12 profiles) found that the learning passes had stopped in 11 of
+them, that six "effective" lessons had been judged on a handful of calls, and that a Hermes update had left an overlay
+running stale code without anyone being told. This release fixes that and adds what was missing: every profile in one
+view, Auto for all of them at once, what an update leaves behind, Hermes' own warnings explained, and the gateway's
+memory against its budget.
+
+### Fixed
+
+- **A gateway started by a launcher of its own never ran a learning pass.** The plugin told a gateway by its command
+  line (`hermes gateway run`); a launcher that runs `gateway.run` as the main module (runpy, `python -m gateway.run`)
+  left argv as `[".../gateway/run.py"]`, so the gateway counted as a short command and claimed no pass, for any profile
+  it served. On the audited machine no pass ran in 11 of 12 profiles for 7 days (since 0.12.0): 26 recurring failures
+  in one profile never became a lesson, verdicts froze, the health checks went stale. Now the main module, argv[0] and
+  Hermes' own record (`gateway.pid`) count too, and a process that did not claim at load asks again every 5 minutes.
+  The same fix lets the gateway record which plugin version it runs and preload the plugin's code.
+- **Passes no longer start all at once in a gateway serving many profiles.** One pass at a time per process, each
+  profile's clock starts at its own delay (0–5 min), and on Linux the pass thread runs at a lower CPU priority than the
+  turns.
+- **A lesson's verdict needs evidence.** "Effective" meant "half the failure rate before", so 5 failures in 1,769 calls
+  before and none in the 20 calls after was effective (the baseline predicted 0.06 failures there). Now the baseline
+  must predict at least 3 failures after, and seeing that few must be unlikely by chance (Poisson, p ≤ 0.1); otherwise
+  the lesson is not judged yet, and after 28 days it is inconclusive. A verdict the evidence no longer supports is taken
+  back.
+- **Old "effective" verdicts are dropped.** A lesson judged before 0.12.0's classifier change kept its verdict for ever;
+  an "effective" from then is dropped, and a lesson whose failure keeps happening at the same rate while the agent reads
+  it (3 or more in 14 days, counted the new way) is ineffective, and retired in Auto mode.
+- **Status said "the gateway may be down" when it was running.** When no pass ran although the gateway runs, status now
+  says that no long-running process claimed the passes, with the gateway's pid. The gateway's line shows the Hermes
+  version it runs now (Hermes' own record), not the one the last health check stored.
+
+### Added
+
+- **Every profile in one view: `hermes evolution fleet`** (and the panel's new **Fleet** tab, and option 15 of the
+  menu). For each profile: whether the plugin is on, which version runs (and which one the gateway loaded), the mode,
+  when the last learning pass ran and whether it is late, lessons active and waiting, failures, turns and slow turns,
+  automatic actions; plus the gateway, its memory, what the last update left behind and Hermes' warnings.
+- **Auto for every profile at once: `hermes evolution fleet auto on|off|status`.** Each profile with the plugin on gets
+  `mode: auto` and `lessons: auto` (and a learning pass every hour where it was off) through Hermes' own
+  `hermes config set`, each change in that profile's history; `--owner suggested` also counts as you the channels that
+  are yours by construction. The values each profile had are kept, and `fleet auto off` puts them back. `status` lists
+  what Auto does by itself (each with its undo) and what it never does. A profile with `fleet_managed: false` is left
+  alone. In the panel, the switch is a decision like any other (your dashboard login).
+- **The daily report: `hermes evolution fleet report` and `fleet schedule`.** What the plugin learned and did in every
+  profile in the last 24 hours, what waits for you, and the fleet view, as a Hermes scheduled task that runs no agent
+  and spends no token (`--deliver` picks the channel; local by default).
+- **Drift after a Hermes update.** From Hermes' update receipts and its checkout, read-only: the last update (from and
+  to which version, its outcome), local changes it parked in a stash instead of putting back, plugins it turned off that
+  are still off, services that did not come back; every file the gateway loaded in place of Hermes' own (an overlay) and
+  whether Hermes' file changed after the overlay was written (the overlay then hides the new upstream fixes) or the
+  overlay changed after the gateway loaded it (a restart is needed); files that differ from the official version; every
+  stash an update left, with how much of what it holds is back in place now; each profile's configuration schema
+  against the one this Hermes writes.
+- **Hermes' warnings in its log, in plain words.** Counted per day with numbers only (never a line of the log): memory
+  over the agent cache's budget, the browser tools' browser not answering, the session database's restart race, a
+  replaced `state.db`, an incomplete pre-update backup, event loop stalls, the root warning, sessions of profiles that
+  no longer exist, contract errors, and `capability_check … decision=deny` (explained as the safe default it is).
+- **The gateway's memory against its budget.** The gateway's memory now, its service's MemoryHigh and MemoryMax, the
+  agent cache's budget as Hermes computes it, and how often the log saw it passed; when the budget is below the peak,
+  what to change (a higher MemoryHigh when the machine has room, a smaller cache when it has not). Never applied by
+  itself.
+- **Lessons proven in one profile are offered to the others in Auto** that call the same tool. They arrive waiting
+  and activate there only once that profile's own turns hit the failure. Only template lessons travel.
+- **A lesson whose tool nobody calls any more is obsolete.** One Auto activated is taken back (and returns if its
+  failure does); one you approved gets a proposal to retire it.
+- **Template lessons of one cause on several tools share one sentence** in the prompt ("`terminal`, `tool_search` and
+  `skill_manage`: this kind of command is blocked…"), so the prompt's 8 lines reach more causes.
+- **What a pass and a hook cost, in detail.** Each pass records the seconds of each phase, and the hooks' cost now
+  separates the plugin's own CPU time from the wait for the interpreter or the disk.
+
+### Unchanged principles
+
+No network access of its own, no telemetry, and it never updates itself or Hermes. Nothing here changes Hermes' code,
+an overlay, a stash or a service: drift, warnings and memory are read and explained, and the commands are yours.
+
+### Upgrading
+
+`hermes -p <profile> plugins update hermes-atlas-evolution` in every profile (or `hermes evolution update --all`),
+then restart the gateway once, so it loads the new code and starts claiming the passes. The test suite has 833 tests,
+on the `tests` branch.
+
 ## 0.13.0
 
 Ready for the Hermes plugin catalog: the plugin no longer updates itself or reads the network, Assist is the default mode, and three audits (catalog rules, the hooks inside Hermes, the background work) found the bugs fixed below.

@@ -407,6 +407,42 @@ def _expire(conn: sqlite3.Connection, *, now: float) -> list[int]:
     return expired
 
 
+# 0.14.0: a lesson whose tool nobody calls any more is obsolete (a plugin removed, a tool renamed, a workflow gone):
+# it keeps a place in the prompt's order and teaches nothing. One the plugin activated by itself is taken back
+# (withdrawn, like a lesson nobody read, and brought back by derive if its failure is seen again); one the owner approved
+# gets a proposal to retire it (proposals.refresh), never a silent retirement. A lesson whose tool is still called and
+# whose failure stopped is kept: the lesson may be why it stopped.
+OBSOLETE_DAYS = 30
+
+
+def unused_tool_lessons(conn: sqlite3.Connection, *, now: float, auto_only: bool) -> list[int]:
+    """Active lessons activated OBSOLETE_DAYS ago or more whose tool had no call and whose failure was not seen in the
+    last OBSOLETE_DAYS. `auto_only`: only the ones auto mode activated (lesson_auto), else only the others."""
+    cutoff = now - OBSOLETE_DAYS * 86_400
+    since = day_offset(now, OBSOLETE_DAYS - 1)
+    joined = "EXISTS" if auto_only else "NOT EXISTS"
+    rows = conn.execute(f"""SELECT l.id FROM lesson l LEFT JOIN failure f ON f.signature=l.signature
+        WHERE l.status='active' AND l.activated IS NOT NULL AND l.activated < ? AND l.tool NOT IN ('general', 'unknown')
+          AND COALESCE(f.last_seen, 0) < ?
+          AND NOT EXISTS (SELECT 1 FROM tool_daily t WHERE t.tool=l.tool AND t.day >= ? AND t.calls > 0)
+          AND {joined} (SELECT 1 FROM lesson_auto a WHERE a.lesson_id=l.id AND a.activated=l.activated)
+          AND NOT EXISTS (SELECT 1 FROM lesson_keep k WHERE k.lesson_id=l.id AND k.activated=l.activated)""",
+                        (cutoff, cutoff, since)).fetchall()
+    return [row[0] for row in rows]
+
+
+def _obsolete(conn: sqlite3.Connection, *, now: float) -> list[int]:
+    """Take back the active lessons auto mode activated whose tool is no longer used (OBSOLETE_DAYS). Returns their ids."""
+    taken = []
+    for lesson_id in unused_tool_lessons(conn, now=now, auto_only=True):
+        cursor = conn.execute(f"""UPDATE lesson SET status='retired', verdict='{WITHDRAWN}', updated=?
+            WHERE id=? AND status='active'""", (now, lesson_id))
+        if cursor.rowcount:
+            conn.execute("INSERT OR REPLACE INTO lesson_reason VALUES (?, 'tool_unused', ?)", (lesson_id, now))
+            taken.append(lesson_id)
+    return taken
+
+
 def rewriter_binaries(conn: sqlite3.Connection) -> set[str]:
     """Binaries seen missing only after another plugin rewrote the command (`rewritten_command` failures)."""
     return {row[0] for row in conn.execute(
@@ -453,7 +489,7 @@ def tidy(conn: sqlite3.Connection, *, now: float) -> int:
         if cursor.rowcount:
             taken_back.append(lesson_id)
     conn.executemany("DELETE FROM lesson_owner_wait WHERE lesson_id=?", [(item,) for item in taken_back])
-    return len(taken_back) + len(_expire(conn, now=now))
+    return len(taken_back) + len(_expire(conn, now=now)) + len(_obsolete(conn, now=now))
 
 
 def add_custom(conn: sqlite3.Connection, text: str, *, tool: str, origin: str, now: float, active: bool = False) -> int:
@@ -537,6 +573,48 @@ def templated(row) -> bool:
     return row["origin"] == "derived" and not row["text"]
 
 
+_TOOL_MARK = "\x00tool\x00"
+MERGE_TOOLS = 4   # tools one merged sentence names at most
+
+
+def merge_key(row) -> tuple | None:
+    """(class, detail) when this template lesson can share one sentence with others of the same cause on other tools
+    (0.14.0): its template names the tool once, in backticks, and nothing else varies but the detail. None otherwise."""
+    if not templated(row):
+        return None
+    template = TEMPLATES.get(row["klass"])
+    if template is None or template[1].count("{tool}") != 1 or "`{tool}`" not in template[1]:
+        return None
+    return row["klass"], row["hint"]
+
+
+def render_group(rows: list, lang: str = "en") -> str:
+    """One sentence for template lessons of one cause on several tools: "`a`, `b` and `c`: ..."."""
+    tools = list(dict.fromkeys(str(row["tool"]) for row in rows))[:MERGE_TOOLS]
+    if len(tools) == 1:
+        return render(rows[0], lang)
+    template = TEMPLATES[rows[0]["klass"]][2 if lang == "pt" else 1]
+    joined = ", ".join(f"`{tool}`" for tool in tools[:-1]) + (" e " if lang == "pt" else " and ") + f"`{tools[-1]}`"
+    return template.format(tool=_TOOL_MARK, hint=rows[0]["hint"]).replace(f"`{_TOOL_MARK}`", joined)
+
+
+def _grouped(rows: list) -> list[list]:
+    """The active lessons in their order, the template lessons of one cause on several tools together (at the place
+    of the first one): one sentence for the cause, so the prompt's few lines reach more causes."""
+    groups: list[list] = []
+    by_key: dict = {}
+    for row in rows:
+        key = merge_key(row)
+        if key is not None and key in by_key and len(by_key[key]) < MERGE_TOOLS:
+            by_key[key].append(row)
+            continue
+        group = [row]
+        groups.append(group)
+        if key is not None and key not in by_key:
+            by_key[key] = group
+    return groups
+
+
 def playbook(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 8, max_chars: int = 1200,
              mark_shown: bool = False, chosen: list | None = None, templates_only: bool = False) -> str:
     """Bounded text for the session prompt section. Empty when there is nothing active.
@@ -544,15 +622,25 @@ def playbook(conn: sqlite3.Connection, *, lang: str = "en", limit: int = 8, max_
     `chosen`, when given, receives the ids of the lessons in the text (so a caller can count them later
     without writing during the read). `templates_only` (a chat where someone else may be on the other side)
     leaves out lessons written by the operator, the reflector or the agent: free text that was never meant
-    for a third party."""
+    for a third party. Template lessons of one cause on several tools share one sentence (0.14.0)."""
     lines, used = [], max(len(HEADERS.get(lang, HEADERS["en"])), len(MIXED_HEADERS.get(lang, MIXED_HEADERS["en"])))
     written_by_hand = False
     chosen = [] if chosen is None else chosen
     written: set[str] = set()
-    for row in active_lessons(conn):
-        if templates_only and not templated(row):
+    rows = [row for row in active_lessons(conn) if not (templates_only and not templated(row))]
+    for group in _grouped(rows):
+        row = group[0]
+        sentence = render_group(group, lang) if len(group) > 1 else render(row, lang)
+        if len(group) > 1 and sentence and sentence not in written and used + len(sentence) + 3 <= max_chars:
+            written.add(sentence)
+            lines.append("- " + sentence)
+            used += len(sentence) + 3
+            chosen.extend(item["id"] for item in group)
+            if len(lines) >= limit:
+                break
             continue
-        sentence = render(row, lang)
+        if len(group) > 1:   # the merged sentence does not fit: its first lesson alone may
+            sentence = render(row, lang)
         if sentence in written:   # one template, several failure details: the sentence is already there
             chosen.append(row["id"])
             continue
@@ -677,6 +765,44 @@ def _migrate_measure(conn: sqlite3.Connection, now: float) -> None:
 
 
 CLASSIFIER_CHECKED = "classifier_0120_checked"   # cursor: whether CLASSIFIER_CHANGED applies here was decided
+# 0.14.0: a verdict needs evidence. "effective" once meant "fewer failures after than half the rate before", so a
+# failure seen 5 times in 1,769 calls before and 0 times in the 20 calls after was "effective" (the baseline itself
+# predicted 0.06 failures there). Now the baseline must predict at least MIN_EXPECTED_FAILURES failures in the calls
+# (or days) after, and seeing that few has to be unlikely by chance (Poisson, at most EFFECTIVE_P). A lesson whose
+# failure is too rare to tell is not judged until INCONCLUSIVE_AFTER_DAYS of use: then it is inconclusive.
+MIN_EXPECTED_FAILURES = 3.0
+EFFECTIVE_P = 0.1
+INCONCLUSIVE_AFTER_DAYS = 28
+STILL_FAILING = 3   # failures within the after window, while the agent reads the lesson, that say it does not help
+
+
+def poisson_at_most(observed: int, expected: float) -> float:
+    """P(X <= observed) for X ~ Poisson(expected): how likely seeing that few failures is by chance alone."""
+    import math
+
+    if expected <= 0:
+        return 1.0
+    term = total = math.exp(-expected)
+    for count in range(1, max(0, int(observed)) + 1):
+        term *= expected / count
+        total += term
+    return min(1.0, total)
+
+
+def judge(*, base_failures: int, failures_after: int, before: float, after: float, exposure: float,
+          days_active: int) -> str | None:
+    """The verdict on one measurement (rates and exposure in the same unit: calls, or days), or None while there is
+    not enough use since to tell. See MIN_EXPECTED_FAILURES."""
+    if base_failures == 0:
+        return "inconclusive"   # nothing to reduce: no rate after can show it helped or did not
+    if failures_after >= STILL_FAILING and after >= 0.9 * before:
+        return "ineffective"
+    expected = before * max(0.0, exposure)
+    if expected >= MIN_EXPECTED_FAILURES:
+        if after <= 0.5 * before and poisson_at_most(failures_after, expected) <= EFFECTIVE_P:
+            return "effective"
+        return "inconclusive"
+    return "inconclusive" if days_active >= INCONCLUSIVE_AFTER_DAYS else None
 
 
 def _mark_classifier(conn: sqlite3.Connection, now: float) -> None:
@@ -774,10 +900,25 @@ def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest", his
         days_after = _calendar_days(after_start, today) if after_start <= today else 0
         failures_after, calls_after = _counts(conn, row["signature"], row["tool"], after_start, today) if days_after else (0, 0)
         days_active = _calendar_days(day_offset(start, -1), today) if start_day < today else 0
-        if legacy:   # the verdict measured consistently before 0.12.0, if any, with its rates
-            verdict = row["verdict"] if row["verdict"] in VERDICTS else None
+        if legacy:
+            # Its whole baseline was counted the old way, so no before-and-after comparison is sound (0.12.0): it keeps
+            # the verdict it had then, except "effective", which up to 0.13.0 could come from as little as 20 calls
+            # (MIN_EXPECTED_FAILURES): that one is dropped. What the agent did while reading the lesson still counts:
+            # its failure happening STILL_FAILING times in the after window, at no lower a rate than the one measured
+            # before, says it does not help.
+            verdict = row["verdict"] if row["verdict"] in VERDICTS and row["verdict"] != "effective" else None
             before, after = row["rate_before"] or 0.0, row["rate_after"] or 0.0
             basis = row["measured_basis"] or ""
+            # only failures counted the new way: the after window from the classifier change on
+            since = max(after_start, changed_day) if changed_day else after_start
+            days_new = _calendar_days(since, today) if since <= today else 0
+            failures_new, calls_new = _counts(conn, row["signature"], row["tool"], since, today) if days_new else (0, 0)
+            if days_new and failures_new >= STILL_FAILING:
+                per_call = basis == "failures_per_call" and calls_new >= 5
+                now_rate = failures_new / calls_new if per_call else failures_new / days_new
+                if not before or basis not in ("failures_per_call", "failures_per_day") or now_rate >= 0.9 * before:
+                    verdict, after = "ineffective", now_rate
+                    basis = "failures_per_call" if per_call else "failures_per_day"
         else:
             per_call = base_calls >= 5 and calls_after >= 5
             if per_call:
@@ -789,25 +930,20 @@ def evaluate(conn: sqlite3.Connection, *, now: float, mode: str = "suggest", his
             ready = days_active >= EVALUATE_AFTER_DAYS or calls_after >= EVALUATE_AFTER_CALLS
             verdict = None
             if ready and days_after:
-                if base_failures == 0:
-                    verdict = "inconclusive"   # nothing to reduce: no rate after can show it helped or did not
-                elif after <= 0.5 * before:
-                    verdict = "effective"
-                elif failures_after >= 3 and after >= 0.9 * before:
-                    verdict = "ineffective"
-                else:
-                    verdict = "inconclusive"
+                verdict = judge(base_failures=base_failures, failures_after=failures_after, before=before, after=after,
+                                exposure=calls_after if per_call else days_after, days_active=days_active)
         kept = verdict == "ineffective" and conn.execute(
             "SELECT 1 FROM lesson_keep WHERE lesson_id=? AND activated=?", (row["id"], row["activated"])).fetchone()
         retire = verdict == "ineffective" and days_active >= RETIRE_AFTER_DAYS and mode == "auto" and not kept
-        if verdict:
-            # Only while it is still active: an operator who retired it since this pass read it has the last word.
+        if verdict or row["verdict"] in VERDICTS:
+            # Only while it is still active: an operator who retired it since this pass read it has the last word. A
+            # verdict the evidence no longer supports (an earlier rule's, see MIN_EXPECTED_FAILURES) is taken back.
             cursor = conn.execute("""UPDATE lesson SET verdict=?, rate_before=?, rate_after=?, evaluated=?, status=?, updated=?
                 WHERE id=? AND status='active'""", (verdict, before, after, now, "retired" if retire else "active",
                                                     now if retire or verdict != row["verdict"] else row["updated"], row["id"]))
             if not cursor.rowcount:
                 continue
-            if not legacy:
+            if not legacy or verdict:
                 conn.execute("UPDATE lesson_measure SET basis=? WHERE lesson_id=? AND activated=?",
                              (basis, row["id"], row["activated"]))
         results.append({"id": row["id"], "tool": row["tool"], "class": row["klass"], "verdict": verdict,

@@ -82,11 +82,20 @@ def ingest_reviews(home: Path, conn, *, since_day: str | None = None) -> dict:
     The first run also reads the rotated files, oldest first, counting lines from `since_day` on (each line
     carries its own date). After a rotation, the rest of the old file is read before the new one, and so is
     every file rotated after it, so lines written around one or several renames are not lost."""
+    result = ingest_lines(home, conn, key="agent_log", consume=_count, since_day=since_day)
+    result["reviews"] = result.pop("lines")
+    return result
+
+
+def ingest_lines(home: Path, conn, *, key: str, consume, since_day: str | None = None) -> dict:
+    """Read the agent.log of `home` (and its rotated files) from where the cursor `key` stopped, and hand the complete
+    lines to `consume(conn, data, since=day)`, which returns how many it counted (0.14.0: shared by the review lines
+    and logsignals). Returns {"status", "lines", "bytes_read", "more"}."""
     files = _files(home)
     current = next(((path, info) for path, info in files if path.name == "agent.log"), None)
     if current is None:
-        return {"status": "log_unavailable", "reviews": 0}
-    saved = conn.execute("SELECT value FROM cursor WHERE key='agent_log'").fetchone()
+        return {"status": "log_unavailable", "lines": 0}
+    saved = conn.execute("SELECT value FROM cursor WHERE key=?", (key,)).fetchone()
     try:
         state = json.loads(saved[0]) if saved else None
     except (ValueError, RecursionError):
@@ -134,13 +143,13 @@ def ingest_reviews(home: Path, conn, *, since_day: str | None = None) -> dict:
         complete, lines, skipping = _usable(data, skipping=skipping, final=False)
         state["offset"] = offset + complete
         more = state["offset"] < size
-    added = _count(conn, lines, since=state.get("since"))
+    added = consume(conn, lines, since=state.get("since"))
     state["queue"] = queue
     state["skip"] = skipping
     if not queue and not more:
         state["since"] = None
-    conn.execute("INSERT OR REPLACE INTO cursor VALUES ('agent_log', ?)", (json.dumps(state),))
-    return {"status": "ok", "reviews": added, "bytes_read": complete, "more": bool(queue) or more}
+    conn.execute("INSERT OR REPLACE INTO cursor VALUES (?, ?)", (key, json.dumps(state)))
+    return {"status": "ok", "lines": added, "bytes_read": complete, "more": bool(queue) or more}
 
 
 def _count(conn, data: bytes, *, since: str | None) -> int:

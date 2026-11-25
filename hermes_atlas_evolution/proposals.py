@@ -108,6 +108,14 @@ def refresh(conn: sqlite3.Connection, *, now: float, skills: dict | None = None,
                 {"lesson_id": row["id"], "rate_before": row["rate_before"], "rate_after": row["rate_after"],
                  "basis": playbook.basis_of(conn, row["id"])},   # per call or per day: explain words the rates by it
                 command(f"evolution lessons retire {row['id']}"), now)
+    # 0.14.0: a lesson the owner approved whose tool nobody calls any more (lessons.OBSOLETE_DAYS) is the owner's call
+    for lesson_id in playbook.unused_tool_lessons(conn, now=now, auto_only=False):
+        if f"lesson_retire:{lesson_id}" in seen:
+            continue
+        row = conn.execute("SELECT tool FROM lesson WHERE id=?", (lesson_id,)).fetchone()
+        _upsert(conn, seen, f"lesson_retire:{lesson_id}", "lesson_retire", "low", row["tool"],
+                {"lesson_id": lesson_id, "reason": "tool_unused", "days": playbook.OBSOLETE_DAYS},
+                command(f"evolution lessons retire {lesson_id}"), now)
     for finding in (skills or {}).get("findings", ()):
         skill = finding["skill"]
         if finding["code"] == "skill_churn":

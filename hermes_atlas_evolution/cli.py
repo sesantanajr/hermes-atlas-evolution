@@ -15,7 +15,7 @@ from .operations import RETENTION_DAYS, database, summarize
 
 EVOLUTION_ACTIONS = ("status", "learn", "lessons", "skills", "proposals", "experiments", "report", "owner",
                      "decisions")
-MAINTENANCE_ACTIONS = ("system", "care", "schedule-digest", "environment", "update")
+MAINTENANCE_ACTIONS = ("system", "care", "schedule-digest", "environment", "update", "fleet")
 
 
 def settings(home: Path) -> dict:
@@ -417,7 +417,38 @@ def setup(parser: argparse.ArgumentParser) -> None:
     upgrade.add_argument("--list", action="store_true", dest="list_only",
                          help=_b("Only show each profile's version, commit and pin", "Só mostra versão, commit e fixação de cada perfil"))
     upgrade.add_argument("--yes", action="store_true", help=_("Do not ask before running Hermes' command"))
-    for command in (system, care, env, upgrade):
+    fleet = commands.add_parser("fleet", help=_b(
+        "Every profile of this Hermes in one view, Auto for all of them at once, and the daily report",
+        "Todos os perfis deste Hermes numa visão só, o Modo Auto para todos de uma vez e o relatório diário"))
+    fleet.add_argument("fleet_action", nargs="?", default="show", choices=("show", "check", "auto", "schedule", "report"),
+                       help=_b("show (default): every profile, the gateway, its memory, what the last Hermes update left "
+                               "behind and Hermes' warnings · check: read all of that again now · auto [status|on|off]: "
+                               "Auto for every profile, and back · schedule: the daily report as a Hermes scheduled task "
+                               "(no agent) · report: the report of the last 24 hours",
+                               "show (padrão): todos os perfis, o gateway, a memória dele, o que a última atualização do "
+                               "Hermes deixou para trás e os avisos do Hermes · check: lê tudo isso de novo agora · auto "
+                               "[status|on|off]: Modo Auto em todos os perfis, e a volta · schedule: o relatório diário "
+                               "como tarefa agendada do Hermes (sem agente) · report: o relatório das últimas 24 horas"))
+    fleet.add_argument("auto_action", nargs="?", default="status", choices=("status", "on", "off"),
+                       help=_b("With auto: status (default), on or off", "Com auto: status (padrão), on ou off"))
+    fleet.add_argument("--profiles", default="", metavar=_b("PROFILES", "PERFIS"),
+                       help=_b("With auto on: only these profiles, comma-separated", "Com auto on: só estes perfis, "
+                                                                                   "separados por vírgula"))
+    fleet.add_argument("--owner", choices=("keep", "suggested"), default="keep",
+                       help=_b("With auto on: suggested also counts as you the channels that are yours by construction "
+                               "(one sender, your own interface); keep (default) leaves who you are as it is",
+                               "Com auto on: suggested também conta como você os canais que são seus por construção (um "
+                               "remetente, a sua própria interface); keep (padrão) deixa quem é você como está"))
+    fleet.add_argument("--hour", type=bounded(0, 23, language), default=7, metavar="0..23",
+                       help=_b("With schedule: the hour of the day (default 7)", "Com schedule: a hora do dia (padrão 7)"))
+    fleet.add_argument("--deliver", default="local", metavar=_b("TARGET", "DESTINO"),
+                       help=_b("With schedule: where to deliver it: local, or a channel such as telegram",
+                               "Com schedule: onde entregar: local, ou um canal como telegram"))
+    fleet.add_argument("--hours", type=bounded(1, 168, language), default=24, metavar="1..168",
+                       help=_b("With report: how many hours to look at (default 24)",
+                               "Com report: quantas horas olhar (padrão 24)"))
+    fleet.add_argument("--yes", action="store_true", help=_("Do not ask before running Hermes' command"))
+    for command in (system, care, env, upgrade, fleet):
         output(command)
     digest = commands.add_parser("schedule-digest", help=_b(
         "Schedule the weekly digest as a Hermes scheduled task (cron), no agent",
@@ -1428,6 +1459,8 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
     lang = getattr(args, "lang", None) or "en"
     if args.evolution_action == "update":
         return _fleet_update(args, home, lang)
+    if args.evolution_action == "fleet":
+        return _fleet_command(args, home, now=now, lang=lang)
     if args.evolution_action == "environment":
         from . import environment, explain
 
@@ -1529,6 +1562,54 @@ def _maintenance(args, home: Path, *, now: float, runtime_config=None):
     return {"started": started, "folder": str(folder), "report": report}
 
 
+def _fleet_command(args, home: Path, *, now: float, lang: str):
+    """`hermes evolution fleet …` (0.14.0): reading is open to anyone; switching Auto for every profile and scheduling
+    the report are the owner's, in the owner's own terminal."""
+    from . import fleet
+    from .environment import lead_home
+
+    task = getattr(args, "fleet_action", "show")
+    if task == "show":
+        return fleet.overview(home, now=now)
+    if task == "check":
+        lead = lead_home(home) or home
+        from .experience import experience
+        from .system_update import Host
+
+        host = Host()
+        host.deadline = time.monotonic() + 90
+        with experience(lead) as conn:
+            fleet.refresh(lead, conn, now=now, host=host, force=True)
+        return fleet.overview(home, now=now)
+    if task == "report":
+        return fleet.report_markdown(home, now=now, lang=lang, hours=args.hours)
+    if task == "schedule":
+        _operator_only()
+        return fleet.schedule(home, now=now, hour=args.hour, lang=lang, deliver=args.deliver, actor="terminal")
+    action = getattr(args, "auto_action", "status")
+    if action == "status":
+        return {"auto": fleet.auto_state(home), "safe_actions": [item[0] for item in fleet.SAFE_ACTIONS]}
+    _operator_only()
+    names = [item.strip() for item in (args.profiles or "").split(",") if item.strip()]
+    if action == "on":
+        what = _say(lang, "Auto mode in every profile with Atlas Evolution on"
+                    + (" (" + ", ".join(names) + ")" if names else "")
+                    + (", and the channels that are yours by construction counted as you" if args.owner == "suggested"
+                       else "") + ", through `hermes config set` (each change can be undone)",
+                    "Modo Auto em todos os perfis com o Atlas Evolution ligado"
+                    + (" (" + ", ".join(names) + ")" if names else "")
+                    + (", e os canais que são seus por construção contados como você" if args.owner == "suggested"
+                       else "") + ", pelo `hermes config set` (cada mudança tem desfazer)")
+        _confirm(what, lang, yes=args.yes, apply=True, what="hermes config set …",
+                 again=_hermes_cmd(home, "evolution fleet auto on" + (f" --profiles {','.join(names)}" if names else "")
+                                   + (" --owner suggested" if args.owner == "suggested" else "") + " --yes"))
+        return fleet.enable(home, now=now, profiles=names or None, owner=args.owner, actor="terminal")
+    _confirm(_say(lang, "Every profile back to the settings it had before Auto for all",
+                  "Cada perfil de volta às configurações que tinha antes do Auto para todos"), lang, yes=args.yes,
+             apply=True, what="hermes config set …", again=_hermes_cmd(home, "evolution fleet auto off --yes"))
+    return fleet.disable(home, now=now, actor="terminal")
+
+
 def _report(args, home: Path, *, now: float, runtime_config=None, reflect=None):
     action = args.evolution_action
     if action in EVOLUTION_ACTIONS:
@@ -1550,7 +1631,7 @@ def _report(args, home: Path, *, now: float, runtime_config=None, reflect=None):
 # output (the same structure as before 0.9.0). A caller that builds the arguments itself, without `format`, gets the
 # structure: the menu and the panel call `execute` that way.
 HUMAN_ACTIONS = ("care", "environment", "decisions", "lessons", "proposals", "learn", "skills", "experiments", "system",
-                 "usage", "schedule-digest", "update")
+                 "usage", "schedule-digest", "update", "fleet")
 
 
 def _wants_text(args) -> bool:
@@ -2759,6 +2840,19 @@ def _digest_md(result: dict, lang: str) -> str:
                                    deliver=result.get("deliver")) + "\n"
 
 
+def _fleet_schedule_md(result: dict, home: Path, lang: str) -> str:
+    if result.get("scheduled"):
+        return _say(lang, f"The daily fleet report is scheduled (job `{result.get('job')}`, `{result.get('schedule')}`, "
+                          f"delivered to `{result.get('deliver')}`). Undo: `{_hermes_cmd(home, 'evolution decisions list')}`.",
+                    f"O relatório diário da frota está agendado (tarefa `{result.get('job')}`, `{result.get('schedule')}`, "
+                    f"entregue em `{result.get('deliver')}`). Desfazer: `{_hermes_cmd(home, 'evolution decisions list')}`.")
+    if result.get("reason") == "already":
+        return _say(lang, f"The daily fleet report was already scheduled (job `{result.get('job')}`).",
+                    f"O relatório diário da frota já estava agendado (tarefa `{result.get('job')}`).")
+    return _say(lang, "Another schedule is being written right now; try again in a moment.",
+                "Outro agendamento está sendo gravado agora; tente de novo em um instante.")
+
+
 def _human(args, result, home: Path, lang: str, runtime_config=None):
     """The text a person reads for the result of `args` (a str), or the result unchanged when it is printed as JSON."""
     from . import status
@@ -2773,6 +2867,18 @@ def _human(args, result, home: Path, lang: str, runtime_config=None):
         from .fleet_update import markdown
 
         return markdown(result, lang)
+    if action == "fleet":
+        from . import fleet
+
+        task = getattr(args, "fleet_action", "show")
+        if task in ("show", "check"):
+            return fleet.markdown(result, lang)
+        if task == "report":
+            return result
+        if task == "schedule":
+            return _fleet_schedule_md(result, home, lang)
+        return fleet.auto_markdown(home, lang, result=result if getattr(args, "auto_action", "status") != "status"
+                                   else None)
     if action == "environment":
         task = getattr(args, "environment_action", "show")
         if task == "catalog":
@@ -2873,7 +2979,7 @@ def execute(args, home: Path, *, runtime_config=None, reflect=None) -> None:
     if isinstance(result, str):
         # one shape for every command printed (0.12.0); Hermes' own commands for this profile too, except where the
         # text speaks of other profiles (environment, update)
-        here = None if args.evolution_action in ("environment", "update") else gateway_profile(home)
+        here = None if args.evolution_action in ("environment", "update", "fleet") else gateway_profile(home)
         result = profile_commands(result, profile, gateway=here)
         print(result, end="" if result.endswith("\n") else "\n")
     elif result is not None:

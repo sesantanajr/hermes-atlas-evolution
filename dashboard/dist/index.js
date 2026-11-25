@@ -38,7 +38,12 @@
                 errors: { timeout: "it took too long", unavailable: "not available in this Hermes", no_answer: "it did not answer",
                           disabled: "turned off", not_a_profile: "not a Hermes profile",
                           runtime_moved: "Hermes' Python changed meanwhile; it runs again after the gateway restarts" } },
-      tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", health: "Health", environment: "Environment", settings: "Settings", history: "History",
+      fleet: { loading: "Reading every profile…", title: "Auto for every profile", on: "Turn Auto on in every profile",
+               off: "Turn it off and put every profile back", confirmOn: "Auto mode in every profile with Atlas Evolution on, through hermes config set (each change can be undone). Go ahead?",
+               confirmOff: "Every profile back to the settings it had before Auto for all. Go ahead?",
+               doneOn: "Auto is on in every profile.", doneOff: "Every profile is back as it was.", go: "Yes, go ahead",
+               readOnly: "Switching Auto for every profile needs your dashboard login, or the terminal:", alert: "After the update and in Hermes' logs" },
+      tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", health: "Health", fleet: "Fleet", environment: "Environment", settings: "Settings", history: "History",
               digest: "Digest", status: "Status" },
       mode: { auto: "Lessons: automatic", suggest: "Lessons: on approval", off: "Lessons: off" },
       lessonModes: { auto: "automatic", suggest: "on approval", off: "off" },
@@ -176,7 +181,12 @@
                 errors: { timeout: "demorou demais", unavailable: "não existe neste Hermes", no_answer: "não respondeu",
                           disabled: "está desligado", not_a_profile: "não é um perfil do Hermes",
                           runtime_moved: "o Python do Hermes mudou nesse meio-tempo; volta a rodar depois que o gateway reiniciar" } },
-      tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", health: "Saúde", environment: "Ambiente", settings: "Configurações", history: "Histórico",
+      fleet: { loading: "Lendo todos os perfis…", title: "Modo Auto em todos os perfis", on: "Ligar o Auto em todos os perfis",
+               off: "Desligar e voltar cada perfil ao que era", confirmOn: "Modo Auto em todos os perfis com o Atlas Evolution ligado, pelo hermes config set (cada mudança tem desfazer). Seguir?",
+               confirmOff: "Cada perfil de volta às configurações que tinha antes do Auto para todos. Seguir?",
+               doneOn: "O Auto está ligado em todos os perfis.", doneOff: "Todos os perfis voltaram ao que eram.", go: "Sim, seguir",
+               readOnly: "Ligar o Auto para todos os perfis pede o seu login no painel, ou o terminal:", alert: "Depois da atualização e nos logs do Hermes" },
+      tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", health: "Saúde", fleet: "Frota", environment: "Ambiente", settings: "Configurações", history: "Histórico",
               digest: "Resumo", status: "Situação" },
       mode: { auto: "Lições: automáticas", suggest: "Lições: com aprovação", off: "Lições: desligadas" },
       lessonModes: { auto: "automáticas", suggest: "com aprovação", off: "desligadas" },
@@ -759,6 +769,8 @@
         h(Kpi, { t: t, label: t.kpi.lastPass, alert: passFailed,
                  value: passAt ? when(passAt, lang) : t.never,
                  detail: passFailed ? t.kpi.passFailed : null })),
+      data.fleet_alert_md ? h("div", { className: "hae-notice hae-notice-bad", role: "status" },
+        h("strong", null, t.fleet.alert), h(Markdown, { text: data.fleet_alert_md })) : null,
       data.insights_md ? h(Section, { title: t.insightsTitle }, h(Markdown, { text: data.insights_md })) : null,
       h(Section, { title: t.waitingTitle },
         pending.length
@@ -1101,7 +1113,46 @@
       h(Markdown, { text: props.data.environment_md || "" }));
   }
 
-  const TABS = ["overview", "lessons", "proposals", "health", "environment", "settings", "history", "digest", "status"];
+  // Every profile in one view (0.14.0): read when the tab opens, from /fleet (it reads every profile's store), and the
+  // switch of Auto for every profile, decided like any other setting (the owner's login, the X-Atlas-Evolution header).
+  function Fleet(props) {
+    const t = props.t, data = props.data, act = props.actions;
+    const fleetState = hooks.useState({ loading: true });
+    const fleet = fleetState[0], setFleet = fleetState[1];
+    const askState = hooks.useState(null);
+    const asking = askState[0], setAsking = askState[1];
+    const read = hooks.useCallback(function () {
+      setFleet(function (previous) { return { loading: true, data: previous.data }; });
+      SDK.fetchJSON("/api/plugins/" + NAME + "/fleet?lang=" + t.lang + scope(data))
+        .then(function (found) { setFleet({ loading: false, data: found }); })
+        .catch(function (error) { setFleet({ loading: false, error: failure(error, t) }); });
+    }, [t.lang, data && data.target, data && data.generated]);
+    hooks.useEffect(function () { read(); }, [read]);
+    const found = fleet.data || {};
+    const on = !!(found.auto && found.auto.on);
+    const decide = function (wanted) {
+      setAsking(null);
+      act.send({ kind: "fleet_auto", on: wanted }, function () { read(); return wanted ? t.fleet.doneOn : t.fleet.doneOff; });
+    };
+    const controls = data.can_decide
+      ? h("div", { className: "hae-stack-tight" },
+          asking === null ? h("div", { className: "hae-actions hae-actions-left" },
+            h(Button, { onClick: function () { setAsking(!on); }, disabled: !!act.working || fleet.loading }, on ? t.fleet.off : t.fleet.on))
+            : h("div", { className: "hae-notice hae-stack-tight" },
+                h("span", null, asking ? t.fleet.confirmOn : t.fleet.confirmOff),
+                h("div", { className: "hae-actions hae-actions-left" },
+                  h(Button, { onClick: function () { decide(asking); }, disabled: !!act.working }, t.fleet.go),
+                  h(Button, { onClick: function () { setAsking(null); } }, t.close))))
+      : h("div", { className: "hae-notice hae-stack-tight" }, h("span", null, t.fleet.readOnly),
+          h(CopyCommand, { t: t, command: "hermes -p " + data.profile + " evolution fleet auto " + (on ? "off" : "on") }));
+    return h("div", { className: "hae-stack" },
+      fleet.error ? h("p", { className: "hae-error", role: "alert" }, fleet.error) : null,
+      !fleet.data && fleet.loading ? h("p", { className: "hae-muted" }, t.fleet.loading) : null,
+      found.fleet_md ? h(Markdown, { text: found.fleet_md }) : null,
+      found.auto_md ? h(Section, { title: t.fleet.title }, controls, h(Markdown, { text: found.auto_md })) : null);
+  }
+
+  const TABS = ["overview", "lessons", "proposals", "health", "fleet", "environment", "settings", "history", "digest", "status"];
 
   // The panel speaks the profile's language (the plugin's `language` setting); with `auto`, the dashboard's. The
   // snapshot says which (`lang`); until it arrives, the dashboard's.
@@ -1189,6 +1240,7 @@
     else if (tab === "history") body = h(History, common);
     else if (tab === "health") body = h(Health, common);
     else if (tab === "environment") body = h(Environment, common);
+    else if (tab === "fleet") body = h(Fleet, common);
     else if (tab === "digest") body = h(Markdown, { text: data.report_md });
     else body = h(Markdown, { text: data.status_md });
     const loadError = !view.error ? null

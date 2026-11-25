@@ -1,9 +1,9 @@
 {
   "name": "hermes-atlas-evolution",
   "label": "Evolution",
-  "description": "What this profile learned, what waits for you, what the plugin did by itself, and the health of Hermes and of the system, in plain words. With a dashboard login you decide here, for every profile. Without one, the same in the terminal: hermes evolution.",
+  "description": "What this profile learned, what waits for you, what the plugin did by itself, every profile in one view, what the last Hermes update left behind, and the health of Hermes and of the system, in plain words. With a dashboard login you decide here, for every profile. Without one, the same in the terminal: hermes evolution.",
   "icon": "Sparkles",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "tab": { "path": "/evolution", "position": "after:skills" },
   "entry": "dist/index.js",
   "css": "dist/style.css",

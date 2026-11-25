@@ -1,22 +1,26 @@
 name: hermes-atlas-evolution
-version: "0.13.0"
+version: "0.14.0"
 requires_hermes: ">=0.23.1"
 description: >-
-  Looks after your whole Hermes Agent, every profile at once. Every day it runs Hermes' own doctor checks
-  offline and explains each problem with the command that fixes it; turns tool errors that keep coming back
-  into short lessons the agent reads, and drops the ones that do not help; removes duplicate memory entries;
-  points out plugins that conflict, duplicate or never load and skills that are unused or repeated; watches the
-  gateway, the disk and the server's updates; and stops the agent from taking Hermes down. By default (Assist)
-  it only removes repeated memory entries by itself; in Auto mode, which you turn on, it also does what is safe
-  and can be undone. The rest waits for one key in `hermes evolution` or the dashboard's Evolution tab. No
-  network access of its own, no telemetry, and it never updates itself: updates come from Hermes.
-  Português: cuida do seu Hermes inteiro, de todos os perfis. Todo dia roda as checagens do próprio
-  `hermes doctor` sem rede e explica cada problema com o comando que resolve; transforma erros repetidos em
-  lições curtas; remove entradas repetidas da memória; aponta plugins em conflito, duplicados ou que nunca
-  carregam e skills sem uso; cuida do gateway, do disco e das atualizações do servidor. No padrão (Assistido),
-  sozinho só remove entradas repetidas da memória; no Modo Auto, que você liga, também faz o que é seguro e tem
-  desfazer. O resto espera uma tecla. Sem rede própria, sem telemetria, e nunca se atualiza sozinho: as
-  atualizações vêm do Hermes.
+  Looks after your whole Hermes Agent, every profile at once, in one view (`hermes evolution fleet`). Every day it
+  runs Hermes' own doctor checks offline and explains each problem with the command that fixes it; turns tool
+  errors that keep coming back into short lessons the agent reads, measures them and drops the ones that do not
+  help; says what a Hermes update left behind (an overlay that went stale, local changes parked in a stash, plugins
+  it turned off); explains Hermes' warnings in its log; checks the gateway's memory against its budget; removes
+  duplicate memory entries; points out plugins that conflict or never load and skills that are unused; and stops
+  the agent from taking Hermes down. By default (Assist) it only removes repeated memory entries by itself; in Auto
+  mode, which you turn on (for every profile at once: `hermes evolution fleet auto on`), it also does what is safe
+  and can be undone. No network access of its own, no telemetry, and it never updates itself: updates come from
+  Hermes.
+  Português: cuida do seu Hermes inteiro, de todos os perfis, numa visão só (`hermes evolution fleet`). Todo dia
+  roda as checagens do próprio `hermes doctor` sem rede e explica cada problema com o comando que resolve;
+  transforma erros repetidos em lições curtas, mede cada uma e tira as que não ajudam; diz o que uma atualização
+  do Hermes deixou para trás (uma sobreposição desatualizada, mudanças locais guardadas num stash, plugins
+  desligados); explica os avisos do Hermes nos logs; compara a memória do gateway com o orçamento dele; remove
+  entradas repetidas da memória; aponta plugins em conflito e skills sem uso. No padrão (Assistido), sozinho só
+  remove entradas repetidas da memória; no Modo Auto, que você liga (em todos os perfis de uma vez:
+  `hermes evolution fleet auto on`), também faz o que é seguro e tem desfazer. Sem rede própria, sem telemetria,
+  e nunca se atualiza sozinho: as atualizações vêm do Hermes.
 license: MIT
 homepage: https://github.com/sesantanajr/hermes-atlas-evolution
 author: "Sérgio Sant'Ana Júnior"

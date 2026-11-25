@@ -162,14 +162,24 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         opts["language"] = lang
     import time as _time
 
+    phases: dict[str, float] = {}   # seconds per phase (0.14.0): what a pass costs, for `status` and the panel
+    lap = [_time.monotonic()]
+
+    def timed(name: str) -> None:
+        moment = _time.monotonic()
+        phases[name] = round(phases.get(name, 0.0) + moment - lap[0], 3)
+        lap[0] = moment
+
     backfill.mark_observed(home, now=now)
     budget = backfill_budget_s if deadline is None else max(0.0, min(backfill_budget_s, deadline - _time.monotonic() - 30))
     owner_known = not (isinstance(runtime_config, dict) and runtime_config.get(CONFIG_UNREAD))
     history = backfill.step(home, now=now, budget_s=budget, owner_sender_ids=opts["owner_sender_ids"],
                             owner_platforms=opts["owner_platforms"], owner_known=owner_known, cancelled=cancelled,
                             sample=opts["reflector"] and opts["lessons"] != "off", slow_ms=opts["slow_turn_seconds"] * 1000)
+    timed("history")
     _stop_if(cancelled)
     fleet = _environment(home, now=now, runtime_config=runtime_config, deadline=deadline)
+    timed("environment")
     _stop_if(cancelled)
     with experience(home) as conn:
         # Short transactions: hook writers of a running gateway share this database, so no phase keeps the
@@ -188,6 +198,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
         # Only once the history is replayed: while it is, failure totals are still being counted (or recounted).
         withdrawn = lessons.tidy(conn, now=now) if history.get("status") in backfill.SETTLED else 0
         conn.commit()
+        timed("lessons")
         _stop_if(cancelled)
         if not opts["reflector"]:
             conn.execute("DELETE FROM failure_sample")   # nothing waits for a reflector that is off
@@ -204,6 +215,7 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
             reflection = reflector.reflect(conn, reflect, now=now, lang=opts["language"],
                                            daily_limit=opts["reflector_daily_limit"], deadline=deadline)
         conn.commit()
+        timed("reflector")
         _stop_if(cancelled)
         # Baselines wait for history the backfill has not settled yet: still replaying ("running"), before the mark
         # ("waiting"), or a pass that could not read it ("unreadable"), so none is frozen from part of the history.
@@ -249,13 +261,20 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
                                     lang=opts["language"], home=home)
         fresh = set(created) | set(promoted)
         new_lessons = [item for item in lessons.listing(conn, lang=opts["language"]) if item["id"] in fresh]
+    timed("measure")
     from . import actions
 
     _stop_if(cancelled)
     automatic = actions.automatic(home, now=now, mode=opts["auto_actions"], runtime_config=runtime_config, usage=usage,
                                   deadline=deadline)
+    timed("actions")
     _stop_if(cancelled)
     care = _daily_checks(home, now=now, deadline=deadline)
+    timed("care")
+    _stop_if(cancelled)
+    health = _fleet(home, now=now, deadline=deadline)
+    shared = _share(home, now=now) if opts["auto_actions"] == "full" else []
+    timed("fleet")
     index = None
     try:   # after the health checks: today's index counts what they found
         from . import evolution_index
@@ -269,13 +288,60 @@ def cycle(home: Path, *, now: float, runtime_config=None, config=None, lang: str
     if automatic["applied"]:
         with experience(home) as conn:
             pending = proposals.listing(conn, status="open")
-    return {"automatic": automatic, "care": care, "evolution_index": index,
+    return {"automatic": automatic, "care": care, "evolution_index": index, "phases": phases,
+            "fleet": {"findings": list((health or {}).get("signals_findings") or ())
+                      + list(((health or {}).get("drift") or {}).get("findings") or ())} if health else None,
+            "lessons_shared": shared,
             "environment": (fleet or {}).get("summary"), "now": now, "lessons_mode": opts["lessons"], "history": history, "new_lessons": new_lessons,
             "lessons_promoted": len(promoted), "lessons_withdrawn": withdrawn, "reflector": reflection,
             "lesson_effects": [item for item in effects if item["verdict"]],
             "changes_detected": detected, "change_verdicts": verdicts, "reviews_ingested": ingested,
             "proposals_closed_as_applied": closed, "radar": [item["code"] for item in reading["findings"]],
             "open_proposals": pending}
+
+
+FLEET_SECONDS = 90   # what a pass must have left to read the whole Hermes' health (fleet.refresh)
+
+
+def _fleet(home: Path, *, now: float, deadline: float | None) -> dict | None:
+    """In the lead profile: Hermes' warnings in its log, what the last update left behind and the gateway's memory
+    (fleet.refresh), within the pass's deadline. None elsewhere, or when it cannot be read now; never fails the pass."""
+    import time as _time
+
+    from . import fleet
+    from .system_update import Host
+
+    if not (Path(home) / "config.yaml").exists():
+        return None
+    if deadline is not None and deadline - _time.monotonic() < FLEET_SECONDS:
+        return None
+    host = Host()
+    host.deadline = _time.monotonic() + 60 if deadline is None else min(deadline - 30, _time.monotonic() + 60)
+    try:
+        with experience(home) as conn:
+            return fleet.refresh(home, conn, now=now, host=host)
+    except Exception as error:   # the pass never fails for this
+        from logging import getLogger
+
+        getLogger(__name__).info("Atlas Evolution could not read the fleet's health: %s", type(error).__name__)
+        return None
+
+
+def _share(home: Path, *, now: float) -> list:
+    """Lessons proven in one profile offered to the others (fleet.share_lessons), from the lead in Auto mode."""
+    from . import fleet
+    from .admin import profile_name
+    from .environment import lead, root_of
+
+    try:
+        if lead(root_of(Path(home)), now=now) != profile_name(Path(home)):
+            return []
+        return fleet.share_lessons(home, now=now)
+    except Exception as error:
+        from logging import getLogger
+
+        getLogger(__name__).info("Atlas Evolution could not share lessons: %s", type(error).__name__)
+        return []
 
 
 def _environment(home: Path, *, now: float, runtime_config=None, deadline: float | None = None) -> dict | None:

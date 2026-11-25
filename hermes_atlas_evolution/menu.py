@@ -38,7 +38,15 @@ TEXT = {
                   "Hermes memory: repeats and space", "Digest of the last 7 days", "Full status",
                   "Run a learning pass now"],
         "items_more": ["Hermes health (no agent, no tokens)", "Operating system ({os})",
-                       "Environment: every profile, plugin and skill ({profiles})"],
+                       "Environment: every profile, plugin and skill ({profiles})",
+                       "Fleet: every profile in one view, Auto for all of them, the daily report"],
+        "fleet_prompt": "[a] Auto on for every profile · [d] off, back as it was · [c] read it all again now · "
+                        "[r] report of the last 24 h · [s] schedule that report every day · Enter goes back: ",
+        "fleet_on": "Turn Auto on in every profile with Atlas Evolution on (each change can be undone)?",
+        "fleet_off": "Put every profile back to the settings it had before Auto for all?",
+        "fleet_done": ("Done: 1 profile changed.", "Done: {n} profiles changed."),
+        "fleet_scheduled": "The daily report is scheduled (job {job}), without an agent.",
+        "fleet_already": "The daily report was already scheduled.",
         "suggest_digest": "Schedule the weekly digest in your chat: a Hermes scheduled task (cron), no agent, no tokens",
         "suggest_os_repair": "Finish the system update that stopped half-way",
         "suggest_env": ("See 1 thing to fix across your profiles (plugins, skills)",
@@ -291,7 +299,15 @@ TEXT = {
                   "Quem é você nos chats", "Memória do Hermes: repetições e espaço", "Resumo dos últimos 7 dias",
                   "Situação completa", "Fazer uma rodada de aprendizado agora"],
         "items_more": ["Saúde do Hermes (sem agente, sem tokens)", "Sistema operacional ({os})",
-                       "Ambiente: todos os perfis, plugins e skills ({profiles})"],
+                       "Ambiente: todos os perfis, plugins e skills ({profiles})",
+                       "Frota: todos os perfis numa visão só, Auto para todos, o relatório diário"],
+        "fleet_prompt": "[a] Auto em todos os perfis · [d] desligar, voltar ao que era · [c] ler tudo de novo agora · "
+                        "[r] relatório das últimas 24 h · [s] agendar esse relatório todo dia · Enter volta: ",
+        "fleet_on": "Ligar o Auto em todos os perfis com o Atlas Evolution ligado (cada mudança tem desfazer)?",
+        "fleet_off": "Voltar cada perfil às configurações que tinha antes do Auto para todos?",
+        "fleet_done": ("Pronto: 1 perfil mudou.", "Pronto: {n} perfis mudaram."),
+        "fleet_scheduled": "O relatório diário está agendado (tarefa {job}), sem agente.",
+        "fleet_already": "O relatório diário já estava agendado.",
         "suggest_digest": "Agendar o resumo semanal no seu chat: uma tarefa agendada do Hermes (cron), sem agente, sem tokens",
         "suggest_os_repair": "Terminar a atualização do sistema que parou no meio",
         "suggest_env": ("Ver 1 coisa para arrumar nos seus perfis (plugins, skills)",
@@ -1168,7 +1184,7 @@ class Menu:
                     continue
                 screens = [self.waiting, self.proposals, self.active, self.history, self.automatic, self.settings,
                            self.owner, self.memory, self.digest, self.full_status, self.learn, self.care,
-                           self.operating_system, self.environment]
+                           self.operating_system, self.environment, self.fleet]
                 chosen = self.pick(answer, len(screens))
                 if chosen is None:
                     self.io.say(self.t["invalid_main"] if ideas else self.t["invalid"])
@@ -2186,6 +2202,37 @@ class Menu:
                        own_transform=chosen["tool_hints"] and chosen["lessons"] != "off")
         self.say_markdown(markdown(report, self.lang))
         self.pause()
+
+    def fleet(self) -> None:
+        """Every profile in one view (fleet.py, 0.14.0), and Auto for all of them, in the owner's own terminal."""
+        from . import fleet
+        from .environment import lead_home
+        from .experience import experience
+
+        while True:
+            self.say_markdown(fleet.markdown(fleet.overview(self.home, now=self.clock()), self.lang))
+            answer = self.io.ask(self.t["fleet_prompt"]).lower()
+            if not answer:
+                return
+            if answer == "a" and self.confirm(self.t["fleet_on"]):
+                result = fleet.enable(self.home, now=self.clock(), actor="terminal")
+                self.io.say(self.n("fleet_done", sum(1 for item in result["results"] if item["status"] == "changed")))
+            elif answer == "d" and self.confirm(self.t["fleet_off"]):
+                result = fleet.disable(self.home, now=self.clock(), actor="terminal")
+                self.io.say(self.n("fleet_done", sum(1 for item in result["results"] if item["status"] == "restored")))
+            elif answer == "c":
+                lead = lead_home(self.home) or self.home
+                with experience(lead) as conn:
+                    fleet.refresh(lead, conn, now=self.clock(), force=True)
+            elif answer == "r":
+                self.say_markdown(fleet.report_markdown(self.home, now=self.clock(), lang=self.lang))
+                self.pause()
+            elif answer == "s":
+                result = fleet.schedule(self.home, now=self.clock(), lang=self.lang, actor="terminal")
+                self.io.say(self.t["fleet_scheduled"].format(job=result.get("job") or "?") if result.get("scheduled")
+                            else self.t["fleet_already"])
+            else:
+                self.io.say(self.t["invalid"])
 
     def full_status(self) -> None:
         from . import status

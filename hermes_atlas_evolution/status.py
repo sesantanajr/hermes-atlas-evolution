@@ -39,16 +39,84 @@ def plugin_version(home: Path | None = None) -> str:
 
 def process_kind() -> str:
     """gateway, dashboard, plugin_host or cli: long-running hosts are the ones that can keep old code loaded. The
-    plugin host (`plugins.isolation: host`) lives as long as the Hermes that started it."""
+    plugin host (`plugins.isolation: host`) lives as long as the Hermes that started it.
+
+    A gateway is told by its command line (`hermes gateway run`) and, since 0.14.0, also when it was started another
+    way: a launcher that runs `gateway.run` as the main module (runpy, `python -m gateway.run`, which leaves argv as
+    `[".../gateway/run.py"]`), or the process Hermes' own record (`gateway.pid`) names as the gateway. Up to 0.13.0 a
+    gateway started by such a launcher counted as a short command, so it never ran a learning pass for any profile
+    it served."""
     if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1" or any(
             "plugin_host_child" in str(item) for item in sys.argv[:3]):
         return "plugin_host"
     words = [os.path.basename(str(item)) for item in sys.argv[:6]]
     if "gateway" in words and "run" in words:
         return "gateway"
+    if gateway_entry() or gateway_record():
+        return "gateway"
     if "dashboard" in words or "serve" in words:   # `hermes serve`: the same server, for the Desktop and remote clients
         return "dashboard"
     return "cli"
+
+
+def _gateway_path(value) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    parts = value.replace("\\", "/").rstrip("/").split("/")
+    return parts[-2:] == ["gateway", "run.py"]
+
+
+def gateway_entry() -> bool:
+    """Whether this process runs Hermes' gateway as its main module: `gateway/run.py` as `__main__` (runpy with
+    alter_sys, `python -m gateway.run`) or as argv[0]. Never raises."""
+    try:
+        main = sys.modules.get("__main__")
+        spec = getattr(main, "__spec__", None)
+        if getattr(spec, "name", None) == "gateway.run":
+            return True
+        return _gateway_path(getattr(main, "__file__", None)) or bool(sys.argv) and _gateway_path(sys.argv[0])
+    except Exception:
+        return False
+
+
+_GATEWAY_RECORD: dict = {"pid": None, "checked": float("-inf"), "found": False}
+GATEWAY_RECORD_SECONDS = 60   # a process not (yet) named by the record is looked at again after this
+
+
+def gateway_record(*, roots=None) -> bool:
+    """Whether Hermes' own gateway record (`gateway.pid` in the Hermes home, `kind` hermes-gateway) names this
+    process. A gateway writes it once it holds its lock, which may be after plugins load: a negative answer is
+    looked at again after GATEWAY_RECORD_SECONDS, a positive one is kept for the process. Never raises."""
+    pid = os.getpid()
+    state = _GATEWAY_RECORD
+    if state["pid"] == pid and (state["found"] or time.monotonic() - state["checked"] < GATEWAY_RECORD_SECONDS):
+        return state["found"]
+    found = False
+    try:
+        candidates = list(roots) if roots is not None else []
+        if roots is None:
+            if os.environ.get("HERMES_HOME"):
+                candidates.append(Path(os.environ["HERMES_HOME"]))
+            try:
+                from hermes_constants import get_default_hermes_root
+
+                candidates.append(Path(get_default_hermes_root()))
+            except Exception:   # outside Hermes
+                pass
+        for root in dict.fromkeys(Path(item) for item in candidates):
+            try:
+                with (root / "gateway.pid").open("rb") as stream:
+                    record = json.loads(stream.read(65_536) or b"{}")
+            except (OSError, ValueError):
+                continue
+            if isinstance(record, dict) and record.get("pid") == pid and \
+                    str(record.get("kind") or "hermes-gateway").startswith("hermes-gateway"):
+                found = True
+                break
+    except Exception:
+        found = False
+    state.update(pid=pid, checked=time.monotonic(), found=found)
+    return found
 
 
 def record_runtime(home: Path, *, now: float, version: str | None = None, pid: int | None = None) -> None:
@@ -826,11 +894,38 @@ def build(home: Path, *, now: float | None = None, config=None, runtime_config=N
                     if unit.get("exec_missing") or unit.get("restart_loop")]
         if all("gateway" in str(unit.get("unit")) for unit in problems):
             health = [code for code in health if code not in ("os_unit_exec_missing", "os_unit_restart_loop")]
+    # 0.14.0: the gateway as Hermes' own record says now (its version after an update), and the whole Hermes' health the
+    # lead profile's last pass read (fleet.refresh): what the last update left behind, the gateway's memory against its
+    # budget, Hermes' warnings in its log. Every profile shows it; the lead reads it once for all.
+    report["gateway_live"], report["fleet_health"] = {}, {}
+    try:
+        from . import fleet
+        from .environment import lead_home, root_of
+
+        report["gateway_live"] = fleet.gateway_state(root_of(Path(home)))
+        target = lead_home(Path(home)) or Path(home)
+        if (Path(target) / "evolution" / "evolution.sqlite3").is_file():
+            with experience(target) as conn:
+                report["fleet_health"] = fleet.stored_health(conn)
+    except (OSError, ValueError, sqlite3.Error):
+        pass
+    fleet_health = report["fleet_health"] or {}
+    from_fleet = list(((fleet_health.get("drift") or {}).get("findings")) or ()) + \
+        list(fleet_health.get("signals_findings") or ())
+    if (fleet_health.get("memory") or {}).get("suggestion"):
+        from_fleet = [code for code in from_fleet if code != "log_memory_pressure"] + ["fleet_memory_budget"]
     if report["health_stale"] and (care or system):
-        health.insert(0, "hermes_health_stale")
+        running = (report["gateway_live"] or {}).get("state") == "running" and _alive_pid(
+            (report["gateway_live"] or {}).get("pid"))
+        health.insert(0, "hermes_pass_unclaimed" if running else "hermes_health_stale")
     attention += list(dict.fromkeys(health))
+    attention += [code for code in dict.fromkeys(from_fleet) if code not in attention]
     report["attention"] = attention
     return report
+
+
+def _alive_pid(pid) -> bool:
+    return type(pid) is int and pid > 0 and _alive(pid) is not False
 
 
 _TEXT = {
@@ -981,6 +1076,7 @@ _TEXT = {
            "index_wait": "not yet: it needs a few days of turns and tool calls",
            "index_parts": {"tools": "tools", "turns": "turns", "you": "you", "lessons": "lessons", "health": "health"},
            "cost": "What the plugin costs the agent", "cost_item": "{hook} {mean} (p95 {p95})",
+           "cost_cpu": "of which its own work {cpu} a call on average; the rest is waiting for the interpreter or the disk",
            "cost_hooks": {"post_tool_call": "per tool call", "pre_tool_call": "guard", "prompt_section": "per prompt",
                           "pre_llm_call": "per turn"},
            "self_slow": "Atlas Evolution is adding {p95} to {hook} in its slow tail (p95). A slow disk or a database "
@@ -1166,6 +1262,7 @@ _TEXT = {
            "index_parts": {"tools": "ferramentas", "turns": "turnos", "you": "você", "lessons": "lições",
                            "health": "saúde"},
            "cost": "Quanto o plugin custa ao agente", "cost_item": "{hook} {mean} (p95 {p95})",
+           "cost_cpu": "dos quais trabalho dele mesmo {cpu} por chamada em média; o resto é espera pelo interpretador ou pelo disco",
            "cost_hooks": {"post_tool_call": "por chamada de ferramenta", "pre_tool_call": "proteção",
                           "prompt_section": "por prompt", "pre_llm_call": "por turno"},
            "self_slow": "O Atlas Evolution está somando {p95} a {hook} na sua cauda lenta (p95). Um disco lento ou um "
@@ -1220,6 +1317,74 @@ _WORDS = {
            "integrity_bad": "a checagem de integridade falhou ({value})", "db_missing": "ainda não criado",
            "db_error": "não pôde ser lido", "free": "{free} livres de {total}", "swap": "swap: {used} de {total} em uso"},
 }
+
+
+_FLEET_TEXT = {
+    "en": {
+        "hermes_pass_unclaimed": "Hermes' health below was read {stale_en} ago and no learning pass ran in this profile "
+                                 "since, although the gateway is running (pid {pid}): no long-running process claimed "
+                                 "the passes. Up to 0.13.0 a gateway started by a launcher of its own did not; restart "
+                                 "the gateway once with 0.14.0 and they resume.",
+        "drift_overlay_stale": "A file loaded in place of Hermes' own went stale with the last update: its new fixes stay "
+                               "off. See **After the Hermes update**.",
+        "drift_overlay_reload": "An overlay was rebuilt, but the gateway still runs the copy from before: restart the "
+                                "gateway.",
+        "drift_update_parked": "The last Hermes update parked your local changes in a stash without putting them back: "
+                               "see **After the Hermes update**.",
+        "drift_stash_missing": "Stashes of earlier Hermes updates hold changes that are not in Hermes now: see **After "
+                               "the Hermes update** whether they still matter.",
+        "drift_stash_old": "Old stashes of Hermes updates can go: see **After the Hermes update**.",
+        "drift_plugins_off": "The last Hermes update turned plugins off and they are still off: see **After the Hermes "
+                             "update**.",
+        "drift_restart_failed": "A service did not come back after the last Hermes update: see **After the Hermes "
+                                "update**.",
+        "drift_config_behind": "A profile's configuration is on an older schema than this Hermes writes: see **After "
+                               "the Hermes update**.",
+        "fleet_memory_budget": "The gateway goes over its agent cache's memory budget at its peaks: see **Gateway "
+                               "memory**.",
+        "log_memory_pressure": "The gateway went over its memory budget this week: see **Gateway memory**.",
+        "log_backup_incomplete": "Hermes' automatic backup before an update came out incomplete: see **Hermes' "
+                                 "warnings**.",
+        "log_state_db_replaced": "The session database was replaced while the gateway ran: see **Hermes' warnings**.",
+        "log_contract_violation": "Hermes logged contract errors (often a local change to its code): see **Hermes' "
+                                  "warnings**.",
+        "log_loop_stall": "Hermes' event loop stalled for 10 s or more: see **Hermes' warnings**.",
+    },
+    "pt": {
+        "hermes_pass_unclaimed": "A saúde do Hermes abaixo foi lida há {stale_pt} e nenhuma rodada de aprendizado rodou "
+                                 "neste perfil desde então, embora o gateway esteja rodando (pid {pid}): nenhum processo de "
+                                 "longa duração assumiu as rodadas. Até a 0.13.0 um gateway iniciado por um lançador "
+                                 "próprio não assumia; reinicie o gateway uma vez com a 0.14.0 e elas voltam.",
+        "drift_overlay_stale": "Um arquivo carregado no lugar do próprio Hermes ficou desatualizado com a última "
+                               "atualização: as correções novas dele ficam desligadas. Veja **Depois da atualização do "
+                               "Hermes**.",
+        "drift_overlay_reload": "Uma sobreposição foi refeita, mas o gateway ainda roda a cópia anterior: reinicie o "
+                                "gateway.",
+        "drift_update_parked": "A última atualização do Hermes guardou as suas mudanças locais num stash sem devolvê-las: "
+                               "veja **Depois da atualização do Hermes**.",
+        "drift_stash_missing": "Stashes de atualizações antigas do Hermes guardam mudanças que não estão no Hermes hoje: "
+                               "veja em **Depois da atualização do Hermes** se ainda importam.",
+        "drift_stash_old": "Stashes antigos de atualizações do Hermes podem sair: veja **Depois da atualização do "
+                           "Hermes**.",
+        "drift_plugins_off": "A última atualização do Hermes desligou plugins que continuam desligados: veja **Depois da "
+                             "atualização do Hermes**.",
+        "drift_restart_failed": "Um serviço não voltou depois da última atualização do Hermes: veja **Depois da "
+                                "atualização do Hermes**.",
+        "drift_config_behind": "A configuração de um perfil está num esquema mais antigo que o deste Hermes: veja "
+                               "**Depois da atualização do Hermes**.",
+        "fleet_memory_budget": "O gateway passa do orçamento de memória do cache de agentes nos picos: veja **Memória do "
+                               "gateway**.",
+        "log_memory_pressure": "O gateway passou do orçamento de memória nesta semana: veja **Memória do gateway**.",
+        "log_backup_incomplete": "O backup automático do Hermes antes de uma atualização saiu incompleto: veja **Avisos "
+                                 "do Hermes**.",
+        "log_state_db_replaced": "O banco de sessões foi trocado com o gateway rodando: veja **Avisos do Hermes**.",
+        "log_contract_violation": "O Hermes registrou erros de contrato (muitas vezes uma mudança local no código dele): "
+                                  "veja **Avisos do Hermes**.",
+        "log_loop_stall": "O laço de eventos do Hermes travou por 10 s ou mais: veja **Avisos do Hermes**.",
+    },
+}
+for _lang, _texts in _FLEET_TEXT.items():
+    _TEXT[_lang].update(_texts)
 
 
 def gateway_words(gate: dict, lang: str, *, beat: bool = False) -> str:
@@ -1302,7 +1467,8 @@ def _care_values(report: dict) -> dict:
             "security_pt": plural(security, "1 atualização de segurança do sistema espera",
                                   "{n} atualizações de segurança do sistema esperam"),
             "held": ", ".join(system.get("plugin_holds") or ()) or "?",
-            "busy": busy, "busy_pt": _comma(busy), **_in_use_values(care), **_unit_values(report)}
+            "busy": busy, "busy_pt": _comma(busy), **_in_use_values(care), **_unit_values(report),
+            "pid": (report.get("gateway_live") or {}).get("pid") or "?"}
 
 
 def _in_use_values(care: dict) -> dict:
@@ -1396,7 +1562,11 @@ def _health_lines(report: dict, t: dict, lang: str = "en") -> list[str]:
     lines = ["", f"## {t['health']}", ""]
     if care:
         memory, db = care.get("memory") or {}, care.get("database") or {}
-        lines.append(f"- **{t['health_gateway']}:** {gateway_words(care.get('gateway') or {}, lang)}")
+        gate = dict(care.get("gateway") or {})
+        live = report.get("gateway_live") or {}
+        if live.get("version") and live.get("state") == "running":   # the version it runs now, not when last checked
+            gate["version"] = live["version"]
+        lines.append(f"- **{t['health_gateway']}:** {gateway_words(gate, lang)}")
         if db.get("present"):
             lines.append(f"- **{t['health_db']}:** {database_words(db, lang)}")
         if care.get("free") is not None:
@@ -1413,6 +1583,38 @@ def _health_lines(report: dict, t: dict, lang: str = "en") -> list[str]:
             parts.append(t["reboot"])
         lines.append(f"- **{t['health_os']}:** " + " · ".join(parts))
     return lines
+
+
+def fleet_health_lines(health: dict | None, lang: str = "en", *, everything: bool = False) -> list[str]:
+    """The sections of the whole Hermes' health the lead's pass read (fleet.refresh): after the Hermes update (drift),
+    the gateway's memory, and Hermes' warnings (only the ones that call for the owner, unless `everything`)."""
+    from . import drift, gateway_memory, logsignals
+
+    if not isinstance(health, dict) or not health:
+        return []
+    pt = lang == "pt"
+    out = []
+    reading = health.get("drift") or {}
+    recent = (reading.get("update") or {}).get("finished") or 0
+    if reading.get("findings") or recent and time.time() - recent < 7 * 86_400 or everything:
+        found = drift.lines(reading, lang)
+        if found:
+            out += ["", "## " + ("Depois da atualização do Hermes" if pt else "After the Hermes update"), "", *found]
+    memory = gateway_memory.lines(health.get("memory"), lang)
+    if memory and ((health.get("memory") or {}).get("events") or everything):
+        out += ["", "## " + ("Memória do gateway" if pt else "Gateway memory"), "", *memory]
+    signals = health.get("signals") or {}
+    shown = signals if everything else {code: item for code, item in signals.items() if code in logsignals.ATTENTION
+                                        or code == "loop_stall" and float(item.get("peak") or 0) >= 10}
+    found = logsignals.lines(shown, lang)
+    if found:
+        rest = len(signals) - len(shown)
+        out += ["", "## " + ("Avisos do Hermes nos logs (7 dias)" if pt else "Hermes' warnings in its logs (7 days)"), "",
+                *found]
+        if rest > 0:
+            out.append(f"- Mais {rest} tipo(s) de aviso sem nada a fazer: `hermes evolution fleet`." if pt else
+                       f"- {rest} more kind(s) of warning with nothing to do: `hermes evolution fleet`.")
+    return out
 
 
 def _p(entry, count) -> str:
@@ -1507,6 +1709,9 @@ def markdown(report: dict, lang: str = "en") -> str:
         lines.append(f"- **{t['cost']}:** " + " · ".join(
             t["cost_item"].format(hook=t["cost_hooks"].get(hook, hook), mean=_ms(item.get("p50_ms", item["mean_ms"]), lang),
                                   p95=_ms(item["p95_ms"], lang)) for hook, item in shown))
+        tool = cost.get("post_tool_call") or {}
+        if tool.get("cpu_mean_ms") is not None and tool.get("mean_ms"):
+            lines.append("  - " + t["cost_cpu"].format(cpu=_ms(tool["cpu_mean_ms"], lang)))
     guard = report["runtime_guard"]
     if guard.get("state") == "host":
         state = t["guard_host"]
@@ -1556,6 +1761,8 @@ def markdown(report: dict, lang: str = "en") -> str:
 
             lines += spike_lines(report["insights"]["spikes"], lang)
             continue
+        if code not in t:
+            continue
         lines.append(f"- {t[code]}")
         if code == "stale_tick_job":
             import shlex
@@ -1584,6 +1791,7 @@ def markdown(report: dict, lang: str = "en") -> str:
     if steps:
         lines += ["", f"## {insight_text.get(lang, insight_text['en'])['do_first']}", "", *steps]
     lines += _health_lines(report, t, lang)
+    lines += fleet_health_lines(report.get("fleet_health"), lang)
     rows = report.get("profiles", [])
     env = report.get("environment") or {}
     if env.get("summary"):

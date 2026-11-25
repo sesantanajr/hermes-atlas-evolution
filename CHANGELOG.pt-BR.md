@@ -2,6 +2,90 @@
 
 *In English: [CHANGELOG.md](CHANGELOG.md), with every version.*
 
+## 0.14.0
+
+Uma auditoria de dez dias de uma frota de verdade (um gateway, 12 perfis) achou as rodadas de aprendizado paradas em 11
+deles, seis lições "eficazes" julgadas com um punhado de chamadas e uma atualização do Hermes que deixou uma
+sobreposição rodando código desatualizado sem ninguém saber. Esta versão corrige isso e traz o que faltava: todos os
+perfis numa visão só, o Modo Auto para todos de uma vez, o que uma atualização deixa para trás, os avisos do próprio
+Hermes explicados e a memória do gateway comparada com o orçamento dele.
+
+### Correções
+
+- **Um gateway iniciado por um lançador próprio nunca fazia uma rodada de aprendizado.** O plugin reconhecia o gateway
+  pela linha de comando (`hermes gateway run`); um lançador que roda o `gateway.run` como módulo principal (runpy,
+  `python -m gateway.run`) deixa o argv como `[".../gateway/run.py"]`, e o gateway contava como um comando curto, sem
+  assumir rodada nenhuma, de nenhum perfil que ele atende. Na máquina auditada nenhuma rodada rodou em 11 de 12 perfis
+  por 7 dias (desde a 0.12.0): 26 falhas repetidas num perfil nunca viraram lição, os veredictos congelaram, as
+  checagens de saúde ficaram velhas. Agora contam também o módulo principal, o argv[0] e o registro do próprio Hermes
+  (`gateway.pid`), e um processo que não assumiu as rodadas ao carregar pergunta de novo a cada 5 minutos. A mesma
+  correção faz o gateway registrar qual versão do plugin roda e carregar o código do plugin de antemão.
+- **As rodadas não começam mais todas juntas num gateway com muitos perfis.** Uma rodada por vez em cada processo, o
+  relógio de cada perfil começa com um atraso próprio (0 a 5 min), e no Linux a linha da rodada roda com prioridade de
+  CPU menor que a dos turnos.
+- **O veredicto de uma lição precisa de evidência.** "Eficaz" queria dizer "metade da taxa de falhas de antes", então 5
+  falhas em 1.769 chamadas antes e nenhuma nas 20 chamadas depois era eficaz (a linha de base previa 0,06 falha ali).
+  Agora a linha de base precisa prever pelo menos 3 falhas depois, e ver tão poucas tem de ser improvável por acaso
+  (Poisson, p ≤ 0,1); senão a lição ainda não é julgada, e depois de 28 dias fica inconclusiva. Um veredicto que a
+  evidência não sustenta mais é retirado.
+- **Os "eficazes" antigos saem.** Uma lição julgada antes da troca de classificador da 0.12.0 guardava o veredicto para
+  sempre; um "eficaz" daquela época sai, e uma lição cuja falha continua no mesmo ritmo enquanto o agente a lê (3 ou mais
+  em 14 dias, contadas do jeito novo) é ineficaz, e no Modo Auto é aposentada.
+- **O status dizia "o gateway pode estar parado" com ele rodando.** Quando nenhuma rodada roda embora o gateway rode, o
+  status agora diz que nenhum processo de longa duração assumiu as rodadas, com o pid do gateway. A linha do gateway
+  mostra a versão do Hermes que ele roda agora (pelo registro do próprio Hermes), não a que a última checagem guardou.
+
+### Novidades
+
+- **Todos os perfis numa visão só: `hermes evolution fleet`** (e a nova aba **Frota** do painel, e a opção 15 do menu).
+  Para cada perfil: se o plugin está ligado, qual versão roda (e qual o gateway carregou), o modo, quando foi a última
+  rodada e se está atrasada, lições ativas e esperando, falhas, turnos e turnos lentos, ações automáticas; e mais o
+  gateway, a memória dele, o que a última atualização deixou para trás e os avisos do Hermes.
+- **O Modo Auto em todos os perfis de uma vez: `hermes evolution fleet auto on|off|status`.** Cada perfil com o plugin
+  ligado recebe `mode: auto` e `lessons: auto` (e uma rodada por hora onde ela estava desligada) pelo `hermes config set`
+  do próprio Hermes, cada mudança no histórico daquele perfil; com `--owner suggested`, os canais que são seus por
+  construção também contam como você. Os valores que cada perfil tinha ficam guardados, e o `fleet auto off` os põe de
+  volta. O status lista o que o Auto faz sozinho (cada coisa com o seu desfazer) e o que ele nunca faz. Um perfil com
+  `fleet_managed: false` fica como está. No painel, o botão é uma decisão como as outras (o seu login no painel).
+- **O relatório diário: `hermes evolution fleet report` e `fleet schedule`.** O que o plugin aprendeu e fez em cada
+  perfil nas últimas 24 horas, o que espera você e a visão da frota, como tarefa agendada do Hermes que não roda agente
+  nem gasta token (`--deliver` escolhe o canal; local por padrão).
+- **A deriva depois de uma atualização do Hermes.** Pelos recibos de atualização do Hermes e pelo checkout dele, só
+  leitura: a última atualização (de qual versão para qual, como terminou), mudanças locais que ela guardou num stash em
+  vez de devolver, plugins que ela desligou e continuam desligados, serviços que não voltaram; cada arquivo que o
+  gateway carregou no lugar de um do Hermes (uma sobreposição) e se o arquivo do Hermes mudou depois que a sobreposição
+  foi escrita (aí ela esconde as correções novas) ou se a sobreposição mudou depois que o gateway a carregou (aí falta
+  reiniciar); arquivos que diferem da versão oficial; cada stash que uma atualização deixou, com quanto do que ele guarda
+  está de volta no lugar; o esquema de configuração de cada perfil comparado com o que este Hermes escreve.
+- **Os avisos do Hermes nos logs, em palavras simples.** Contados por dia, só com números (nunca uma linha do log):
+  memória acima do orçamento do cache de agentes, o navegador das ferramentas de browser sem responder, a corrida do
+  banco de sessões nos reinícios, um `state.db` trocado, um backup antes da atualização incompleto, travadas do laço de
+  eventos, o aviso de root, sessões de perfis que não existem mais, erros de contrato e o `capability_check … decision=deny`
+  (explicado como o padrão seguro que ele é).
+- **A memória do gateway comparada com o orçamento.** A memória do gateway agora, o MemoryHigh e o MemoryMax do serviço,
+  o orçamento do cache de agentes como o Hermes calcula, e quantas vezes o log o viu estourar; quando o orçamento fica
+  abaixo do pico, o que mudar (um MemoryHigh maior quando a máquina tem folga, um cache menor quando não tem). Nunca
+  aplicado sozinho.
+- **Lições comprovadas num perfil são oferecidas aos outros em Auto** que chamam a mesma ferramenta. Elas chegam
+  esperando e só se ativam ali quando os turnos daquele perfil batem na falha. Só lições de padrão fixo viajam.
+- **Uma lição cuja ferramenta ninguém chama mais é obsoleta.** A que o Auto ativou sai (e volta se a falha voltar); a
+  que você aprovou ganha uma proposta para aposentá-la.
+- **Lições de padrão fixo de uma mesma causa em várias ferramentas dividem uma frase** no prompt ("`terminal`,
+  `tool_search` e `skill_manage`: esse tipo de comando é bloqueado…"), e as 8 linhas do prompt alcançam mais causas.
+- **O custo de uma rodada e de um gancho, em detalhe.** Cada rodada guarda os segundos de cada fase, e o custo dos
+  ganchos agora separa o tempo de CPU do próprio plugin da espera pelo interpretador ou pelo disco.
+
+### Princípios que não mudam
+
+Sem rede própria, sem telemetria, e ele nunca atualiza a si mesmo nem o Hermes. Nada aqui muda o código do Hermes, uma
+sobreposição, um stash ou um serviço: deriva, avisos e memória são lidos e explicados, e os comandos são seus.
+
+### Atualizando
+
+`hermes -p <perfil> plugins update hermes-atlas-evolution` em cada perfil (ou `hermes evolution update --all`), depois
+reinicie o gateway uma vez, para ele carregar o código novo e começar a assumir as rodadas. A suíte de testes tem 833
+testes, no ramo `tests`.
+
 ## 0.13.0
 
 Pronto para o catálogo de plugins do Hermes: o plugin não se atualiza mais sozinho nem usa a rede, o Assistido é o modo padrão, e três auditorias (regras do catálogo, os ganchos dentro do Hermes, o trabalho em segundo plano) acharam os erros corrigidos abaixo.

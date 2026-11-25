@@ -560,14 +560,49 @@ MEMORY_FLOOR = 600 * 2**20   # each run takes about 210 MB for a few seconds: ne
 
 
 def _memory_available() -> int | None:
+    """What the machine has free, or less: the room left under this process's own cgroup limit (0.14.0). A check run
+    by a gateway counts against the gateway's service (MemoryHigh), which may be near its limit while the machine has
+    gigabytes free: run there, the check would push the gateway into the kernel's throttling."""
+    free = None
     try:
         with open("/proc/meminfo", encoding="ascii") as stream:
             for line in stream:
                 if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
+                    free = int(line.split()[1]) * 1024
+                    break
     except (OSError, ValueError, IndexError):
+        free = None
+    room = _cgroup_room()
+    if room is not None:
+        return room if free is None else min(free, room)
+    return free
+
+
+def _cgroup_room(base: str = "/sys/fs/cgroup", own: str | None = None) -> int | None:
+    """Bytes left under this process's cgroup v2 memory.high (else memory.max), None when it has no limit or none can
+    be read. `own`: the cgroup path (read from /proc/self/cgroup by default)."""
+    try:
+        path = own
+        if path is None:
+            with open("/proc/self/cgroup", encoding="utf-8") as stream:
+                path = next((line.strip()[3:] for line in stream if line.startswith("0::")), None)
+        if not path:
+            return None
+        folder = Path(base) / path.lstrip("/")
+        limits = []
+        for name in ("memory.high", "memory.max"):
+            try:
+                value = (folder / name).read_text(encoding="ascii").strip()
+            except OSError:
+                continue
+            if value.isdigit() and 0 < int(value) < (1 << 62):
+                limits.append(int(value))
+        if not limits:
+            return None
+        current = int((folder / "memory.current").read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
         return None
-    return None
+    return max(0, min(limits) - current)
 
 
 def stored(conn) -> dict:

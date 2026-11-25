@@ -472,6 +472,17 @@ def decide(home: Path, runtime_config: dict, body: dict, *, now: float, lang: st
     kind = body.get("kind") if isinstance(body, dict) else None
     if kind == "settings":
         return write_settings(home, runtime_config, body.get("values"), now=now, writer=writer, actor=actor)
+    if kind == "fleet_auto":   # 0.14.0: Auto for every profile, and back (fleet.enable / fleet.disable)
+        from . import fleet
+
+        if body.get("on") is True:
+            owner = body.get("owner") if body.get("owner") in ("keep", "suggested") else "keep"
+            return fleet.enable(home, now=now, owner=owner, actor=actor,
+                                writer_for=(lambda _home: writer) if writer is not None else None)
+        if body.get("on") is False:
+            return fleet.disable(home, now=now, actor=actor,
+                                 writer_for=(lambda _home: writer) if writer is not None else None)
+        raise ValueError("Say on or off")
     if kind == "apply":
         from . import actions
 

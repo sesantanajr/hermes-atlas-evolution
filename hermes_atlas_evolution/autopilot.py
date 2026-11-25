@@ -30,6 +30,12 @@ LEASE_SECONDS = 15 * 60     # a pass that has not renewed its lease by then is p
 PASS_RENEW_LIMIT = 3        # renewals of a running pass's lease on a timer: past ~2 leases a stuck pass lets another run
 RETRY_SECONDS = 10 * 60     # a failed pass is tried again after this, not after a full interval
 SKEW_SECONDS = 5 * 60       # a last pass up to this far "in the future" finished after the caller read its clock
+CLAIMS_RECHECK_SECONDS = 300   # a process that did not claim passes at load asks again this often (0.14.0)
+STAGGER_SECONDS = 300       # the profiles one gateway serves start their clocks spread over this much (0.14.0)
+PASS_NICE = 10              # the pass thread's CPU priority on Linux: below the turns of the same process (0.14.0)
+# One pass at a time per process (0.14.0): a gateway serving a dozen profiles ran a dozen passes at once on the first
+# clock tick, each replaying history and reading files while the turns wait for the same interpreter.
+_PASS_SLOT = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +261,28 @@ def pinned_profile(home: Path):
         reset_hermes_home_override(home_token)
 
 
+def stagger(home: Path) -> float:
+    """A delay of 0 to STAGGER_SECONDS that stays the same for a profile: the clocks of the profiles one gateway serves
+    start spread out instead of all at once."""
+    import hashlib
+
+    digest = hashlib.sha256(os.fspath(Path(home)).encode("utf-8", "replace")).digest()
+    return float(int.from_bytes(digest[:4], "big") % (STAGGER_SECONDS + 1))
+
+
+def _lower_priority() -> None:
+    """On Linux, give the pass thread (and the commands it starts) a lower CPU priority than the turns of the same
+    process: `setpriority` on a thread id changes that thread only. Elsewhere, or when refused, nothing changes."""
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        thread = threading.get_native_id()
+        if os.getpriority(os.PRIO_PROCESS, thread) < PASS_NICE:
+            os.setpriority(os.PRIO_PROCESS, thread, PASS_NICE)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
 class Autopilot:
     """Run `run()` at most once per interval for the profile, in a daemon thread started by `poke()`."""
 
@@ -274,14 +302,22 @@ class Autopilot:
         self._exit_hooked = False
         self.on_tick = None   # called by the clock before each nudge (the plugin's settings refresh)
         self.claims = True    # False in a short-lived process (runs_passes): it never claims the pass
+        # Asked again every CLAIMS_RECHECK_SECONDS while `claims` is False (0.14.0): a gateway its own record names
+        # only after the plugins loaded (status.gateway_record) is a long-running process after all.
+        self.recheck = None
+        self._rechecked = clock()
         self._lease: _Lease | None = None   # the lease of the pass running now
 
-    def start_clock(self, *, first: float = CLOCK_FIRST_SECONDS, period: float = CLOCK_PERIOD_SECONDS) -> bool:
+    def start_clock(self, *, first: float | None = None, period: float = CLOCK_PERIOD_SECONDS) -> bool:
         """A daemon timer that nudges the pass while the process is idle.
 
         Turns nudge the pass too, but a gateway that serves several profiles delivers its kanban tick only to
         its own profile, so another profile with no turns would otherwise never run a pass. The clock only
-        calls `poke`, which is O(1) until a check is due. `stop` ends it (the plugin's on_unload)."""
+        calls `poke`, which is O(1) until a check is due. `stop` ends it (the plugin's on_unload). Its first nudge
+        comes CLOCK_FIRST_SECONDS after the load plus a delay of its own (stagger), so the profiles of one gateway
+        do not all start at the same moment."""
+        if first is None:
+            first = CLOCK_FIRST_SECONDS + stagger(self.home)
         # The clock runs with the pass on "by hand only" too (interval 0): its tick still re-reads the settings and
         # keeps the database's retention (integration), and poke() stays a no-op until an interval is set.
         if self._clock is not None or self._stop.is_set():
@@ -349,6 +385,14 @@ class Autopilot:
 
     def poke(self) -> bool:
         """Start a background check when one is due. Never blocks and never raises."""
+        if not self.claims and self.recheck is not None and self.interval_s and not self._stop.is_set():
+            moment = self.clock()
+            if moment - self._rechecked >= CLAIMS_RECHECK_SECONDS:
+                self._rechecked = moment
+                try:
+                    self.claims = bool(self.recheck())
+                except Exception:   # asked again later
+                    pass
         if not self.interval_s or not self.claims or self._stop.is_set():
             return False
         moment = self.clock()
@@ -369,6 +413,17 @@ class Autopilot:
         return True
 
     def _work(self) -> None:
+        # one pass at a time in this process: another profile's pass running now means this one waits for the next
+        # check (CHECK_SECONDS), before it claims anything
+        if not _PASS_SLOT.acquire(blocking=False):
+            return
+        try:
+            _lower_priority()
+            self._work_claimed()
+        finally:
+            _PASS_SLOT.release()
+
+    def _work_claimed(self) -> None:
         started = self.wall()
         try:
             if not claim(self.home, now=started, interval_s=self.interval_s, owner=self._owner):

@@ -154,6 +154,15 @@ ADDITIVE_TABLES = (
     # activation. Only these may be taken back unseen (lessons.tidy); one the owner wrote or approved never is.
     ("lesson_auto", "CREATE TABLE IF NOT EXISTS lesson_auto (lesson_id INTEGER PRIMARY KEY, activated REAL NOT NULL) "
                     "WITHOUT ROWID"),
+    # 0.14.0: why the plugin took an active lesson back when it was not for its measurement: `tool_unused` (its tool
+    # had no call for lessons.OBSOLETE_DAYS). The listing and the digest say it in plain words.
+    ("lesson_reason", "CREATE TABLE IF NOT EXISTS lesson_reason (lesson_id INTEGER PRIMARY KEY, reason TEXT NOT NULL, "
+                      "at REAL NOT NULL) WITHOUT ROWID"),
+    # 0.14.0: Hermes' own warnings read from its logs (logsignals.py), per day and kind: counts and numbers only (a
+    # memory size, a port, a duration), never a line of the log.
+    ("log_signal_daily", "CREATE TABLE IF NOT EXISTS log_signal_daily (day TEXT NOT NULL, code TEXT NOT NULL, "
+                         "count INTEGER NOT NULL, peak REAL NOT NULL DEFAULT 0, detail TEXT NOT NULL DEFAULT '', "
+                         "PRIMARY KEY (day, code)) WITHOUT ROWID"),
     # Per-signature lookups (lessons, promotion, the listing) would scan these tables once per signature.
     ("failure_daily_signature", "CREATE INDEX IF NOT EXISTS failure_daily_signature ON failure_daily(signature)"),
     ("failure_owner_daily_signature",
@@ -219,7 +228,7 @@ DECISIONS_KEPT = 1000        # the owner's latest decisions, always kept (the hi
 RETENTION_STEP_DAYS = 2      # how far past the newest day stored a prune may date its retention window
 RETENTION_CONFIRM_DAYS = 3   # days stored past the clock the last prune used before a jump of the clock is believed
 _DAILY_TABLES = ("tool_daily", "failure_daily", "turn_daily", "feedback_daily", "skill_daily", "review_daily",
-                 "skill_outcome_daily", "guard_daily", "failure_owner_daily", "approval_daily")
+                 "skill_outcome_daily", "guard_daily", "failure_owner_daily", "approval_daily", "log_signal_daily")
 
 
 def _day_start(day) -> float | None:

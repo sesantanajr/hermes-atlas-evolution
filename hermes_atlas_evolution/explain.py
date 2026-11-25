@@ -267,6 +267,11 @@ def _what(kind: str, subject: str, evidence: dict, lang: str) -> str:
                 f" and spent {_n(e.get('input_tokens'), lang)} input tokens.")
     if kind == "lesson":
         return str(e.get("lesson") or "")
+    if kind == "lesson_retire" and e.get("reason") == "tool_unused":
+        days = _n(e.get("days") or 30, lang)
+        return (f"Ninguém chamou {s} nos últimos {days} dias: a lição não ensina mais nada e ocupa lugar no prompt." if pt
+                else f"Nobody called {s} in the last {days} days: the lesson teaches nothing now and takes a place in "
+                     "the prompt.")
     if kind == "lesson_retire":
         # The rate the verdict compared (lessons.evaluate): per call with enough calls on both sides, else per day.
         # A proposal from before 0.12.0 has no basis: its rates are named without a unit.

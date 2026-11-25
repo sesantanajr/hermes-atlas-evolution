@@ -310,6 +310,10 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
     texts, care_values = status._TEXT.get(lang, status._TEXT["en"]), status._care_values(state)
     health_md = commands_of("\n".join("- " + texts[code].format(**care_values) for code in state.get("attention") or ()
                                        if code.startswith(("hermes_", "os_")) and code in texts))
+    # 0.14.0: what the last Hermes update left behind, the gateway's memory and Hermes' warnings that call for the owner,
+    # in a few lines at the top of the overview; the whole of it in the Fleet tab
+    fleet_alert_md = commands_of("\n".join("- " + texts[code] for code in state.get("attention") or ()
+                                            if code.startswith(("drift_", "log_", "fleet_")) and code in texts))
     return {
         "lang": lang, "days": days, "generated": now, "profile": state["profile"], "version": state["plugin_version"],
         "mode": opts["lessons"], "status": state, "report": digest, "lessons": playbook, "proposals": queue,
@@ -319,6 +323,7 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
                      "reload_keys": ["runtime_guard", "tool_hints"], "problems": sorted(set(settings_problems))},
         "owner": {"channels": channels, "suggestions": suggestions},
         "status_md": status.markdown(state, lang), "report_md": report.markdown(digest, lang), "health_md": health_md,
+        "fleet_alert_md": fleet_alert_md,
         "insights_md": commands_of(_module("insights").panel_markdown(state.get("insights"), lang)),
         "environment_md": status.environment_markdown(home, lang, mode=opts["mode"]),
         "environment": environment_extra(home),
@@ -332,6 +337,19 @@ def snapshot(home: Path, *, now: float, runtime_config: dict | None = None, lang
                      "import": f"{hermes} evolution lessons import --from <profile> --dry-run",
                      "undo_gateway": f"{hermes} evolution care undo-gateway"},
     }
+
+
+def fleet_view(home: Path, *, now: float, lang: str) -> dict:
+    """The Fleet tab (0.14.0): every profile of this Hermes, the gateway, its memory, what the last update left behind
+    and Hermes' warnings, and the state of Auto for every profile. Read-only; raises OSError or sqlite3.Error when busy."""
+    fleet = _module("fleet")
+    view = fleet.overview(home, now=now)
+    profile = _module("admin").profile_name(home)
+    cli = _module("cli")
+    return {"lang": lang, "profile": profile, "generated": now, "auto": view.get("auto") or {},
+            "attention": view.get("attention") or [],
+            "fleet_md": cli.profile_commands(fleet.markdown(view, lang), profile),
+            "auto_md": cli.profile_commands(fleet.auto_markdown(home, lang), profile)}
 
 
 def validate_settings(values: dict) -> None:
@@ -436,6 +454,30 @@ def _router():
             _log().warning("Atlas Evolution: the panel could not read profile %s", home.name, exc_info=True)
             told = profile_language(home, config, lang)
             command = f"{_prefix(_module('admin').profile_name(home))} evolution status"
+            return JSONResponse({"error": "unexpected", "message": message("unexpected_read", told).format(
+                command=command)}, status_code=500)
+
+    @router.get("/fleet")
+    def get_fleet(request: Request, lang: str = Query("", max_length=8)):
+        import sqlite3
+
+        i18n = _module("i18n")
+        try:
+            home, config = _current(_target(request))
+        except ValueError as error:
+            told = i18n.normalize(lang) or "en"
+            return JSONResponse({"error": "invalid", "message": i18n.text(str(error), told)}, status_code=400)
+        except OSError:
+            told = i18n.normalize(lang) or "en"
+            return JSONResponse({"error": "busy", "message": message("busy", told)}, status_code=503)
+        told = profile_language(home, config, lang)
+        try:
+            return fleet_view(home, now=time.time(), lang=told)
+        except (OSError, sqlite3.Error):
+            return JSONResponse({"error": "busy", "message": message("busy", told)}, status_code=503)
+        except Exception:
+            _log().warning("Atlas Evolution: the panel could not read every profile from %s", home.name, exc_info=True)
+            command = f"{_prefix(_module('admin').profile_name(home))} evolution fleet"
             return JSONResponse({"error": "unexpected", "message": message("unexpected_read", told).format(
                 command=command)}, status_code=500)
 

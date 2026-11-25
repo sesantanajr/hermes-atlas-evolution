@@ -143,7 +143,8 @@ def autopilot_pass(home: Path, reflect, cancelled=None, *, reflector_reload: boo
     reflection = result["reflector"]
     return {"new_lessons": len(result["new_lessons"]), "open_proposals": len(result["open_proposals"]),
             "reflector_status": reflection.get("status", "ran"), "reflector_drafts": len(reflection.get("drafted") or []),
-            "reviews_ingested": result["reviews_ingested"]}
+            "reviews_ingested": result["reviews_ingested"], "phases": result.get("phases") or {},
+            "lessons_shared": len(result.get("lessons_shared") or ())}
 
 
 def _register_skills(ctx) -> None:
@@ -623,6 +624,7 @@ class _Plugin:
             checkpoint(self.home)
         except Exception:   # busy now, or the store is unusable: the next tick tries again
             pass
+        self.snapshot_overlays()
         autopilot = getattr(self, "autopilot", None)
         if autopilot is None or autopilot.interval_s:
             return
@@ -639,6 +641,21 @@ class _Plugin:
                 prune_samples(conn, now=now)
         except Exception:   # busy now, or the store is unusable: the next day tries again
             self.warn("retention")
+
+    def snapshot_overlays(self) -> None:
+        """In a gateway: keep which of Hermes' own modules this process loaded from elsewhere (drift.write_snapshot, at
+        most hourly for the whole process), so the learning pass and `status` can tell a stale overlay after an update."""
+        try:
+            from .status import process_kind
+
+            if process_kind() != "gateway":
+                return
+            from .drift import write_snapshot
+            from .environment import root_of
+
+            write_snapshot(root_of(self.home))
+        except Exception:   # a reading for later: it never costs the clock anything else
+            pass
 
     def save_cost(self) -> None:
         try:
@@ -1045,8 +1062,10 @@ def register(ctx):
             plugin.forget_playbook()   # lessons may have been activated or retired: new prompts show them now
 
     plugin.autopilot = Autopilot(home, learning_pass, interval_minutes=evolution["autopilot_minutes"])
-    # Only a process that stays up claims the pass: a one-shot run would end in its middle (runs_passes).
+    # Only a process that stays up claims the pass: a one-shot run would end in its middle (runs_passes). A process
+    # that does not at load asks again from time to time (a gateway Hermes' record names only once it holds its lock).
     plugin.autopilot.claims = runs_passes()
+    plugin.autopilot.recheck = runs_passes
     _start(plugin)
     _preload()
 
