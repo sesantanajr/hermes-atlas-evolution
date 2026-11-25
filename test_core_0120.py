@@ -124,7 +124,10 @@ class FirstReadingTest(Store):
         activated = NOW - 20 * DAY
         with experience(self.home) as conn:
             for index in range(12):
-                self.lesson(conn, index, activated)
+                lesson_id = self.lesson(conn, index, activated)
+                # a detail of its own each: lessons of one cause on several tools share a sentence (0.14.0), and
+                # this test is about the prompt's limit of lines
+                conn.execute("UPDATE lesson SET hint=? WHERE id=?", (f"path{index:02d}", lesson_id))
                 conn.execute("INSERT INTO failure VALUES (?, ?, 'missing_argument', 'path', ?, ?, ?, 2, '')",
                              (f"sig{index:02d}", f"tool_{index:02d}", activated - 5 * DAY, NOW, 10 + index))
                 self.days(conn, f"sig{index:02d}", f"tool_{index:02d}", activated - 7 * DAY, 7, failures=2, calls=10)

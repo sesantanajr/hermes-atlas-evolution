@@ -460,6 +460,9 @@ class LessonOrderTest(Scratch):
             conn.execute("INSERT INTO lesson_measure(lesson_id, activated, first_shown) VALUES (?, ?, ?)", (seen, old, old))
             recurring = self.lesson(conn, "recurring", total=6, days_ago=2, activated=old)
             young = self.lesson(conn, "young", total=6, days_ago=35, activated=NOW - 10 * DAY)
+            # the tool is still called: a lesson whose tool nobody calls any more is obsolete (0.14.0), not this one
+            conn.execute("INSERT INTO tool_daily VALUES (?, 'files_search', 4, 0, 0, 0)",
+                         (experience_module.day_offset(NOW, 3),))
             lessons.tidy(conn, now=NOW)
             status = dict(conn.execute("SELECT id, status FROM lesson").fetchall())
             self.assertEqual({key for key, value in status.items() if value == "retired"}, {stale, marked})
@@ -477,6 +480,8 @@ class LessonOrderTest(Scratch):
             conn.execute("INSERT INTO cursor VALUES ('observed_since', ?)", (repr(NOW - 61 * DAY),))
             read = self.lesson(conn, "read", total=10, days_ago=40, activated=NOW - 60 * DAY, verdict="effective")
             conn.execute("UPDATE lesson SET shown=57, hints=3 WHERE id=?", (read,))
+            conn.execute("INSERT INTO tool_daily VALUES (?, 'files_search', 4, 0, 0, 0)",   # its tool is in use
+                         (experience_module.day_offset(NOW, 3),))
             lessons.tidy(conn, now=NOW)
             row = conn.execute("SELECT status, verdict FROM lesson WHERE id=?", (read,)).fetchone()
         self.assertEqual(tuple(row), ("active", "effective"))

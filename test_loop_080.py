@@ -67,8 +67,10 @@ class BaselineTest(Base):
         with experience(self.home) as conn:
             [lesson_id] = lessons.derive(conn, now=activated, mode="auto")
             lessons.shown(conn, [lesson_id], now=activated)
-        for day in range(1, 15):   # after: the lesson works, the failure is gone
-            for index in range(10):
+        # after: the lesson works, the failure is gone. 11 calls a day: the baseline's rate (3 in 150) then predicts
+        # 3 failures in the 154 calls after, enough for a verdict (lessons.MIN_EXPECTED_FAILURES, 0.14.0)
+        for day in range(1, 15):
+            for index in range(11):
                 self.call(activated + day * DAY + index * 60, session=f"after-{day}")
         with experience(self.home) as conn:
             [effect] = lessons.evaluate(conn, now=activated + 14 * DAY + 3600, mode="auto")
