@@ -8,7 +8,8 @@ whether it is late, what it learned, what waits, what failed; with the gateway, 
 update left behind (drift) and Hermes' own warnings (logsignals).
 
 Auto for the whole Hermes (`hermes evolution fleet auto on`) is one switch, in the owner's own terminal: each profile
-with the plugin on gets `mode: auto` and `lessons: auto` (and a learning pass every hour where it was off) through
+with the plugin on gets `mode: auto` (and a learning pass every hour where it was off; its lessons setting stays the
+owner's) through
 Hermes' own `hermes config set`, each change kept in that profile's history with its undo, and the values it had
 before kept here, so `fleet auto off` puts every profile back as it was. Optionally (`--owner suggested`) the chat
 channels that are the owner's by construction (one sender, the owner's own interface) count as the owner, so lessons
@@ -344,7 +345,7 @@ def enable(home: Path, *, now: float, profiles=None, owner: str = "keep", writer
             results.append({"profile": name, "status": "opted_out"})
             continue
         current = admin.current_settings(folder, config)
-        wanted = {"mode": "auto", "lessons": "auto"}
+        wanted = {"mode": "auto"}   # `lessons` stays the owner's choice (auto is its default)
         if not current.get("autopilot_minutes"):
             wanted["autopilot_minutes"] = 60
         if owner == "suggested":
@@ -412,7 +413,7 @@ def disable(home: Path, *, now: float, writer_for=None, actor: str = "terminal",
             continue
         current = admin.current_settings(Path(folder), config)
         restore = {key: value for key, value in values.items() if value is not None and current.get(key) != value}
-        defaults = {"mode": "assist", "lessons": "auto"}
+        defaults = {"mode": "assist"}
         for key, value in values.items():   # a key that had no value of its own goes back to the default
             if value is None and key in defaults and current.get(key) != defaults[key]:
                 restore[key] = defaults[key]

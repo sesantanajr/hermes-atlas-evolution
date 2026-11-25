@@ -44,7 +44,7 @@ memory against its budget.
   when the last learning pass ran and whether it is late, lessons active and waiting, failures, turns and slow turns,
   automatic actions; plus the gateway, its memory, what the last update left behind and Hermes' warnings.
 - **Auto for every profile at once: `hermes evolution fleet auto on|off|status`.** Each profile with the plugin on gets
-  `mode: auto` and `lessons: auto` (and a learning pass every hour where it was off) through Hermes' own
+  `mode: auto` (and a learning pass every hour where it was off; the lessons setting stays yours) through Hermes' own
   `hermes config set`, each change in that profile's history; `--owner suggested` also counts as you the channels that
   are yours by construction. The values each profile had are kept, and `fleet auto off` puts them back. `status` lists
   what Auto does by itself (each with its undo) and what it never does. A profile with `fleet_managed: false` is left

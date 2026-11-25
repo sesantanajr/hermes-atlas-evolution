@@ -45,7 +45,7 @@ Hermes explicados e a memória do gateway comparada com o orçamento dele.
   rodada e se está atrasada, lições ativas e esperando, falhas, turnos e turnos lentos, ações automáticas; e mais o
   gateway, a memória dele, o que a última atualização deixou para trás e os avisos do Hermes.
 - **O Modo Auto em todos os perfis de uma vez: `hermes evolution fleet auto on|off|status`.** Cada perfil com o plugin
-  ligado recebe `mode: auto` e `lessons: auto` (e uma rodada por hora onde ela estava desligada) pelo `hermes config set`
+  ligado recebe `mode: auto` (e uma rodada por hora onde ela estava desligada; a configuração das lições continua sua) pelo `hermes config set`
   do próprio Hermes, cada mudança no histórico daquele perfil; com `--owner suggested`, os canais que são seus por
   construção também contam como você. Os valores que cada perfil tinha ficam guardados, e o `fleet auto off` os põe de
   volta. O status lista o que o Auto faz sozinho (cada coisa com o seu desfazer) e o que ele nunca faz. Um perfil com

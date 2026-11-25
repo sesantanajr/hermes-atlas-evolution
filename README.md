@@ -92,7 +92,7 @@ What a cautious reader would want to know before installing, checked against the
 | `pm doctor`, `doctor` | Hermes' own checks | Never: your click (`care pm-doctor`, `care doctor`) |
 | `backup --quick`, then `doctor --fix` | Hermes' own repair, after a quick backup | Never: your click (`care fix`) |
 | `config set plugins.entries.hermes-atlas-evolution.settings.<key>` | Change this plugin's settings | Never: your change in the menu or the panel |
-| `config set …settings.mode auto` (and `lessons`, `autopilot_minutes`, `owner_platforms`) in every profile | Auto for every profile, and back | Never: your `fleet auto on` / `off`, or the Fleet tab with your login |
+| `config set …settings.mode auto` (and `autopilot_minutes`, `owner_platforms`) in every profile | Auto for every profile, and back | Never: your `fleet auto on` / `off`, or the Fleet tab with your login |
 | `cron create … --no-agent`, `cron remove` | The weekly digest or the daily fleet report, and the undo | Never: your `schedule-digest` or `fleet schedule` |
 | `systemctl [--user] daemon-reload`, `reset-failed`, `start --no-block` of the gateway's unit | Right after repairing that unit | Auto: a user service only, at most once a day, only when no gateway is alive. Also your `care fix-gateway` |
 | `apt-get update`, a simulation (`apt-get -s`), then the upgrade or repair through `systemd-run` | `evolution system plan`, `upgrade`, `repair` | Never: only you, in your own terminal (the upgrade and the repair as root) |
@@ -372,7 +372,7 @@ O que uma pessoa cuidadosa quer saber antes de instalar, conferido com o código
 | `pm doctor`, `doctor` | As checagens do próprio Hermes | Nunca: o seu clique (`care pm-doctor`, `care doctor`) |
 | `backup --quick`, depois `doctor --fix` | O reparo do próprio Hermes, depois de um backup rápido | Nunca: o seu clique (`care fix`) |
 | `config set plugins.entries.hermes-atlas-evolution.settings.<opção>` | Mudar as configurações deste plugin | Nunca: a sua mudança no menu ou no painel |
-| `config set …settings.mode auto` (e `lessons`, `autopilot_minutes`, `owner_platforms`) em todos os perfis | O Modo Auto para todos os perfis, e a volta | Nunca: o seu `fleet auto on` / `off`, ou a aba Frota com o seu login |
+| `config set …settings.mode auto` (e `autopilot_minutes`, `owner_platforms`) em todos os perfis | O Modo Auto para todos os perfis, e a volta | Nunca: o seu `fleet auto on` / `off`, ou a aba Frota com o seu login |
 | `cron create … --no-agent`, `cron remove` | O resumo semanal ou o relatório diário da frota, e o desfazer | Nunca: o seu `schedule-digest` ou `fleet schedule` |
 | `systemctl [--user] daemon-reload`, `reset-failed`, `start --no-block` da unidade do gateway | Logo depois de reparar essa unidade | Auto: só um serviço de usuário, no máximo uma vez por dia, só quando nenhum gateway está vivo. Também o seu `care fix-gateway` |
 | `apt-get update`, uma simulação (`apt-get -s`), depois a atualização ou o reparo pelo `systemd-run` | `evolution system plan`, `upgrade`, `repair` | Nunca: só você, no seu próprio terminal (a atualização e o reparo como root) |
