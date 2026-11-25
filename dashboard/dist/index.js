@@ -42,7 +42,8 @@
                off: "Turn it off and put every profile back", confirmOn: "Auto mode in every profile with Atlas Evolution on, through hermes config set (each change can be undone). Go ahead?",
                confirmOff: "Every profile back to the settings it had before Auto for all. Go ahead?",
                doneOn: "Auto is on in every profile.", doneOff: "Every profile is back as it was.", go: "Yes, go ahead",
-               readOnly: "Switching Auto for every profile needs your dashboard login, or the terminal:", alert: "After the update and in Hermes' logs" },
+               readOnly: "Switching Auto for every profile needs your dashboard login, or the terminal:", alert: "After the update and in Hermes' logs",
+               restart: "This tab needs the dashboard to load Atlas Evolution 0.14.0: restart the Hermes dashboard. Meanwhile: hermes evolution fleet" },
       tabs: { overview: "Overview", lessons: "Lessons", proposals: "Proposals", health: "Health", fleet: "Fleet", environment: "Environment", settings: "Settings", history: "History",
               digest: "Digest", status: "Status" },
       mode: { auto: "Lessons: automatic", suggest: "Lessons: on approval", off: "Lessons: off" },
@@ -185,7 +186,8 @@
                off: "Desligar e voltar cada perfil ao que era", confirmOn: "Modo Auto em todos os perfis com o Atlas Evolution ligado, pelo hermes config set (cada mudança tem desfazer). Seguir?",
                confirmOff: "Cada perfil de volta às configurações que tinha antes do Auto para todos. Seguir?",
                doneOn: "O Auto está ligado em todos os perfis.", doneOff: "Todos os perfis voltaram ao que eram.", go: "Sim, seguir",
-               readOnly: "Ligar o Auto para todos os perfis pede o seu login no painel, ou o terminal:", alert: "Depois da atualização e nos logs do Hermes" },
+               readOnly: "Ligar o Auto para todos os perfis pede o seu login no painel, ou o terminal:", alert: "Depois da atualização e nos logs do Hermes",
+               restart: "Esta aba precisa que o dashboard carregue o Atlas Evolution 0.14.0: reinicie o dashboard do Hermes. Enquanto isso: hermes evolution fleet" },
       tabs: { overview: "Visão geral", lessons: "Lições", proposals: "Propostas", health: "Saúde", fleet: "Frota", environment: "Ambiente", settings: "Configurações", history: "Histórico",
               digest: "Resumo", status: "Situação" },
       mode: { auto: "Lições: automáticas", suggest: "Lições: com aprovação", off: "Lições: desligadas" },
@@ -1125,7 +1127,11 @@
       setFleet(function (previous) { return { loading: true, data: previous.data }; });
       SDK.fetchJSON("/api/plugins/" + NAME + "/fleet?lang=" + t.lang + scope(data))
         .then(function (found) { setFleet({ loading: false, data: found }); })
-        .catch(function (error) { setFleet({ loading: false, error: failure(error, t) }); });
+        .catch(function (error) {
+          // a dashboard started before the update still serves the earlier API, without this route
+          const missing = /^404\b/.test(String(error && error.message || error));
+          setFleet({ loading: false, error: missing ? t.fleet.restart : failure(error, t) });
+        });
     }, [t.lang, data && data.target, data && data.generated]);
     hooks.useEffect(function () { read(); }, [read]);
     const found = fleet.data || {};
