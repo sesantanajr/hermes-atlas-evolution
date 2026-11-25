@@ -90,7 +90,7 @@ an overlay, a stash or a service: drift, warnings and memory are read and explai
 ### Upgrading
 
 `hermes -p <profile> plugins update hermes-atlas-evolution` in every profile (or `hermes evolution update --all`),
-then restart the gateway once, so it loads the new code and starts claiming the passes. The test suite has 837 tests,
+then restart the gateway once, so it loads the new code and starts claiming the passes. The test suite has 838 tests,
 on the `tests` branch.
 
 ## 0.13.0

@@ -35,9 +35,21 @@ STAGGER_SECONDS = 300       # the profiles one gateway serves start their clocks
 PASS_NICE = 10              # the pass thread's CPU priority on Linux: below the turns of the same process (0.14.0)
 # One pass at a time per process (0.14.0): a gateway serving a dozen profiles ran a dozen passes at once on the first
 # clock tick, each replaying history and reading files while the turns wait for the same interpreter. A pass waits for
-# the slot (in its own thread, before it claims anything) at most SLOT_WAIT_SECONDS.
-_PASS_SLOT = threading.Lock()
+# the slot (in its own thread, before it claims anything) at most SLOT_WAIT_SECONDS. Hermes imports each profile's copy
+# of the plugin under a module name of its own, so the slot lives in one shared module of the process, which every copy
+# (and every version) of the plugin finds by the same name.
+_SHARED_MODULE = "hermes_atlas_evolution_process_shared"
 SLOT_WAIT_SECONDS = LEASE_SECONDS
+
+
+def _shared_slot() -> threading.Lock:
+    import types
+
+    shared = sys.modules.setdefault(_SHARED_MODULE, types.ModuleType(_SHARED_MODULE))
+    return shared.__dict__.setdefault("pass_slot", threading.Lock())
+
+
+_PASS_SLOT = _shared_slot()
 
 logger = logging.getLogger(__name__)
 

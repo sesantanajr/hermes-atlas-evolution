@@ -92,7 +92,7 @@ sobreposição, um stash ou um serviço: deriva, avisos e memória são lidos e 
 ### Atualizando
 
 `hermes -p <perfil> plugins update hermes-atlas-evolution` em cada perfil (ou `hermes evolution update --all`), depois
-reinicie o gateway uma vez, para ele carregar o código novo e começar a assumir as rodadas. A suíte de testes tem 837
+reinicie o gateway uma vez, para ele carregar o código novo e começar a assumir as rodadas. A suíte de testes tem 838
 testes, no ramo `tests`.
 
 ## 0.13.0
