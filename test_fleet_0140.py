@@ -615,15 +615,15 @@ class FleetViewTest(Fleet):
             result = fleet.enable(self.root, now=NOW, writer_for=writer_for)
             states = {item["profile"]: item["status"] for item in result["results"]}
             self.assertEqual((states["default"], states["work"], states["other"]), ("changed", "changed", "not_installed"))
-            self.assertEqual(merged("work"), {"mode": "auto", "lessons": "auto", "autopilot_minutes": 60})
+            self.assertEqual(merged("work"), {"mode": "auto", "autopilot_minutes": 60})   # the lessons choice stays
             state = fleet.auto_state(self.root)
             self.assertTrue(state["on"])
-            self.assertEqual(state["before"]["work"], {"mode": "assist", "lessons": "suggest", "autopilot_minutes": 0})
-            current.update(mode="auto", lessons="auto", autopilot_minutes=60)
+            self.assertEqual(state["before"]["work"], {"mode": "assist", "autopilot_minutes": 0})
+            current.update(mode="auto", autopilot_minutes=60)
             written.clear()
             back = fleet.disable(self.root, now=NOW + 60, writer_for=writer_for)
         self.assertEqual({item["status"] for item in back["results"]}, {"restored"})
-        self.assertEqual(merged("work"), {"mode": "assist", "lessons": "suggest", "autopilot_minutes": 0})
+        self.assertEqual(merged("work"), {"mode": "assist", "autopilot_minutes": 0})
         self.assertFalse(fleet.auto_state(self.root)["on"])
 
     def test_a_profile_that_opted_out_is_left_alone(self):
